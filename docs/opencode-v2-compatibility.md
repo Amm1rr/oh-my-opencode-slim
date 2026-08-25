@@ -11,6 +11,9 @@ commits with **zero `packages/plugin` API changes** (every fix landed
 elsewhere), so the plugin's shim targets are valid across the whole v2.0.x
 range, not just the newest patch release.
 
+> **Capability details:** see the [OpenCode v2 capability-gap report](opencode-v2-gap-report.md)
+> for the verified matrix, source citations, and migration dispositions.
+
 ## How it works
 
 The package's default export is an object:
