@@ -1844,7 +1844,6 @@ describe('observer agent', () => {
     expect(names).toContain('observer');
     expect(names).not.toContain('designer');
   });
-
 });
 
 describe('AgentOverrideConfigSchema permission validation', () => {
