@@ -528,8 +528,7 @@ for the CLI, in-session `marketplace` tool, and status diagnostics.
   "presets": {
     "work": {
       "marketplace": {
-        "agents": ["community/example"],
-        "profiles": { "oracle": "community/oracle-profile" }
+        "agents": ["community/oracle-agent"]
       }
     }
   }
