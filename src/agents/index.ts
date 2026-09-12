@@ -52,6 +52,7 @@ import {
 } from './orchestrator';
 import {
   ROLE_DEFINITIONS,
+  type RoleDefinition,
   renderRoleRoutingBlock,
   SUPPORTED_SPECIALIST_ROLES,
 } from './role-definitions';
@@ -614,6 +615,27 @@ export function resolveAgentConfigModel(
     runtime.primaryModel ??
     role?.defaultModel ??
     (DEFAULT_MODELS as Record<string, string | undefined>)[name]
+  );
+}
+
+function resolveMarketplaceBuiltinModel(
+  runtime: RuntimeConfig,
+  role: RoleDefinition,
+): string | undefined {
+  const override = runtime.agent(role.id);
+  if (override?.model !== undefined) {
+    return resolvePrimaryModelValue(override.model);
+  }
+  if (override?.inheritModelFrom === 'session') {
+    return undefined;
+  }
+  if (override?.inheritModelFrom === 'orchestrator') {
+    return resolveAgentConfigModel(runtime, 'orchestrator');
+  }
+  return (
+    runtime.primaryModel ??
+    role.defaultModel ??
+    (DEFAULT_MODELS as Record<string, string | undefined>)[role.id]
   );
 }
 
@@ -1434,7 +1456,9 @@ export function createAgents(
             ? policy.candidates[0]
             : policy.candidates[0]?.id
           : policy.source === 'builtin'
-            ? role?.defaultModel
+            ? role
+              ? resolveMarketplaceBuiltinModel(runtime, role)
+              : undefined
             : policy.source === 'orchestrator'
               ? (configuredOrchestratorModel ?? primaryModel)
               : undefined;
