@@ -1162,7 +1162,9 @@ function buildRoutingEntriesFromAgents(
       ? renderMarketplaceAutoDelegationBlock(
           marketplaceManifest,
           runtimeName,
-          agent.description,
+          marketplaceManifest.schemaVersion === 3
+            ? undefined
+            : agent.description,
         )
       : genericRoutingBlock;
     return [
