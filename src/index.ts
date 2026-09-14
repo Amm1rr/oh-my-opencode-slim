@@ -96,11 +96,20 @@ import {
 } from './utils';
 import type { ContextFile } from './utils/background-job-board';
 import { isPluginDisabledByEnv } from './utils/env';
+import { isInternalInitiatorPart } from './utils/internal-initiator';
 import { probeJSDOM } from './utils/jsdom';
 import { initLogger, log } from './utils/logger';
 import { SessionMetadataStore } from './utils/session-metadata';
+import {
+  createSessionSelectionReader,
+  resolveCurrentSelection,
+} from './utils/session-selection';
 import { collapseSystemInPlace } from './utils/system-collapse';
 import { createV2Setup } from './v2';
+import {
+  isInternalAdmission,
+  recordInternalAdmission,
+} from './v2/internal-admissions';
 
 /**
  * Best-effort log to opencode's app logger.
@@ -227,6 +236,21 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     },
   });
   const ownedTuiActivitySessions = new Map<string, string>();
+  // #1079: lifecycle continuations (orchestrator wake, terminal
+  // notifications) resolve the session's CURRENT agent/model at send
+  // time instead of hardcoding `orchestrator`. Host-persisted selection
+  // wins; slim metadata (fed only by external admissions — see the
+  // chat.message filter) is the fallback.
+  const lifecycleSelectionReader = createSessionSelectionReader(
+    ctx.client,
+    ctx.directory,
+  );
+  const lifecycleSelectionResolver = (sessionID: string) =>
+    resolveCurrentSelection(
+      sessionID,
+      lifecycleSelectionReader,
+      sessionMetadata,
+    );
   // Busy/retry arrived before the session's agent was known. chat.message
   // latches the agent and flushes these so the spinner still starts.
   const pendingTuiBusySessions = new Set<string>();
@@ -505,6 +529,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       input: ctx,
       backgroundJobBoard: backgroundJobCoordinator,
       backgroundJobSupervisor,
+      resolveSelection: lifecycleSelectionResolver,
       onRegister: (taskID) => markRevivedRunPending(taskID),
       onSettled: (taskID) => markRevivedRunSettled(taskID),
       contextFilesForPrompt: (taskID) => getRevivedContextFiles(taskID),
@@ -597,9 +622,11 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       sameProviderPolicy: runtime.backgroundJobs.sameProviderPolicy,
       getSessionModel: (sessionID) => sessionMetadata.getModel(sessionID),
       shouldManageSession: (sessionID) =>
-        sessionMetadata.getAgent(sessionID) === 'orchestrator',
+        sessionMetadata.getAgent(sessionID) === 'orchestrator' ||
+        sessionMetadata.isTaskManaged(sessionID),
       registerSessionAsOrchestrator: (sessionID) => {
-        sessionMetadata.setAgent(sessionID, 'orchestrator');
+        // Membership in task management, not a selection rewrite (#1079).
+        sessionMetadata.markTaskManaged(sessionID);
       },
       isFallbackInProgress: (sessionID) =>
         foregroundFallback.isFallbackInProgress(sessionID),
@@ -621,6 +648,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         taskSessionManagerHook.hasInputWait(sessionID),
       isFallbackInProgress: (sessionID) =>
         foregroundFallback.isFallbackInProgress(sessionID),
+      resolveSelection: lifecycleSelectionResolver,
       isStoppedJobRecoveryCurrent: (taskID, generation) => {
         const record = backgroundJobCoordinator.get(taskID);
         return (
@@ -629,6 +657,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           record.terminalUnreconciled
         );
       },
+      hasPendingDelegatedWork: (sessionID) =>
+        backgroundJobCoordinator.hasRunning(sessionID) ||
+        backgroundJobCoordinator.hasTerminalUnreconciled(sessionID),
       coordinator: sessionLifecycle,
     });
     backgroundJobCoordinator.addTerminalOutcomeListener((record) => {
@@ -731,7 +762,8 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       input: ctx,
       backgroundJobBoard: backgroundJobCoordinator,
       shouldManageSession: (sessionID) =>
-        sessionMetadata.getAgent(sessionID) === 'orchestrator',
+        sessionMetadata.getAgent(sessionID) === 'orchestrator' ||
+        sessionMetadata.isTaskManaged(sessionID),
     });
     taskMessageTools = createTaskMessageTool({
       input: ctx,
@@ -745,7 +777,8 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       input: ctx,
       backgroundJobBoard: backgroundJobCoordinator,
       shouldManageSession: (sessionID) =>
-        sessionMetadata.getAgent(sessionID) === 'orchestrator',
+        sessionMetadata.getAgent(sessionID) === 'orchestrator' ||
+        sessionMetadata.isTaskManaged(sessionID),
       backgroundJobSupervisor,
       revivedRunTracker,
     });
@@ -756,11 +789,12 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     });
     waitForUserTools = createWaitForUserTool({
       shouldManageSession: (sessionID) =>
-        sessionMetadata.getAgent(sessionID) === 'orchestrator',
+        sessionMetadata.getAgent(sessionID) === 'orchestrator' ||
+        sessionMetadata.isTaskManaged(sessionID),
       resolveAgentName: (agent) =>
         resolveRuntimeAgentName(agentRegistry, agent),
       registerSessionAsOrchestrator: (sessionID) => {
-        sessionMetadata.setAgent(sessionID, 'orchestrator');
+        sessionMetadata.markTaskManaged(sessionID);
       },
       beginUserWait: (sessionID) => {
         taskSessionManagerHook.beginUserWait(sessionID);
@@ -1062,9 +1096,10 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         ctx.directory,
       );
 
-      // Host `agent.council.prompt` wins the shallow merge above and can
-      // drop the compaction exception applied in createAgents. Re-apply to
-      // the canonical key and the visible display-name alias.
+      // The resolved registry deliberately excludes host prompts so mandatory
+      // agent instructions survive its general projection. Council is the
+      // exception: preserve its host prompt and re-apply the required
+      // compaction exception for both canonical and display-name entries.
       const councilPlugin = agents.council as
         | { displayName?: string }
         | undefined;
@@ -1074,6 +1109,10 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       }
       for (const key of councilKeys) {
         const entry = configAgent[key] as Record<string, unknown> | undefined;
+        const hostPrompt = runtime.hostAgent(key)?.prompt;
+        if (entry && typeof hostPrompt === 'string') {
+          entry.prompt = hostPrompt;
+        }
         if (typeof entry?.prompt === 'string') {
           entry.prompt = ensureCouncilCompactionException(entry.prompt);
         }
@@ -1187,12 +1226,17 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         // can resolve the model a model-less subagent will inherit.
         if (typeof info?.sessionID === 'string' && providerID && modelID) {
           const model = `${providerID}/${modelID}`;
-          sessionMetadata.setModel(info.sessionID, model);
-          // Managed background-task sessions are identified by their session
-          // ID. If the model serving one changed (fallback re-prompt, runtime
-          // switch), migrate the admission accounting so provider/model caps
-          // keep tracking the model actually in use. No-op for other
-          // sessions and idempotent when the model is unchanged.
+          // Accounting/fallback follows the model actually executing.
+          // External selection tracking does not: a synthetic wake's
+          // message.updated must not poison Plan/Build metadata (#1079).
+          const internalAdmission =
+            (typeof info.id === 'string' &&
+              isInternalAdmission(info.sessionID, info.id)) ||
+            (typeof info.parentID === 'string' &&
+              isInternalAdmission(info.sessionID, info.parentID));
+          if (!internalAdmission) {
+            sessionMetadata.setModel(info.sessionID, model);
+          }
           backgroundTaskConcurrency.migrateTask(info.sessionID, model);
         }
         if (typeof info?.agent === 'string' && providerID && modelID) {
@@ -1452,9 +1496,39 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         output.message.agent = agent;
       }
 
+      // #1079: internal admissions (lifecycle wakes, terminal
+      // notifications) must not overwrite the user's tracked selection.
+      // Without this filter, a synthetic orchestrator wake flips a
+      // Plan/Build session's tracked agent back to 'orchestrator' and
+      // task-management tooling keeps treating it as orchestrated.
+      // Inspect BOTH part surfaces: `input.parts ?? output.parts` would
+      // skip output when input carries an empty array. Also honor the
+      // v2 admission tracker — agent-discovery forwards agent/model
+      // without parts.
+      const messageID = input.messageID ?? output?.message?.id;
+      const inputParts = Array.isArray(input.parts) ? input.parts : [];
+      const outputParts = Array.isArray(output?.parts) ? output.parts : [];
+      const partsInternal = [...inputParts, ...outputParts].some((part) =>
+        isInternalInitiatorPart(part),
+      );
+      // v1 chat.message sees the internal parts but historically never
+      // recorded the message id, so the later message.updated could not
+      // classify the same admission (#1079 Oracle r2). Record it here
+      // so assistant replies (parentID) and message.updated share the
+      // registry the v2 shim already maintains.
+      if (partsInternal && typeof messageID === 'string') {
+        recordInternalAdmission(input.sessionID, messageID);
+      }
+      const internalAdmission =
+        partsInternal ||
+        (typeof messageID === 'string' &&
+          isInternalAdmission(input.sessionID, messageID));
+
       if (agent) {
         foregroundFallback.registerSessionAgent(input.sessionID, agent);
-        sessionMetadata.setAgent(input.sessionID, agent);
+        if (!internalAdmission) {
+          sessionMetadata.setAgent(input.sessionID, agent);
+        }
         // Spinner follows session.status, not chat.message: v2 context
         // hooks re-deliver chat.message after idle and would otherwise
         // relight a finished row (and the parent of a background child).
@@ -1487,12 +1561,13 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         typeof messageModel.modelID === 'string'
       ) {
         const model = `${messageModel.providerID}/${messageModel.modelID}`;
-        sessionMetadata.setModel(input.sessionID, model);
+        if (!internalAdmission) {
+          sessionMetadata.setModel(input.sessionID, model);
+        }
         backgroundTaskConcurrency.migrateTask(input.sessionID, model);
       }
       taskSessionManagerHook.observeChatMessage(input, output);
       orchestratorWakeScheduler.observeChatMessage(input, output);
-      const messageID = input.messageID ?? output?.message?.id;
       if (messageID) {
         toolLoopGuard.observeNewUserMessage(input.sessionID, messageID);
       }
