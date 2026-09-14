@@ -139,7 +139,8 @@ async function main(): Promise<void> {
     process.exit(exitCode);
   } else if (args[0] === 'marketplace') {
     const exitCode = await marketplaceCommand(args.slice(1));
-    process.exit(exitCode);
+    // Let pending I/O drain instead of forcing Node's worker teardown.
+    process.exitCode = exitCode;
   } else if (args[0] === '-h' || args[0] === '--help') {
     printHelp();
     process.exit(0);
@@ -153,6 +154,6 @@ async function main(): Promise<void> {
 if (import.meta.main) {
   main().catch((err) => {
     console.error('Fatal error:', err);
-    process.exit(1);
+    process.exitCode = 1;
   });
 }

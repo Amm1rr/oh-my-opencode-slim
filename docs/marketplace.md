@@ -15,6 +15,12 @@ the saved configuration is marked pending for the next launch.
 
 ## CLI
 
+Completed marketplace commands set the process exit status and let pending I/O
+drain before exiting naturally: `0` for success, `1` for errors. Unexpected CLI
+failures also report a fatal error and exit naturally with status `1`. This avoids
+forced Node.js worker teardown, which can trigger shutdown assertions on Windows;
+it does not suppress validation errors or change their exit status.
+
 ```bash
 bunx oh-my-opencode-slim marketplace install community/example
 bunx oh-my-opencode-slim marketplace install community/example@1.2.3
