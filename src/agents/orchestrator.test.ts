@@ -60,6 +60,7 @@ describe('orchestrator prompt', () => {
       true,
       undefined,
       undefined,
+      undefined,
       false,
     );
 

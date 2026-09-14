@@ -75,12 +75,16 @@ export function createCouncilAgent(
   customPrompt?: string,
   customAppendPrompt?: string,
 ): AgentDefinition {
-  const prompt = resolvePrompt(
-    'council',
-    customPrompt,
-    undefined,
-    COUNCIL_AGENT_PROMPT,
-    customAppendPrompt,
+  // A custom prompt replaces the base format rules, but the compaction
+  // exception must survive every override path (no-op when already present).
+  const prompt = ensureCouncilCompactionException(
+    resolvePrompt(
+      'council',
+      customPrompt,
+      undefined,
+      COUNCIL_AGENT_PROMPT,
+      customAppendPrompt,
+    ),
   );
 
   return {

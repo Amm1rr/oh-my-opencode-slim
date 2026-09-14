@@ -530,17 +530,20 @@ describe('agents-only marketplace contract', () => {
       const v2Rules = adaptPermissions(permission);
       expect(
         v2Rules.some(
-          (rule) => rule.resource === 'read' && rule.effect === 'ask',
+          (rule) =>
+            rule.action === 'read' &&
+            rule.resource === '*' &&
+            rule.effect === 'ask',
         ),
       ).toBe(true);
       expect(
         v2Rules.some(
-          (rule) => rule.resource === 'codesearch' && rule.effect === 'deny',
+          (rule) => rule.action === 'codesearch' && rule.effect === 'deny',
         ),
       ).toBe(true);
       expect(
         v2Rules.some(
-          (rule) => rule.resource === 'context7_*' && rule.effect === 'deny',
+          (rule) => rule.action === 'context7_*' && rule.effect === 'deny',
         ),
       ).toBe(true);
     } finally {

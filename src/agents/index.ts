@@ -1306,6 +1306,11 @@ export function createAgents(
       const inlinePrompt = override?.prompt;
       const defaultPrompt = agent.config.prompt ?? '';
 
+      // A user-supplied council prompt (inline or file) replaces the base
+      // format rules, and the synthesis reinforcement must not be imposed on
+      // it — only the compaction exception survives overrides (see below).
+      const councilBaseKept =
+        inlinePrompt === undefined && customPrompts.prompt === undefined;
       agent.config.prompt = resolvePrompt(
         name,
         inlinePrompt,
@@ -1314,7 +1319,9 @@ export function createAgents(
         customPrompts.appendPrompt,
         [
           TASK_REJECTION_INSTRUCTION,
-          ...(name === 'council' ? [COUNCIL_SYNTHESIS_REINFORCEMENT] : []),
+          ...(name === 'council' && councilBaseKept
+            ? [COUNCIL_SYNTHESIS_REINFORCEMENT]
+            : []),
         ],
       );
       if (name === 'council') {
