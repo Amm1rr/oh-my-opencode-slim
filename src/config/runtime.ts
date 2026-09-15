@@ -41,7 +41,7 @@ import type {
   PluginConfig,
   WebfetchConfig,
 } from './schema';
-import { getCustomAgentNames } from './utils';
+import { getCustomAgentNames, normalizeAgentSkillDirectives } from './utils';
 
 /** A single agent entry from the host opencode.json config. */
 export interface HostAgentConfig {
@@ -244,10 +244,10 @@ export class RuntimeConfig {
       : undefined;
     // A runtime preset selects the preset layer; it is not a higher
     // precedence override. Root agents always remain authoritative.
-    return (
+    const merged =
       mergeAgentLayers(presetAgents ?? {}, this.pluginConfig?.agents ?? {}) ??
-      {}
-    );
+      {};
+    return normalizeAgentSkillDirectives(merged);
   }
 
   /**

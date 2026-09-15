@@ -7,7 +7,7 @@ import pluginModuleDefault, {
   sessionManagerMultiplexerConfig,
   shouldEnableMultiplexer,
 } from './index';
-import { readTuiSnapshot } from './tui-state';
+import { readTuiSnapshot, snapshotSectionsEqual } from './tui-state';
 import { createInternalAgentTextPart } from './utils/internal-initiator';
 
 function createPluginClient(
@@ -437,6 +437,26 @@ describe('plugin TUI agent activity', () => {
     expect(readTuiSnapshot(projectDir).activeSessions).toEqual({});
   });
 
+  test('second plugin init in the same PID does not wipe the first instance activity', async () => {
+    await hooks?.['chat.message']?.(
+      { sessionID: 'oracle-live', agent: 'oracle' } as never,
+      {} as never,
+    );
+    await busy('oracle-live');
+    expect(readTuiSnapshot(projectDir).activeSessions).toEqual({
+      'oracle-live': 'oracle',
+    });
+
+    const second = await createActivityPlugin();
+    try {
+      expect(readTuiSnapshot(projectDir).activeSessions).toEqual({
+        'oracle-live': 'oracle',
+      });
+    } finally {
+      await second.dispose?.();
+    }
+  });
+
   test('server disposal preserves activity owned by another plugin instance', async () => {
     const otherHooks = await createActivityPlugin();
 
@@ -708,6 +728,199 @@ describe('plugin TUI agent activity', () => {
     expect(readTuiSnapshot(projectDir).activeSessions).toEqual({
       root: 'fixer',
     });
+  });
+
+  test('message.part.delta does not write TUI activity or session model', async () => {
+    await hooks?.['chat.message']?.(
+      {
+        sessionID: 'stream-1',
+        agent: 'orchestrator',
+        model: { providerID: 'openai', modelID: 'gpt-4o' },
+      } as never,
+      {} as never,
+    );
+    const before = readTuiSnapshot(projectDir);
+
+    await hooks?.event?.({
+      event: {
+        type: 'message.part.delta',
+        properties: {
+          sessionID: 'stream-1',
+          messageID: 'msg-1',
+          partID: 'part-1',
+          field: 'text',
+          delta: 'a'.repeat(200),
+        },
+      },
+    } as never);
+
+    const after = readTuiSnapshot(projectDir);
+    expect(after.activeSessions).toEqual(before.activeSessions);
+    expect(after.agentModels).toEqual(before.agentModels);
+    expect(snapshotSectionsEqual(after, before)).toBe(true);
+  });
+
+  test('chat.message model is published to sessionDetails when the session is already busy', async () => {
+    await busy('ora-child');
+    await hooks?.['chat.message']?.(
+      {
+        sessionID: 'ora-child',
+        agent: 'oracle',
+        model: { providerID: 'openai', modelID: 'gpt-5.6' },
+      } as never,
+      {} as never,
+    );
+
+    expect(readTuiSnapshot(projectDir).sessionDetails['ora-child']).toEqual({
+      model: 'openai/gpt-5.6',
+      status: 'busy',
+    });
+  });
+
+  test('model observed before busy is recovered on activation (v2 order)', async () => {
+    await hooks?.['chat.message']?.(
+      {
+        sessionID: 'ora-early',
+        agent: 'oracle',
+        model: { providerID: 'openai', modelID: 'gpt-5.6' },
+      } as never,
+      {} as never,
+    );
+    expect(readTuiSnapshot(projectDir).sessionDetails).toEqual({});
+
+    await busy('ora-early');
+    expect(readTuiSnapshot(projectDir).sessionDetails['ora-early']).toEqual({
+      model: 'openai/gpt-5.6',
+      status: 'busy',
+    });
+  });
+
+  test('two same-agent sessions keep distinct models in sessionDetails', async () => {
+    await hooks?.['chat.message']?.(
+      {
+        sessionID: 'ora-a',
+        agent: 'oracle',
+        model: { providerID: 'openai', modelID: 'gpt-5.6' },
+      } as never,
+      {} as never,
+    );
+    await hooks?.['chat.message']?.(
+      {
+        sessionID: 'ora-b',
+        agent: 'oracle',
+        model: { providerID: 'anthropic', modelID: 'claude-opus' },
+      } as never,
+      {} as never,
+    );
+    await busy('ora-a');
+    await busy('ora-b');
+
+    const details = readTuiSnapshot(projectDir).sessionDetails;
+    expect(details['ora-a']?.model).toBe('openai/gpt-5.6');
+    expect(details['ora-b']?.model).toBe('anthropic/claude-opus');
+  });
+
+  test('chat.message model after idle does not resurrect sessionDetails', async () => {
+    await hooks?.['chat.message']?.(
+      {
+        sessionID: 'ora-idle',
+        agent: 'oracle',
+        model: { providerID: 'openai', modelID: 'gpt-5.6' },
+      } as never,
+      {} as never,
+    );
+    await busy('ora-idle');
+    await hooks?.event?.({
+      event: {
+        type: 'session.status',
+        properties: { sessionID: 'ora-idle', status: { type: 'idle' } },
+      },
+    } as never);
+
+    await hooks?.['chat.message']?.(
+      {
+        sessionID: 'ora-idle',
+        agent: 'oracle',
+        model: { providerID: 'openai', modelID: 'gpt-5.6' },
+      } as never,
+      {} as never,
+    );
+
+    expect(readTuiSnapshot(projectDir).activeSessions).toEqual({});
+    expect(readTuiSnapshot(projectDir).sessionDetails).toEqual({});
+  });
+
+  const launchChild = async (
+    parentID: string,
+    childID: string,
+    callID: string,
+  ) => {
+    await hooks?.['tool.execute.before']?.(
+      { tool: 'task', sessionID: parentID, callID } as never,
+      {
+        args: {
+          background: true,
+          subagent_type: 'oracle',
+          description: 'sidebar child',
+        },
+      } as never,
+    );
+    await hooks?.['tool.execute.after']?.(
+      { tool: 'task', sessionID: parentID, callID } as never,
+      {
+        output: [
+          `task_id: ${childID}`,
+          'state: running',
+          '',
+          '<task_result>',
+          'Background task started.',
+          '</task_result>',
+        ].join('\n'),
+      } as never,
+    );
+  };
+
+  test('launch then busy persists the board alias into sessionDetails', async () => {
+    await hooks?.['chat.message']?.(
+      { sessionID: 'parent-1', agent: 'orchestrator' } as never,
+      {} as never,
+    );
+    await launchChild('parent-1', 'child-launch-first', 'call-launch-first');
+    await hooks?.['chat.message']?.(
+      { sessionID: 'child-launch-first', agent: 'oracle' } as never,
+      {} as never,
+    );
+    await busy('child-launch-first');
+
+    const snapshot = readTuiSnapshot(projectDir);
+    expect(snapshot.sessionParents['child-launch-first']).toBe('parent-1');
+    expect(snapshot.sessionDetails['child-launch-first']?.alias).toMatch(
+      /^ora-\d+$/,
+    );
+    expect(snapshot.activeSessions['child-launch-first']).toBe('oracle');
+  });
+
+  test('busy then launch backfills the alias without resurrecting idle sessions', async () => {
+    await hooks?.['chat.message']?.(
+      { sessionID: 'parent-2', agent: 'orchestrator' } as never,
+      {} as never,
+    );
+    await hooks?.['chat.message']?.(
+      { sessionID: 'child-busy-first', agent: 'oracle' } as never,
+      {} as never,
+    );
+    await busy('child-busy-first');
+    expect(
+      readTuiSnapshot(projectDir).sessionDetails['child-busy-first']?.alias,
+    ).toBeUndefined();
+
+    await launchChild('parent-2', 'child-busy-first', 'call-busy-first');
+
+    const snapshot = readTuiSnapshot(projectDir);
+    expect(snapshot.sessionParents['child-busy-first']).toBe('parent-2');
+    expect(snapshot.sessionDetails['child-busy-first']?.alias).toMatch(
+      /^ora-\d+$/,
+    );
   });
 });
 
@@ -1289,6 +1502,140 @@ describe('plugin config model inheritance', () => {
       },
       { orchestrator: { model: 'openai/parent' } },
     );
+  });
+});
+
+describe('system.transform orchestrator injection', () => {
+  let originalEnv: typeof process.env;
+  const configDirs: string[] = [];
+
+  beforeEach(() => {
+    originalEnv = { ...process.env };
+  });
+
+  afterEach(async () => {
+    process.env = originalEnv;
+    while (configDirs.length > 0) {
+      const configDir = configDirs.pop();
+      if (configDir) {
+        await rm(configDir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  async function loadPluginWithOrchestratorSession(
+    config: Record<string, unknown> = {},
+  ) {
+    const configDir = await mkdtemp('/tmp/oh-my-system-transform-');
+    configDirs.push(configDir);
+    await Bun.write(
+      `${configDir}/oh-my-opencode-slim.json`,
+      JSON.stringify(config),
+    );
+    process.env = {
+      ...originalEnv,
+      OPENCODE_CONFIG_DIR: configDir,
+      XDG_DATA_HOME: `${configDir}/data`,
+      XDG_CACHE_HOME: `${configDir}/cache`,
+      OPENCODE_LOG_DIR: `${configDir}/logs`,
+    };
+    const client = createPluginClient(async () => ({}));
+    const hooks = await plugin({
+      client,
+      directory: configDir,
+      worktree: configDir,
+      serverUrl: new URL('http://127.0.0.1:4096'),
+    } as never);
+    // Session tracked as orchestrator (how chat.message records it).
+    await hooks['chat.message']?.(
+      {
+        sessionID: 'ses-orc',
+        agent: 'orchestrator',
+        model: { providerID: 'test', modelID: 'm' },
+      } as never,
+      {} as never,
+    );
+    return hooks;
+  }
+
+  const ENV_BLOCK = [
+    'You are powered by the model named test/m.',
+    '<env>',
+    '  Working directory: /tmp',
+    '</env>',
+  ].join('\n');
+
+  test('does not duplicate a custom orchestrator prompt already present', async () => {
+    // Configure a REAL custom replacement without default-prompt markers:
+    // the effective prompt is this string, and the dedup must key on it.
+    const customPrompt = 'Mi prompt custom sin marcadores.';
+    const hooks = await loadPluginWithOrchestratorSession({
+      agents: { orchestrator: { prompt: customPrompt } },
+    });
+    try {
+      const system = [`${ENV_BLOCK}\n\n${customPrompt}`];
+      await hooks['experimental.chat.system.transform']?.(
+        { sessionID: 'ses-orc' } as never,
+        { system } as never,
+      );
+      // Exactly one copy of the effective prompt (split = parts + 1) and
+      // no default-prompt content appended after it.
+      expect(system[0]?.split(customPrompt).length).toBe(2);
+      expect(system[0]).toBe(`${ENV_BLOCK}\n\n${customPrompt}`);
+    } finally {
+      await hooks.dispose?.();
+    }
+  });
+
+  test('skips auxiliary requests (title/compaction) in an orchestrator session', async () => {
+    const hooks = await loadPluginWithOrchestratorSession();
+    try {
+      // Title/compaction requests carry their own short system and no
+      // environment block.
+      const system = [
+        'You are a title generator. You output ONLY a thread title.',
+      ];
+      await hooks['experimental.chat.system.transform']?.(
+        { sessionID: 'ses-orc' } as never,
+        { system } as never,
+      );
+      expect(system[0]).not.toContain('<Role>');
+      expect(system[0]).toBe(
+        'You are a title generator. You output ONLY a thread title.',
+      );
+    } finally {
+      await hooks.dispose?.();
+    }
+  });
+
+  test('injects on a main chat request in an orchestrator session', async () => {
+    const hooks = await loadPluginWithOrchestratorSession();
+    try {
+      const system = [ENV_BLOCK];
+      await hooks['experimental.chat.system.transform']?.(
+        { sessionID: 'ses-orc' } as never,
+        { system } as never,
+      );
+      expect(system[0]).toContain('<Role>');
+    } finally {
+      await hooks.dispose?.();
+    }
+  });
+
+  test('request-scoped agent overrides session tracking', async () => {
+    const hooks = await loadPluginWithOrchestratorSession();
+    try {
+      // v2 bridge forwards the request agent: an auxiliary request says
+      // its real agent even though the session is tracked as orchestrator.
+      const system = [ENV_BLOCK];
+      await hooks['experimental.chat.system.transform']?.(
+        { sessionID: 'ses-orc', agent: 'title' } as never,
+        { system } as never,
+      );
+      expect(system[0]).not.toContain('<Role>');
+    } finally {
+      await hooks.dispose?.();
+    }
   });
 });
 

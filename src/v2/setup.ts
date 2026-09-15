@@ -322,7 +322,11 @@ export function createSessionContextHandler(
       try {
         const sysStrings = event.system.map((s) => s.text ?? '');
         await deps.systemTransform(
-          { sessionID: event.sessionID },
+          // Forward the request-scoped agent so the transform can tell a
+          // real orchestrator request from an auxiliary (title/compaction)
+          // request running in the same session — v1 hosts lack this and
+          // fall back to a structural heuristic.
+          { sessionID: event.sessionID, agent: event.agent },
           { system: sysStrings },
         );
         event.system = sysStrings.map((text) => ({
@@ -1767,10 +1771,21 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
               const next = await eventIterator.next();
               if (next.done) break;
               try {
-                // interviewBridge keeps the RAW v2 event; the v1 eventHook
-                // loop iterates raw + synthesized v1 shapes (idle,
-                // early-registration created, message.updated telemetry).
+                // Token-stream deltas: the interview bridge already
+                // gates to managed sessions. Skip permission rules and
+                // v1 synthesis; still deliver the raw event so the
+                // multiplexer heartbeat in the v1 event hook can run.
+                const rawType =
+                  typeof next.value?.type === 'string' ? next.value.type : '';
+                const isStreamDelta =
+                  rawType === 'session.next.text.delta' ||
+                  rawType === 'session.next.reasoning.delta' ||
+                  rawType === 'message.part.delta';
                 await interviewBridge.handleEvent(next.value);
+                if (isStreamDelta) {
+                  if (eventHook) await eventHook({ event: next.value });
+                  continue;
+                }
                 // Child-session permission tightening sees the same RAW
                 // event (before v1-shape synthesis) so it is independent
                 // of v1 event-hook presence.

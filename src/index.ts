@@ -79,11 +79,13 @@ import {
 } from './tools/task-activity';
 import {
   clearTuiAgentActivities,
+  clearTuiSessionAlias,
   readTuiSnapshot,
   recordTuiAgentActivity,
   recordTuiAgentModel,
   recordTuiAgentModels,
   recordTuiSessionParent,
+  updateTuiSessionDetails,
 } from './tui-state';
 import {
   BackgroundJobBoard,
@@ -104,7 +106,10 @@ import {
   createSessionSelectionReader,
   resolveCurrentSelection,
 } from './utils/session-selection';
-import { collapseSystemInPlace } from './utils/system-collapse';
+import {
+  collapseSystemInPlace,
+  looksLikeMainChatRequest,
+} from './utils/system-collapse';
 import { createV2Setup } from './v2';
 import {
   isInternalAdmission,
@@ -252,8 +257,10 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       sessionMetadata,
     );
   // Busy/retry arrived before the session's agent was known. chat.message
-  // latches the agent and flushes these so the spinner still starts.
-  const pendingTuiBusySessions = new Set<string>();
+  // latches the agent and flushes these so the spinner still starts. The
+  // observed status is kept so the flushed activation records the right
+  // sidebar detail (busy vs retry).
+  const pendingTuiBusySessions = new Map<string, 'busy' | 'retry'>();
   const tuiActivityDirectory = (sessionID: string): string => {
     return sessionMetadata.getDirectory(sessionID) ?? ctx.directory;
   };
@@ -263,9 +270,31 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   // child→parent links; roots are never stored per-activity, so a
   // late-learned link re-roots everything consistently. Process identity
   // cannot scope this because v2 daemons are shared across windows.
-  const markTuiAgentActive = (sessionID: string, agentName: string): void => {
+  const markTuiAgentActive = (
+    sessionID: string,
+    agentName: string,
+    status?: 'busy' | 'retry',
+  ): void => {
     const directory = tuiActivityDirectory(sessionID);
-    recordTuiAgentActivity({ sessionID, agentName, active: true }, directory);
+    // Alias from an already-registered board record (launch may have
+    // arrived before or after busy; both orders converge here or via the
+    // coordinator's identity listener).
+    const alias = backgroundJobBoard?.get(sessionID)?.alias;
+    const model = sessionMetadata.getModel(sessionID);
+    const details = {
+      ...(alias ? { alias } : {}),
+      ...(model ? { model } : {}),
+      ...(status ? { status } : {}),
+    };
+    recordTuiAgentActivity(
+      {
+        sessionID,
+        agentName,
+        active: true,
+        ...(Object.keys(details).length > 0 ? { details } : {}),
+      },
+      directory,
+    );
     ownedTuiActivitySessions.set(sessionID, directory);
     void hydrateTuiSessionParent(sessionID, directory);
   };
@@ -512,6 +541,28 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     const backgroundJobCoordinator = new BackgroundJobCoordinator(
       backgroundJobBoard,
     );
+    // Project launch identity (alias↔session) into TUI state so the
+    // clickable sidebar can label active subagent sessions. Best-effort:
+    // a failed tui-state write must never fail a launch.
+    backgroundJobCoordinator.addLaunchIdentityListener((event) => {
+      const directory = tuiActivityDirectory(event.taskID);
+      if (event.kind === 'registered') {
+        if (event.parentSessionID && event.parentSessionID !== event.taskID) {
+          recordTuiSessionParent(
+            event.taskID,
+            event.parentSessionID,
+            directory,
+          );
+        }
+        updateTuiSessionDetails(
+          event.taskID,
+          { alias: event.alias },
+          directory,
+        );
+      } else {
+        clearTuiSessionAlias(event.taskID, directory);
+      }
+    });
     backgroundJobSupervisor = new BackgroundJobSupervisor({
       backgroundJobStore: backgroundJobCoordinator,
       wallClockTimeoutMs: runtime.backgroundJobs.wallClockTimeoutMs,
@@ -1140,6 +1191,21 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     },
 
     event: async (input) => {
+      // Token-stream deltas fire on every reasoning/text chunk. Slim
+      // has no work for them except the multiplexer activity heartbeat
+      // that keeps a child pane from looking idle mid-stream. Skip the
+      // rest of the fan-out. v2 names: session.next.{text,reasoning}.delta.
+      const streamEventType = (input.event as { type?: string } | undefined)
+        ?.type;
+      if (
+        streamEventType === 'message.part.delta' ||
+        streamEventType === 'session.next.text.delta' ||
+        streamEventType === 'session.next.reasoning.delta'
+      ) {
+        await multiplexerSessionManager.onSessionStatus(input.event as never);
+        return;
+      }
+
       await cacheMonitor.event(input);
 
       const event = input.event as {
@@ -1193,9 +1259,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           const agentName = sessionMetadata.getAgent(eventSessionID);
           if (agentName) {
             pendingTuiBusySessions.delete(eventSessionID);
-            markTuiAgentActive(eventSessionID, agentName);
+            markTuiAgentActive(eventSessionID, agentName, statusType);
           } else {
-            pendingTuiBusySessions.add(eventSessionID);
+            pendingTuiBusySessions.set(eventSessionID, statusType);
           }
         } else if (
           event.type === 'session.idle' ||
@@ -1237,6 +1303,20 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           if (!internalAdmission) {
             sessionMetadata.setModel(info.sessionID, model);
           }
+          // Per-session sidebar detail: the model actually observed for
+          // this session (two same-agent sessions may differ). Published
+          // regardless of admission origin: the executing model is a
+          // runtime fact, not selection tracking.
+          updateTuiSessionDetails(
+            info.sessionID,
+            { model },
+            tuiActivityDirectory(info.sessionID),
+          );
+          // Managed background-task sessions are identified by their session
+          // ID. If the model serving one changed (fallback re-prompt, runtime
+          // switch), migrate the admission accounting so provider/model caps
+          // keep tracking the model actually in use. No-op for other
+          // sessions and idempotent when the model is unchanged.
           backgroundTaskConcurrency.migrateTask(info.sessionID, model);
         }
         if (typeof info?.agent === 'string' && providerID && modelID) {
@@ -1538,8 +1618,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           pendingTuiBusySessions.has(input.sessionID) ||
           ownedTuiActivitySessions.has(input.sessionID)
         ) {
+          const pendingStatus = pendingTuiBusySessions.get(input.sessionID);
           pendingTuiBusySessions.delete(input.sessionID);
-          markTuiAgentActive(input.sessionID, agent);
+          markTuiAgentActive(input.sessionID, agent, pendingStatus);
         }
         companionManager.onSessionStatus({
           sessionId: input.sessionID,
@@ -1564,6 +1645,14 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         if (!internalAdmission) {
           sessionMetadata.setModel(input.sessionID, model);
         }
+        // v2 synthesizes message.updated without provider/model; publish
+        // the observed model here so sessionDetails is not empty for the
+        // entire run. Only-if-active: idle sessions are not resurrected.
+        updateTuiSessionDetails(
+          input.sessionID,
+          { model },
+          tuiActivityDirectory(input.sessionID),
+        );
         backgroundTaskConcurrency.migrateTask(input.sessionID, model);
       }
       taskSessionManagerHook.observeChatMessage(input, output);
@@ -1580,40 +1669,65 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // agentDefs (which has custom replacement or append prompts applied)
     // instead of rebuilding the default.
     'experimental.chat.system.transform': async (
-      input: { sessionID?: string },
+      input: { sessionID?: string; agent?: unknown },
       output: { system: string[] },
     ): Promise<void> => {
-      const agentName = input.sessionID
+      // Request-scoped agent when the host provides one (the v2 context
+      // bridge forwards `event.agent`). v1 hosts only pass sessionID, so
+      // there we fall back to the session's tracked agent — which is the
+      // SESSION agent, not the request agent: auxiliary LLM requests
+      // (title generation, compaction) run in the same session under
+      // their own agent and must not receive orchestrator instructions.
+      const requestAgent =
+        typeof input.agent === 'string' && input.agent
+          ? input.agent
+          : undefined;
+      const sessionAgent = input.sessionID
         ? sessionMetadata.getAgent(input.sessionID)
         : undefined;
-      if (agentName === 'orchestrator') {
-        const alreadyInjected = output.system.some(
-          (s) =>
-            typeof s === 'string' &&
-            s.includes('<Role>') &&
-            s.includes('orchestrator'),
+      const isOrchestratorRequest =
+        requestAgent !== undefined
+          ? requestAgent === 'orchestrator'
+          : sessionAgent === 'orchestrator' &&
+            looksLikeMainChatRequest(output.system);
+      if (isOrchestratorRequest) {
+        const orchestratorDef = agentDefs.find(
+          (a) => a.name === 'orchestrator',
         );
-        if (!alreadyInjected) {
+        const orchestratorPrompt =
+          typeof orchestratorDef?.config?.prompt === 'string'
+            ? orchestratorDef.config.prompt
+            : buildOrchestratorPrompt(
+                runtime.disabledAgents,
+                undefined,
+                true,
+                true,
+                hostFlavor,
+                agentRegistry.routing,
+              );
+        // Dedup by the EFFECTIVE prompt, not by default-prompt markers:
+        // a custom replacement without `<Role>` previously slipped past
+        // the marker check and was appended twice (P + host + P).
+        // The resolved agent definition is authoritative. Check the direct
+        // config prompt too: a custom replacement may be augmented while
+        // assembling the resolved definition, while the host may already
+        // contain the unaugmented replacement.
+        const configuredPrompt = runtime.agent('orchestrator')?.prompt;
+        const promptCandidates = [orchestratorPrompt, configuredPrompt].filter(
+          (prompt): prompt is string => typeof prompt === 'string' && !!prompt,
+        );
+        const alreadyInjected = output.system.some(
+          (systemPrompt) =>
+            typeof systemPrompt === 'string' &&
+            promptCandidates.some((prompt) => systemPrompt.includes(prompt)),
+        );
+        if (!alreadyInjected && orchestratorPrompt) {
           // Place the orchestrator prompt after AGENTS.md so the user's
           // behavioral rules (language, code conventions, etc.) retain
           // their intended priority. AGENTS.md is injected by OpenCode
           // core into system[0]; prepending the orchestrator prompt before
           // it buries user-defined rules under thousands of lines of
           // orchestration instructions.
-          const orchestratorDef = agentDefs.find(
-            (a) => a.name === 'orchestrator',
-          );
-          const orchestratorPrompt =
-            typeof orchestratorDef?.config?.prompt === 'string'
-              ? orchestratorDef.config.prompt
-              : buildOrchestratorPrompt(
-                  runtime.disabledAgents,
-                  undefined,
-                  true,
-                  true,
-                  hostFlavor,
-                  agentRegistry.routing,
-                );
           output.system[0] = `${output.system[0] || ''}\n\n${orchestratorPrompt}`;
         }
       }
