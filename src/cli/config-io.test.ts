@@ -146,6 +146,25 @@ describe('config-io', () => {
     expect(saved.plugin.length).toBe(2);
   });
 
+  test('addPluginToOpenCodeConfig reads and preserves a plural-key config', async () => {
+    const configPath = join(tmpDir, 'opencode', 'opencode.json');
+    paths.ensureConfigDir();
+    writeFileSync(
+      configPath,
+      JSON.stringify({ plugins: ['other', 'oh-my-opencode-slim@1.0.0'] }),
+    );
+    process.argv[1] = '';
+
+    const result = await addPluginToOpenCodeConfig();
+    expect(result.success).toBe(true);
+
+    const saved = JSON.parse(readFileSync(configPath, 'utf-8'));
+    // The file's own key is preserved; the legacy singular key stays untouched.
+    expect(saved.plugins).toContain('oh-my-opencode-slim');
+    expect(saved.plugins).not.toContain('oh-my-opencode-slim@1.0.0');
+    expect(saved.plugin).toBeUndefined();
+  });
+
   test('addPluginToOpenCodeConfig respects OPENCODE_CONFIG_DIR', async () => {
     const customConfigDir = join(tmpDir, 'custom-opencode');
     const defaultConfigDir = join(tmpDir, 'opencode');
