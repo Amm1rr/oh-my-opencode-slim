@@ -40,18 +40,18 @@ describe('apply-patch/matching', () => {
     });
   });
 
-  test('rescueByPrefixSuffix rescues a single stale block', () => {
+  test('rescueByPrefixSuffix rescues a stale block with multiline edges', () => {
     const result = rescueByPrefixSuffix(
-      ['top', 'const title = “Hola”;', 'stale-value', 'const footer = “Fin”;'],
-      ['const title = "Hola";', 'old-value', 'const footer = "Fin";'],
-      ['const title = “Hola”;', 'new-value', 'const footer = “Fin”;'],
+      ['L1', 'x', 'L1', 'L2 “q”', 'stale', 'R1', 'R2', 'R1', 'y'],
+      ['L1', 'L2 "q"', 'old', 'R1', 'R2'],
+      ['L1', 'L2 “q”', 'new-value', 'R1', 'R2'],
       0,
     );
 
     expect(result).toEqual({
       kind: 'match',
       hit: {
-        start: 2,
+        start: 4,
         del: 1,
         add: ['new-value'],
       },

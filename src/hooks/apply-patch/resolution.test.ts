@@ -57,6 +57,7 @@ describe('apply-patch/resolution', () => {
       'const title = “Hola”;',
     ],
     ['trim-end', ['alpha  '], 'alpha', 'omega', 'alpha  '],
+    ['trim-end', ['  alpha', 'alpha  '], 'alpha', 'omega', 'alpha  '],
     ['trim', [' alpha  '], 'alpha', 'omega', ' alpha  '],
     [
       'trim',
@@ -101,14 +102,14 @@ describe('apply-patch/resolution', () => {
 
   test('resolveUpdate resolves EOF updates', () => {
     expect(
-      resolveUpdate('sample.txt', 'alpha\nbeta', [
+      resolveUpdate('sample.txt', 'beta\nalpha\nbeta', [
         {
           old_lines: ['beta'],
           new_lines: ['omega'],
           is_end_of_file: true,
         },
       ]).nextText,
-    ).toBe('alpha\nomega');
+    ).toBe('beta\nalpha\nomega');
   });
 
   test('resolveUpdate preserves CRLF while rebuilding content', () => {

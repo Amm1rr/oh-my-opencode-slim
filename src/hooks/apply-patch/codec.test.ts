@@ -123,18 +123,23 @@ PATCH`);
     expect(() => parsePatch(`*** Begin Patch\n${body}`)).toThrow(message);
   });
 
-  test('formatPatch allows stable parse -> format -> parse roundtrips', () => {
+  test.each([
+    [
+      ['alpha', 'beta'],
+      ['alpha', 'BETA'],
+    ],
+    [['a'], ['a', 'a']],
+    [
+      ['a', 'b', 'a'],
+      ['a', 'a'],
+    ],
+  ])('formatPatch roundtrips old=%j new=%j', (old_lines, new_lines) => {
     const parsed: ParsedPatch = {
       hunks: [
         {
           type: 'update',
           path: 'sample.txt',
-          chunks: [
-            {
-              old_lines: ['alpha', 'beta'],
-              new_lines: ['alpha', 'BETA'],
-            },
-          ],
+          chunks: [{ old_lines, new_lines }],
         },
       ],
     };
