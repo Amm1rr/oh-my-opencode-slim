@@ -492,6 +492,19 @@ export class ForegroundFallbackManager {
     return true;
   }
 
+  private withholdsAbortForLiveChildren(sessionID: string): boolean {
+    if (
+      (this.input as PluginInput & { hostFlavor?: string }).hostFlavor ===
+        'v2' ||
+      !this.hasRunningChildren?.(sessionID)
+    )
+      return false;
+    log('[foreground-fallback] abort withheld for live background children', {
+      sessionID,
+    });
+    return true;
+  }
+
   constructor(
     /**
      * Ordered fallback chains per agent.
@@ -538,6 +551,8 @@ export class ForegroundFallbackManager {
      *  unmanaged — the handoff is not applicable, never a wildcard).
      *  Captured before ANY await in the fallback preparation. */
     readBackgroundGeneration?: (sessionID: string) => number | undefined,
+    /** Synchronous check for running background children OF this session. */
+    private readonly hasRunningChildren?: (sessionID: string) => boolean,
   ) {
     this.onSessionModelChanged = onSessionModelChanged;
     this.backgroundFallbackHandoff = backgroundFallbackHandoff;
@@ -1031,6 +1046,7 @@ export class ForegroundFallbackManager {
     if (this.abandonedByDispose(sessionID)) return;
     if (this.inProgress.has(sessionID)) return;
     if (!this.hasFallbackChain(sessionID)) return;
+    if (this.withholdsAbortForLiveChildren(sessionID)) return;
     if (this.isDeduped(sessionID)) return;
 
     this.inProgress.add(sessionID);
@@ -1039,6 +1055,7 @@ export class ForegroundFallbackManager {
       // Promotion awaited: a reload may have disposed this generation in
       // the meantime — never abort through a stale client.
       if (this.abandonedByDispose(sessionID)) return;
+      if (this.withholdsAbortForLiveChildren(sessionID)) return;
       await abortSessionWithTimeout(getClient(this.input), sessionID);
       // The abort suspended across a dispose(): its outcome no longer
       // matters to the reloaded generation — do not continue into
@@ -1216,6 +1233,9 @@ export class ForegroundFallbackManager {
       const selection = this.selectFallbackModel(sessionID);
       if (!selection) return;
       if (selection === 'exhausted') {
+        // Same withhold as the retry and busy paths: the merged chain
+        // selection collapses both exhaustion aborts into this one point.
+        if (this.withholdsAbortForLiveChildren(sessionID)) return;
         await abortSessionWithTimeout(getClient(this.input), sessionID);
         return;
       }
@@ -1379,6 +1399,13 @@ export class ForegroundFallbackManager {
           withdrawHandoff();
           throw promptErr;
         }
+        if (this.withholdsAbortForLiveChildren(sessionID)) {
+          // Explicit busy refusal with no abort attempted: nothing was
+          // admitted, so release ownership (reject) like the v2 branch
+          // above instead of converting into a tracked run.
+          withdrawHandoff();
+          throw promptErr;
+        }
         log('[foreground-fallback] promptAsync on busy session, aborting', {
           sessionID,
           error: stringifyError(promptErr),
@@ -1386,6 +1413,13 @@ export class ForegroundFallbackManager {
         await this.promoteForegroundWaiter(sessionID);
         // Same stale-generation fence as the failover abort above.
         if (this.abandonedByDispose(sessionID)) return;
+        if (this.withholdsAbortForLiveChildren(sessionID)) {
+          // Explicit busy refusal with no abort attempted: nothing was
+          // admitted, so release ownership (reject) like the v2 branch
+          // above instead of converting into a tracked run.
+          withdrawHandoff();
+          throw promptErr;
+        }
         try {
           await abortSessionWithTimeout(getClient(this.input), sessionID);
         } catch (abortErr) {

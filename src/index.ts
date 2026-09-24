@@ -659,6 +659,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           ? record.generation
           : undefined;
       },
+      (sessionID) => backgroundJobCoordinator.hasRunning(sessionID),
     );
 
     deepworkCommandHook = createDeepworkCommandHook();
