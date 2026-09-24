@@ -86,39 +86,19 @@ function tryMatch(
   pattern: string[],
   start: number,
   eof: boolean,
+  norm: (line: string) => string,
 ): number | undefined {
-  if (eof) {
-    const at = lines.length - pattern.length;
-    if (at >= start) {
-      let ok = true;
-      for (let index = 0; index < pattern.length; index += 1) {
-        if (lines[at + index] !== pattern[index]) {
-          ok = false;
-          break;
-        }
-      }
-
-      if (ok) {
-        return at;
-      }
+  const at = (index: number) => {
+    for (let offset = 0; offset < pattern.length; offset += 1) {
+      if (norm(lines[index + offset]) !== pattern[offset]) return false;
     }
+    return true;
+  };
+  const last = lines.length - pattern.length;
+  if (eof && last >= start && at(last)) return last;
+  for (let index = start; index <= last; index += 1) {
+    if (at(index)) return index;
   }
-
-  for (let index = start; index <= lines.length - pattern.length; index += 1) {
-    let ok = true;
-
-    for (let inner = 0; inner < pattern.length; inner += 1) {
-      if (lines[index + inner] !== pattern[inner]) {
-        ok = false;
-        break;
-      }
-    }
-
-    if (ok) {
-      return index;
-    }
-  }
-
   return undefined;
 }
 
@@ -132,15 +112,10 @@ export function seekMatch(
     return undefined;
   }
 
-  for (const level of LEVELS) {
-    const at = tryMatch(
-      level.exact ? lines : lines.map(level.norm),
-      level.exact ? pattern : pattern.map(level.norm),
-      start,
-      eof,
-    );
+  for (const { norm, exact } of LEVELS) {
+    const at = tryMatch(lines, pattern.map(norm), start, eof, norm);
     if (at !== undefined) {
-      return { index: at, exact: level.exact };
+      return { index: at, exact };
     }
   }
 
