@@ -896,7 +896,7 @@ export class ForegroundFallbackManager {
           void trigger.catch((err) => {
             log('[foreground-fallback] delayed fallback trigger failed', {
               sessionID,
-              error: err instanceof Error ? err.message : String(err),
+              error: stringifyError(err),
             });
           });
         }, this.initialRetryDelayMs);
