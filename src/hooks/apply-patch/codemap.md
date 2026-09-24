@@ -13,7 +13,7 @@ Preflights `apply_patch` calls before OpenCode's native tool runs. It validates 
 
 ## Pipeline
 
-1. `codec.ts` normalizes heredocs/line endings and **strictly** parses `*** Begin Patch`/`*** End Patch` with Add, Delete, Update, and optional Move hunks. `formatPatch()` renders canonical patches; update chunks render in linear time using their common prefix/suffix and replacement blocks.
+1. `codec.ts` normalizes heredocs/line endings and **strictly** parses `*** Begin Patch`/`*** End Patch` with Add, Delete, Update, and optional Move hunks. `formatPatch()` renders canonical patches; update chunks render in linear time using their common prefix/suffix and replacement blocks. Shared lines inside a replacement are re-emitted as `-x`/`+x` pairs rather than context; the parsed old/new line arrays remain identical.
 2. `execution-context.ts` parses, resolves and guards all target paths (including move destinations), and simulates add/delete/update hunks in their original order. `simulatePatch()` returns normalized hunks, a paths-normalized flag, and sequential steps; its staged state allows same-file and add/move dependencies without writing files.
 3. `resolution.ts` uses `resolveUpdate(file, text, chunks)` to produce resolved canonical chunks and the next text, preserving CRLF and final-newline state. Empty old-line insertions require a unique anchor except at explicit EOF. `applyHits()` computes the result from source lines and accepted hits.
 4. `matching.ts` searches globally by comparator level: exact → unicode → trim-end → unicode-trim-end → trim → unicode-trim. EOF matches are tried at the end first, then from the start offset. Prefix/suffix rescue searches both edges in one pass using unicode-trim-end, **not** full-trim; ambiguous locations fail. LCS rescue is limited to 48 old lines and 64 candidates, needs at least 70% overlap (minimum two lines), requires both borders and rejects tied best matches. LCS borders retain the full comparator chain.
@@ -22,6 +22,7 @@ Preflights `apply_patch` calls before OpenCode's native tool runs. It validates 
 ## Safety and configuration
 
 - The hook has no `ApplyPatchRuntimeOptions`: prefix/suffix and LCS rescue are always enabled. There is no prepared-changes/rollback engine or disk-applying operation in production; the test helper applies simulated steps with plain filesystem calls.
+- `errors.ts` also exports `getErrorMessage`, consumed by `src/companion/updater.ts` to report fetch and install failures.
 - The preflight checks paths against the real root and worktree before reading. Nonexistent or ambiguous targets and overlapping chunks fail verification rather than guessing. All changes to files are left to the native `apply_patch` tool.
 - The only external dependency of the hook beyond OpenCode's plugin context is the shared structured logger (`src/utils/logger.ts`).
 
