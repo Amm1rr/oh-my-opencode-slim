@@ -3,6 +3,7 @@ import path from 'node:path';
 import { formatPatch, normalizePatchText } from './codec';
 import { ensureApplyPatchError } from './errors';
 import { simulatePatch, stageAddedText } from './execution-context';
+import { commonEdges } from './matching';
 import { deriveNewContentFromText } from './resolution';
 import type { PatchHunk, UpdatePatchHunk } from './types';
 
@@ -106,24 +107,10 @@ function clonePatchChunks(
 }
 
 function minimizeMergedChunk(chunk: UpdatePatchHunk['chunks'][number]) {
-  let prefixLength = 0;
-  while (
-    prefixLength < chunk.old_lines.length &&
-    prefixLength < chunk.new_lines.length &&
-    chunk.old_lines[prefixLength] === chunk.new_lines[prefixLength]
-  ) {
-    prefixLength += 1;
-  }
-
-  let suffixLength = 0;
-  while (
-    chunk.old_lines.length - suffixLength - 1 >= prefixLength &&
-    chunk.new_lines.length - suffixLength - 1 >= prefixLength &&
-    chunk.old_lines[chunk.old_lines.length - suffixLength - 1] ===
-      chunk.new_lines[chunk.new_lines.length - suffixLength - 1]
-  ) {
-    suffixLength += 1;
-  }
+  const { prefixLength, suffixLength } = commonEdges(
+    chunk.old_lines,
+    chunk.new_lines,
+  );
 
   if (prefixLength === 0 && suffixLength === 0) {
     return {

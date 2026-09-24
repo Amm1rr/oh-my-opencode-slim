@@ -1,12 +1,12 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
-  prefix,
+  commonEdges,
   rescueByLcs,
   rescueByPrefixSuffix,
+  sameRescueLine,
   seek,
   seekMatch,
-  suffix,
 } from './matching';
 
 describe('apply-patch/matching', () => {
@@ -34,8 +34,10 @@ describe('apply-patch/matching', () => {
       'const footer = “Fin”;',
     ];
 
-    expect(prefix(oldLines, newLines)).toBe(1);
-    expect(suffix(oldLines, newLines, 1)).toBe(1);
+    expect(commonEdges(oldLines, newLines, sameRescueLine)).toEqual({
+      prefixLength: 1,
+      suffixLength: 1,
+    });
   });
 
   test('rescueByPrefixSuffix rescues a single stale block', () => {

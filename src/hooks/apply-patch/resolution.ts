@@ -1,12 +1,12 @@
 import {
-  matchPreparedAutoRescueComparator,
-  prefix,
+  commonEdges,
+  matchesAt,
   prepareAutoRescueTarget,
   rescueByLcs,
   rescueByPrefixSuffix,
+  sameRescueLine,
   seek,
   seekMatch,
-  suffix,
 } from './matching';
 import type {
   ApplyPatchRescueStrategy,
@@ -67,10 +67,7 @@ function resolveUniqueAnchor(
   const anchorTarget = prepareAutoRescueTarget(changeContext);
 
   for (let index = start; index < lines.length; index += 1) {
-    const comparator = matchPreparedAutoRescueComparator(
-      lines[index],
-      anchorTarget,
-    );
+    const comparator = matchesAt(lines[index], anchorTarget);
     if (!comparator) {
       continue;
     }
@@ -146,8 +143,11 @@ export function locateChunk(
   }
 
   if (prefixSuffix.kind === 'match') {
-    const prefixLength = prefix(old_lines, new_lines);
-    const suffixLength = suffix(old_lines, new_lines, prefixLength);
+    const { prefixLength, suffixLength } = commonEdges(
+      old_lines,
+      new_lines,
+      sameRescueLine,
+    );
     const canonicalStart = prefixSuffix.hit.start - prefixLength;
     const canonicalEnd =
       prefixSuffix.hit.start + prefixSuffix.hit.del + suffixLength;
