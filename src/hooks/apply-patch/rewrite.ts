@@ -4,7 +4,7 @@ import { formatPatch, normalizePatchText } from './codec';
 import { ensureApplyPatchError } from './errors';
 import { simulatePatch, stageAddedText } from './execution-context';
 import { commonEdges } from './matching';
-import { resolveUpdate } from './resolution';
+import { resolveUpdate, splitFileLines } from './resolution';
 import type { PatchHunk, UpdatePatchHunk } from './types';
 
 export type RewritePatchResult = {
@@ -15,41 +15,31 @@ export type RewritePatchResult = {
 type RewriteUpdateGroup = {
   index: number;
   sourcePath: string;
-  outputPath: string;
   sourceFilePath: string;
   outputFilePath: string;
   baseText: string;
-  finalText: string;
   chunks?: UpdatePatchHunk['chunks'];
 };
 
 type RewriteAddGroup = {
   index: number;
-  outputPath: string;
-  outputFilePath: string;
-  finalText: string;
 };
 
 type RewriteDependencyGroup =
   | { kind: 'add'; group: RewriteAddGroup }
   | { kind: 'update'; group: RewriteUpdateGroup };
 
-function normalizeTextLineEndings(text: string): string {
-  return text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-}
-
-function splitPatchTextLines(text: string): string[] {
-  // Empty text is zero lines, not one empty line; '\n' is one empty line.
-  if (text.length === 0) {
-    return [];
+function reproduces(
+  filePath: string,
+  baseText: string,
+  chunks: UpdatePatchHunk['chunks'],
+  finalText: string,
+): boolean {
+  try {
+    return resolveUpdate(filePath, baseText, chunks).nextText === finalText;
+  } catch {
+    return false;
   }
-
-  const normalized = normalizeTextLineEndings(text);
-  const lines = normalized.split('\n');
-  if (normalized.endsWith('\n')) {
-    lines.pop();
-  }
-  return lines;
 }
 
 function createCollapsedUpdateHunk(
@@ -60,8 +50,8 @@ function createCollapsedUpdateHunk(
   movePath?: string,
 ): UpdatePatchHunk {
   const collapsedChunk = {
-    old_lines: splitPatchTextLines(baseText),
-    new_lines: splitPatchTextLines(finalText),
+    old_lines: splitFileLines(baseText).lines,
+    new_lines: splitFileLines(finalText).lines,
     change_context: undefined,
     is_end_of_file: true,
   } satisfies UpdatePatchHunk['chunks'][number];
@@ -69,22 +59,11 @@ function createCollapsedUpdateHunk(
   const minimizedChunk = minimizeMergedChunk(collapsedChunk);
   const chunk =
     minimizedChunk.old_lines.length === collapsedChunk.old_lines.length &&
-    minimizedChunk.new_lines.length === collapsedChunk.new_lines.length &&
-    minimizedChunk.change_context === collapsedChunk.change_context &&
-    minimizedChunk.is_end_of_file === collapsedChunk.is_end_of_file
+    minimizedChunk.new_lines.length === collapsedChunk.new_lines.length
       ? collapsedChunk
-      : (() => {
-          try {
-            return resolveUpdate(filePath, baseText, [minimizedChunk])
-              .nextText === finalText
-              ? minimizedChunk
-              : collapsedChunk;
-          } catch {
-            // Keep the whole-file chunk when trimming shared context would make
-            // the fallback ambiguous or no longer reproduce the same result.
-            return collapsedChunk;
-          }
-        })();
+      : reproduces(filePath, baseText, [minimizedChunk], finalText)
+        ? minimizedChunk
+        : collapsedChunk;
 
   return {
     type: 'update',
@@ -92,17 +71,6 @@ function createCollapsedUpdateHunk(
     move_path: movePath,
     chunks: [chunk],
   };
-}
-
-function clonePatchChunks(
-  chunks: UpdatePatchHunk['chunks'],
-): UpdatePatchHunk['chunks'] {
-  return chunks.map((chunk) => ({
-    old_lines: [...chunk.old_lines],
-    new_lines: [...chunk.new_lines],
-    change_context: chunk.change_context,
-    is_end_of_file: chunk.is_end_of_file,
-  }));
 }
 
 function minimizeMergedChunk(chunk: UpdatePatchHunk['chunks'][number]) {
@@ -133,128 +101,7 @@ function minimizeMergedChunk(chunk: UpdatePatchHunk['chunks'][number]) {
       prefixLength > 0
         ? chunk.old_lines[prefixLength - 1]
         : chunk.change_context,
-    is_end_of_file:
-      chunk.is_end_of_file && suffixLength === 0 ? true : undefined,
-  };
-}
-
-function createUpdateHunk(
-  pathValue: string,
-  chunks: UpdatePatchHunk['chunks'],
-  movePath?: string,
-): UpdatePatchHunk {
-  return {
-    type: 'update',
-    path: pathValue,
-    move_path: movePath,
-    chunks: clonePatchChunks(chunks),
-  };
-}
-
-function mergeSameFileUpdateGroupChunks(
-  filePath: string,
-  group: RewriteUpdateGroup,
-  nextChunks: UpdatePatchHunk['chunks'],
-  finalText: string,
-): UpdatePatchHunk['chunks'] | undefined {
-  if (!group.chunks) {
-    return undefined;
-  }
-
-  // minimizeMergedChunk never mutates its input, so the original chunk
-  // arrays can be mapped directly.
-  const mergedChunks = [
-    ...group.chunks.map(minimizeMergedChunk),
-    ...nextChunks.map(minimizeMergedChunk),
-  ];
-
-  try {
-    const mergedText = resolveUpdate(
-      filePath,
-      group.baseText,
-      mergedChunks,
-    ).nextText;
-
-    return mergedText === finalText ? mergedChunks : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function renderRewriteDependencyGroup(
-  group: RewriteDependencyGroup,
-): PatchHunk {
-  if (group.kind === 'add') {
-    return {
-      type: 'add',
-      path: group.group.outputPath,
-      // Guarantee the canonical newline-terminated Add representation:
-      // finalText may legitimately lack a final newline (e.g. updates on a
-      // no-final-newline file), which the renderer would otherwise drop.
-      contents: stageAddedText(group.group.finalText),
-    };
-  }
-
-  return group.group.chunks
-    ? createUpdateHunk(
-        group.group.sourcePath,
-        group.group.chunks,
-        group.group.outputPath !== group.group.sourcePath
-          ? group.group.outputPath
-          : undefined,
-      )
-    : createCollapsedUpdateHunk(
-        group.group.sourcePath,
-        group.group.sourceFilePath,
-        group.group.baseText,
-        group.group.finalText,
-        group.group.outputPath !== group.group.sourcePath
-          ? group.group.outputPath
-          : undefined,
-      );
-}
-
-function combineDependentUpdateGroup(
-  filePath: string,
-  group: RewriteDependencyGroup,
-  nextChunks: UpdatePatchHunk['chunks'],
-  finalText: string,
-  nextOutputPath: string,
-  nextOutputFilePath: string,
-): RewriteDependencyGroup {
-  if (group.kind === 'add') {
-    return {
-      kind: 'add',
-      group: {
-        ...group.group,
-        outputPath: nextOutputPath,
-        outputFilePath: nextOutputFilePath,
-        finalText,
-      },
-    };
-  }
-
-  const mergedChunks =
-    group.group.outputFilePath === filePath &&
-    group.group.sourceFilePath === filePath &&
-    nextOutputFilePath === filePath
-      ? mergeSameFileUpdateGroupChunks(
-          filePath,
-          group.group,
-          nextChunks,
-          finalText,
-        )
-      : undefined;
-
-  return {
-    kind: 'update',
-    group: {
-      ...group.group,
-      outputPath: nextOutputPath,
-      outputFilePath: nextOutputFilePath,
-      finalText,
-      chunks: mergedChunks,
-    },
+    is_end_of_file: suffixLength === 0 ? chunk.is_end_of_file : undefined,
   };
 }
 
@@ -269,7 +116,6 @@ export async function rewritePatch(
       patchText,
       worktree,
     );
-    const normalizedPatchText = normalizePatchText(patchText);
     const rewritten: PatchHunk[] = [];
     let changed = false;
 
@@ -319,9 +165,6 @@ export async function rewritePatch(
           kind: 'add',
           group: {
             index: rewritten.length - 1,
-            outputPath: step.hunk.path,
-            outputFilePath: filePath,
-            finalText: step.finalText,
           },
         });
         continue;
@@ -390,18 +233,7 @@ export async function rewritePatch(
         // Overlap merges must reproduce the accepted hits exactly. If an
         // exotic shape does not, fall back to a verified whole-file chunk
         // instead of shipping a rewrite that cannot re-apply.
-        try {
-          if (
-            resolveUpdate(filePath, current.text, next).nextText !== nextText
-          ) {
-            next = createCollapsedUpdateHunk(
-              hunk.path,
-              filePath,
-              current.text,
-              nextText,
-            ).chunks;
-          }
-        } catch {
+        if (!reproduces(filePath, current.text, next, nextText)) {
           next = createCollapsedUpdateHunk(
             hunk.path,
             filePath,
@@ -411,29 +243,68 @@ export async function rewritePatch(
         }
       }
 
-      for (const chunk of resolved) {
-        if (!chunk.rewritten) {
-          continue;
-        }
-        changed = true;
-      }
+      changed ||= resolved.some((chunk) => chunk.rewritten);
 
       const nextOutputPath = hunk.move_path ?? hunk.path;
       const nextOutputFilePath = movePath ?? filePath;
 
       let folded = false;
       if (current.derived && currentDependency) {
-        const nextGroup = combineDependentUpdateGroup(
-          filePath,
-          currentDependency,
-          next,
-          nextText,
-          nextOutputPath,
-          nextOutputFilePath,
-        );
+        let nextGroup: RewriteDependencyGroup;
+        let rendered: PatchHunk;
+        if (currentDependency.kind === 'add') {
+          nextGroup = currentDependency;
+          // Add contents must remain newline-terminated after a fold.
+          rendered = {
+            type: 'add',
+            path: nextOutputPath,
+            contents: stageAddedText(nextText),
+          };
+        } else {
+          const group = currentDependency.group;
+          let chunks: UpdatePatchHunk['chunks'] | undefined;
+          if (
+            group.chunks &&
+            group.outputFilePath === filePath &&
+            group.sourceFilePath === filePath &&
+            nextOutputFilePath === filePath
+          ) {
+            const merged = [
+              ...group.chunks.map(minimizeMergedChunk),
+              ...next.map(minimizeMergedChunk),
+            ];
+            if (reproduces(filePath, group.baseText, merged, nextText)) {
+              chunks = merged;
+            }
+          }
+          nextGroup = {
+            kind: 'update',
+            group: {
+              ...group,
+              outputFilePath: nextOutputFilePath,
+              chunks,
+            },
+          };
+          const move =
+            nextOutputPath !== group.sourcePath ? nextOutputPath : undefined;
+          rendered = chunks
+            ? {
+                type: 'update',
+                path: group.sourcePath,
+                move_path: move,
+                chunks,
+              }
+            : createCollapsedUpdateHunk(
+                group.sourcePath,
+                group.sourceFilePath,
+                group.baseText,
+                nextText,
+                move,
+              );
+        }
         const foldedIndex = reemitFoldedGroup(
           currentDependency.group.index,
-          renderRewriteDependencyGroup(nextGroup),
+          rendered,
         );
         if (foldedIndex !== undefined) {
           changed = true;
@@ -451,7 +322,12 @@ export async function rewritePatch(
         // First touch of this path, or an interfering hunk made the fold
         // order-unsafe: emit this update standalone, which preserves the
         // original patch ordering.
-        rewritten.push(createUpdateHunk(hunk.path, next, hunk.move_path));
+        rewritten.push({
+          type: 'update',
+          path: hunk.path,
+          move_path: hunk.move_path,
+          chunks: next,
+        });
         clearDependencyGroup(filePath);
         if (movePath && movePath !== filePath) {
           clearDependencyGroup(movePath);
@@ -461,12 +337,10 @@ export async function rewritePatch(
           group: {
             index: rewritten.length - 1,
             sourcePath: hunk.path,
-            outputPath: nextOutputPath,
             sourceFilePath: filePath,
             outputFilePath: nextOutputFilePath,
             baseText: current.text,
-            finalText: nextText,
-            chunks: clonePatchChunks(next),
+            chunks: next,
           },
         });
       }
@@ -480,6 +354,7 @@ export async function rewritePatch(
         };
       }
 
+      const normalizedPatchText = normalizePatchText(patchText);
       if (normalizedPatchText !== patchText) {
         return {
           patchText: normalizedPatchText,

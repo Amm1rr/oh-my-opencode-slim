@@ -19,10 +19,6 @@ type PathGuardContext = {
   worktreeReal?: Promise<string>;
 };
 
-type FileCacheContext = {
-  stats: Map<string, Promise<Stats | null>>;
-};
-
 export type PreparedFileState =
   | {
       exists: false;
@@ -115,13 +111,6 @@ function inside(root: string, target: string): boolean {
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
 }
 
-function createPathGuardContext(
-  root: string,
-  worktree: string | undefined,
-): PathGuardContext {
-  return { root, worktree };
-}
-
 async function guard(ctx: PathGuardContext, target: string): Promise<void> {
   const targetReal = await real(target);
   // Both resolutions are lazy: whichever rejects first is observed here,
@@ -131,26 +120,10 @@ async function guard(ctx: PathGuardContext, target: string): Promise<void> {
     return;
   }
 
-  if (!ctx.worktree) {
-    throw new ApplyPatchError(
-      'blocked',
-      `patch contains path outside workspace root: ${target}`,
-    );
-  }
-
-  // Resolve the worktree lazily: patches whose targets all live inside root
-  // never pay for it, and its rejection stays observed inside this flow
-  // instead of becoming an unhandled promise.
-  ctx.worktreeReal ??= ctx.worktree !== '/' ? real(ctx.worktree) : undefined;
-  if (!ctx.worktreeReal) {
-    throw new ApplyPatchError(
-      'blocked',
-      `patch contains path outside workspace root: ${target}`,
-    );
-  }
-
-  if (inside(await ctx.worktreeReal, targetReal)) {
-    return;
+  // Resolve the worktree lazily, without an unobserved promise on root hits.
+  if (ctx.worktree && ctx.worktree !== '/') {
+    ctx.worktreeReal ??= real(ctx.worktree);
+    if (inside(await ctx.worktreeReal, targetReal)) return;
   }
 
   throw new ApplyPatchError(
@@ -159,44 +132,15 @@ async function guard(ctx: PathGuardContext, target: string): Promise<void> {
   );
 }
 
-function createFileCacheContext(): FileCacheContext {
-  return { stats: new Map() };
-}
-
-async function statCached(
-  ctx: FileCacheContext,
-  filePath: string,
-): Promise<Stats | null> {
-  let pending = ctx.stats.get(filePath);
-  if (!pending) {
-    const nextPending = fs.stat(filePath).catch((error: unknown) => {
-      if (isMissingPathError(error)) {
-        return null;
-      }
-
-      throw new ApplyPatchError(
-        'internal',
-        `Failed to stat file for patch verification: ${filePath}`,
-        error,
-      );
-    });
-    ctx.stats.set(filePath, nextPending);
-    pending = nextPending;
-  }
-
-  return await pending;
-}
-
-async function assertRegularFile(
-  ctx: FileCacheContext,
-  filePath: string,
-  verb: 'update' | 'delete',
-): Promise<void> {
-  const stat = await statCached(ctx, filePath);
-  if (!stat || stat.isDirectory()) {
+async function statOrNull(filePath: string): Promise<Stats | null> {
+  try {
+    return await fs.stat(filePath);
+  } catch (error) {
+    if (isMissingPathError(error)) return null;
     throw new ApplyPatchError(
-      'verification',
-      `Failed to read file to ${verb}: ${filePath}`,
+      'internal',
+      `Failed to stat file for patch verification: ${filePath}`,
+      error,
     );
   }
 }
@@ -215,15 +159,10 @@ function collectPatchTargets(root: string, hunks: PatchHunk[]): string[] {
   return [...targets];
 }
 
-function toRelativePatchPath(root: string, target: string): string {
-  const relative = path.relative(root, target);
-  return (relative.length === 0 ? '.' : relative).replaceAll('\\', '/');
-}
-
 function normalizePatchPath(root: string, value: string): string {
-  return path.isAbsolute(value)
-    ? toRelativePatchPath(root, path.resolve(value))
-    : value;
+  if (!path.isAbsolute(value)) return value;
+  const relative = path.relative(root, path.resolve(value));
+  return (relative.length === 0 ? '.' : relative).replaceAll('\\', '/');
 }
 
 function normalizePatchPaths(
@@ -234,41 +173,22 @@ function normalizePatchPaths(
   changed: boolean;
 } {
   const resolvedRoot = path.resolve(root);
-  const normalized: PatchHunk[] = [];
   let changed = false;
 
-  for (const hunk of hunks) {
-    const normalizedPath = normalizePatchPath(resolvedRoot, hunk.path);
-
-    if (hunk.type !== 'update') {
-      changed ||= normalizedPath !== hunk.path;
-      normalized.push(
-        normalizedPath === hunk.path
-          ? hunk
-          : {
-              ...hunk,
-              path: normalizedPath,
-            },
-      );
-      continue;
+  const normalized = hunks.map((hunk): PatchHunk => {
+    const nextPath = normalizePatchPath(resolvedRoot, hunk.path);
+    if (hunk.type === 'update') {
+      const nextMove = hunk.move_path
+        ? normalizePatchPath(resolvedRoot, hunk.move_path)
+        : undefined;
+      if (nextPath === hunk.path && nextMove === hunk.move_path) return hunk;
+      changed = true;
+      return { ...hunk, path: nextPath, move_path: nextMove };
     }
-
-    const normalizedMovePath = hunk.move_path
-      ? normalizePatchPath(resolvedRoot, hunk.move_path)
-      : undefined;
-    changed ||=
-      normalizedPath !== hunk.path || normalizedMovePath !== hunk.move_path;
-
-    normalized.push(
-      normalizedPath === hunk.path && normalizedMovePath === hunk.move_path
-        ? hunk
-        : {
-            ...hunk,
-            path: normalizedPath,
-            move_path: normalizedMovePath,
-          },
-    );
-  }
+    if (nextPath === hunk.path) return hunk;
+    changed = true;
+    return { ...hunk, path: nextPath };
+  });
 
   return { hunks: normalized, changed };
 }
@@ -277,14 +197,12 @@ async function guardPatchTargets(
   root: string,
   worktree: string | undefined,
   targets: string[],
-): Promise<number> {
-  const guardContext = createPathGuardContext(root, worktree);
+): Promise<void> {
+  const guardContext: PathGuardContext = { root, worktree };
 
   for (const target of targets) {
     await guard(guardContext, target);
   }
-
-  return targets.length;
 }
 
 export function parseValidatedPatch(patchText: string): PatchHunk[] {
@@ -342,38 +260,23 @@ async function createPatchExecutionContext(
     collectPatchTargets(root, parsedHunks),
   );
   const normalized = normalizePatchPaths(root, parsedHunks);
-  const files = createFileCacheContext();
   const staged = new Map<string, PreparedFileState>();
 
   async function assertPreparedPathMissing(
     filePath: string,
     verb: 'add' | 'move',
   ): Promise<void> {
-    const existing = staged.get(filePath);
-    if (existing) {
-      if (!existing.exists) {
-        return;
-      }
-
-      throw new ApplyPatchError(
-        'verification',
-        verb === 'add'
-          ? `Add File target already exists: ${filePath}`
-          : `Move destination already exists: ${filePath}`,
-      );
-    }
-
-    const stat = await statCached(files, filePath);
-    if (!stat) {
-      return;
-    }
-
-    throw new ApplyPatchError(
-      'verification',
+    const message =
       verb === 'add'
         ? `Add File target already exists: ${filePath}`
-        : `Move destination already exists: ${filePath}`,
-    );
+        : `Move destination already exists: ${filePath}`;
+    const existing = staged.get(filePath);
+    if (existing) {
+      if (!existing.exists) return;
+    } else if (!(await statOrNull(filePath))) {
+      return;
+    }
+    throw new ApplyPatchError('verification', message);
   }
 
   async function getPreparedFileState(
@@ -392,13 +295,18 @@ async function createPatchExecutionContext(
       return existing;
     }
 
-    await assertRegularFile(files, filePath, verb);
-    const stat = await statCached(files, filePath);
+    const stat = await statOrNull(filePath);
+    if (!stat || stat.isDirectory()) {
+      throw new ApplyPatchError(
+        'verification',
+        `Failed to read file to ${verb}: ${filePath}`,
+      );
+    }
     const text = await readPreparedFileText(filePath, verb);
     const state: PreparedFileState = {
       exists: true,
       text,
-      mode: stat ? stat.mode & 0o7777 : undefined,
+      mode: stat.mode & 0o7777,
       derived: false,
     };
     staged.set(filePath, state);

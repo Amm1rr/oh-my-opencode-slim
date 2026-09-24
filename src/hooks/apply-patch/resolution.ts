@@ -16,7 +16,7 @@ type FileLines = {
   hasFinalNewline: boolean;
 };
 
-function splitFileLines(text: string): FileLines {
+export function splitFileLines(text: string): FileLines {
   const eol = text.match(/\r\n|\n|\r/)?.[0] === '\r\n' ? '\r\n' : '\n';
   const normalized = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
   const hasFinalNewline = normalized.endsWith('\n');
