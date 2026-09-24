@@ -10,16 +10,16 @@ import {
 } from './matching';
 
 describe('apply-patch/matching', () => {
-  test('seek finds matches with unicode and trim-end', () => {
-    expect(seek(['console.log(“hola”);  '], ['console.log("hola");'], 0)).toBe(
-      0,
-    );
-  });
-
-  test('seek matches trim-only differences with different indentation (native-compatible)', () => {
-    expect(seek(['  console.log("hola");'], ['console.log("hola");'], 0)).toBe(
-      0,
-    );
+  test.each([
+    ['unicode + trim-end', 'console.log(“hola”);  ', 'console.log("hola");'],
+    ['indentation', '  console.log("hola");', 'console.log("hola");'],
+    [
+      'curly + straight quotes',
+      'const title = “it’s ready”;',
+      'const title = "it\'s ready";',
+    ],
+  ])('seek matches %s', (_, fileLine, patchLine) => {
+    expect(seek([fileLine], [patchLine], 0)).toBe(0);
   });
 
   test('prefix and suffix detect common edges', () => {
@@ -195,16 +195,6 @@ describe('apply-patch/matching', () => {
         0,
       ),
     ).toEqual({ kind: 'miss' });
-  });
-
-  test('seek matches mixed curly and straight quotes', () => {
-    expect(
-      seek(
-        ['const title = “it’s ready”;'],
-        ['const title = "it\'s ready";'],
-        0,
-      ),
-    ).toBe(0);
   });
 
   test('seekMatch reports when the match was only tolerant and safe', () => {

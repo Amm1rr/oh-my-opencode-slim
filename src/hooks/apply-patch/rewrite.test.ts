@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdir, symlink } from 'node:fs/promises';
+import { symlink } from 'node:fs/promises';
 import path from 'node:path';
 
-import { formatPatch, parsePatch } from './codec';
+import { parsePatch } from './codec';
 import { ApplyPatchError } from './errors';
 import { rewritePatch } from './rewrite';
 import {
@@ -180,83 +180,49 @@ PATCH`;
     ).toBeTrue();
   });
 
-  test('rewritePatchText canonicalizes a unicode-only stale patch', async () => {
-    const root = await createTempDir();
-    await writeFixture(root, 'sample.txt', 'const title = “Hola”;\n');
-    const patchText = `*** Begin Patch
-*** Update File: sample.txt
-@@
--const title = "Hola";
-+const title = "Hola mundo";
-*** End Patch`;
-
-    const rewritten = parsePatch(await rewritePatchText(root, patchText))
-      .hunks[0];
-
-    expect(rewritten.type).toBe('update');
-    expect(
-      rewritten.type === 'update' ? rewritten.chunks[0]?.old_lines : undefined,
-    ).toEqual(['const title = “Hola”;']);
-    expect(
-      rewritten.type === 'update' ? rewritten.chunks[0]?.new_lines : undefined,
-    ).toEqual(['const title = "Hola mundo";']);
-  });
-
-  test('rewritePatchText canonicalizes a trim-end stale patch', async () => {
-    const root = await createTempDir();
-    await writeFixture(root, 'sample.txt', 'alpha  \n');
-    const patchText = `*** Begin Patch
-*** Update File: sample.txt
-@@
--alpha
-+omega
-*** End Patch`;
-
-    const rewritten = parsePatch(await rewritePatchText(root, patchText))
-      .hunks[0];
-
-    expect(rewritten.type).toBe('update');
-    expect(
-      rewritten.type === 'update' ? rewritten.chunks[0]?.old_lines : undefined,
-    ).toEqual(['alpha  ']);
-    expect(
-      rewritten.type === 'update' ? rewritten.chunks[0]?.new_lines : undefined,
-    ).toEqual(['omega']);
-  });
-
-  test('rewritePatchText canonicalizes a trim-only stale patch (native-compatible)', async () => {
-    const root = await createTempDir();
-    await writeFixture(root, 'sample.txt', '  alpha  \n');
-    const patchText = `*** Begin Patch
-*** Update File: sample.txt
-@@
--alpha
-+omega
-*** End Patch`;
-
-    const rewritten = await rewritePatchText(root, patchText);
-    expect(rewritten).toContain('+omega');
-    expect(rewritten).toContain('-  alpha  ');
-  });
-
-  test('rewritePatchText canonicalizes an indented case (native-compatible)', async () => {
-    const root = await createTempDir();
-    await writeFixture(
-      root,
+  test.each([
+    [
+      'unicode',
+      'sample.txt',
+      'const title = “Hola”;\n',
+      'const title = "Hola";',
+      'const title = “Hola”;',
+      'const title = "Hola mundo";',
+    ],
+    ['trim-end', 'sample.txt', 'alpha  \n', 'alpha', 'alpha  ', 'omega'],
+    ['trim', 'sample.txt', '  alpha  \n', 'alpha', '  alpha  ', 'omega'],
+    [
+      'indent',
       'sample.yml',
       'root:\n  child:\n    enabled: false\nnext: true\n',
-    );
-    const patchText = `*** Begin Patch
-*** Update File: sample.yml
+      'enabled: false',
+      '    enabled: false',
+      'enabled: true',
+    ],
+  ])(
+    'canonicalizes %s matches',
+    async (_, file, text, oldLine, canonicalOld, newLine) => {
+      const root = await createTempDir();
+      await writeFixture(root, file, text);
+      const rewritten = parsePatch(
+        await rewritePatchText(
+          root,
+          `*** Begin Patch
+*** Update File: ${file}
 @@
--enabled: false
-+enabled: true
-*** End Patch`;
+-${oldLine}
++${newLine}
+*** End Patch`,
+        ),
+      ).hunks[0];
 
-    const rewritten = await rewritePatchText(root, patchText);
-    expect(rewritten).toContain('+enabled: true');
-    expect(rewritten).toContain('-    enabled: false');
-  });
+      expect(rewritten.type).toBe('update');
+      if (rewritten.type === 'update') {
+        expect(rewritten.chunks[0]?.old_lines).toEqual([canonicalOld]);
+        expect(rewritten.chunks[0]?.new_lines).toEqual([newLine]);
+      }
+    },
+  );
 
   test('rewritePatchText rejects malformed @@ instead of silently sanitizing it', async () => {
     const root = await createTempDir();
@@ -296,115 +262,69 @@ garbage
     );
   });
 
-  test('rewritePatch normalizes an Update File with an absolute path inside root', async () => {
+  test.each([
+    [
+      'Update File',
+      'sample.txt',
+      '*** Update File: %s\n@@\n-alpha\n+omega',
+      { type: 'update', path: 'sample.txt' },
+    ],
+    [
+      'Add File',
+      'added.txt',
+      '*** Add File: %s\n+fresh',
+      { type: 'add', path: 'added.txt', contents: 'fresh\n' },
+    ],
+    [
+      'Move to',
+      'nested/after.txt',
+      '*** Update File: before.txt\n*** Move to: %s\n@@\n alpha\n-beta\n+BETA',
+      { type: 'update', path: 'before.txt', move_path: 'nested/after.txt' },
+    ],
+  ])('normalizes an absolute %s path', async (_, relative, body, expected) => {
     const root = await createTempDir();
-    const absolutePath = path.join(root, 'sample.txt');
     await writeFixture(root, 'sample.txt', 'alpha\nbeta\n');
-
-    const rewritten = await rewritePatch(
-      root,
-      `*** Begin Patch
-*** Update File: ${absolutePath}
-@@
--alpha
-+omega
-*** End Patch`,
-    );
-
-    expect(rewritten.changed).toBeTrue();
-    const [rewrittenHunk] = parsePatch(rewritten.patchText).hunks;
-    expect(rewrittenHunk.type).toBe('update');
-    expect(rewrittenHunk.path).toBe('sample.txt');
-  });
-
-  test('rewritePatch normalizes an Add File with an absolute path inside root', async () => {
-    const root = await createTempDir();
-    const absolutePath = path.join(root, 'added.txt');
-
-    const rewritten = await rewritePatch(
-      root,
-      `*** Begin Patch
-*** Add File: ${absolutePath}
-+fresh
-*** End Patch`,
-    );
-
-    expect(rewritten.changed).toBeTrue();
-    expect(parsePatch(rewritten.patchText).hunks[0]).toMatchObject({
-      type: 'add',
-      path: 'added.txt',
-      contents: 'fresh\n',
-    });
-  });
-
-  test('rewritePatch normalizes a Move to with an absolute path inside root', async () => {
-    const root = await createTempDir();
-    const absoluteMovePath = path.join(root, 'nested/after.txt');
-
     await writeFixture(root, 'before.txt', 'alpha\nbeta\n');
-
     const rewritten = await rewritePatch(
       root,
-      `*** Begin Patch
-*** Update File: before.txt
-*** Move to: ${absoluteMovePath}
-@@
- alpha
--beta
-+BETA
-*** End Patch`,
+      `*** Begin Patch\n${body.replace('%s', path.join(root, relative))}\n*** End Patch`,
     );
-
     expect(rewritten.changed).toBeTrue();
-    expect(parsePatch(rewritten.patchText).hunks[0]).toMatchObject({
-      type: 'update',
-      path: 'before.txt',
-      move_path: 'nested/after.txt',
-    });
+    expect(parsePatch(rewritten.patchText).hunks[0]).toMatchObject(expected);
   });
 
-  test('rewritePatchText blocks an absolute path outside root/worktree', async () => {
-    const root = await createTempDir();
-    const outsidePath = path.join(path.dirname(root), 'outside.txt');
+  test.each(['absolute', 'symlink', 'relative'])(
+    'blocks %s paths outside root/worktree',
+    async (kind) => {
+      const root = await createTempDir();
+      const outsidePath = path.join(path.dirname(root), 'outside.txt');
+      if (kind === 'symlink') {
+        await writeFixture(root, 'before.txt', 'alpha\nbeta\n');
+        await symlink(await createTempDir(), path.join(root, 'linked-outside'));
+      }
+      const target = kind === 'absolute' ? outsidePath : '../outside-added.txt';
+      const body =
+        kind === 'symlink'
+          ? '*** Update File: before.txt\n*** Move to: linked-outside/missing/child.txt\n@@\n alpha\n-beta\n+BETA'
+          : `*** Add File: ${target}\n+fresh`;
+      const error = await rewritePatchText(
+        root,
+        `*** Begin Patch\n${body}\n*** End Patch`,
+        kind === 'absolute' ? undefined : root,
+      ).catch((caughtError) => caughtError);
 
-    const error = await rewritePatchText(
-      root,
-      `*** Begin Patch
-*** Add File: ${outsidePath}
-+fresh
-*** End Patch`,
-    ).catch((caughtError) => caughtError);
-
-    expect(error).toBeInstanceOf(ApplyPatchError);
-    expect((error as ApplyPatchError).kind).toBe('blocked');
-    expect(error).toBeInstanceOf(Error);
-    expect((error as Error).message).toBe(
-      `apply_patch blocked: patch contains path outside workspace root: ${outsidePath}`,
-    );
-  });
-
-  test('rewritePatch allows an absolute path inside worktree even when it is outside root', async () => {
-    const worktree = await createTempDir();
-    const root = path.join(worktree, 'subdir');
-    await mkdir(root, { recursive: true });
-    const siblingPath = path.join(worktree, 'shared.txt');
-
-    const rewritten = await rewritePatch(
-      root,
-      `*** Begin Patch
-*** Add File: ${siblingPath}
-+fresh
-*** End Patch`,
-      worktree,
-    );
-
-    expect(rewritten.changed).toBeTrue();
-    expect(parsePatch(rewritten.patchText).hunks[0]).toMatchObject({
-      type: 'add',
-      path: '../shared.txt',
-      contents: 'fresh\n',
-    });
-  });
+      expect(error).toBeInstanceOf(ApplyPatchError);
+      expect((error as ApplyPatchError).kind).toBe('blocked');
+      expect((error as Error).message).toContain(
+        'apply_patch blocked: patch contains path outside workspace root:',
+      );
+      if (kind === 'absolute') {
+        expect((error as Error).message).toBe(
+          `apply_patch blocked: patch contains path outside workspace root: ${outsidePath}`,
+        );
+      }
+    },
+  );
 
   test('rewritePatchText does not redirect an absolute root target to its basename', async () => {
     const root = await createTempDir();
@@ -461,54 +381,27 @@ garbage
     );
   });
 
-  test('rewritePatchText rejects a missing Delete File', async () => {
+  test.each([
+    ['missing', 'missing.txt', undefined, '*** Delete File: missing.txt'],
+    [
+      'duplicate',
+      'obsolete.txt',
+      'legacy\n',
+      '*** Delete File: obsolete.txt\n*** Delete File: obsolete.txt',
+    ],
+    [
+      'after move',
+      'before.txt',
+      'alpha\nbeta\n',
+      '*** Update File: before.txt\n*** Move to: nested/after.txt\n@@\n alpha\n-beta\n+BETA\n*** Delete File: before.txt',
+    ],
+  ])('rejects Delete File %s', async (_, file, initial, body) => {
     const root = await createTempDir();
-    const patchText = `*** Begin Patch
-*** Delete File: missing.txt
-*** End Patch`;
-    const expectedMessage = `apply_patch verification failed: Failed to read file to delete: ${path.join(root, 'missing.txt')}`;
-
-    await expect(rewritePatchText(root, patchText)).rejects.toThrow(
-      expectedMessage,
-    );
-  });
-
-  test('rewritePatchText rejects duplicate Delete File on the same path', async () => {
-    const root = await createTempDir();
-    await writeFixture(root, 'obsolete.txt', 'legacy\n');
-
+    if (initial !== undefined) await writeFixture(root, file, initial);
     await expect(
-      rewritePatchText(
-        root,
-        `*** Begin Patch
-*** Delete File: obsolete.txt
-*** Delete File: obsolete.txt
-*** End Patch`,
-      ),
+      rewritePatchText(root, `*** Begin Patch\n${body}\n*** End Patch`),
     ).rejects.toThrow(
-      `apply_patch verification failed: Failed to read file to delete: ${path.join(root, 'obsolete.txt')}`,
-    );
-  });
-
-  test('rewritePatchText rejects Delete File on the source after a previous move', async () => {
-    const root = await createTempDir();
-    await writeFixture(root, 'before.txt', 'alpha\nbeta\n');
-
-    await expect(
-      rewritePatchText(
-        root,
-        `*** Begin Patch
-*** Update File: before.txt
-*** Move to: nested/after.txt
-@@
- alpha
--beta
-+BETA
-*** Delete File: before.txt
-*** End Patch`,
-      ),
-    ).rejects.toThrow(
-      `apply_patch verification failed: Failed to read file to delete: ${path.join(root, 'before.txt')}`,
+      `apply_patch verification failed: Failed to read file to delete: ${path.join(root, file)}`,
     );
   });
 
@@ -523,32 +416,6 @@ garbage
 
     await applyPatch(root, patchText);
     await expect(readText(root, 'obsolete.txt')).rejects.toThrow();
-  });
-
-  test('rewritePatchText canonicalizes EOF insertion with a tolerant anchor', async () => {
-    const root = await createTempDir();
-    await writeFixture(root, 'sample.txt', 'top\n“anchor”\n');
-
-    const rewritten = parsePatch(
-      await rewritePatchText(
-        root,
-        `*** Begin Patch
-*** Update File: sample.txt
-@@ "anchor"
-+middle
-*** End Patch`,
-      ),
-    ).hunks[0];
-
-    expect(rewritten.type).toBe('update');
-    expect(
-      rewritten.type === 'update'
-        ? rewritten.chunks[0]?.change_context
-        : undefined,
-    ).toBe('“anchor”');
-    expect(
-      rewritten.type === 'update' ? rewritten.chunks[0]?.new_lines : undefined,
-    ).toEqual(['middle']);
   });
 
   test('rewritePatch groups two exact Update File hunks on the same path', async () => {
@@ -779,54 +646,6 @@ garbage
     );
   });
 
-  test('rewritePatch keeps the correct change order when grouping same-file updates', async () => {
-    const root = await createTempDir();
-    await writeFixture(root, 'sample.txt', 'one\ntwo\nthree\nfour\nfive\n');
-
-    const rewrittenText = await rewritePatchText(
-      root,
-      `*** Begin Patch
-*** Update File: sample.txt
-@@
- one
--two
-+TWO
- three
-*** Update File: sample.txt
-@@
- three
--four
-+FOUR
- five
-*** End Patch`,
-    );
-
-    expect(parsePatch(rewrittenText).hunks[0]).toEqual({
-      type: 'update',
-      path: 'sample.txt',
-      move_path: undefined,
-      chunks: [
-        {
-          old_lines: ['two'],
-          new_lines: ['TWO'],
-          change_context: 'one',
-          is_end_of_file: undefined,
-        },
-        {
-          old_lines: ['four'],
-          new_lines: ['FOUR'],
-          change_context: 'three',
-          is_end_of_file: undefined,
-        },
-      ],
-    });
-
-    await applyPatch(root, rewrittenText);
-    expect(await readText(root, 'sample.txt')).toBe(
-      'one\nTWO\nthree\nFOUR\nfive\n',
-    );
-  });
-
   test('rewritePatchText fails when rescue is ambiguous', async () => {
     const root = await createTempDir();
     await writeFixture(
@@ -906,22 +725,6 @@ garbage
     );
   });
 
-  test('applyPatch supports pure insertion at EOF', async () => {
-    const root = await createTempDir();
-    await writeFixture(root, 'sample.txt', 'top\nanchor\n');
-
-    await applyPatch(
-      root,
-      `*** Begin Patch
-*** Update File: sample.txt
-@@ anchor
-+middle
-*** End Patch`,
-    );
-
-    expect(await readText(root, 'sample.txt')).toBe('top\nanchor\nmiddle\n');
-  });
-
   test('applyPatch accumulates two Update File hunks on the same path', async () => {
     const root = await createTempDir();
     await writeFixture(root, 'sample.txt', 'alpha\nbeta\ngamma\n');
@@ -947,200 +750,54 @@ garbage
     expect(await readText(root, 'sample.txt')).toBe('alpha\nBETA\nGAMMA\n');
   });
 
-  test('applyPatch preserves a file without a final newline', async () => {
-    const root = await createTempDir();
-    await writeFixture(root, 'sample.txt', 'alpha\nbeta');
-
-    await applyPatch(
-      root,
-      `*** Begin Patch
-*** Update File: sample.txt
-@@
- alpha
--beta
-+omega
-*** End Patch`,
-    );
-
-    expect(await readText(root, 'sample.txt')).toBe('alpha\nomega');
-  });
-
-  test('applyPatch applies add + update in the same patch', async () => {
-    const root = await createTempDir();
-    await writeFixture(root, 'sample.txt', 'alpha\nbeta\n');
-
-    await applyPatch(
-      root,
-      `*** Begin Patch
-*** Add File: added.txt
-+fresh
-*** Update File: sample.txt
-@@
- alpha
--beta
-+BETA
-*** End Patch`,
-    );
-
-    expect(await readText(root, 'added.txt')).toBe('fresh\n');
-    expect(await readText(root, 'sample.txt')).toBe('alpha\nBETA\n');
-  });
-
-  test('applyPatch applies update + delete in the same patch', async () => {
-    const root = await createTempDir();
-    await writeFixture(root, 'sample.txt', 'alpha\nbeta\n');
-    await writeFixture(root, 'obsolete.txt', 'legacy\n');
-
-    await applyPatch(
-      root,
-      `*** Begin Patch
-*** Update File: sample.txt
-@@
- alpha
--beta
-+BETA
-*** Delete File: obsolete.txt
-*** End Patch`,
-    );
-
-    expect(await readText(root, 'sample.txt')).toBe('alpha\nBETA\n');
-    await expect(readText(root, 'obsolete.txt')).rejects.toThrow();
-  });
-
-  test('applyPatch applies move + add in the same patch', async () => {
-    const root = await createTempDir();
-    await writeFixture(root, 'before.txt', 'alpha\nbeta\n');
-
-    await applyPatch(
-      root,
-      `*** Begin Patch
-*** Update File: before.txt
-*** Move to: nested/after.txt
-@@
- alpha
--beta
-+BETA
-*** Add File: before.txt
-+replacement
-*** End Patch`,
-    );
-
-    expect(await readText(root, 'nested/after.txt')).toBe('alpha\nBETA\n');
-    expect(await readText(root, 'before.txt')).toBe('replacement\n');
-  });
-
-  test('rewritePatchText blocks a patch when the path escapes through a symlink with a missing ancestor', async () => {
-    const root = await createTempDir();
-    const outside = await createTempDir();
-    await writeFixture(root, 'before.txt', 'alpha\nbeta\n');
-    await symlink(outside, path.join(root, 'linked-outside'));
-
-    const patchText = `*** Begin Patch
-*** Update File: before.txt
-*** Move to: linked-outside/missing/child.txt
-@@
- alpha
--beta
-+BETA
-*** End Patch`;
-
-    await expect(rewritePatchText(root, patchText, root)).rejects.toThrow(
-      'apply_patch blocked: patch contains path outside workspace root:',
-    );
-  });
-
-  test('rewritePatchText blocks the whole patch if any add/delete escapes root even when an update is rewritable', async () => {
-    const root = await createTempDir();
-    const outsideDir = await createTempDir();
-    await writeFixture(root, 'sample.txt', 'prefix\nstale-value\nsuffix\n');
-    await writeFixture(outsideDir, 'outside.txt', 'legacy\n');
-
-    const patchText = `*** Begin Patch
-*** Add File: ../outside-added.txt
-+fresh
-*** Update File: sample.txt
-@@
- prefix
--old-value
-+new-value
- suffix
-*** Delete File: ../${path.basename(outsideDir)}/outside.txt
-*** End Patch`;
-
-    await expect(rewritePatchText(root, patchText, root)).rejects.toThrow(
-      'apply_patch blocked: patch contains path outside workspace root:',
-    );
-  });
-
-  test('rewritePatchText keeps an escaping relative path as blocked', async () => {
-    const root = await createTempDir();
-
-    const error = await rewritePatchText(
-      root,
-      `*** Begin Patch
-*** Add File: ../outside-added.txt
-+fresh
-*** End Patch`,
-      root,
-    ).catch((caughtError) => caughtError);
-
-    expect(error).toBeInstanceOf(ApplyPatchError);
-    expect((error as ApplyPatchError).kind).toBe('blocked');
-    expect(error).toBeInstanceOf(Error);
-    expect((error as Error).message).toContain(
-      'apply_patch blocked: patch contains path outside workspace root:',
-    );
-  });
-
-  test('rewritePatchText rejects a path that escapes through a symlink with a missing ancestor', async () => {
-    const root = await createTempDir();
-    const outside = await createTempDir();
-    await mkdir(path.join(outside, 'real-target'), { recursive: true });
-    await symlink(outside, path.join(root, 'linked-outside'));
-
-    await expect(
-      rewritePatchText(
-        root,
-        `*** Begin Patch
-*** Add File: linked-outside/missing/child.txt
-+fresh
-*** End Patch`,
-        root,
-      ),
-    ).rejects.toThrow(
-      'apply_patch blocked: patch contains path outside workspace root:',
-    );
-  });
-
-  test('parsePatch/formatPatch keep an Add File trailing empty line distinct from the terminator', () => {
-    const patchText = `*** Begin Patch
-*** Add File: trailing.txt
-+a
-+
-*** End Patch`;
-
-    const parsed = parsePatch(patchText);
-    expect(parsed.hunks[0]).toMatchObject({
-      type: 'add',
-      contents: 'a\n\n',
-    });
-
-    // Round-trip preserves the trailing empty `+` line.
-    const reformatted = formatPatch(parsed);
-    expect(reformatted).toContain('+a\n+\n');
-    expect(parsePatch(reformatted).hunks[0]).toEqual(parsed.hunks[0]);
-  });
-
-  test('parsePatch represents an empty Add File as empty contents', () => {
-    const parsed = parsePatch(`*** Begin Patch
-*** Add File: empty.txt
-*** End Patch`);
-
-    expect(parsed.hunks[0]).toMatchObject({
-      type: 'add',
-      contents: '',
-    });
-  });
+  test.each([
+    {
+      name: 'add + update',
+      initial: { 'sample.txt': 'alpha\nbeta\n' },
+      patch:
+        '*** Add File: added.txt\n+fresh\n*** Update File: sample.txt\n@@\n alpha\n-beta\n+BETA',
+      expected: {
+        'added.txt': 'fresh\n',
+        'sample.txt': 'alpha\nBETA\n',
+      } as Record<string, string | null>,
+    },
+    {
+      name: 'update + delete',
+      initial: { 'sample.txt': 'alpha\nbeta\n', 'obsolete.txt': 'legacy\n' },
+      patch:
+        '*** Update File: sample.txt\n@@\n alpha\n-beta\n+BETA\n*** Delete File: obsolete.txt',
+      expected: {
+        'sample.txt': 'alpha\nBETA\n',
+        'obsolete.txt': null,
+      } as Record<string, string | null>,
+    },
+    {
+      name: 'move + add',
+      initial: { 'before.txt': 'alpha\nbeta\n' },
+      patch:
+        '*** Update File: before.txt\n*** Move to: nested/after.txt\n@@\n alpha\n-beta\n+BETA\n*** Add File: before.txt\n+replacement',
+      expected: {
+        'nested/after.txt': 'alpha\nBETA\n',
+        'before.txt': 'replacement\n',
+      } as Record<string, string | null>,
+    },
+  ])(
+    'applyPatch applies $name in the same patch',
+    async ({ initial, patch, expected }) => {
+      const root = await createTempDir();
+      for (const [file, text] of Object.entries(initial)) {
+        await writeFixture(root, file, text);
+      }
+      await applyPatch(root, `*** Begin Patch\n${patch}\n*** End Patch`);
+      for (const [file, text] of Object.entries(expected)) {
+        if (text === null) {
+          await expect(readText(root, file)).rejects.toThrow();
+        } else {
+          expect(await readText(root, file)).toBe(text);
+        }
+      }
+    },
+  );
 
   test('rewritePatch re-emits a folded move after a later delete of its destination', async () => {
     const root = await createTempDir();

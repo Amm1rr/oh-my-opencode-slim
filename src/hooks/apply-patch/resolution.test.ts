@@ -49,73 +49,34 @@ describe('apply-patch/resolution', () => {
     expect(resolved.canonical_new_lines).toEqual(chunk.new_lines);
   });
 
-  test('locateChunk canonicalizes a tolerant unicode match', () => {
-    const chunk: PatchChunk = {
-      old_lines: ['const title = "Hola";'],
-      new_lines: ['const title = "Hola mundo";'],
-    };
-
-    const resolved = locateChunk(
+  test.each([
+    [
+      'unicode',
       ['const title = “Hola”;'],
-      'sample.txt',
-      chunk,
-      0,
-    );
-
-    expect(resolved.rewritten).toBe(true);
-    expect(resolved.matchComparator).toBe('unicode');
-    expect(resolved.canonical_old_lines).toEqual(['const title = “Hola”;']);
-    expect(resolved.canonical_new_lines).toEqual([
+      'const title = "Hola";',
       'const title = "Hola mundo";',
-    ]);
-  });
-
-  test('locateChunk canonicalizes a tolerant trim-end match', () => {
-    const chunk: PatchChunk = {
-      old_lines: ['alpha'],
-      new_lines: ['omega'],
-    };
-
-    const resolved = locateChunk(['alpha  '], 'sample.txt', chunk, 0);
-
-    expect(resolved.rewritten).toBe(true);
-    expect(resolved.matchComparator).toBe('trim-end');
-    expect(resolved.canonical_old_lines).toEqual(['alpha  ']);
-    expect(resolved.canonical_new_lines).toEqual(['omega']);
-  });
-
-  test('locateChunk canonicalizes a tolerant trim match (native-compatible)', () => {
-    const chunk: PatchChunk = {
-      old_lines: ['alpha'],
-      new_lines: ['omega'],
-    };
-
-    const resolved = locateChunk([' alpha  '], 'sample.txt', chunk, 0);
-
-    expect(resolved.rewritten).toBe(true);
-    expect(resolved.matchComparator).toBe('trim');
-    expect(resolved.canonical_old_lines).toEqual([' alpha  ']);
-    expect(resolved.canonical_new_lines).toEqual(['omega']);
-  });
-
-  test('locateChunk canonicalizes an indented match (native-compatible)', () => {
-    const chunk: PatchChunk = {
-      old_lines: ['enabled: false'],
-      new_lines: ['enabled: true'],
-    };
-
-    const resolved = locateChunk(
+      'const title = “Hola”;',
+    ],
+    ['trim-end', ['alpha  '], 'alpha', 'omega', 'alpha  '],
+    ['trim', [' alpha  '], 'alpha', 'omega', ' alpha  '],
+    [
+      'trim',
       ['root:', '  child:', '    enabled: false', 'done: true'],
-      'sample.yml',
-      chunk,
-      0,
-    );
-
-    expect(resolved.rewritten).toBe(true);
-    expect(resolved.matchComparator).toBe('trim');
-    expect(resolved.canonical_old_lines).toEqual(['    enabled: false']);
-    expect(resolved.canonical_new_lines).toEqual(['enabled: true']);
-  });
+      'enabled: false',
+      'enabled: true',
+      '    enabled: false',
+    ],
+  ])(
+    'locateChunk canonicalizes %s matches',
+    (comparator, lines, oldLine, newLine, canonical) => {
+      const chunk: PatchChunk = { old_lines: [oldLine], new_lines: [newLine] };
+      const resolved = locateChunk(lines, 'sample.txt', chunk, 0);
+      expect(resolved.rewritten).toBe(true);
+      expect(resolved.matchComparator).toBe(comparator);
+      expect(resolved.canonical_old_lines).toEqual([canonical]);
+      expect(resolved.canonical_new_lines).toEqual([newLine]);
+    },
+  );
 
   test('locateChunk preserves a real final blank line when it exists in the file', () => {
     const chunk: PatchChunk = {
@@ -229,63 +190,47 @@ describe('apply-patch/resolution', () => {
     });
   });
 
-  test('deriveNewContentFromText fails if a pure insertion cannot find its anchor', () => {
-    expect(() =>
-      deriveNewContentFromText('sample.txt', 'top\nbottom\n', [
+  test.each([
+    {
+      name: 'missing anchor',
+      text: 'top\nbottom\n',
+      chunks: [
+        { old_lines: [], new_lines: ['middle'], change_context: 'anchor' },
+      ],
+      message: 'Failed to find insertion anchor',
+    },
+    {
+      name: 'ambiguous anchor',
+      text: 'top\nanchor\none\nsplit\nanchor\ntwo\n',
+      chunks: [
+        { old_lines: [], new_lines: ['middle'], change_context: 'anchor' },
+      ],
+      message: 'Insertion anchor was ambiguous',
+    },
+    {
+      name: 'ambiguous tolerant anchor',
+      text: 'top\n“anchor”\n"anchor"\n',
+      chunks: [
+        { old_lines: [], new_lines: ['middle'], change_context: '"anchor"' },
+      ],
+      message: 'Insertion anchor was ambiguous',
+    },
+    {
+      name: 'ambiguous later chunk',
+      text: 'alpha\none\nomega\nsplit\nleft\nstale-one\nright\ngap\nleft\nstale-two\nright\n',
+      chunks: [
+        { old_lines: ['one'], new_lines: ['ONE'] },
         {
-          old_lines: [],
-          new_lines: ['middle'],
-          change_context: 'anchor',
+          old_lines: ['left', 'old', 'right'],
+          new_lines: ['left', 'new', 'right'],
         },
-      ]),
-    ).toThrow('Failed to find insertion anchor');
-  });
-
-  test('deriveNewContentFromText fails if a pure insertion has an ambiguous anchor', () => {
-    expect(() =>
-      deriveNewContentFromText(
-        'sample.txt',
-        'top\nanchor\none\nsplit\nanchor\ntwo\n',
-        [
-          {
-            old_lines: [],
-            new_lines: ['middle'],
-            change_context: 'anchor',
-          },
-        ],
-      ),
-    ).toThrow('Insertion anchor was ambiguous');
-  });
-
-  test('deriveNewContentFromText fails if a tolerant insertion anchor is ambiguous', () => {
-    expect(() =>
-      deriveNewContentFromText('sample.txt', 'top\n“anchor”\n"anchor"\n', [
-        {
-          old_lines: [],
-          new_lines: ['middle'],
-          change_context: '"anchor"',
-        },
-      ]),
-    ).toThrow('Insertion anchor was ambiguous');
-  });
-
-  test('deriveNewContentFromText fails if a later chunk remains ambiguous', () => {
-    expect(() =>
-      deriveNewContentFromText(
-        'sample.txt',
-        'alpha\none\nomega\nsplit\nleft\nstale-one\nright\ngap\nleft\nstale-two\nright\n',
-        [
-          {
-            old_lines: ['one'],
-            new_lines: ['ONE'],
-          },
-          {
-            old_lines: ['left', 'old', 'right'],
-            new_lines: ['left', 'new', 'right'],
-          },
-        ],
-      ),
-    ).toThrow('ambiguous');
+      ],
+      message: 'ambiguous',
+    },
+  ])('deriveNewContentFromText rejects $name', ({ text, chunks, message }) => {
+    expect(() => deriveNewContentFromText('sample.txt', text, chunks)).toThrow(
+      message,
+    );
   });
 
   test('deriveNewContentFromText rescues a stale EOF and preserves the final update', () => {
