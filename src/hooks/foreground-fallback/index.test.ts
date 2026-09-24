@@ -1798,6 +1798,160 @@ describe('ForegroundFallbackManager message.updated', () => {
 // ForegroundFallbackManager - session.status retry
 // ---------------------------------------------------------------------------
 
+describe('ForegroundFallbackManager v1 abort protection for live children', () => {
+  const live = new Set<string>();
+  const checked: string[] = [];
+  const retry = (sessionID: string, attempt = 1) => ({
+    type: 'session.status',
+    properties: {
+      sessionID,
+      status: { type: 'retry', attempt, message: 'rate limit' },
+    },
+  });
+  const error = (sessionID: string) => ({
+    type: 'session.error',
+    properties: { sessionID, error: { message: 'rate limit exceeded' } },
+  });
+  const observe = (id: string) => {
+    checked.push(id);
+    return live.has(id);
+  };
+  const manager = (
+    hostFlavor?: string,
+    chain = makeChains(),
+    handoff?: {
+      prepare: (id: string, generation: number | undefined, baseline: string | undefined) => boolean;
+      admit: (id: string, generation: number | undefined) => void;
+      reject: (id: string, generation: number | undefined) => void;
+      settleUnresolved: (id: string, generation: number | undefined) => void;
+    },
+    readGeneration?: (id: string) => number | undefined,
+  ) => new ForegroundFallbackManager(
+    chain,
+    true,
+    { directory: '/test', hostFlavor } as any,
+    3,
+    undefined,
+    undefined,
+    0,
+    0,
+    handoff,
+    readGeneration,
+    observe,
+  );
+  const seed = (mgr: ForegroundFallbackManager, sessionID: string, modelID = 'claude-opus-4-5') =>
+    mgr.handleEvent({
+      type: 'message.updated',
+      properties: {
+        info: { sessionID, agent: 'orchestrator', providerID: 'anthropic', modelID },
+      },
+    });
+
+  beforeEach(() => {
+    live.clear();
+    checked.length = 0;
+  });
+
+  test('T1: retry with live children neither aborts nor replays or marks fallback active', async () => {
+    const { mocks } = createMockClient();
+    const mgr = manager();
+    live.add('sess-parent');
+    await seed(mgr, 'sess-parent');
+    await mgr.handleEvent(retry('sess-parent'));
+    expect(mocks.abort).toHaveBeenCalledTimes(0);
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(0);
+    expect(mgr.isFallbackInProgress('sess-parent')).toBe(false);
+  });
+
+  test('T2: held retry leaves dedup and budget free for the next retry after children finish', async () => {
+    const calls: string[] = [];
+    const { mocks } = createMockClient({
+      abortImpl: async () => { calls.push('abort'); },
+      promptAsyncImpl: async () => { calls.push('promptAsync'); return {}; },
+    });
+    const mgr = manager();
+    live.add('sess-parent');
+    await seed(mgr, 'sess-parent');
+    await mgr.handleEvent(retry('sess-parent'));
+    expect(mocks.abort).toHaveBeenCalledTimes(0);
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(0);
+    live.clear();
+    await mgr.handleEvent(retry('sess-parent', 2));
+    expect(calls).toEqual(['abort', 'promptAsync']);
+    expect(mgr.isFallbackInProgress('sess-parent')).toBe(false);
+  });
+
+  test('T3: session.error can replay without abort while children are live', async () => {
+    const { mocks } = createMockClient();
+    const mgr = manager();
+    live.add('sess-parent');
+    await seed(mgr, 'sess-parent');
+    await mgr.handleEvent(error('sess-parent'));
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+    expect(mocks.abort).toHaveBeenCalledTimes(0);
+  });
+
+  test('T4: exhausted chain stops intervening without aborting live children', async () => {
+    const { mocks } = createMockClient();
+    const mgr = manager(undefined, { orchestrator: ['openai/model-y'] });
+    live.add('sess-exhaust');
+    await mgr.handleEvent({
+      type: 'message.updated',
+      properties: { info: {
+        sessionID: 'sess-exhaust', agent: 'orchestrator',
+        providerID: 'openai', modelID: 'model-y',
+        error: { message: 'rate limit exceeded' },
+      } },
+    });
+    expect(mocks.abort).toHaveBeenCalledTimes(0);
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(0);
+    expect(mgr.willAttemptFallback('sess-exhaust')).toBe(false);
+  });
+
+  test('T5: busy replay settles armed handoff without promoting, aborting or retrying', async () => {
+    const { mocks } = createMockClient({
+      promptAsyncImpl: async () => { throw new Error('session busy'); },
+    });
+    const prepare = mock(() => true);
+    const settleUnresolved = mock(() => {});
+    const mgr = manager(undefined, makeChains(), {
+      prepare, admit: mock(() => {}), reject: mock(() => {}), settleUnresolved,
+    }, () => 1);
+    live.add('sess-child');
+    await mgr.handleEvent({
+      type: 'session.created',
+      properties: { info: { id: 'sess-child', parentID: 'sess-parent' } },
+    });
+    await seed(mgr, 'sess-child');
+    await mgr.handleEvent(error('sess-child'));
+    expect(prepare).toHaveBeenCalledTimes(1);
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+    expect(mocks.post).toHaveBeenCalledTimes(0);
+    expect(mocks.abort).toHaveBeenCalledTimes(0);
+    expect(settleUnresolved).toHaveBeenCalledTimes(1);
+  });
+
+  test('T6: a background job for the failing child is not a child of that session', async () => {
+    const { mocks } = createMockClient();
+    const mgr = manager();
+    live.add('sess-parent');
+    await seed(mgr, 'sess-child');
+    await mgr.handleEvent(retry('sess-child'));
+    expect(checked).toContain('sess-child');
+    expect(mocks.abort).toHaveBeenCalledTimes(1);
+  });
+
+  test('T7: v2 keeps aborting on retry even when children are live', async () => {
+    const { mocks } = createMockClient();
+    const mgr = manager('v2');
+    live.add('sess-parent');
+    await seed(mgr, 'sess-parent');
+    await mgr.handleEvent(retry('sess-parent'));
+    expect(mocks.abort).toHaveBeenCalledTimes(1);
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('ForegroundFallbackManager session.status', () => {
   test('aborts session before fallback re-prompt on first failover retry', async () => {
     const calls: string[] = [];
