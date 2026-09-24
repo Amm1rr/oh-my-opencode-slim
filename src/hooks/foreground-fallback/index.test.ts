@@ -1820,30 +1820,44 @@ describe('ForegroundFallbackManager v1 abort protection for live children', () =
     hostFlavor?: string,
     chain = makeChains(),
     handoff?: {
-      prepare: (id: string, generation: number | undefined, baseline: string | undefined) => boolean;
+      prepare: (
+        id: string,
+        generation: number | undefined,
+        baseline: string | undefined,
+      ) => boolean;
       admit: (id: string, generation: number | undefined) => void;
       reject: (id: string, generation: number | undefined) => void;
       settleUnresolved: (id: string, generation: number | undefined) => void;
     },
     readGeneration?: (id: string) => number | undefined,
-  ) => new ForegroundFallbackManager(
-    chain,
-    true,
-    { directory: '/test', hostFlavor } as any,
-    3,
-    undefined,
-    undefined,
-    0,
-    0,
-    handoff,
-    readGeneration,
-    observe,
-  );
-  const seed = (mgr: ForegroundFallbackManager, sessionID: string, modelID = 'claude-opus-4-5') =>
+  ) =>
+    new ForegroundFallbackManager(
+      chain,
+      true,
+      { directory: '/test', hostFlavor } as any,
+      3,
+      undefined,
+      undefined,
+      0,
+      0,
+      handoff,
+      readGeneration,
+      observe,
+    );
+  const seed = (
+    mgr: ForegroundFallbackManager,
+    sessionID: string,
+    modelID = 'claude-opus-4-5',
+  ) =>
     mgr.handleEvent({
       type: 'message.updated',
       properties: {
-        info: { sessionID, agent: 'orchestrator', providerID: 'anthropic', modelID },
+        info: {
+          sessionID,
+          agent: 'orchestrator',
+          providerID: 'anthropic',
+          modelID,
+        },
       },
     });
 
@@ -1866,8 +1880,13 @@ describe('ForegroundFallbackManager v1 abort protection for live children', () =
   test('T2: held retry leaves dedup and budget free for the next retry after children finish', async () => {
     const calls: string[] = [];
     const { mocks } = createMockClient({
-      abortImpl: async () => { calls.push('abort'); },
-      promptAsyncImpl: async () => { calls.push('promptAsync'); return {}; },
+      abortImpl: async () => {
+        calls.push('abort');
+      },
+      promptAsyncImpl: async () => {
+        calls.push('promptAsync');
+        return {};
+      },
     });
     const mgr = manager();
     live.add('sess-parent');
@@ -1897,11 +1916,15 @@ describe('ForegroundFallbackManager v1 abort protection for live children', () =
     live.add('sess-exhaust');
     await mgr.handleEvent({
       type: 'message.updated',
-      properties: { info: {
-        sessionID: 'sess-exhaust', agent: 'orchestrator',
-        providerID: 'openai', modelID: 'model-y',
-        error: { message: 'rate limit exceeded' },
-      } },
+      properties: {
+        info: {
+          sessionID: 'sess-exhaust',
+          agent: 'orchestrator',
+          providerID: 'openai',
+          modelID: 'model-y',
+          error: { message: 'rate limit exceeded' },
+        },
+      },
     });
     expect(mocks.abort).toHaveBeenCalledTimes(0);
     expect(mocks.promptAsync).toHaveBeenCalledTimes(0);
@@ -1910,13 +1933,23 @@ describe('ForegroundFallbackManager v1 abort protection for live children', () =
 
   test('T5: busy replay settles armed handoff without promoting, aborting or retrying', async () => {
     const { mocks } = createMockClient({
-      promptAsyncImpl: async () => { throw new Error('session busy'); },
+      promptAsyncImpl: async () => {
+        throw new Error('session busy');
+      },
     });
     const prepare = mock(() => true);
     const settleUnresolved = mock(() => {});
-    const mgr = manager(undefined, makeChains(), {
-      prepare, admit: mock(() => {}), reject: mock(() => {}), settleUnresolved,
-    }, () => 1);
+    const mgr = manager(
+      undefined,
+      makeChains(),
+      {
+        prepare,
+        admit: mock(() => {}),
+        reject: mock(() => {}),
+        settleUnresolved,
+      },
+      () => 1,
+    );
     live.add('sess-child');
     await mgr.handleEvent({
       type: 'session.created',

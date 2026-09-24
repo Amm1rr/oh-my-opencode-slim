@@ -490,6 +490,19 @@ export class ForegroundFallbackManager {
     return true;
   }
 
+  private withholdsAbortForLiveChildren(sessionID: string): boolean {
+    if (
+      (this.input as PluginInput & { hostFlavor?: string }).hostFlavor ===
+        'v2' ||
+      !this.hasRunningChildren?.(sessionID)
+    )
+      return false;
+    log('[foreground-fallback] abort withheld for live background children', {
+      sessionID,
+    });
+    return true;
+  }
+
   constructor(
     /**
      * Ordered fallback chains per agent.
@@ -536,6 +549,8 @@ export class ForegroundFallbackManager {
      *  unmanaged — the handoff is not applicable, never a wildcard).
      *  Captured before ANY await in the fallback preparation. */
     readBackgroundGeneration?: (sessionID: string) => number | undefined,
+    /** Synchronous check for running background children OF this session. */
+    private readonly hasRunningChildren?: (sessionID: string) => boolean,
   ) {
     this.onSessionModelChanged = onSessionModelChanged;
     this.backgroundFallbackHandoff = backgroundFallbackHandoff;
@@ -684,6 +699,9 @@ export class ForegroundFallbackManager {
           }
           // Otherwise (attempt === 1, or model didn't change, or outside
           // dedup window): process as genuine retry for current model.
+          // Retention must precede the retry budget (and dedup in the abort
+          // path), so the next retry can proceed once the children finish.
+          if (this.withholdsAbortForLiveChildren(sessionID)) break;
           if (this.shouldTriggerFallback(sessionID, true)) {
             // Failover may have been detected from status.message (e.g.
             // 'AI_APICallError: Gone') with no separate error property;
@@ -944,6 +962,7 @@ export class ForegroundFallbackManager {
     if (this.abandonedByDispose(sessionID)) return;
     if (this.inProgress.has(sessionID)) return;
     if (!this.hasFallbackChain(sessionID)) return;
+    if (this.withholdsAbortForLiveChildren(sessionID)) return;
     if (this.isDeduped(sessionID)) return;
 
     this.inProgress.add(sessionID);
@@ -952,6 +971,7 @@ export class ForegroundFallbackManager {
       // Promotion awaited: a reload may have disposed this generation in
       // the meantime — never abort through a stale client.
       if (this.abandonedByDispose(sessionID)) return;
+      if (this.withholdsAbortForLiveChildren(sessionID)) return;
       await abortSessionWithTimeout(getClient(this.input), sessionID);
       // The abort suspended across a dispose(): its outcome no longer
       // matters to the reloaded generation — do not continue into
@@ -1072,6 +1092,7 @@ export class ForegroundFallbackManager {
           const stickyFallback = chain[chain.length - 1];
           if ((this.chainExhaustion.get(sessionID) ?? 0) >= 1) {
             this.chainExhaustion.set(sessionID, 2);
+            if (this.withholdsAbortForLiveChildren(sessionID)) return;
             log(
               '[foreground-fallback] chain exhausted after re-fallback, aborting',
               {
@@ -1099,6 +1120,7 @@ export class ForegroundFallbackManager {
           nextModel = stickyFallback;
         } else {
           this.chainExhaustion.set(sessionID, 2);
+          if (this.withholdsAbortForLiveChildren(sessionID)) return;
           log('[foreground-fallback] fallback chain exhausted, aborting', {
             sessionID,
             agentName,
@@ -1285,12 +1307,20 @@ export class ForegroundFallbackManager {
           withdrawHandoff();
           throw promptErr;
         }
+        if (this.withholdsAbortForLiveChildren(sessionID)) {
+          settleUnresolvedHandoff();
+          throw promptErr;
+        }
         log('[foreground-fallback] promptAsync on busy session, aborting', {
           sessionID,
         });
         await this.promoteForegroundWaiter(sessionID);
         // Same stale-generation fence as the failover abort above.
         if (this.abandonedByDispose(sessionID)) return;
+        if (this.withholdsAbortForLiveChildren(sessionID)) {
+          settleUnresolvedHandoff();
+          throw promptErr;
+        }
         try {
           await abortSessionWithTimeout(getClient(this.input), sessionID);
         } catch (abortErr) {
