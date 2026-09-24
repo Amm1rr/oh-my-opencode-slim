@@ -2,7 +2,7 @@ import type { Stats } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
 
-import { parsePatchStrict } from './codec';
+import { parsePatch } from './codec';
 import { ApplyPatchError, getErrorMessage } from './errors';
 import { applyHits, resolveUpdateChunksFromText } from './resolution';
 import type {
@@ -291,7 +291,7 @@ export function parseValidatedPatch(patchText: string): PatchHunk[] {
   let hunks: PatchHunk[];
 
   try {
-    hunks = parsePatchStrict(patchText).hunks;
+    hunks = parsePatch(patchText).hunks;
   } catch (error) {
     throw new ApplyPatchError('validation', getErrorMessage(error));
   }

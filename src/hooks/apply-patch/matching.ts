@@ -1,4 +1,3 @@
-import { normalizeUnicode } from './codec';
 import type {
   LineComparator,
   MatchComparatorName,
@@ -6,6 +5,32 @@ import type {
   RescueResult,
   SeekHit,
 } from './types';
+
+const UNICODE_MAP: Record<string, string> = {
+  '\u00A0': ' ',
+  '\u2010': '-',
+  '\u2011': '-',
+  '\u2012': '-',
+  '\u2013': '-',
+  '\u2014': '-',
+  '\u2015': '-',
+  '\u2018': "'",
+  '\u2019': "'",
+  '\u201A': "'",
+  '\u201B': "'",
+  '\u201C': '"',
+  '\u201D': '"',
+  '\u201E': '"',
+  '\u201F': '"',
+  '\u2026': '...',
+};
+
+export function normalizeUnicode(text: string): string {
+  return text.replace(
+    /[\u00A0\u2010-\u2015\u2018-\u201F\u2026]/g,
+    (char) => UNICODE_MAP[char],
+  );
+}
 
 type NamedComparator = {
   name: MatchComparatorName;

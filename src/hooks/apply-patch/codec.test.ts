@@ -1,11 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
-import {
-  formatPatch,
-  normalizeUnicode,
-  parsePatch,
-  parsePatchStrict,
-} from './codec';
+import { formatPatch, parsePatch } from './codec';
+import { normalizeUnicode } from './matching';
 import type { ParsedPatch } from './types';
 
 describe('apply-patch/codec', () => {
@@ -72,9 +68,9 @@ PATCH`);
     ]);
   });
 
-  test('parsePatchStrict preserves End Patch text when it is hunk context', () => {
+  test('parsePatch preserves End Patch text when it is hunk context', () => {
     const markerPadding = '  ';
-    const parsed = parsePatchStrict(`*** Begin Patch${markerPadding}
+    const parsed = parsePatch(`*** Begin Patch${markerPadding}
 *** Update File: sample.txt
 @@ marker
  *** End Patch
@@ -123,8 +119,8 @@ PATCH`);
       '*** Update File: sample.txt\n*** End Patch',
       'missing @@ chunk body',
     ],
-  ])('parsePatchStrict rejects %s', (_, body, message) => {
-    expect(() => parsePatchStrict(`*** Begin Patch\n${body}`)).toThrow(message);
+  ])('parsePatch rejects %s', (_, body, message) => {
+    expect(() => parsePatch(`*** Begin Patch\n${body}`)).toThrow(message);
   });
 
   test('formatPatch allows stable parse -> format -> parse roundtrips', () => {
@@ -157,7 +153,7 @@ PATCH`);
   ])('formatPatch preserves Add File contents %j', (contents, expected) => {
     const hunk = { type: 'add' as const, path: 'added.txt', contents };
     const formatted = formatPatch({ hunks: [hunk] });
-    const parsed = parsePatchStrict(formatted);
+    const parsed = parsePatch(formatted);
 
     expect(parsed.hunks).toEqual([{ ...hunk, contents: expected }]);
     expect(formatPatch(parsed)).toBe(formatted);

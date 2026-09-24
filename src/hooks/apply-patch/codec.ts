@@ -1,18 +1,7 @@
 import type { ParsedPatch, PatchChunk, PatchHunk } from './types';
 
-type ParseMode = 'permissive' | 'strict';
-
 function normalizeLineEndings(text: string): string {
-  return text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-}
-
-export function normalizeUnicode(text: string): string {
-  return text
-    .replace(/[\u2018\u2019\u201A\u201B]/g, "'")
-    .replace(/[\u201C\u201D\u201E\u201F]/g, '"')
-    .replace(/[\u2010\u2011\u2012\u2013\u2014\u2015]/g, '-')
-    .replace(/\u2026/g, '...')
-    .replace(/\u00A0/g, ' ');
+  return text.replace(/\r\n?/g, '\n');
 }
 
 export function stripHeredoc(input: string): string {
@@ -27,38 +16,27 @@ export function normalizePatchText(patchText: string): string {
   return stripHeredoc(normalizeLineEndings(patchText).trim());
 }
 
+const HEADERS = [
+  { prefix: '*** Add File:', type: 'add' },
+  { prefix: '*** Delete File:', type: 'delete' },
+  { prefix: '*** Update File:', type: 'update' },
+] as const;
+
 function parseHeader(lines: string[], index: number) {
-  const line = lines[index];
+  const header = HEADERS.find(({ prefix }) => lines[index].startsWith(prefix));
+  if (!header) return null;
+  const file = lines[index].slice(header.prefix.length).trim();
+  if (!file) return null;
 
-  if (line.startsWith('*** Add File:')) {
-    const file = line.slice('*** Add File:'.length).trim();
-    return file ? { file, next: index + 1 } : null;
+  let move: string | undefined;
+  let next = index + 1;
+  if (header.type === 'update' && lines[next]?.startsWith('*** Move to:')) {
+    move = lines[next].slice('*** Move to:'.length).trim();
+    if (!move) return null;
+    next += 1;
   }
 
-  if (line.startsWith('*** Delete File:')) {
-    const file = line.slice('*** Delete File:'.length).trim();
-    return file ? { file, next: index + 1 } : null;
-  }
-
-  if (line.startsWith('*** Update File:')) {
-    const file = line.slice('*** Update File:'.length).trim();
-    let move: string | undefined;
-    let next = index + 1;
-
-    if (next < lines.length && lines[next].startsWith('*** Move to:')) {
-      const moveTarget = lines[next].slice('*** Move to:'.length).trim();
-      if (!moveTarget) {
-        return null;
-      }
-
-      move = moveTarget;
-      next += 1;
-    }
-
-    return file ? { file, move, next } : null;
-  }
-
-  return null;
+  return { type: header.type, file, move, next };
 }
 
 function unexpectedPatchLine(context: string, line: string): never {
@@ -81,17 +59,13 @@ function isPatchBoundary(line: string, marker: string): boolean {
   return line.trimEnd() === marker;
 }
 
-function parseChunks(lines: string[], index: number, mode: ParseMode) {
+function parseChunks(lines: string[], index: number) {
   const chunks: PatchChunk[] = [];
   let at = index;
 
   while (at < lines.length && !lines[at].startsWith('***')) {
     if (!lines[at].startsWith('@@')) {
-      if (mode === 'strict') {
-        unexpectedPatchLine('in update body', lines[at]);
-      }
-      at += 1;
-      continue;
+      unexpectedPatchLine('in update body', lines[at]);
     }
 
     const context = parseChangeContext(lines[at]);
@@ -133,11 +107,7 @@ function parseChunks(lines: string[], index: number, mode: ParseMode) {
         continue;
       }
 
-      if (mode === 'strict') {
-        unexpectedPatchLine('in patch chunk', line);
-      }
-
-      at += 1;
+      unexpectedPatchLine('in patch chunk', line);
     }
 
     chunks.push({
@@ -151,7 +121,7 @@ function parseChunks(lines: string[], index: number, mode: ParseMode) {
   return { chunks, next: at };
 }
 
-function parseAdd(lines: string[], index: number, mode: ParseMode) {
+function parseAdd(lines: string[], index: number) {
   const contents: string[] = [];
   let at = index;
 
@@ -162,11 +132,7 @@ function parseAdd(lines: string[], index: number, mode: ParseMode) {
       continue;
     }
 
-    if (mode === 'strict') {
-      unexpectedPatchLine('in Add File body', lines[at]);
-    }
-
-    at += 1;
+    unexpectedPatchLine('in Add File body', lines[at]);
   }
 
   // Canonical Add representation: either empty (no lines) or newline-
@@ -178,7 +144,7 @@ function parseAdd(lines: string[], index: number, mode: ParseMode) {
   };
 }
 
-function parsePatchInternal(patchText: string, mode: ParseMode): ParsedPatch {
+export function parsePatch(patchText: string): ParsedPatch {
   const clean = normalizePatchText(patchText);
   const lines = clean.split('\n');
   const begin = lines.findIndex((line) =>
@@ -192,14 +158,12 @@ function parsePatchInternal(patchText: string, mode: ParseMode): ParsedPatch {
     throw new Error('Invalid patch format: missing Begin/End markers');
   }
 
-  if (mode === 'strict') {
-    for (const line of lines.slice(0, begin)) {
-      unexpectedPatchLine('before Begin Patch', line);
-    }
+  for (const line of lines.slice(0, begin)) {
+    unexpectedPatchLine('before Begin Patch', line);
+  }
 
-    for (const line of lines.slice(end + 1)) {
-      unexpectedPatchLine('after End Patch', line);
-    }
+  for (const line of lines.slice(end + 1)) {
+    unexpectedPatchLine('after End Patch', line);
   }
 
   const hunks: PatchHunk[] = [];
@@ -209,15 +173,11 @@ function parsePatchInternal(patchText: string, mode: ParseMode): ParsedPatch {
     const header = parseHeader(lines, index);
 
     if (!header) {
-      if (mode === 'strict') {
-        unexpectedPatchLine('between hunks', lines[index]);
-      }
-      index += 1;
-      continue;
+      unexpectedPatchLine('between hunks', lines[index]);
     }
 
-    if (lines[index].startsWith('*** Add File:')) {
-      const next = parseAdd(lines, header.next, mode);
+    if (header.type === 'add') {
+      const next = parseAdd(lines, header.next);
       hunks.push({
         type: 'add',
         path: header.file,
@@ -227,14 +187,14 @@ function parsePatchInternal(patchText: string, mode: ParseMode): ParsedPatch {
       continue;
     }
 
-    if (lines[index].startsWith('*** Delete File:')) {
+    if (header.type === 'delete') {
       hunks.push({ type: 'delete', path: header.file });
       index = header.next;
       continue;
     }
 
-    const next = parseChunks(lines, header.next, mode);
-    if (mode === 'strict' && next.chunks.length === 0) {
+    const next = parseChunks(lines, header.next);
+    if (next.chunks.length === 0) {
       throw new Error(
         `Invalid patch format: Update File is missing @@ chunk body: ${header.file}`,
       );
@@ -252,67 +212,38 @@ function parsePatchInternal(patchText: string, mode: ParseMode): ParsedPatch {
   return { hunks };
 }
 
-export function parsePatch(patchText: string): ParsedPatch {
-  return parsePatchInternal(patchText, 'permissive');
-}
-
-export function parsePatchStrict(patchText: string): ParsedPatch {
-  return parsePatchInternal(patchText, 'strict');
-}
-
-function diffMatrix(old_lines: string[], new_lines: string[]): number[][] {
-  const dp = Array.from({ length: old_lines.length + 1 }, () =>
-    Array<number>(new_lines.length + 1).fill(0),
-  );
-
-  for (let oldIndex = 1; oldIndex <= old_lines.length; oldIndex += 1) {
-    for (let newIndex = 1; newIndex <= new_lines.length; newIndex += 1) {
-      dp[oldIndex][newIndex] =
-        old_lines[oldIndex - 1] === new_lines[newIndex - 1]
-          ? dp[oldIndex - 1][newIndex - 1] + 1
-          : Math.max(dp[oldIndex - 1][newIndex], dp[oldIndex][newIndex - 1]);
-    }
-  }
-
-  return dp;
-}
-
 function renderChunk(chunk: PatchChunk): string[] {
   const lines = [chunk.change_context ? `@@ ${chunk.change_context}` : '@@'];
-  const dp = diffMatrix(chunk.old_lines, chunk.new_lines);
-  const body: string[] = [];
-  let oldIndex = chunk.old_lines.length;
-  let newIndex = chunk.new_lines.length;
+  let prefix = 0;
+  while (
+    prefix < chunk.old_lines.length &&
+    prefix < chunk.new_lines.length &&
+    chunk.old_lines[prefix] === chunk.new_lines[prefix]
+  )
+    prefix++;
 
-  while (oldIndex > 0 && newIndex > 0) {
-    if (chunk.old_lines[oldIndex - 1] === chunk.new_lines[newIndex - 1]) {
-      body.push(` ${chunk.old_lines[oldIndex - 1]}`);
-      oldIndex -= 1;
-      newIndex -= 1;
-      continue;
-    }
+  let suffix = 0;
+  while (
+    chunk.old_lines.length - suffix > prefix &&
+    chunk.new_lines.length - suffix > prefix &&
+    chunk.old_lines[chunk.old_lines.length - suffix - 1] ===
+      chunk.new_lines[chunk.new_lines.length - suffix - 1]
+  )
+    suffix++;
 
-    if (dp[oldIndex - 1][newIndex] >= dp[oldIndex][newIndex - 1]) {
-      body.push(`-${chunk.old_lines[oldIndex - 1]}`);
-      oldIndex -= 1;
-      continue;
-    }
-
-    body.push(`+${chunk.new_lines[newIndex - 1]}`);
-    newIndex -= 1;
-  }
-
-  while (oldIndex > 0) {
-    body.push(`-${chunk.old_lines[oldIndex - 1]}`);
-    oldIndex -= 1;
-  }
-
-  while (newIndex > 0) {
-    body.push(`+${chunk.new_lines[newIndex - 1]}`);
-    newIndex -= 1;
-  }
-
-  lines.push(...body.reverse());
+  for (const line of chunk.old_lines.slice(0, prefix)) lines.push(` ${line}`);
+  for (const line of chunk.old_lines.slice(
+    prefix,
+    chunk.old_lines.length - suffix,
+  ))
+    lines.push(`-${line}`);
+  for (const line of chunk.new_lines.slice(
+    prefix,
+    chunk.new_lines.length - suffix,
+  ))
+    lines.push(`+${line}`);
+  for (const line of chunk.old_lines.slice(chunk.old_lines.length - suffix))
+    lines.push(` ${line}`);
 
   if (chunk.is_end_of_file) {
     lines.push('*** End of File');
