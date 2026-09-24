@@ -1794,10 +1794,6 @@ describe('ForegroundFallbackManager message.updated', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// ForegroundFallbackManager - session.status retry
-// ---------------------------------------------------------------------------
-
 describe('ForegroundFallbackManager v1 abort protection for live children', () => {
   const live = new Set<string>();
   const checked: string[] = [];
@@ -1877,7 +1873,7 @@ describe('ForegroundFallbackManager v1 abort protection for live children', () =
     expect(mgr.isFallbackInProgress('sess-parent')).toBe(false);
   });
 
-  test('T2: held retry leaves dedup and budget free for the next retry after children finish', async () => {
+  test('T2: held retry leaves dedup free for the next retry after children finish', async () => {
     const calls: string[] = [];
     const { mocks } = createMockClient({
       abortImpl: async () => {
@@ -1984,6 +1980,10 @@ describe('ForegroundFallbackManager v1 abort protection for live children', () =
     expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// ForegroundFallbackManager - session.status retry
+// ---------------------------------------------------------------------------
 
 describe('ForegroundFallbackManager session.status', () => {
   test('aborts session before fallback re-prompt on first failover retry', async () => {

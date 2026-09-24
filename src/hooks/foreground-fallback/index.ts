@@ -699,9 +699,6 @@ export class ForegroundFallbackManager {
           }
           // Otherwise (attempt === 1, or model didn't change, or outside
           // dedup window): process as genuine retry for current model.
-          // Retention must precede the retry budget (and dedup in the abort
-          // path), so the next retry can proceed once the children finish.
-          if (this.withholdsAbortForLiveChildren(sessionID)) break;
           if (this.shouldTriggerFallback(sessionID, true)) {
             // Failover may have been detected from status.message (e.g.
             // 'AI_APICallError: Gone') with no separate error property;
