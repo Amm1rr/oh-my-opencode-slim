@@ -33,15 +33,11 @@ export function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export function isApplyPatchError(error: unknown): error is ApplyPatchError {
-  return error instanceof ApplyPatchError;
-}
-
 export function ensureApplyPatchError(
   error: unknown,
   context: string,
 ): ApplyPatchError {
-  if (isApplyPatchError(error)) {
+  if (error instanceof ApplyPatchError) {
     return error;
   }
 

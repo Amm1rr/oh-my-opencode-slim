@@ -1,6 +1,7 @@
+import { commonEdges } from './matching';
 import type { ParsedPatch, PatchChunk, PatchHunk } from './types';
 
-function normalizeLineEndings(text: string): string {
+export function normalizeLineEndings(text: string): string {
   return text.replace(/\r\n?/g, '\n');
 }
 
@@ -214,22 +215,10 @@ export function parsePatch(patchText: string): ParsedPatch {
 
 function renderChunk(chunk: PatchChunk): string[] {
   const lines = [chunk.change_context ? `@@ ${chunk.change_context}` : '@@'];
-  let prefix = 0;
-  while (
-    prefix < chunk.old_lines.length &&
-    prefix < chunk.new_lines.length &&
-    chunk.old_lines[prefix] === chunk.new_lines[prefix]
-  )
-    prefix++;
-
-  let suffix = 0;
-  while (
-    chunk.old_lines.length - suffix > prefix &&
-    chunk.new_lines.length - suffix > prefix &&
-    chunk.old_lines[chunk.old_lines.length - suffix - 1] ===
-      chunk.new_lines[chunk.new_lines.length - suffix - 1]
-  )
-    suffix++;
+  const { prefixLength: prefix, suffixLength: suffix } = commonEdges(
+    chunk.old_lines,
+    chunk.new_lines,
+  );
 
   for (const line of chunk.old_lines.slice(0, prefix)) lines.push(` ${line}`);
   for (const line of chunk.old_lines.slice(

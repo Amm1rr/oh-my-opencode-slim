@@ -2,7 +2,7 @@ import type { Stats } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
 
-import { parsePatch } from './codec';
+import { normalizeLineEndings, parsePatch } from './codec';
 import { ApplyPatchError, getErrorMessage } from './errors';
 import { resolveUpdate } from './resolution';
 import type {
@@ -27,7 +27,6 @@ export type PreparedFileState =
   | {
       exists: true;
       text: string;
-      mode?: number;
       derived: boolean;
     };
 
@@ -215,7 +214,7 @@ export function parseValidatedPatch(patchText: string): PatchHunk[] {
   }
 
   if (hunks.length === 0) {
-    const clean = patchText.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
+    const clean = normalizeLineEndings(patchText).trim();
     if (clean === '*** Begin Patch\n*** End Patch') {
       throw new ApplyPatchError('validation', 'empty patch');
     }
@@ -306,7 +305,6 @@ async function createPatchExecutionContext(
     const state: PreparedFileState = {
       exists: true,
       text,
-      mode: stat.mode & 0o7777,
       derived: false,
     };
     staged.set(filePath, state);
@@ -383,20 +381,12 @@ export async function simulatePatch(
 
     if (movePath && movePath !== filePath) {
       staged.set(filePath, { exists: false, derived: true });
-      staged.set(movePath, {
-        exists: true,
-        text: nextText,
-        mode: current.mode,
-        derived: true,
-      });
-    } else {
-      staged.set(filePath, {
-        exists: true,
-        text: nextText,
-        mode: current.mode,
-        derived: true,
-      });
     }
+    staged.set(movePath ?? filePath, {
+      exists: true,
+      text: nextText,
+      derived: true,
+    });
   }
 
   return { hunks, pathsNormalized, steps };

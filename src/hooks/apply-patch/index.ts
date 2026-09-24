@@ -1,7 +1,7 @@
 import type { PluginInput } from '@opencode-ai/plugin';
 
 import { log } from '../../utils/logger';
-import { ApplyPatchError, isApplyPatchError } from './errors';
+import { ensureApplyPatchError } from './errors';
 import { rewritePatch } from './rewrite';
 
 interface ToolExecuteBeforeInput {
@@ -69,21 +69,14 @@ export function createApplyPatchHook(ctx: PluginInput) {
         log('apply-patch hook unchanged');
         return;
       } catch (error) {
-        const normalizedError = isApplyPatchError(error)
-          ? error
-          : new ApplyPatchError(
-              'internal',
-              `Unexpected hook failure before native apply: ${error instanceof Error ? error.message : String(error)}`,
-              error,
-            );
+        const normalizedError = ensureApplyPatchError(
+          error,
+          'Unexpected hook failure before native apply',
+        );
 
-        if (
-          normalizedError.kind === 'blocked' &&
-          // Only the plugin-side outside-workspace preflight should fail open.
-          // Keep the code check explicit so any future blocked error remains
-          // fail-closed by default.
-          normalizedError.code === 'outside_workspace'
-        ) {
+        // Code derives from kind. A new blocked reason needs its own code to
+        // remain fail-closed rather than inheriting this outside-workspace gate.
+        if (normalizedError.code === 'outside_workspace') {
           log('apply-patch hook skipped', {
             kind: normalizedError.kind,
             code: normalizedError.code,

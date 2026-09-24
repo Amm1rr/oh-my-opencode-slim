@@ -12,22 +12,17 @@ export type RewritePatchResult = {
   changed: boolean;
 };
 
-type RewriteUpdateGroup = {
-  index: number;
-  sourcePath: string;
-  sourceFilePath: string;
-  outputFilePath: string;
-  baseText: string;
-  chunks?: UpdatePatchHunk['chunks'];
-};
-
-type RewriteAddGroup = {
-  index: number;
-};
-
 type RewriteDependencyGroup =
-  | { kind: 'add'; group: RewriteAddGroup }
-  | { kind: 'update'; group: RewriteUpdateGroup };
+  | { kind: 'add'; index: number }
+  | {
+      kind: 'update';
+      index: number;
+      sourcePath: string;
+      sourceFilePath: string;
+      outputFilePath: string;
+      baseText: string;
+      chunks?: UpdatePatchHunk['chunks'];
+    };
 
 function reproduces(
   filePath: string,
@@ -121,10 +116,6 @@ export async function rewritePatch(
 
     const dependencyGroups = new Map<string, RewriteDependencyGroup>();
 
-    function clearDependencyGroup(filePath: string) {
-      dependencyGroups.delete(filePath);
-    }
-
     function hunkTouchedPaths(hunk: PatchHunk): Set<string> {
       const touched = new Set<string>([path.resolve(root, hunk.path)]);
       if (hunk.type === 'update' && hunk.move_path) {
@@ -160,18 +151,15 @@ export async function rewritePatch(
       const { filePath } = step;
       if (step.type === 'add') {
         rewritten.push(step.hunk);
-        clearDependencyGroup(filePath);
         dependencyGroups.set(filePath, {
           kind: 'add',
-          group: {
-            index: rewritten.length - 1,
-          },
+          index: rewritten.length - 1,
         });
         continue;
       }
 
       if (step.type === 'delete') {
-        clearDependencyGroup(filePath);
+        dependencyGroups.delete(filePath);
         rewritten.push(step.hunk);
         continue;
       }
@@ -261,7 +249,7 @@ export async function rewritePatch(
             contents: stageAddedText(nextText),
           };
         } else {
-          const group = currentDependency.group;
+          const group = currentDependency;
           let chunks: UpdatePatchHunk['chunks'] | undefined;
           if (
             group.chunks &&
@@ -278,12 +266,9 @@ export async function rewritePatch(
             }
           }
           nextGroup = {
-            kind: 'update',
-            group: {
-              ...group,
-              outputFilePath: nextOutputFilePath,
-              chunks,
-            },
+            ...group,
+            outputFilePath: nextOutputFilePath,
+            chunks,
           };
           const move =
             nextOutputPath !== group.sourcePath ? nextOutputPath : undefined;
@@ -303,16 +288,13 @@ export async function rewritePatch(
               );
         }
         const foldedIndex = reemitFoldedGroup(
-          currentDependency.group.index,
+          currentDependency.index,
           rendered,
         );
         if (foldedIndex !== undefined) {
           changed = true;
-          clearDependencyGroup(filePath);
-          if (movePath && movePath !== filePath) {
-            clearDependencyGroup(movePath);
-          }
-          nextGroup.group.index = foldedIndex;
+          dependencyGroups.delete(filePath);
+          nextGroup.index = foldedIndex;
           dependencyGroups.set(nextOutputFilePath, nextGroup);
           folded = true;
         }
@@ -328,20 +310,15 @@ export async function rewritePatch(
           move_path: hunk.move_path,
           chunks: next,
         });
-        clearDependencyGroup(filePath);
-        if (movePath && movePath !== filePath) {
-          clearDependencyGroup(movePath);
-        }
+        dependencyGroups.delete(filePath);
         dependencyGroups.set(nextOutputFilePath, {
           kind: 'update',
-          group: {
-            index: rewritten.length - 1,
-            sourcePath: hunk.path,
-            sourceFilePath: filePath,
-            outputFilePath: nextOutputFilePath,
-            baseText: current.text,
-            chunks: next,
-          },
+          index: rewritten.length - 1,
+          sourcePath: hunk.path,
+          sourceFilePath: filePath,
+          outputFilePath: nextOutputFilePath,
+          baseText: current.text,
+          chunks: next,
         });
       }
     }

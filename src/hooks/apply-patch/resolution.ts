@@ -1,3 +1,4 @@
+import { normalizeLineEndings } from './codec';
 import {
   commonEdges,
   matchesAt,
@@ -18,7 +19,7 @@ type FileLines = {
 
 export function splitFileLines(text: string): FileLines {
   const eol = text.match(/\r\n|\n|\r/)?.[0] === '\r\n' ? '\r\n' : '\n';
-  const normalized = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  const normalized = normalizeLineEndings(text);
   const hasFinalNewline = normalized.endsWith('\n');
   // Empty text is zero lines, not one empty line; '\n' is one empty line.
   const lines = normalized.length === 0 ? [] : normalized.split('\n');
