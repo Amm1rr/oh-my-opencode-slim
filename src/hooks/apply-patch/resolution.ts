@@ -10,7 +10,6 @@ import {
 } from './matching';
 import type {
   ApplyPatchRescueStrategy,
-  ApplyPatchRuntimeOptions,
   MatchComparatorName,
   MatchHit,
   PatchChunk,
@@ -104,7 +103,6 @@ export function locateChunk(
   file: string,
   chunk: PatchChunk,
   start: number,
-  cfg: ApplyPatchRuntimeOptions,
 ): ResolvedChunk {
   const old_lines = chunk.old_lines;
   const new_lines = chunk.new_lines;
@@ -137,65 +135,61 @@ export function locateChunk(
     };
   }
 
-  if (cfg.prefixSuffix) {
-    const rescued = rescueByPrefixSuffix(lines, old_lines, new_lines, start);
+  const prefixSuffix = rescueByPrefixSuffix(lines, old_lines, new_lines, start);
 
-    if (rescued.kind === 'ambiguous') {
-      throw new Error(
-        `Prefix/suffix rescue was ambiguous in ${file}:\n${chunk.old_lines.join(
-          '\n',
-        )}`,
-      );
-    }
-
-    if (rescued.kind === 'match') {
-      const prefixLength = prefix(old_lines, new_lines);
-      const suffixLength = suffix(old_lines, new_lines, prefixLength);
-      const canonicalStart = rescued.hit.start - prefixLength;
-      const canonicalEnd = rescued.hit.start + rescued.hit.del + suffixLength;
-
-      return {
-        hit: rescued.hit,
-        old_lines,
-        canonical_old_lines: lines.slice(canonicalStart, canonicalEnd),
-        canonical_new_lines: [...chunk.new_lines],
-        resolved_is_end_of_file: canonicalEnd === lines.length,
-        rewritten: true,
-        strategy: 'prefix/suffix',
-        matchComparator: 'exact',
-        canonical_start: canonicalStart,
-        canonical_end: canonicalEnd,
-      };
-    }
+  if (prefixSuffix.kind === 'ambiguous') {
+    throw new Error(
+      `Prefix/suffix rescue was ambiguous in ${file}:\n${chunk.old_lines.join(
+        '\n',
+      )}`,
+    );
   }
 
-  if (cfg.lcsRescue) {
-    const rescued = rescueByLcs(lines, old_lines, new_lines, start);
+  if (prefixSuffix.kind === 'match') {
+    const prefixLength = prefix(old_lines, new_lines);
+    const suffixLength = suffix(old_lines, new_lines, prefixLength);
+    const canonicalStart = prefixSuffix.hit.start - prefixLength;
+    const canonicalEnd =
+      prefixSuffix.hit.start + prefixSuffix.hit.del + suffixLength;
 
-    if (rescued.kind === 'ambiguous') {
-      throw new Error(
-        `LCS rescue was ambiguous in ${file}:\n${chunk.old_lines.join('\n')}`,
-      );
-    }
+    return {
+      hit: prefixSuffix.hit,
+      old_lines,
+      canonical_old_lines: lines.slice(canonicalStart, canonicalEnd),
+      canonical_new_lines: [...chunk.new_lines],
+      resolved_is_end_of_file: canonicalEnd === lines.length,
+      rewritten: true,
+      strategy: 'prefix/suffix',
+      matchComparator: 'exact',
+      canonical_start: canonicalStart,
+      canonical_end: canonicalEnd,
+    };
+  }
 
-    if (rescued.kind === 'match') {
-      return {
-        hit: rescued.hit,
-        old_lines,
-        canonical_old_lines: lines.slice(
-          rescued.hit.start,
-          rescued.hit.start + rescued.hit.del,
-        ),
-        canonical_new_lines: [...chunk.new_lines],
-        resolved_is_end_of_file:
-          rescued.hit.start + rescued.hit.del === lines.length,
-        rewritten: true,
-        strategy: 'lcs',
-        matchComparator: 'exact',
-        canonical_start: rescued.hit.start,
-        canonical_end: rescued.hit.start + rescued.hit.del,
-      };
-    }
+  const lcs = rescueByLcs(lines, old_lines, new_lines, start);
+
+  if (lcs.kind === 'ambiguous') {
+    throw new Error(
+      `LCS rescue was ambiguous in ${file}:\n${chunk.old_lines.join('\n')}`,
+    );
+  }
+
+  if (lcs.kind === 'match') {
+    return {
+      hit: lcs.hit,
+      old_lines,
+      canonical_old_lines: lines.slice(
+        lcs.hit.start,
+        lcs.hit.start + lcs.hit.del,
+      ),
+      canonical_new_lines: [...chunk.new_lines],
+      resolved_is_end_of_file: lcs.hit.start + lcs.hit.del === lines.length,
+      rewritten: true,
+      strategy: 'lcs',
+      matchComparator: 'exact',
+      canonical_start: lcs.hit.start,
+      canonical_end: lcs.hit.start + lcs.hit.del,
+    };
   }
 
   throw new Error(
@@ -227,7 +221,6 @@ function resolveUpdateChunksFromFileLines(
   file: string,
   state: FileLines,
   chunks: PatchChunk[],
-  cfg: ApplyPatchRuntimeOptions,
 ): {
   lines: string[];
   resolved: ResolvedChunk[];
@@ -336,7 +329,7 @@ function resolveUpdateChunksFromFileLines(
       continue;
     }
 
-    const found = locateChunk(lines, file, chunk, chunkStart, cfg);
+    const found = locateChunk(lines, file, chunk, chunkStart);
     resolved.push(found);
     start = found.hit.start + found.hit.del;
   }
@@ -363,10 +356,9 @@ export function deriveNewContentFromText(
   file: string,
   text: string,
   chunks: PatchChunk[],
-  cfg: ApplyPatchRuntimeOptions,
 ): string {
   const { lines, resolved, eol, hasFinalNewline } =
-    resolveUpdateChunksFromFileLines(file, splitFileLines(text), chunks, cfg);
+    resolveUpdateChunksFromFileLines(file, splitFileLines(text), chunks);
 
   return applyHits(
     lines,
@@ -380,17 +372,11 @@ export function resolveUpdateChunksFromText(
   file: string,
   text: string,
   chunks: PatchChunk[],
-  cfg: ApplyPatchRuntimeOptions,
 ): {
   lines: string[];
   resolved: ResolvedChunk[];
   eol: '\n' | '\r\n';
   hasFinalNewline: boolean;
 } {
-  return resolveUpdateChunksFromFileLines(
-    file,
-    splitFileLines(text),
-    chunks,
-    cfg,
-  );
+  return resolveUpdateChunksFromFileLines(file, splitFileLines(text), chunks);
 }

@@ -3,12 +3,6 @@ import type { PluginInput } from '@opencode-ai/plugin';
 import { log } from '../../utils/logger';
 import { ApplyPatchError, isApplyPatchError } from './errors';
 import { rewritePatch } from './rewrite';
-import type { ApplyPatchRuntimeOptions } from './types';
-
-const APPLY_PATCH_RESCUE_OPTIONS: ApplyPatchRuntimeOptions = {
-  prefixSuffix: true,
-  lcsRescue: true,
-};
 
 interface ToolExecuteBeforeInput {
   tool: string;
@@ -57,12 +51,7 @@ export function createApplyPatchHook(ctx: PluginInput) {
       const root = input.directory || ctx.directory || process.cwd();
       const worktree = ctx.worktree || root;
       try {
-        const result = await rewritePatch(
-          root,
-          patchText,
-          APPLY_PATCH_RESCUE_OPTIONS,
-          worktree,
-        );
+        const result = await rewritePatch(root, patchText, worktree);
 
         if (result.changed) {
           if (replacePatchArgs(output, args, result.patchText)) {
@@ -71,7 +60,6 @@ export function createApplyPatchHook(ctx: PluginInput) {
             log('apply-patch hook skipped', {
               reason: 'readonly output args',
               failOpen: true,
-              rescueOptions: APPLY_PATCH_RESCUE_OPTIONS,
               rewriteStage: 'before-native',
             });
           }
@@ -101,7 +89,6 @@ export function createApplyPatchHook(ctx: PluginInput) {
             code: normalizedError.code,
             reason: normalizedError.message,
             failOpen: true,
-            rescueOptions: APPLY_PATCH_RESCUE_OPTIONS,
             rewriteStage: 'before-native',
           });
           return;
@@ -112,7 +99,6 @@ export function createApplyPatchHook(ctx: PluginInput) {
           code: normalizedError.code,
           reason: normalizedError.message,
           failOpen: false,
-          rescueOptions: APPLY_PATCH_RESCUE_OPTIONS,
           rewriteStage: 'before-native',
         });
         throw normalizedError;

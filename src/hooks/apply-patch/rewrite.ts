@@ -8,11 +8,7 @@ import {
   stageAddedText,
 } from './execution-context';
 import { deriveNewContentFromText } from './resolution';
-import type {
-  ApplyPatchRuntimeOptions,
-  PatchHunk,
-  UpdatePatchHunk,
-} from './types';
+import type { PatchHunk, UpdatePatchHunk } from './types';
 
 export type RewritePatchResult = {
   patchText: string;
@@ -64,7 +60,6 @@ function createCollapsedUpdateHunk(
   filePath: string,
   baseText: string,
   finalText: string,
-  cfg: ApplyPatchRuntimeOptions,
   movePath?: string,
 ): UpdatePatchHunk {
   const collapsedChunk = {
@@ -83,12 +78,9 @@ function createCollapsedUpdateHunk(
       ? collapsedChunk
       : (() => {
           try {
-            return deriveNewContentFromText(
-              filePath,
-              baseText,
-              [minimizedChunk],
-              cfg,
-            ) === finalText
+            return deriveNewContentFromText(filePath, baseText, [
+              minimizedChunk,
+            ]) === finalText
               ? minimizedChunk
               : collapsedChunk;
           } catch {
@@ -182,7 +174,6 @@ function mergeSameFileUpdateGroupChunks(
   group: RewriteUpdateGroup,
   nextChunks: UpdatePatchHunk['chunks'],
   finalText: string,
-  cfg: ApplyPatchRuntimeOptions,
 ): UpdatePatchHunk['chunks'] | undefined {
   if (!group.chunks) {
     return undefined;
@@ -200,7 +191,6 @@ function mergeSameFileUpdateGroupChunks(
       filePath,
       group.baseText,
       mergedChunks,
-      cfg,
     );
 
     return mergedText === finalText ? mergedChunks : undefined;
@@ -211,7 +201,6 @@ function mergeSameFileUpdateGroupChunks(
 
 function renderRewriteDependencyGroup(
   group: RewriteDependencyGroup,
-  cfg: ApplyPatchRuntimeOptions,
 ): PatchHunk {
   if (group.kind === 'add') {
     return {
@@ -237,7 +226,6 @@ function renderRewriteDependencyGroup(
         group.group.sourceFilePath,
         group.group.baseText,
         group.group.finalText,
-        cfg,
         group.group.outputPath !== group.group.sourcePath
           ? group.group.outputPath
           : undefined,
@@ -251,7 +239,6 @@ function combineDependentUpdateGroup(
   finalText: string,
   nextOutputPath: string,
   nextOutputFilePath: string,
-  cfg: ApplyPatchRuntimeOptions,
 ): RewriteDependencyGroup {
   if (group.kind === 'add') {
     return {
@@ -274,7 +261,6 @@ function combineDependentUpdateGroup(
           group.group,
           nextChunks,
           finalText,
-          cfg,
         )
       : undefined;
 
@@ -293,7 +279,6 @@ function combineDependentUpdateGroup(
 export async function rewritePatch(
   root: string,
   patchText: string,
-  cfg: ApplyPatchRuntimeOptions,
   worktree?: string,
 ): Promise<RewritePatchResult> {
   try {
@@ -399,7 +384,6 @@ export async function rewritePatch(
         filePath,
         current.text,
         hunk,
-        cfg,
       );
 
       let next: UpdatePatchHunk['chunks'] = [];
@@ -457,15 +441,13 @@ export async function rewritePatch(
         // instead of shipping a rewrite that cannot re-apply.
         try {
           if (
-            deriveNewContentFromText(filePath, current.text, next, cfg) !==
-            nextText
+            deriveNewContentFromText(filePath, current.text, next) !== nextText
           ) {
             next = createCollapsedUpdateHunk(
               hunk.path,
               filePath,
               current.text,
               nextText,
-              cfg,
             ).chunks;
           }
         } catch {
@@ -474,7 +456,6 @@ export async function rewritePatch(
             filePath,
             current.text,
             nextText,
-            cfg,
           ).chunks;
         }
       }
@@ -498,11 +479,10 @@ export async function rewritePatch(
           nextText,
           nextOutputPath,
           nextOutputFilePath,
-          cfg,
         );
         const foldedIndex = reemitFoldedGroup(
           currentDependency.group.index,
-          renderRewriteDependencyGroup(nextGroup, cfg),
+          renderRewriteDependencyGroup(nextGroup),
         );
         if (foldedIndex !== undefined) {
           changed = true;

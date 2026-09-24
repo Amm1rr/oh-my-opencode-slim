@@ -5,7 +5,7 @@ import path from 'node:path';
 import { parsePatch } from './codec';
 import { createApplyPatchHook } from './index';
 import { applyPreparedChanges, preparePatchChanges } from './prepared-changes';
-import { createTempDir, DEFAULT_OPTIONS, writeFixture } from './test-helpers';
+import { createTempDir, writeFixture } from './test-helpers';
 
 function createHook() {
   return createApplyPatchHook({
@@ -83,7 +83,6 @@ PATCH`,
     const changes = await preparePatchChanges(
       root,
       output.args.patchText as string,
-      DEFAULT_OPTIONS,
     );
     await applyPreparedChanges(changes);
     expect(await readFile(path.join(root, 'sample.txt'), 'utf-8')).toBe(
@@ -220,7 +219,6 @@ PATCH`,
     const changes = await preparePatchChanges(
       root,
       output.args.patchText as string,
-      DEFAULT_OPTIONS,
     );
     await applyPreparedChanges(changes);
     expect(await readFile(path.join(root, 'sample.txt'), 'utf-8')).toBe(
@@ -344,7 +342,6 @@ PATCH`,
     const changes = await preparePatchChanges(
       root,
       output.args.patchText as string,
-      DEFAULT_OPTIONS,
     );
     await applyPreparedChanges(changes);
     expect(await readFile(path.join(root, 'sample.txt'), 'utf-8')).toBe(
@@ -378,7 +375,6 @@ PATCH`,
     const changes = await preparePatchChanges(
       root,
       output.args.patchText as string,
-      DEFAULT_OPTIONS,
     );
     await applyPreparedChanges(changes);
     expect(await readFile(path.join(root, 'sample.txt'), 'utf-8')).toBe(
@@ -535,7 +531,6 @@ garbage
     const changes = await preparePatchChanges(
       root,
       output.args.patchText as string,
-      DEFAULT_OPTIONS,
     );
     await applyPreparedChanges(changes);
     expect(await readFile(path.join(root, 'sample.txt'), 'utf-8')).toBe(
@@ -668,7 +663,6 @@ garbage
     const changes = await preparePatchChanges(
       root,
       output.args.patchText as string,
-      DEFAULT_OPTIONS,
     );
     await applyPreparedChanges(changes);
     expect(await readFile(path.join(root, 'sample.txt'), 'utf-8')).toBe(

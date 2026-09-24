@@ -5,7 +5,6 @@ import path from 'node:path';
 
 import { applyPreparedChanges, preparePatchChanges } from './prepared-changes';
 import { rewritePatch } from './rewrite';
-import type { ApplyPatchRuntimeOptions } from './types';
 
 const tempDirs: string[] = [];
 
@@ -14,11 +13,6 @@ afterEach(async () => {
     tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })),
   );
 });
-
-export const DEFAULT_OPTIONS: ApplyPatchRuntimeOptions = {
-  prefixSuffix: true,
-  lcsRescue: true,
-};
 
 export async function createTempDir(prefix = 'apply-patch-'): Promise<string> {
   const dir = await mkdtemp(path.join(os.tmpdir(), prefix));
@@ -46,17 +40,15 @@ export async function readText(
 export async function applyPatch(
   root: string,
   patchText: string,
-  cfg: ApplyPatchRuntimeOptions = DEFAULT_OPTIONS,
 ): Promise<void> {
-  const changes = await preparePatchChanges(root, patchText, cfg);
+  const changes = await preparePatchChanges(root, patchText);
   await applyPreparedChanges(changes);
 }
 
 export async function rewritePatchText(
   root: string,
   patchText: string,
-  cfg: ApplyPatchRuntimeOptions = DEFAULT_OPTIONS,
   worktree?: string,
 ): Promise<string> {
-  return (await rewritePatch(root, patchText, cfg, worktree)).patchText;
+  return (await rewritePatch(root, patchText, worktree)).patchText;
 }

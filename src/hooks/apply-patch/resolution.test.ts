@@ -6,7 +6,6 @@ import {
   resolveChunkStart,
   resolveUpdateChunksFromText,
 } from './resolution';
-import { DEFAULT_OPTIONS } from './test-helpers';
 import type { PatchChunk } from './types';
 
 describe('apply-patch/resolution', () => {
@@ -39,7 +38,6 @@ describe('apply-patch/resolution', () => {
       'sample.txt',
       chunk,
       0,
-      DEFAULT_OPTIONS,
     );
 
     expect(resolved.rewritten).toBe(true);
@@ -62,7 +60,6 @@ describe('apply-patch/resolution', () => {
       'sample.txt',
       chunk,
       0,
-      DEFAULT_OPTIONS,
     );
 
     expect(resolved.rewritten).toBe(true);
@@ -79,13 +76,7 @@ describe('apply-patch/resolution', () => {
       new_lines: ['omega'],
     };
 
-    const resolved = locateChunk(
-      ['alpha  '],
-      'sample.txt',
-      chunk,
-      0,
-      DEFAULT_OPTIONS,
-    );
+    const resolved = locateChunk(['alpha  '], 'sample.txt', chunk, 0);
 
     expect(resolved.rewritten).toBe(true);
     expect(resolved.matchComparator).toBe('trim-end');
@@ -99,13 +90,7 @@ describe('apply-patch/resolution', () => {
       new_lines: ['omega'],
     };
 
-    const resolved = locateChunk(
-      [' alpha  '],
-      'sample.txt',
-      chunk,
-      0,
-      DEFAULT_OPTIONS,
-    );
+    const resolved = locateChunk([' alpha  '], 'sample.txt', chunk, 0);
 
     expect(resolved.rewritten).toBe(true);
     expect(resolved.matchComparator).toBe('trim');
@@ -124,7 +109,6 @@ describe('apply-patch/resolution', () => {
       'sample.yml',
       chunk,
       0,
-      DEFAULT_OPTIONS,
     );
 
     expect(resolved.rewritten).toBe(true);
@@ -139,13 +123,7 @@ describe('apply-patch/resolution', () => {
       new_lines: ['omega', ''],
     };
 
-    const resolved = locateChunk(
-      ['alpha', ''],
-      'sample.txt',
-      chunk,
-      0,
-      DEFAULT_OPTIONS,
-    );
+    const resolved = locateChunk(['alpha', ''], 'sample.txt', chunk, 0);
 
     expect(resolved.canonical_old_lines).toEqual(['alpha', '']);
     expect(resolved.canonical_new_lines).toEqual(['omega', '']);
@@ -157,75 +135,55 @@ describe('apply-patch/resolution', () => {
       new_lines: ['omega', ''],
     };
 
-    expect(() =>
-      locateChunk(['alpha'], 'sample.txt', chunk, 0, DEFAULT_OPTIONS),
-    ).toThrow('Failed to find expected lines');
+    expect(() => locateChunk(['alpha'], 'sample.txt', chunk, 0)).toThrow(
+      'Failed to find expected lines',
+    );
   });
 
   test('deriveNewContentFromText resolves EOF updates', () => {
     expect(
-      deriveNewContentFromText(
-        'sample.txt',
-        'alpha\nbeta',
-        [
-          {
-            old_lines: ['beta'],
-            new_lines: ['omega'],
-            is_end_of_file: true,
-          },
-        ],
-        DEFAULT_OPTIONS,
-      ),
+      deriveNewContentFromText('sample.txt', 'alpha\nbeta', [
+        {
+          old_lines: ['beta'],
+          new_lines: ['omega'],
+          is_end_of_file: true,
+        },
+      ]),
     ).toBe('alpha\nomega');
   });
 
   test('deriveNewContentFromText preserves CRLF while rebuilding content', () => {
     expect(
-      deriveNewContentFromText(
-        'sample.txt',
-        'alpha\r\nbeta\r\ngamma\r\n',
-        [
-          {
-            old_lines: ['alpha', 'beta', 'gamma'],
-            new_lines: ['alpha', 'BETA', 'gamma'],
-          },
-        ],
-        DEFAULT_OPTIONS,
-      ),
+      deriveNewContentFromText('sample.txt', 'alpha\r\nbeta\r\ngamma\r\n', [
+        {
+          old_lines: ['alpha', 'beta', 'gamma'],
+          new_lines: ['alpha', 'BETA', 'gamma'],
+        },
+      ]),
     ).toBe('alpha\r\nBETA\r\ngamma\r\n');
   });
 
   test('deriveNewContentFromText inserts an anchored block without moving it to EOF', () => {
     expect(
-      deriveNewContentFromText(
-        'sample.txt',
-        'top\nanchor\nbottom\n',
-        [
-          {
-            old_lines: [],
-            new_lines: ['middle'],
-            change_context: 'anchor',
-          },
-        ],
-        DEFAULT_OPTIONS,
-      ),
+      deriveNewContentFromText('sample.txt', 'top\nanchor\nbottom\n', [
+        {
+          old_lines: [],
+          new_lines: ['middle'],
+          change_context: 'anchor',
+        },
+      ]),
     ).toBe('top\nanchor\nmiddle\nbottom\n');
   });
 
   test('deriveNewContentFromText supports pure insertion at EOF with a single anchor', () => {
     expect(
-      deriveNewContentFromText(
-        'sample.txt',
-        'top\nanchor\n',
-        [
-          {
-            old_lines: [],
-            new_lines: ['middle'],
-            change_context: 'anchor',
-          },
-        ],
-        DEFAULT_OPTIONS,
-      ),
+      deriveNewContentFromText('sample.txt', 'top\nanchor\n', [
+        {
+          old_lines: [],
+          new_lines: ['middle'],
+          change_context: 'anchor',
+        },
+      ]),
     ).toBe('top\nanchor\nmiddle\n');
   });
 
@@ -240,7 +198,6 @@ describe('apply-patch/resolution', () => {
           change_context: '"anchor"',
         },
       ],
-      DEFAULT_OPTIONS,
     );
 
     expect(resolved[0]).toMatchObject({
@@ -262,7 +219,6 @@ describe('apply-patch/resolution', () => {
           change_context: 'anchor',
         },
       ],
-      DEFAULT_OPTIONS,
     );
 
     expect(resolved[0]).toMatchObject({
@@ -275,18 +231,13 @@ describe('apply-patch/resolution', () => {
 
   test('deriveNewContentFromText fails if a pure insertion cannot find its anchor', () => {
     expect(() =>
-      deriveNewContentFromText(
-        'sample.txt',
-        'top\nbottom\n',
-        [
-          {
-            old_lines: [],
-            new_lines: ['middle'],
-            change_context: 'anchor',
-          },
-        ],
-        DEFAULT_OPTIONS,
-      ),
+      deriveNewContentFromText('sample.txt', 'top\nbottom\n', [
+        {
+          old_lines: [],
+          new_lines: ['middle'],
+          change_context: 'anchor',
+        },
+      ]),
     ).toThrow('Failed to find insertion anchor');
   });
 
@@ -302,25 +253,19 @@ describe('apply-patch/resolution', () => {
             change_context: 'anchor',
           },
         ],
-        DEFAULT_OPTIONS,
       ),
     ).toThrow('Insertion anchor was ambiguous');
   });
 
   test('deriveNewContentFromText fails if a tolerant insertion anchor is ambiguous', () => {
     expect(() =>
-      deriveNewContentFromText(
-        'sample.txt',
-        'top\n“anchor”\n"anchor"\n',
-        [
-          {
-            old_lines: [],
-            new_lines: ['middle'],
-            change_context: '"anchor"',
-          },
-        ],
-        DEFAULT_OPTIONS,
-      ),
+      deriveNewContentFromText('sample.txt', 'top\n“anchor”\n"anchor"\n', [
+        {
+          old_lines: [],
+          new_lines: ['middle'],
+          change_context: '"anchor"',
+        },
+      ]),
     ).toThrow('Insertion anchor was ambiguous');
   });
 
@@ -339,25 +284,19 @@ describe('apply-patch/resolution', () => {
             new_lines: ['left', 'new', 'right'],
           },
         ],
-        DEFAULT_OPTIONS,
       ),
     ).toThrow('ambiguous');
   });
 
   test('deriveNewContentFromText rescues a stale EOF and preserves the final update', () => {
     expect(
-      deriveNewContentFromText(
-        'sample.txt',
-        'alpha\nstale\nomega',
-        [
-          {
-            old_lines: ['alpha', 'old', 'omega'],
-            new_lines: ['alpha', 'new', 'omega'],
-            is_end_of_file: true,
-          },
-        ],
-        DEFAULT_OPTIONS,
-      ),
+      deriveNewContentFromText('sample.txt', 'alpha\nstale\nomega', [
+        {
+          old_lines: ['alpha', 'old', 'omega'],
+          new_lines: ['alpha', 'new', 'omega'],
+          is_end_of_file: true,
+        },
+      ]),
     ).toBe('alpha\nnew\nomega');
   });
 

@@ -13,7 +13,7 @@ import {
   resolvePreparedUpdate,
   stageAddedText,
 } from './execution-context';
-import type { ApplyPatchRuntimeOptions, PreparedChange } from './types';
+import type { PreparedChange } from './types';
 
 function isNormalizedAbsolutePath(filePath: string): boolean {
   return path.isAbsolute(filePath) && path.normalize(filePath) === filePath;
@@ -98,7 +98,6 @@ function assertPreparedChangesContract(
 export async function preparePatchChanges(
   root: string,
   patchText: string,
-  cfg: ApplyPatchRuntimeOptions,
   worktree?: string,
 ): Promise<PreparedChange[]> {
   try {
@@ -143,12 +142,7 @@ export async function preparePatchChanges(
       if (move && move !== filePath) {
         await assertPreparedPathMissing(move, 'move');
       }
-      const { nextText } = resolvePreparedUpdate(
-        filePath,
-        current.text,
-        hunk,
-        cfg,
-      );
+      const { nextText } = resolvePreparedUpdate(filePath, current.text, hunk);
 
       changes.push({
         type: 'update',

@@ -1,8 +1,3 @@
-export type ApplyPatchRuntimeOptions = {
-  prefixSuffix: boolean;
-  lcsRescue: boolean;
-};
-
 export type ApplyPatchErrorKind =
   | 'blocked'
   | 'validation'

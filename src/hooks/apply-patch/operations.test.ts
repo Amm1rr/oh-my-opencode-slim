@@ -16,7 +16,6 @@ import { rewritePatch } from './rewrite';
 import {
   applyPatch,
   createTempDir,
-  DEFAULT_OPTIONS,
   readText,
   rewritePatchText,
   writeFixture,
@@ -61,10 +60,8 @@ describe('apply-patch/operations', () => {
       'line-01\nexact-top\nexact-old\nexact-bottom\nline-05\n',
     );
 
-    expect(await rewritePatchText(root, patchText, DEFAULT_OPTIONS)).toBe(
-      patchText,
-    );
-    expect(await rewritePatch(root, patchText, DEFAULT_OPTIONS)).toMatchObject({
+    expect(await rewritePatchText(root, patchText)).toBe(patchText);
+    expect(await rewritePatch(root, patchText)).toMatchObject({
       patchText,
       changed: false,
     });
@@ -88,10 +85,8 @@ PATCH`;
       'line-01\nexact-top\nexact-old\nexact-bottom\nline-05\n',
     );
 
-    expect(await rewritePatchText(root, patchText, DEFAULT_OPTIONS)).toBe(
-      cleanPatchText,
-    );
-    expect(await rewritePatch(root, patchText, DEFAULT_OPTIONS)).toMatchObject({
+    expect(await rewritePatchText(root, patchText)).toBe(cleanPatchText);
+    expect(await rewritePatch(root, patchText)).toMatchObject({
       patchText: cleanPatchText,
       changed: true,
     });
@@ -123,7 +118,7 @@ PATCH`;
       'line-01\nexact-top\nexact-old\nexact-bottom\nline-05\n',
     );
 
-    const rewritten = await rewritePatchText(root, patchText, DEFAULT_OPTIONS);
+    const rewritten = await rewritePatchText(root, patchText);
 
     expect(rewritten).toBe(cleanPatchText);
     await applyPatch(root, rewritten);
@@ -148,9 +143,8 @@ PATCH`;
  suffix
 *** End Patch`;
 
-    const rewritten = parsePatch(
-      await rewritePatchText(root, patchText, DEFAULT_OPTIONS),
-    ).hunks[0];
+    const rewritten = parsePatch(await rewritePatchText(root, patchText))
+      .hunks[0];
 
     expect(rewritten.type).toBe('update');
     expect(
@@ -178,11 +172,7 @@ PATCH`;
 *** End of File
 *** End Patch`;
 
-    const rewrittenText = await rewritePatchText(
-      root,
-      patchText,
-      DEFAULT_OPTIONS,
-    );
+    const rewrittenText = await rewritePatchText(root, patchText);
     const rewritten = parsePatch(rewrittenText).hunks[0];
 
     expect(rewrittenText.includes('*** End of File')).toBeFalse();
@@ -209,11 +199,7 @@ PATCH`;
 *** End of File
 *** End Patch`;
 
-    const rewrittenText = await rewritePatchText(
-      root,
-      patchText,
-      DEFAULT_OPTIONS,
-    );
+    const rewrittenText = await rewritePatchText(root, patchText);
     const rewritten = parsePatch(rewrittenText).hunks[0];
 
     expect(rewrittenText.includes('*** End of File')).toBeTrue();
@@ -235,9 +221,8 @@ PATCH`;
 +const title = "Hola mundo";
 *** End Patch`;
 
-    const rewritten = parsePatch(
-      await rewritePatchText(root, patchText, DEFAULT_OPTIONS),
-    ).hunks[0];
+    const rewritten = parsePatch(await rewritePatchText(root, patchText))
+      .hunks[0];
 
     expect(rewritten.type).toBe('update');
     expect(
@@ -258,9 +243,8 @@ PATCH`;
 +omega
 *** End Patch`;
 
-    const rewritten = parsePatch(
-      await rewritePatchText(root, patchText, DEFAULT_OPTIONS),
-    ).hunks[0];
+    const rewritten = parsePatch(await rewritePatchText(root, patchText))
+      .hunks[0];
 
     expect(rewritten.type).toBe('update');
     expect(
@@ -281,7 +265,7 @@ PATCH`;
 +omega
 *** End Patch`;
 
-    const rewritten = await rewritePatchText(root, patchText, DEFAULT_OPTIONS);
+    const rewritten = await rewritePatchText(root, patchText);
     expect(rewritten).toContain('+omega');
     expect(rewritten).toContain('-  alpha  ');
   });
@@ -300,7 +284,7 @@ PATCH`;
 +enabled: true
 *** End Patch`;
 
-    const rewritten = await rewritePatchText(root, patchText, DEFAULT_OPTIONS);
+    const rewritten = await rewritePatchText(root, patchText);
     expect(rewritten).toContain('+enabled: true');
     expect(rewritten).toContain('-    enabled: false');
   });
@@ -320,7 +304,6 @@ garbage
 -beta
 +BETA
 *** End Patch`,
-        DEFAULT_OPTIONS,
       ),
     ).rejects.toThrow(
       'apply_patch validation failed: Invalid patch format: unexpected line in patch chunk: garbage',
@@ -338,7 +321,6 @@ garbage
 +fresh
 garbage
 *** End Patch`,
-        DEFAULT_OPTIONS,
       ),
     ).rejects.toThrow(
       'apply_patch validation failed: Invalid patch format: unexpected line in Add File body: garbage',
@@ -358,7 +340,6 @@ garbage
 -alpha
 +omega
 *** End Patch`,
-      DEFAULT_OPTIONS,
     );
 
     expect(rewritten.changed).toBeTrue();
@@ -375,7 +356,6 @@ garbage
 -alpha
 +omega
 *** End Patch`,
-        DEFAULT_OPTIONS,
       ),
     ).resolves.toEqual([
       {
@@ -397,7 +377,6 @@ garbage
 *** Add File: ${absolutePath}
 +fresh
 *** End Patch`,
-      DEFAULT_OPTIONS,
     );
 
     expect(rewritten.changed).toBeTrue();
@@ -414,7 +393,6 @@ garbage
 *** Add File: ${absolutePath}
 +fresh
 *** End Patch`,
-        DEFAULT_OPTIONS,
       ),
     ).resolves.toEqual([
       {
@@ -441,7 +419,6 @@ garbage
 -beta
 +BETA
 *** End Patch`,
-      DEFAULT_OPTIONS,
     );
 
     expect(rewritten.changed).toBeTrue();
@@ -462,7 +439,6 @@ garbage
 -beta
 +BETA
 *** End Patch`,
-        DEFAULT_OPTIONS,
       ),
     ).resolves.toEqual([
       {
@@ -484,7 +460,6 @@ garbage
 *** Add File: ${outsidePath}
 +fresh
 *** End Patch`,
-      DEFAULT_OPTIONS,
     ).catch((caughtError) => caughtError);
 
     expect(error).toBeInstanceOf(ApplyPatchError);
@@ -507,7 +482,6 @@ garbage
 *** Add File: ${siblingPath}
 +fresh
 *** End Patch`,
-      DEFAULT_OPTIONS,
       worktree,
     );
 
@@ -525,7 +499,6 @@ garbage
 *** Add File: ${siblingPath}
 +fresh
 *** End Patch`,
-        DEFAULT_OPTIONS,
         worktree,
       ),
     ).resolves.toEqual([
@@ -547,7 +520,6 @@ garbage
 *** Add File: ${root}
 +fresh
 *** End Patch`,
-        DEFAULT_OPTIONS,
       ),
     ).rejects.toThrow(
       `apply_patch verification failed: Add File target already exists: ${root}`,
@@ -565,7 +537,6 @@ garbage
 *** Add File: added.txt
 +fresh
 *** End Patch`,
-        DEFAULT_OPTIONS,
       ),
     ).rejects.toThrow(
       `apply_patch verification failed: Add File target already exists: ${path.join(root, 'added.txt')}`,
@@ -588,7 +559,6 @@ garbage
 -beta
 +BETA
 *** End Patch`,
-        DEFAULT_OPTIONS,
       ),
     ).rejects.toThrow(
       `apply_patch verification failed: Move destination already exists: ${path.join(root, 'nested/after.txt')}`,
@@ -602,12 +572,12 @@ garbage
 *** End Patch`;
     const expectedMessage = `apply_patch verification failed: Failed to read file to delete: ${path.join(root, 'missing.txt')}`;
 
-    await expect(
-      rewritePatchText(root, patchText, DEFAULT_OPTIONS),
-    ).rejects.toThrow(expectedMessage);
-    await expect(
-      preparePatchChanges(root, patchText, DEFAULT_OPTIONS),
-    ).rejects.toThrow(expectedMessage);
+    await expect(rewritePatchText(root, patchText)).rejects.toThrow(
+      expectedMessage,
+    );
+    await expect(preparePatchChanges(root, patchText)).rejects.toThrow(
+      expectedMessage,
+    );
   });
 
   test('rewritePatchText rejects duplicate Delete File on the same path', async () => {
@@ -621,7 +591,6 @@ garbage
 *** Delete File: obsolete.txt
 *** Delete File: obsolete.txt
 *** End Patch`,
-        DEFAULT_OPTIONS,
       ),
     ).rejects.toThrow(
       `apply_patch verification failed: Failed to read file to delete: ${path.join(root, 'obsolete.txt')}`,
@@ -644,7 +613,6 @@ garbage
 +BETA
 *** Delete File: before.txt
 *** End Patch`,
-        DEFAULT_OPTIONS,
       ),
     ).rejects.toThrow(
       `apply_patch verification failed: Failed to read file to delete: ${path.join(root, 'before.txt')}`,
@@ -658,9 +626,7 @@ garbage
 *** Delete File: obsolete.txt
 *** End Patch`;
 
-    expect(await rewritePatchText(root, patchText, DEFAULT_OPTIONS)).toBe(
-      patchText,
-    );
+    expect(await rewritePatchText(root, patchText)).toBe(patchText);
 
     await applyPatch(root, patchText);
     await expect(readText(root, 'obsolete.txt')).rejects.toThrow();
@@ -739,7 +705,6 @@ garbage
 -missing
 +omega
 *** End Patch`,
-      DEFAULT_OPTIONS,
     ).catch((error) => error);
 
     const validationError = await preparePatchChanges(
@@ -749,7 +714,6 @@ garbage
 +fresh
 garbage
 *** End Patch`,
-      DEFAULT_OPTIONS,
     ).catch((error) => error);
 
     expect(verificationError).toBeInstanceOf(ApplyPatchError);
@@ -770,7 +734,6 @@ garbage
 @@ "anchor"
 +middle
 *** End Patch`,
-        DEFAULT_OPTIONS,
       ),
     ).hunks[0];
 
@@ -804,7 +767,6 @@ garbage
 -delta
 +DELTA
 *** End Patch`,
-      DEFAULT_OPTIONS,
     );
 
     const rewritten = parsePatch(result.patchText);
@@ -851,7 +813,6 @@ garbage
 +BETA!
  gamma
 *** End Patch`,
-      DEFAULT_OPTIONS,
     );
 
     expect(parsePatch(rewrittenText).hunks).toEqual([
@@ -870,11 +831,7 @@ garbage
       },
     ]);
 
-    const changes = await preparePatchChanges(
-      root,
-      rewrittenText,
-      DEFAULT_OPTIONS,
-    );
+    const changes = await preparePatchChanges(root, rewrittenText);
     await applyPreparedChanges(changes);
     expect(await readText(root, 'sample.txt')).toBe('alpha\nBETA!\ngamma\n');
   });
@@ -894,7 +851,6 @@ garbage
 -beta
 +BETA
 *** End Patch`,
-      DEFAULT_OPTIONS,
     );
 
     expect(result.changed).toBeTrue();
@@ -923,7 +879,6 @@ garbage
 -beta
 +BETA
 *** End Patch`,
-      DEFAULT_OPTIONS,
     );
 
     expect(result.changed).toBeTrue();
@@ -957,7 +912,6 @@ garbage
 -gamma
 +GAMMA
 *** End Patch`,
-      DEFAULT_OPTIONS,
     );
 
     expect(result.changed).toBeTrue();
@@ -998,7 +952,6 @@ garbage
 +BETA
  gamma
 *** End Patch`,
-      DEFAULT_OPTIONS,
     );
 
     expect(result.changed).toBeTrue();
@@ -1044,7 +997,6 @@ garbage
 +FOUR
  five
 *** End Patch`,
-      DEFAULT_OPTIONS,
     );
 
     expect(parsePatch(rewrittenText).hunks[0]).toEqual({
@@ -1092,7 +1044,6 @@ garbage
 +new
  right
 *** End Patch`,
-        DEFAULT_OPTIONS,
       ),
     ).rejects.toThrow('apply_patch verification failed:');
   });
@@ -1142,7 +1093,6 @@ garbage
 +BETA
  gamma
 *** End Patch`,
-      DEFAULT_OPTIONS,
     );
     await applyPreparedChanges(changes);
 
@@ -1285,7 +1235,6 @@ garbage
 -tail-old
 +tail-new
 *** End Patch`,
-      DEFAULT_OPTIONS,
     );
     await applyPreparedChanges(changes);
 
@@ -1305,7 +1254,6 @@ garbage
 @@ anchor
 +middle
 *** End Patch`,
-      DEFAULT_OPTIONS,
     );
     await applyPreparedChanges(changes);
 
@@ -1332,7 +1280,6 @@ garbage
 -gamma
 +GAMMA
 *** End Patch`,
-      DEFAULT_OPTIONS,
     );
 
     expect(changes).toHaveLength(2);
@@ -1365,7 +1312,6 @@ garbage
 -beta
 +omega
 *** End Patch`,
-      DEFAULT_OPTIONS,
     );
 
     await applyPreparedChanges(changes);
@@ -1452,9 +1398,7 @@ garbage
 +BETA
 *** End Patch`;
 
-    await expect(
-      rewritePatchText(root, patchText, DEFAULT_OPTIONS, root),
-    ).rejects.toThrow(
+    await expect(rewritePatchText(root, patchText, root)).rejects.toThrow(
       'apply_patch blocked: patch contains path outside workspace root:',
     );
   });
@@ -1477,9 +1421,7 @@ garbage
 *** Delete File: ../${path.basename(outsideDir)}/outside.txt
 *** End Patch`;
 
-    await expect(
-      rewritePatchText(root, patchText, DEFAULT_OPTIONS, root),
-    ).rejects.toThrow(
+    await expect(rewritePatchText(root, patchText, root)).rejects.toThrow(
       'apply_patch blocked: patch contains path outside workspace root:',
     );
   });
@@ -1493,7 +1435,6 @@ garbage
 *** Add File: ../outside-added.txt
 +fresh
 *** End Patch`,
-      DEFAULT_OPTIONS,
       root,
     ).catch((caughtError) => caughtError);
 
@@ -1518,7 +1459,6 @@ garbage
 *** Add File: linked-outside/missing/child.txt
 +fresh
 *** End Patch`,
-        DEFAULT_OPTIONS,
         root,
       ),
     ).rejects.toThrow(
@@ -1579,7 +1519,6 @@ garbage
 -ALPHA
 +ALPHA-MOVED
 *** End Patch`,
-      DEFAULT_OPTIONS,
     );
 
     // The folded update+move over a.txt must be emitted after Delete b.txt
@@ -1616,7 +1555,6 @@ garbage
 -z
 +Z2
 *** End Patch`,
-      DEFAULT_OPTIONS,
     );
 
     // The stale first chunk is rescued with shared suffix `z`; the second
@@ -1638,7 +1576,6 @@ garbage
 +hello
 *** End of File
 *** End Patch`,
-      DEFAULT_OPTIONS,
     );
 
     // Zero-line representation: no phantom leading blank line. The missing
@@ -1737,7 +1674,6 @@ garbage
 +hello
 *** End of File
 *** End Patch`,
-      DEFAULT_OPTIONS,
     );
 
     const hunks = parsePatch(result.patchText).hunks;
@@ -1769,7 +1705,6 @@ garbage
 -ALPHA
 +ALPHA-MOVED
 *** End Patch`,
-      DEFAULT_OPTIONS,
     );
 
     // The add on the freed source a.txt must stay AFTER the folded move

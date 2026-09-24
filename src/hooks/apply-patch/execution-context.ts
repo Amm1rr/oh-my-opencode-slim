@@ -5,11 +5,7 @@ import path from 'node:path';
 import { parsePatchStrict } from './codec';
 import { ApplyPatchError, getErrorMessage } from './errors';
 import { applyHits, resolveUpdateChunksFromText } from './resolution';
-import type {
-  ApplyPatchRuntimeOptions,
-  PatchHunk,
-  UpdatePatchHunk,
-} from './types';
+import type { PatchHunk, UpdatePatchHunk } from './types';
 
 type PathGuardContext = {
   root: string;
@@ -402,11 +398,10 @@ export function resolvePreparedUpdate(
   filePath: string,
   currentText: string,
   hunk: UpdatePatchHunk,
-  cfg: ApplyPatchRuntimeOptions,
 ): ResolvedPreparedUpdate {
   try {
     const { lines, resolved, eol, hasFinalNewline } =
-      resolveUpdateChunksFromText(filePath, currentText, hunk.chunks, cfg);
+      resolveUpdateChunksFromText(filePath, currentText, hunk.chunks);
 
     return {
       resolved,
