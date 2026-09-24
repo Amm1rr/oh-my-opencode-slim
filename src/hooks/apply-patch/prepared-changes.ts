@@ -7,12 +7,7 @@ import {
   ensureApplyPatchError,
   getErrorMessage,
 } from './errors';
-import {
-  createPatchExecutionContext,
-  isMissingPathError,
-  resolvePreparedUpdate,
-  stageAddedText,
-} from './execution-context';
+import { isMissingPathError, simulatePatch } from './execution-context';
 import type { PreparedChange } from './types';
 
 function isNormalizedAbsolutePath(filePath: string): boolean {
@@ -101,76 +96,21 @@ export async function preparePatchChanges(
   worktree?: string,
 ): Promise<PreparedChange[]> {
   try {
-    const { hunks, staged, getPreparedFileState, assertPreparedPathMissing } =
-      await createPatchExecutionContext(root, patchText, worktree);
-    const changes: PreparedChange[] = [];
-
-    for (const hunk of hunks) {
-      const filePath = path.resolve(root, hunk.path);
-
-      if (hunk.type === 'add') {
-        await assertPreparedPathMissing(filePath, 'add');
-        const text = stageAddedText(hunk.contents);
-        changes.push({
-          type: 'add',
-          file: filePath,
-          text,
-        });
-        staged.set(filePath, { exists: true, text, derived: true });
-        continue;
+    const { steps } = await simulatePatch(root, patchText, worktree);
+    return steps.map((step): PreparedChange => {
+      if (step.type === 'add') {
+        return { type: 'add', file: step.filePath, text: step.finalText };
       }
-
-      if (hunk.type === 'delete') {
-        await getPreparedFileState(filePath, 'delete');
-
-        changes.push({ type: 'delete', file: filePath });
-        staged.set(filePath, { exists: false, derived: true });
-        continue;
+      if (step.type === 'delete') {
+        return { type: 'delete', file: step.filePath };
       }
-
-      const current = await getPreparedFileState(filePath, 'update');
-      if (!current.exists) {
-        throw new ApplyPatchError(
-          'verification',
-          `Failed to read file to update: ${filePath}`,
-        );
-      }
-
-      const move = hunk.move_path
-        ? path.resolve(root, hunk.move_path)
-        : undefined;
-      if (move && move !== filePath) {
-        await assertPreparedPathMissing(move, 'move');
-      }
-      const { nextText } = resolvePreparedUpdate(filePath, current.text, hunk);
-
-      changes.push({
+      return {
         type: 'update',
-        file: filePath,
-        move,
-        text: nextText,
-      });
-
-      if (move && move !== filePath) {
-        staged.set(filePath, { exists: false, derived: true });
-        staged.set(move, {
-          exists: true,
-          text: nextText,
-          mode: current.mode,
-          derived: true,
-        });
-        continue;
-      }
-
-      staged.set(filePath, {
-        exists: true,
-        text: nextText,
-        mode: current.mode,
-        derived: true,
-      });
-    }
-
-    return changes;
+        file: step.filePath,
+        move: step.movePath,
+        text: step.nextText,
+      };
+    });
   } catch (error) {
     throw ensureApplyPatchError(error, 'Unexpected prepare failure');
   }

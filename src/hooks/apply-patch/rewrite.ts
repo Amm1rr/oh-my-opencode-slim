@@ -1,12 +1,8 @@
 import path from 'node:path';
 
 import { formatPatch, normalizePatchText } from './codec';
-import { ApplyPatchError, ensureApplyPatchError } from './errors';
-import {
-  createPatchExecutionContext,
-  resolvePreparedUpdate,
-  stageAddedText,
-} from './execution-context';
+import { ensureApplyPatchError } from './errors';
+import { simulatePatch, stageAddedText } from './execution-context';
 import { deriveNewContentFromText } from './resolution';
 import type { PatchHunk, UpdatePatchHunk } from './types';
 
@@ -282,13 +278,11 @@ export async function rewritePatch(
   worktree?: string,
 ): Promise<RewritePatchResult> {
   try {
-    const {
-      hunks,
-      pathsNormalized,
-      staged,
-      getPreparedFileState,
-      assertPreparedPathMissing,
-    } = await createPatchExecutionContext(root, patchText, worktree);
+    const { hunks, pathsNormalized, steps } = await simulatePatch(
+      root,
+      patchText,
+      worktree,
+    );
     const normalizedPatchText = normalizePatchText(patchText);
     const rewritten: PatchHunk[] = [];
     let changed = false;
@@ -330,61 +324,32 @@ export async function rewritePatch(
       return groupIndex;
     }
 
-    for (const hunk of hunks) {
-      if (hunk.type === 'add') {
-        const filePath = path.resolve(root, hunk.path);
-        await assertPreparedPathMissing(filePath, 'add');
-        rewritten.push(hunk);
+    for (const step of steps) {
+      const { filePath } = step;
+      if (step.type === 'add') {
+        rewritten.push(step.hunk);
         clearDependencyGroup(filePath);
-        const finalText = stageAddedText(hunk.contents);
-        staged.set(filePath, {
-          exists: true,
-          text: finalText,
-          derived: true,
-        });
         dependencyGroups.set(filePath, {
           kind: 'add',
           group: {
             index: rewritten.length - 1,
-            outputPath: hunk.path,
+            outputPath: step.hunk.path,
             outputFilePath: filePath,
-            finalText,
+            finalText: step.finalText,
           },
         });
         continue;
       }
 
-      if (hunk.type === 'delete') {
-        const filePath = path.resolve(root, hunk.path);
-        await getPreparedFileState(filePath, 'delete');
+      if (step.type === 'delete') {
         clearDependencyGroup(filePath);
-        rewritten.push(hunk);
-        staged.set(filePath, { exists: false, derived: true });
+        rewritten.push(step.hunk);
         continue;
       }
 
-      const filePath = path.resolve(root, hunk.path);
+      const hunk = step.hunk;
+      const { current, movePath, resolved, nextText } = step;
       const currentDependency = dependencyGroups.get(filePath);
-      const current = await getPreparedFileState(filePath, 'update');
-      if (!current.exists) {
-        throw new ApplyPatchError(
-          'verification',
-          `Failed to read file to update: ${filePath}`,
-        );
-      }
-
-      const movePath = hunk.move_path
-        ? path.resolve(root, hunk.move_path)
-        : undefined;
-      if (movePath && movePath !== filePath) {
-        await assertPreparedPathMissing(movePath, 'move');
-      }
-
-      const { resolved, nextText } = resolvePreparedUpdate(
-        filePath,
-        current.text,
-        hunk,
-      );
 
       let next: UpdatePatchHunk['chunks'] = [];
       let lastCanonicalEnd = -1;
@@ -517,23 +482,6 @@ export async function rewritePatch(
             finalText: nextText,
             chunks: clonePatchChunks(next),
           },
-        });
-      }
-
-      if (movePath && movePath !== filePath) {
-        staged.set(filePath, { exists: false, derived: true });
-        staged.set(movePath, {
-          exists: true,
-          text: nextText,
-          mode: current.mode,
-          derived: true,
-        });
-      } else {
-        staged.set(filePath, {
-          exists: true,
-          text: nextText,
-          mode: current.mode,
-          derived: true,
         });
       }
     }

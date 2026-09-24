@@ -5,7 +5,12 @@ import path from 'node:path';
 import { parsePatchStrict } from './codec';
 import { ApplyPatchError, getErrorMessage } from './errors';
 import { applyHits, resolveUpdateChunksFromText } from './resolution';
-import type { PatchHunk, UpdatePatchHunk } from './types';
+import type {
+  AddPatchHunk,
+  DeletePatchHunk,
+  PatchHunk,
+  UpdatePatchHunk,
+} from './types';
 
 type PathGuardContext = {
   root: string;
@@ -30,6 +35,21 @@ export type PreparedFileState =
       derived: boolean;
     };
 
+type ExistingFileState = Extract<PreparedFileState, { exists: true }>;
+
+export type SimulatedStep =
+  | { type: 'add'; hunk: AddPatchHunk; filePath: string; finalText: string }
+  | { type: 'delete'; hunk: DeletePatchHunk; filePath: string }
+  | {
+      type: 'update';
+      hunk: UpdatePatchHunk;
+      filePath: string;
+      movePath?: string;
+      current: ExistingFileState;
+      resolved: ResolvedPreparedUpdate['resolved'];
+      nextText: string;
+    };
+
 export type PatchExecutionContext = {
   hunks: PatchHunk[];
   pathsNormalized: boolean;
@@ -37,7 +57,7 @@ export type PatchExecutionContext = {
   getPreparedFileState: (
     filePath: string,
     verb: 'update' | 'delete',
-  ) => Promise<PreparedFileState>;
+  ) => Promise<ExistingFileState>;
   assertPreparedPathMissing: (
     filePath: string,
     verb: 'add' | 'move',
@@ -310,7 +330,7 @@ async function readPreparedFileText(
   }
 }
 
-export async function createPatchExecutionContext(
+async function createPatchExecutionContext(
   root: string,
   patchText: string,
   worktree?: string,
@@ -359,7 +379,7 @@ export async function createPatchExecutionContext(
   async function getPreparedFileState(
     filePath: string,
     verb: 'update' | 'delete',
-  ): Promise<PreparedFileState> {
+  ): Promise<ExistingFileState> {
     const existing = staged.get(filePath);
     if (existing) {
       if (!existing.exists) {
@@ -392,6 +412,86 @@ export async function createPatchExecutionContext(
     getPreparedFileState,
     assertPreparedPathMissing,
   };
+}
+
+export async function simulatePatch(
+  root: string,
+  patchText: string,
+  worktree?: string,
+): Promise<{
+  hunks: PatchHunk[];
+  pathsNormalized: boolean;
+  steps: SimulatedStep[];
+}> {
+  const {
+    hunks,
+    pathsNormalized,
+    staged,
+    getPreparedFileState,
+    assertPreparedPathMissing,
+  } = await createPatchExecutionContext(root, patchText, worktree);
+  const steps: SimulatedStep[] = [];
+
+  for (const hunk of hunks) {
+    const filePath = path.resolve(root, hunk.path);
+
+    if (hunk.type === 'add') {
+      await assertPreparedPathMissing(filePath, 'add');
+      const finalText = stageAddedText(hunk.contents);
+      steps.push({ type: 'add', hunk, filePath, finalText });
+      staged.set(filePath, { exists: true, text: finalText, derived: true });
+      continue;
+    }
+
+    if (hunk.type === 'delete') {
+      await getPreparedFileState(filePath, 'delete');
+      steps.push({ type: 'delete', hunk, filePath });
+      staged.set(filePath, { exists: false, derived: true });
+      continue;
+    }
+
+    const current = await getPreparedFileState(filePath, 'update');
+    const movePath = hunk.move_path
+      ? path.resolve(root, hunk.move_path)
+      : undefined;
+    if (movePath && movePath !== filePath) {
+      await assertPreparedPathMissing(movePath, 'move');
+    }
+
+    const { resolved, nextText } = resolvePreparedUpdate(
+      filePath,
+      current.text,
+      hunk,
+    );
+    steps.push({
+      type: 'update',
+      hunk,
+      filePath,
+      movePath,
+      current,
+      resolved,
+      nextText,
+    });
+
+    if (movePath && movePath !== filePath) {
+      staged.set(filePath, { exists: false, derived: true });
+      staged.set(movePath, {
+        exists: true,
+        text: nextText,
+        mode: current.mode,
+        derived: true,
+      });
+    } else {
+      staged.set(filePath, {
+        exists: true,
+        text: nextText,
+        mode: current.mode,
+        derived: true,
+      });
+    }
+  }
+
+  return { hunks, pathsNormalized, steps };
 }
 
 export function resolvePreparedUpdate(
