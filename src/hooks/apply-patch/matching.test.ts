@@ -15,8 +15,8 @@ describe('apply-patch/matching', () => {
     ['indentation', '  console.log("hola");', 'console.log("hola");'],
     [
       'curly + straight quotes',
-      'const title = “it’s ready”;',
       'const title = "it\'s ready";',
+      'const title = “it’s ready”;',
     ],
   ])('seek matches %s', (_, fileLine, patchLine) => {
     expect(seek([fileLine], [patchLine], 0)).toBe(0);

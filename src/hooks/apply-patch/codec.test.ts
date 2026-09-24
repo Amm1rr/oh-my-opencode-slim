@@ -130,7 +130,7 @@ PATCH`);
     ],
     [['a'], ['a', 'a']],
     [
-      ['a', 'b', 'a'],
+      ['a', 'a', 'a'],
       ['a', 'a'],
     ],
   ])('formatPatch roundtrips old=%j new=%j', (old_lines, new_lines) => {

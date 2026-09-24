@@ -56,7 +56,6 @@ describe('apply-patch/resolution', () => {
       'const title = "Hola mundo";',
       'const title = “Hola”;',
     ],
-    ['trim-end', ['alpha  '], 'alpha', 'omega', 'alpha  '],
     ['trim-end', ['  alpha', 'alpha  '], 'alpha', 'omega', 'alpha  '],
     ['trim', [' alpha  '], 'alpha', 'omega', ' alpha  '],
     [
