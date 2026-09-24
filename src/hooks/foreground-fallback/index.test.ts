@@ -1927,6 +1927,46 @@ describe('ForegroundFallbackManager v1 abort protection for live children', () =
     expect(mgr.willAttemptFallback('sess-exhaust')).toBe(false);
   });
 
+  test('T4b: second exhaustion stops intervening without aborting live children', async () => {
+    const { mocks } = createMockClient();
+    const mgr = manager(undefined, {
+      orchestrator: ['openai/gpt-b', 'openai/gpt-c'],
+    });
+    await mgr.handleEvent({
+      type: 'message.updated',
+      properties: {
+        info: {
+          sessionID: 'sess-loop',
+          agent: 'orchestrator',
+          providerID: 'openai',
+          modelID: 'gpt-b',
+          role: 'assistant',
+        },
+      },
+    });
+    const originalNow = Date.now;
+    let fakeNow = originalNow();
+    Date.now = () => fakeNow;
+    try {
+      const fail = async () => {
+        fakeNow += 6_000;
+        await mgr.handleEvent(error('sess-loop'));
+      };
+      await fail();
+      await fail();
+      expect(mocks.promptAsync).toHaveBeenCalledTimes(2);
+      expect(mocks.abort).toHaveBeenCalledTimes(0);
+
+      live.add('sess-loop');
+      await fail();
+      expect(mocks.abort).toHaveBeenCalledTimes(0);
+      expect(mocks.promptAsync).toHaveBeenCalledTimes(2);
+      expect(mgr.willAttemptFallback('sess-loop')).toBe(false);
+    } finally {
+      Date.now = originalNow;
+    }
+  });
+
   test('T5: busy replay settles armed handoff without promoting, aborting or retrying', async () => {
     const { mocks } = createMockClient({
       promptAsyncImpl: async () => {
@@ -1964,9 +2004,15 @@ describe('ForegroundFallbackManager v1 abort protection for live children', () =
     const { mocks } = createMockClient();
     const mgr = manager();
     live.add('sess-parent');
+    await mgr.handleEvent({
+      type: 'session.created',
+      properties: { info: { id: 'sess-child', parentID: 'sess-parent' } },
+    });
     await seed(mgr, 'sess-child');
     await mgr.handleEvent(retry('sess-child'));
-    expect(checked).toContain('sess-child');
+    expect(checked.length).toBeGreaterThan(0);
+    expect(checked.every((id) => id === 'sess-child')).toBe(true);
+    expect(mocks.post).toHaveBeenCalledTimes(1);
     expect(mocks.abort).toHaveBeenCalledTimes(1);
   });
 
@@ -1978,6 +2024,60 @@ describe('ForegroundFallbackManager v1 abort protection for live children', () =
     await mgr.handleEvent(retry('sess-parent'));
     expect(mocks.abort).toHaveBeenCalledTimes(1);
     expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+  });
+
+  test('T8: children appearing during waiter promotion prevent the retry abort', async () => {
+    const { mocks } = createMockClient({
+      postImpl: async () => {
+        live.add('sess-child');
+        return {};
+      },
+    });
+    const mgr = manager();
+    await mgr.handleEvent({
+      type: 'session.created',
+      properties: { info: { id: 'sess-child', parentID: 'sess-parent' } },
+    });
+    await seed(mgr, 'sess-child');
+    await mgr.handleEvent(retry('sess-child'));
+    expect(mocks.post).toHaveBeenCalledTimes(1);
+    expect(mocks.abort).toHaveBeenCalledTimes(0);
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(0);
+    expect(mgr.isFallbackInProgress('sess-child')).toBe(false);
+  });
+
+  test('T9: children appearing during busy promotion settle the armed handoff without abort', async () => {
+    const { mocks } = createMockClient({
+      postImpl: async () => {
+        live.add('sess-child');
+        return {};
+      },
+      promptAsyncImpl: async () => {
+        throw new Error('session busy');
+      },
+    });
+    const settleUnresolved = mock(() => {});
+    const mgr = manager(
+      undefined,
+      makeChains(),
+      {
+        prepare: mock(() => true),
+        admit: mock(() => {}),
+        reject: mock(() => {}),
+        settleUnresolved,
+      },
+      () => 1,
+    );
+    await mgr.handleEvent({
+      type: 'session.created',
+      properties: { info: { id: 'sess-child', parentID: 'sess-parent' } },
+    });
+    await seed(mgr, 'sess-child');
+    await mgr.handleEvent(error('sess-child'));
+    expect(mocks.post).toHaveBeenCalledTimes(1);
+    expect(mocks.abort).toHaveBeenCalledTimes(0);
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+    expect(settleUnresolved).toHaveBeenCalledTimes(1);
   });
 });
 
