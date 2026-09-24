@@ -1,7 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
-  autoRescueComparators,
   prefix,
   rescueByLcs,
   rescueByPrefixSuffix,
@@ -216,9 +215,5 @@ describe('apply-patch/matching', () => {
       comparator: 'unicode-trim-end',
       exact: false,
     });
-  });
-
-  test('comparator chain mirrors native matching passes', () => {
-    expect(autoRescueComparators).toHaveLength(6);
   });
 });

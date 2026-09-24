@@ -66,9 +66,6 @@ const autoRescueComparatorEntries: NamedComparator[] = [
 const MAX_LCS_CHUNK_LINES = 48;
 const MAX_LCS_CANDIDATES = 64;
 
-export const autoRescueComparators: LineComparator[] =
-  autoRescueComparatorEntries.map((entry) => entry.same);
-
 // Fuzzy rescues (prefix/suffix edges, one-line hits) keep the conservative
 // set: full-trim anchors can cross indentation levels and bind a stale chunk
 // at the wrong depth. Direct contiguous matching (seekMatch, prepared

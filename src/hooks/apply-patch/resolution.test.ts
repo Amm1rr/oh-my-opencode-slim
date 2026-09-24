@@ -1,26 +1,15 @@
 import { describe, expect, test } from 'bun:test';
-import path from 'node:path';
-
 import {
   applyHits,
-  deriveNewContent,
+  deriveNewContentFromText,
   locateChunk,
-  readFileLines,
   resolveChunkStart,
-  resolveUpdateChunks,
+  resolveUpdateChunksFromText,
 } from './resolution';
-import { createTempDir, DEFAULT_OPTIONS, writeFixture } from './test-helpers';
+import { DEFAULT_OPTIONS } from './test-helpers';
 import type { PatchChunk } from './types';
 
 describe('apply-patch/resolution', () => {
-  test('readFileLines removes the final synthetic empty line', async () => {
-    const root = await createTempDir();
-    const file = path.join(root, 'sample.txt');
-    await writeFixture(root, 'sample.txt', 'alpha\nbeta\n');
-
-    expect(await readFileLines(file)).toEqual(['alpha', 'beta']);
-  });
-
   test('resolveChunkStart uses change_context as an anchor when present', () => {
     const chunk: PatchChunk = {
       old_lines: [],
@@ -173,14 +162,11 @@ describe('apply-patch/resolution', () => {
     ).toThrow('Failed to find expected lines');
   });
 
-  test('deriveNewContent resolves EOF updates', async () => {
-    const root = await createTempDir();
-    const file = path.join(root, 'sample.txt');
-    await writeFixture(root, 'sample.txt', 'alpha\nbeta');
-
+  test('deriveNewContentFromText resolves EOF updates', () => {
     expect(
-      await deriveNewContent(
-        file,
+      deriveNewContentFromText(
+        'sample.txt',
+        'alpha\nbeta',
         [
           {
             old_lines: ['beta'],
@@ -193,14 +179,11 @@ describe('apply-patch/resolution', () => {
     ).toBe('alpha\nomega');
   });
 
-  test('deriveNewContent preserves CRLF while rebuilding content', async () => {
-    const root = await createTempDir();
-    const file = path.join(root, 'sample.txt');
-    await writeFixture(root, 'sample.txt', 'alpha\r\nbeta\r\ngamma\r\n');
-
+  test('deriveNewContentFromText preserves CRLF while rebuilding content', () => {
     expect(
-      await deriveNewContent(
-        file,
+      deriveNewContentFromText(
+        'sample.txt',
+        'alpha\r\nbeta\r\ngamma\r\n',
         [
           {
             old_lines: ['alpha', 'beta', 'gamma'],
@@ -212,14 +195,11 @@ describe('apply-patch/resolution', () => {
     ).toBe('alpha\r\nBETA\r\ngamma\r\n');
   });
 
-  test('deriveNewContent inserts an anchored block without moving it to EOF', async () => {
-    const root = await createTempDir();
-    const file = path.join(root, 'sample.txt');
-    await writeFixture(root, 'sample.txt', 'top\nanchor\nbottom\n');
-
+  test('deriveNewContentFromText inserts an anchored block without moving it to EOF', () => {
     expect(
-      await deriveNewContent(
-        file,
+      deriveNewContentFromText(
+        'sample.txt',
+        'top\nanchor\nbottom\n',
         [
           {
             old_lines: [],
@@ -232,14 +212,11 @@ describe('apply-patch/resolution', () => {
     ).toBe('top\nanchor\nmiddle\nbottom\n');
   });
 
-  test('deriveNewContent supports pure insertion at EOF with a single anchor', async () => {
-    const root = await createTempDir();
-    const file = path.join(root, 'sample.txt');
-    await writeFixture(root, 'sample.txt', 'top\nanchor\n');
-
+  test('deriveNewContentFromText supports pure insertion at EOF with a single anchor', () => {
     expect(
-      await deriveNewContent(
-        file,
+      deriveNewContentFromText(
+        'sample.txt',
+        'top\nanchor\n',
         [
           {
             old_lines: [],
@@ -252,13 +229,10 @@ describe('apply-patch/resolution', () => {
     ).toBe('top\nanchor\nmiddle\n');
   });
 
-  test('resolveUpdateChunks canonicalizes EOF insertion with a tolerant anchor', async () => {
-    const root = await createTempDir();
-    const file = path.join(root, 'sample.txt');
-    await writeFixture(root, 'sample.txt', 'top\n“anchor”\n');
-
-    const { resolved } = await resolveUpdateChunks(
-      file,
+  test('resolveUpdateChunksFromText canonicalizes EOF insertion with a tolerant anchor', () => {
+    const { resolved } = resolveUpdateChunksFromText(
+      'sample.txt',
+      'top\n“anchor”\n',
       [
         {
           old_lines: [],
@@ -277,13 +251,10 @@ describe('apply-patch/resolution', () => {
     });
   });
 
-  test('resolveUpdateChunks canonicalizes non-EOF insertion with a trim-end anchor', async () => {
-    const root = await createTempDir();
-    const file = path.join(root, 'sample.txt');
-    await writeFixture(root, 'sample.txt', 'top\nanchor  \nbottom\n');
-
-    const { resolved } = await resolveUpdateChunks(
-      file,
+  test('resolveUpdateChunksFromText canonicalizes non-EOF insertion with a trim-end anchor', () => {
+    const { resolved } = resolveUpdateChunksFromText(
+      'sample.txt',
+      'top\nanchor  \nbottom\n',
       [
         {
           old_lines: [],
@@ -302,14 +273,11 @@ describe('apply-patch/resolution', () => {
     });
   });
 
-  test('deriveNewContent fails if a pure insertion cannot find its anchor', async () => {
-    const root = await createTempDir();
-    const file = path.join(root, 'sample.txt');
-    await writeFixture(root, 'sample.txt', 'top\nbottom\n');
-
-    await expect(
-      deriveNewContent(
-        file,
+  test('deriveNewContentFromText fails if a pure insertion cannot find its anchor', () => {
+    expect(() =>
+      deriveNewContentFromText(
+        'sample.txt',
+        'top\nbottom\n',
         [
           {
             old_lines: [],
@@ -319,21 +287,14 @@ describe('apply-patch/resolution', () => {
         ],
         DEFAULT_OPTIONS,
       ),
-    ).rejects.toThrow('Failed to find insertion anchor');
+    ).toThrow('Failed to find insertion anchor');
   });
 
-  test('deriveNewContent fails if a pure insertion has an ambiguous anchor', async () => {
-    const root = await createTempDir();
-    const file = path.join(root, 'sample.txt');
-    await writeFixture(
-      root,
-      'sample.txt',
-      'top\nanchor\none\nsplit\nanchor\ntwo\n',
-    );
-
-    await expect(
-      deriveNewContent(
-        file,
+  test('deriveNewContentFromText fails if a pure insertion has an ambiguous anchor', () => {
+    expect(() =>
+      deriveNewContentFromText(
+        'sample.txt',
+        'top\nanchor\none\nsplit\nanchor\ntwo\n',
         [
           {
             old_lines: [],
@@ -343,17 +304,14 @@ describe('apply-patch/resolution', () => {
         ],
         DEFAULT_OPTIONS,
       ),
-    ).rejects.toThrow('Insertion anchor was ambiguous');
+    ).toThrow('Insertion anchor was ambiguous');
   });
 
-  test('deriveNewContent fails if a tolerant insertion anchor is ambiguous', async () => {
-    const root = await createTempDir();
-    const file = path.join(root, 'sample.txt');
-    await writeFixture(root, 'sample.txt', 'top\n“anchor”\n"anchor"\n');
-
-    await expect(
-      deriveNewContent(
-        file,
+  test('deriveNewContentFromText fails if a tolerant insertion anchor is ambiguous', () => {
+    expect(() =>
+      deriveNewContentFromText(
+        'sample.txt',
+        'top\n“anchor”\n"anchor"\n',
         [
           {
             old_lines: [],
@@ -363,21 +321,14 @@ describe('apply-patch/resolution', () => {
         ],
         DEFAULT_OPTIONS,
       ),
-    ).rejects.toThrow('Insertion anchor was ambiguous');
+    ).toThrow('Insertion anchor was ambiguous');
   });
 
-  test('deriveNewContent fails if a later chunk remains ambiguous', async () => {
-    const root = await createTempDir();
-    const file = path.join(root, 'sample.txt');
-    await writeFixture(
-      root,
-      'sample.txt',
-      'alpha\none\nomega\nsplit\nleft\nstale-one\nright\ngap\nleft\nstale-two\nright\n',
-    );
-
-    await expect(
-      deriveNewContent(
-        file,
+  test('deriveNewContentFromText fails if a later chunk remains ambiguous', () => {
+    expect(() =>
+      deriveNewContentFromText(
+        'sample.txt',
+        'alpha\none\nomega\nsplit\nleft\nstale-one\nright\ngap\nleft\nstale-two\nright\n',
         [
           {
             old_lines: ['one'],
@@ -390,17 +341,14 @@ describe('apply-patch/resolution', () => {
         ],
         DEFAULT_OPTIONS,
       ),
-    ).rejects.toThrow('ambiguous');
+    ).toThrow('ambiguous');
   });
 
-  test('deriveNewContent rescues a stale EOF and preserves the final update', async () => {
-    const root = await createTempDir();
-    const file = path.join(root, 'sample.txt');
-    await writeFixture(root, 'sample.txt', 'alpha\nstale\nomega');
-
+  test('deriveNewContentFromText rescues a stale EOF and preserves the final update', () => {
     expect(
-      await deriveNewContent(
-        file,
+      deriveNewContentFromText(
+        'sample.txt',
+        'alpha\nstale\nomega',
         [
           {
             old_lines: ['alpha', 'old', 'omega'],

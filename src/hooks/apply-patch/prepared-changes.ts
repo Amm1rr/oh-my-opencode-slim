@@ -3,9 +3,7 @@ import * as fs from 'node:fs/promises';
 import path from 'node:path';
 
 import {
-  createApplyPatchInternalError,
-  createApplyPatchValidationError,
-  createApplyPatchVerificationError,
+  ApplyPatchError,
   ensureApplyPatchError,
   getErrorMessage,
 } from './errors';
@@ -27,13 +25,15 @@ function assertPreparedChangePath(
   index: number,
 ): asserts value is string {
   if (typeof value !== 'string' || value.length === 0) {
-    throw createApplyPatchValidationError(
+    throw new ApplyPatchError(
+      'validation',
       `Prepared changes require a non-empty string ${field} at index ${index}`,
     );
   }
 
   if (!isNormalizedAbsolutePath(value)) {
-    throw createApplyPatchValidationError(
+    throw new ApplyPatchError(
+      'validation',
       `Prepared changes require absolute normalized ${field} paths at index ${index}: ${value}`,
     );
   }
@@ -44,13 +44,15 @@ function assertPreparedChangesContract(
 ): void {
   for (const [index, change] of changes.entries()) {
     if (!change || typeof change !== 'object') {
-      throw createApplyPatchValidationError(
+      throw new ApplyPatchError(
+        'validation',
         `Prepared change at index ${index} must be an object`,
       );
     }
 
     if (!('type' in change)) {
-      throw createApplyPatchValidationError(
+      throw new ApplyPatchError(
+        'validation',
         `Prepared change at index ${index} is missing type`,
       );
     }
@@ -59,7 +61,8 @@ function assertPreparedChangesContract(
 
     if (change.type === 'add') {
       if (typeof change.text !== 'string') {
-        throw createApplyPatchValidationError(
+        throw new ApplyPatchError(
+          'validation',
           `Prepared add at index ${index} is missing text`,
         );
       }
@@ -72,7 +75,8 @@ function assertPreparedChangesContract(
 
     if (change.type === 'update') {
       if (typeof change.text !== 'string') {
-        throw createApplyPatchValidationError(
+        throw new ApplyPatchError(
+          'validation',
           `Prepared update at index ${index} is missing text`,
         );
       }
@@ -84,7 +88,8 @@ function assertPreparedChangesContract(
       continue;
     }
 
-    throw createApplyPatchValidationError(
+    throw new ApplyPatchError(
+      'validation',
       `Prepared change at index ${index} has unsupported type`,
     );
   }
@@ -126,7 +131,8 @@ export async function preparePatchChanges(
 
       const current = await getPreparedFileState(filePath, 'update');
       if (!current.exists) {
-        throw createApplyPatchVerificationError(
+        throw new ApplyPatchError(
+          'verification',
           `Failed to read file to update: ${filePath}`,
         );
       }
@@ -190,7 +196,8 @@ async function readSnapshot(filePath: string): Promise<FileSnapshot> {
   try {
     const stat = await fs.stat(filePath);
     if (stat.isDirectory()) {
-      throw createApplyPatchInternalError(
+      throw new ApplyPatchError(
+        'internal',
         `Refusing to overwrite directory while applying prepared changes: ${filePath}`,
       );
     }
@@ -205,7 +212,8 @@ async function readSnapshot(filePath: string): Promise<FileSnapshot> {
       return { type: 'missing' };
     }
 
-    throw createApplyPatchInternalError(
+    throw new ApplyPatchError(
+      'internal',
       `Failed to snapshot file before apply: ${filePath}`,
       error,
     );
@@ -272,7 +280,8 @@ function assertPreparedApplyPreconditions(
   for (const change of changes) {
     if (change.type === 'add') {
       if (pathState(change.file) !== 'missing') {
-        throw createApplyPatchVerificationError(
+        throw new ApplyPatchError(
+          'verification',
           `Prepared add target already exists: ${change.file}`,
         );
       }
@@ -284,7 +293,8 @@ function assertPreparedApplyPreconditions(
 
     if (change.type === 'delete') {
       if (pathState(change.file) !== 'file') {
-        throw createApplyPatchVerificationError(
+        throw new ApplyPatchError(
+          'verification',
           `Prepared delete source does not exist: ${change.file}`,
         );
       }
@@ -294,7 +304,8 @@ function assertPreparedApplyPreconditions(
     }
 
     if (pathState(change.file) !== 'file') {
-      throw createApplyPatchVerificationError(
+      throw new ApplyPatchError(
+        'verification',
         change.move && change.move !== change.file
           ? `Prepared move source does not exist: ${change.file}`
           : `Prepared update source does not exist: ${change.file}`,
@@ -303,7 +314,8 @@ function assertPreparedApplyPreconditions(
 
     if (change.move && change.move !== change.file) {
       if (pathState(change.move) !== 'missing') {
-        throw createApplyPatchVerificationError(
+        throw new ApplyPatchError(
+          'verification',
           `Prepared move destination already exists: ${change.move}`,
         );
       }
@@ -413,6 +425,6 @@ export async function applyPreparedChanges(
       ? `Failed to apply prepared changes and rollback was incomplete: ${getErrorMessage(error)}; rollback issues: ${rollbackFailures.join('; ')}`
       : `Failed to apply prepared changes; rolled back touched files: ${getErrorMessage(error)}`;
 
-    throw createApplyPatchInternalError(message, error);
+    throw new ApplyPatchError('internal', message, error);
   }
 }

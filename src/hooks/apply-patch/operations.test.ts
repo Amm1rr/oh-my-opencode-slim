@@ -10,22 +10,15 @@ import {
 import path from 'node:path';
 
 import { formatPatch, parsePatch } from './codec';
-import {
-  isApplyPatchBlockedError,
-  isApplyPatchValidationError,
-  isApplyPatchVerificationError,
-} from './errors';
-import {
-  applyPreparedChanges,
-  preparePatchChanges,
-  rewritePatch,
-  rewritePatchText,
-} from './operations';
+import { ApplyPatchError } from './errors';
+import { applyPreparedChanges, preparePatchChanges } from './prepared-changes';
+import { rewritePatch } from './rewrite';
 import {
   applyPatch,
   createTempDir,
   DEFAULT_OPTIONS,
   readText,
+  rewritePatchText,
   writeFixture,
 } from './test-helpers';
 
@@ -494,7 +487,8 @@ garbage
       DEFAULT_OPTIONS,
     ).catch((caughtError) => caughtError);
 
-    expect(isApplyPatchBlockedError(error)).toBeTrue();
+    expect(error).toBeInstanceOf(ApplyPatchError);
+    expect((error as ApplyPatchError).kind).toBe('blocked');
     expect(error).toBeInstanceOf(Error);
     expect((error as Error).message).toBe(
       `apply_patch blocked: patch contains path outside workspace root: ${outsidePath}`,
@@ -725,7 +719,8 @@ garbage
       },
     ]).catch((caughtError) => caughtError);
 
-    expect(isApplyPatchValidationError(error)).toBeTrue();
+    expect(error).toBeInstanceOf(ApplyPatchError);
+    expect((error as ApplyPatchError).kind).toBe('validation');
     expect(error).toBeInstanceOf(Error);
     expect((error as Error).message).toBe(
       'apply_patch validation failed: Prepared changes require absolute normalized file paths at index 0: relative.txt',
@@ -757,8 +752,10 @@ garbage
       DEFAULT_OPTIONS,
     ).catch((error) => error);
 
-    expect(isApplyPatchVerificationError(verificationError)).toBeTrue();
-    expect(isApplyPatchValidationError(validationError)).toBeTrue();
+    expect(verificationError).toBeInstanceOf(ApplyPatchError);
+    expect((verificationError as ApplyPatchError).kind).toBe('verification');
+    expect(validationError).toBeInstanceOf(ApplyPatchError);
+    expect((validationError as ApplyPatchError).kind).toBe('validation');
   });
 
   test('rewritePatchText canonicalizes EOF insertion with a tolerant anchor', async () => {
@@ -1500,8 +1497,8 @@ garbage
       root,
     ).catch((caughtError) => caughtError);
 
-    expect(isApplyPatchBlockedError(error)).toBeTrue();
-    expect(isApplyPatchValidationError(error)).toBeFalse();
+    expect(error).toBeInstanceOf(ApplyPatchError);
+    expect((error as ApplyPatchError).kind).toBe('blocked');
     expect(error).toBeInstanceOf(Error);
     expect((error as Error).message).toContain(
       'apply_patch blocked: patch contains path outside workspace root:',

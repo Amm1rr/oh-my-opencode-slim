@@ -3,13 +3,7 @@ import * as fs from 'node:fs/promises';
 import path from 'node:path';
 
 import { parsePatchStrict } from './codec';
-import {
-  createApplyPatchBlockedError,
-  createApplyPatchInternalError,
-  createApplyPatchValidationError,
-  createApplyPatchVerificationError,
-  getErrorMessage,
-} from './errors';
+import { ApplyPatchError, getErrorMessage } from './errors';
 import { applyHits, resolveUpdateChunksFromText } from './resolution';
 import type {
   ApplyPatchRuntimeOptions,
@@ -78,7 +72,8 @@ async function real(target: string): Promise<string> {
         return null;
       }
 
-      throw createApplyPatchInternalError(
+      throw new ApplyPatchError(
+        'internal',
         `Failed to resolve real path: ${current}`,
         error,
       );
@@ -121,7 +116,8 @@ async function guard(ctx: PathGuardContext, target: string): Promise<void> {
   }
 
   if (!ctx.worktree) {
-    throw createApplyPatchBlockedError(
+    throw new ApplyPatchError(
+      'blocked',
       `patch contains path outside workspace root: ${target}`,
     );
   }
@@ -131,7 +127,8 @@ async function guard(ctx: PathGuardContext, target: string): Promise<void> {
   // instead of becoming an unhandled promise.
   ctx.worktreeReal ??= ctx.worktree !== '/' ? real(ctx.worktree) : undefined;
   if (!ctx.worktreeReal) {
-    throw createApplyPatchBlockedError(
+    throw new ApplyPatchError(
+      'blocked',
       `patch contains path outside workspace root: ${target}`,
     );
   }
@@ -140,7 +137,8 @@ async function guard(ctx: PathGuardContext, target: string): Promise<void> {
     return;
   }
 
-  throw createApplyPatchBlockedError(
+  throw new ApplyPatchError(
+    'blocked',
     `patch contains path outside workspace root: ${target}`,
   );
 }
@@ -160,7 +158,8 @@ async function statCached(
         return null;
       }
 
-      throw createApplyPatchInternalError(
+      throw new ApplyPatchError(
+        'internal',
         `Failed to stat file for patch verification: ${filePath}`,
         error,
       );
@@ -179,7 +178,8 @@ async function assertRegularFile(
 ): Promise<void> {
   const stat = await statCached(ctx, filePath);
   if (!stat || stat.isDirectory()) {
-    throw createApplyPatchVerificationError(
+    throw new ApplyPatchError(
+      'verification',
       `Failed to read file to ${verb}: ${filePath}`,
     );
   }
@@ -277,16 +277,16 @@ export function parseValidatedPatch(patchText: string): PatchHunk[] {
   try {
     hunks = parsePatchStrict(patchText).hunks;
   } catch (error) {
-    throw createApplyPatchValidationError(getErrorMessage(error));
+    throw new ApplyPatchError('validation', getErrorMessage(error));
   }
 
   if (hunks.length === 0) {
     const clean = patchText.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
     if (clean === '*** Begin Patch\n*** End Patch') {
-      throw createApplyPatchValidationError('empty patch');
+      throw new ApplyPatchError('validation', 'empty patch');
     }
 
-    throw createApplyPatchValidationError('no hunks found');
+    throw new ApplyPatchError('validation', 'no hunks found');
   }
 
   return hunks;
@@ -300,12 +300,14 @@ async function readPreparedFileText(
     return await fs.readFile(filePath, 'utf-8');
   } catch (error) {
     if (isMissingPathError(error)) {
-      throw createApplyPatchVerificationError(
+      throw new ApplyPatchError(
+        'verification',
         `Failed to read file to ${verb}: ${filePath}`,
       );
     }
 
-    throw createApplyPatchInternalError(
+    throw new ApplyPatchError(
+      'internal',
       `Failed to read file for patch verification: ${filePath}`,
       error,
     );
@@ -337,7 +339,8 @@ export async function createPatchExecutionContext(
         return;
       }
 
-      throw createApplyPatchVerificationError(
+      throw new ApplyPatchError(
+        'verification',
         verb === 'add'
           ? `Add File target already exists: ${filePath}`
           : `Move destination already exists: ${filePath}`,
@@ -349,7 +352,8 @@ export async function createPatchExecutionContext(
       return;
     }
 
-    throw createApplyPatchVerificationError(
+    throw new ApplyPatchError(
+      'verification',
       verb === 'add'
         ? `Add File target already exists: ${filePath}`
         : `Move destination already exists: ${filePath}`,
@@ -363,7 +367,8 @@ export async function createPatchExecutionContext(
     const existing = staged.get(filePath);
     if (existing) {
       if (!existing.exists) {
-        throw createApplyPatchVerificationError(
+        throw new ApplyPatchError(
+          'verification',
           `Failed to read file to ${verb}: ${filePath}`,
         );
       }
@@ -413,7 +418,7 @@ export function resolvePreparedUpdate(
       ),
     };
   } catch (error) {
-    throw createApplyPatchVerificationError(getErrorMessage(error), error);
+    throw new ApplyPatchError('verification', getErrorMessage(error), error);
   }
 }
 

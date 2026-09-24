@@ -1,5 +1,3 @@
-import * as fs from 'node:fs/promises';
-
 import {
   matchPreparedAutoRescueComparator,
   prefix,
@@ -36,22 +34,6 @@ function splitFileLines(text: string): FileLines {
   }
 
   return { lines, eol, hasFinalNewline };
-}
-
-async function readFileLinesWithEol(file: string): Promise<FileLines> {
-  let text: string;
-
-  try {
-    text = await fs.readFile(file, 'utf-8');
-  } catch (error) {
-    throw new Error(`Failed to read file ${file}: ${error}`);
-  }
-
-  return splitFileLines(text);
-}
-
-export async function readFileLines(file: string): Promise<string[]> {
-  return (await readFileLinesWithEol(file)).lines;
 }
 
 export function resolveChunkStart(
@@ -377,24 +359,6 @@ function resolveUpdateChunksFromFileLines(
   };
 }
 
-export async function resolveUpdateChunks(
-  file: string,
-  chunks: PatchChunk[],
-  cfg: ApplyPatchRuntimeOptions,
-): Promise<{
-  lines: string[];
-  resolved: ResolvedChunk[];
-  eol: '\n' | '\r\n';
-  hasFinalNewline: boolean;
-}> {
-  return resolveUpdateChunksFromFileLines(
-    file,
-    await readFileLinesWithEol(file),
-    chunks,
-    cfg,
-  );
-}
-
 export function deriveNewContentFromText(
   file: string,
   text: string,
@@ -428,23 +392,5 @@ export function resolveUpdateChunksFromText(
     splitFileLines(text),
     chunks,
     cfg,
-  );
-}
-
-export async function deriveNewContent(
-  file: string,
-  chunks: PatchChunk[],
-  cfg: ApplyPatchRuntimeOptions,
-): Promise<string> {
-  const { lines, resolved, eol, hasFinalNewline } = await resolveUpdateChunks(
-    file,
-    chunks,
-    cfg,
-  );
-  return applyHits(
-    lines,
-    resolved.map((chunk) => chunk.hit),
-    eol,
-    hasFinalNewline,
   );
 }

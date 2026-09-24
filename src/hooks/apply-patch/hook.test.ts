@@ -4,7 +4,7 @@ import path from 'node:path';
 
 import { parsePatch } from './codec';
 import { createApplyPatchHook } from './index';
-import { applyPreparedChanges, preparePatchChanges } from './operations';
+import { applyPreparedChanges, preparePatchChanges } from './prepared-changes';
 import { createTempDir, DEFAULT_OPTIONS, writeFixture } from './test-helpers';
 
 function createHook() {

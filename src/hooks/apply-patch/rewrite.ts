@@ -1,10 +1,7 @@
 import path from 'node:path';
 
 import { formatPatch, normalizePatchText } from './codec';
-import {
-  createApplyPatchVerificationError,
-  ensureApplyPatchError,
-} from './errors';
+import { ApplyPatchError, ensureApplyPatchError } from './errors';
 import {
   createPatchExecutionContext,
   resolvePreparedUpdate,
@@ -385,7 +382,8 @@ export async function rewritePatch(
       const currentDependency = dependencyGroups.get(filePath);
       const current = await getPreparedFileState(filePath, 'update');
       if (!current.exists) {
-        throw createApplyPatchVerificationError(
+        throw new ApplyPatchError(
+          'verification',
           `Failed to read file to update: ${filePath}`,
         );
       }
@@ -588,13 +586,4 @@ export async function rewritePatch(
   } catch (error) {
     throw ensureApplyPatchError(error, 'Unexpected rewrite failure');
   }
-}
-
-export async function rewritePatchText(
-  root: string,
-  patchText: string,
-  cfg: ApplyPatchRuntimeOptions,
-  worktree?: string,
-): Promise<string> {
-  return (await rewritePatch(root, patchText, cfg, worktree)).patchText;
 }

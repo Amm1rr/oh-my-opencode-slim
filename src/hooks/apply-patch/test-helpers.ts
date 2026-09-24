@@ -3,7 +3,8 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { applyPreparedChanges, preparePatchChanges } from './operations';
+import { applyPreparedChanges, preparePatchChanges } from './prepared-changes';
+import { rewritePatch } from './rewrite';
 import type { ApplyPatchRuntimeOptions } from './types';
 
 const tempDirs: string[] = [];
@@ -49,4 +50,13 @@ export async function applyPatch(
 ): Promise<void> {
   const changes = await preparePatchChanges(root, patchText, cfg);
   await applyPreparedChanges(changes);
+}
+
+export async function rewritePatchText(
+  root: string,
+  patchText: string,
+  cfg: ApplyPatchRuntimeOptions = DEFAULT_OPTIONS,
+  worktree?: string,
+): Promise<string> {
+  return (await rewritePatch(root, patchText, cfg, worktree)).patchText;
 }
