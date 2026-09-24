@@ -55,10 +55,6 @@ const ALLOWLIST = new Map<string, string>([
     'Date.now() gates retry/dedup windows for model failover; no prompt content is derived from it.',
   ],
   [
-    'hooks/apply-patch/prepared-changes.ts',
-    'randomUUID() names temp files during atomic writes; never serialized into messages.',
-  ],
-  [
     'hooks/task-session-manager/task-context-tracker.ts',
     'Date.now() records lastReadAt for internal recency ordering; formatted prompt output (background job board) is confined to the volatile trailing message.',
   ],

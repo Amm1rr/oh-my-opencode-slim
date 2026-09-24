@@ -51,29 +51,6 @@ export type ParsedPatch = {
   hunks: PatchHunk[];
 };
 
-export type AddPreparedChange = {
-  type: 'add';
-  file: string;
-  text: string;
-};
-
-export type DeletePreparedChange = {
-  type: 'delete';
-  file: string;
-};
-
-export type UpdatePreparedChange = {
-  type: 'update';
-  file: string;
-  move?: string;
-  text: string;
-};
-
-export type PreparedChange =
-  | AddPreparedChange
-  | DeletePreparedChange
-  | UpdatePreparedChange;
-
 export type MatchHit = {
   start: number;
   del: number;

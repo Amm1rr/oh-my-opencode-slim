@@ -4,8 +4,7 @@ import path from 'node:path';
 
 import { parsePatch } from './codec';
 import { createApplyPatchHook } from './index';
-import { applyPreparedChanges, preparePatchChanges } from './prepared-changes';
-import { createTempDir, writeFixture } from './test-helpers';
+import { applyPatch, createTempDir, writeFixture } from './test-helpers';
 
 function createHook() {
   return createApplyPatchHook({
@@ -80,11 +79,7 @@ PATCH`,
 
     expect(output.args.patchText).toBe(cleanPatchText);
 
-    const changes = await preparePatchChanges(
-      root,
-      output.args.patchText as string,
-    );
-    await applyPreparedChanges(changes);
+    await applyPatch(root, output.args.patchText as string);
     expect(await readFile(path.join(root, 'sample.txt'), 'utf-8')).toBe(
       'line-01\nexact-top\nexact-new\nexact-bottom\nline-05\n',
     );
@@ -216,11 +211,7 @@ PATCH`,
       rewritten.type === 'update' && rewritten.chunks[0]?.old_lines,
     ).toEqual(['A', 'B-stale', 'C', 'D', 'E']);
 
-    const changes = await preparePatchChanges(
-      root,
-      output.args.patchText as string,
-    );
-    await applyPreparedChanges(changes);
+    await applyPatch(root, output.args.patchText as string);
     expect(await readFile(path.join(root, 'sample.txt'), 'utf-8')).toBe(
       'top\nA\nB\nC\nD\nX\nbottom\n',
     );
@@ -339,11 +330,7 @@ PATCH`,
       rewritten.type === 'update' ? rewritten.chunks[0]?.old_lines : undefined,
     ).toEqual(['const title = “Hola”;']);
 
-    const changes = await preparePatchChanges(
-      root,
-      output.args.patchText as string,
-    );
-    await applyPreparedChanges(changes);
+    await applyPatch(root, output.args.patchText as string);
     expect(await readFile(path.join(root, 'sample.txt'), 'utf-8')).toBe(
       'const title = "Hola mundo";\n',
     );
@@ -372,11 +359,7 @@ PATCH`,
       rewritten.type === 'update' ? rewritten.chunks[0]?.old_lines : undefined,
     ).toEqual(['alpha  ']);
 
-    const changes = await preparePatchChanges(
-      root,
-      output.args.patchText as string,
-    );
-    await applyPreparedChanges(changes);
+    await applyPatch(root, output.args.patchText as string);
     expect(await readFile(path.join(root, 'sample.txt'), 'utf-8')).toBe(
       'omega\n',
     );
@@ -528,11 +511,7 @@ garbage
       output,
     );
 
-    const changes = await preparePatchChanges(
-      root,
-      output.args.patchText as string,
-    );
-    await applyPreparedChanges(changes);
+    await applyPatch(root, output.args.patchText as string);
     expect(await readFile(path.join(root, 'sample.txt'), 'utf-8')).toBe(
       'top\nanchor-insert\nmiddle-inserted\nafter-anchor\nend\n',
     );
@@ -660,11 +639,7 @@ garbage
       ],
     });
 
-    const changes = await preparePatchChanges(
-      root,
-      output.args.patchText as string,
-    );
-    await applyPreparedChanges(changes);
+    await applyPatch(root, output.args.patchText as string);
     expect(await readFile(path.join(root, 'sample.txt'), 'utf-8')).toBe(
       'top\nprefix\nnew-value\nsuffix\n',
     );
