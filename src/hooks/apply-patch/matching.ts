@@ -140,7 +140,7 @@ export function seekMatch(
       eof,
     );
     if (at !== undefined) {
-      return { index: at, comparator: level.name, exact: level.exact };
+      return { index: at, exact: level.exact };
     }
   }
 

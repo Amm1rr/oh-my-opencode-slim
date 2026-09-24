@@ -204,7 +204,6 @@ describe('apply-patch/matching', () => {
       seekMatch(['console.log(“hola”);  '], ['console.log("hola");'], 0),
     ).toEqual({
       index: 0,
-      comparator: 'unicode-trim-end',
       exact: false,
     });
   });

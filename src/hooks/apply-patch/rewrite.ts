@@ -4,7 +4,7 @@ import { formatPatch, normalizePatchText } from './codec';
 import { ensureApplyPatchError } from './errors';
 import { simulatePatch, stageAddedText } from './execution-context';
 import { commonEdges } from './matching';
-import { deriveNewContentFromText } from './resolution';
+import { resolveUpdate } from './resolution';
 import type { PatchHunk, UpdatePatchHunk } from './types';
 
 export type RewritePatchResult = {
@@ -75,9 +75,8 @@ function createCollapsedUpdateHunk(
       ? collapsedChunk
       : (() => {
           try {
-            return deriveNewContentFromText(filePath, baseText, [
-              minimizedChunk,
-            ]) === finalText
+            return resolveUpdate(filePath, baseText, [minimizedChunk])
+              .nextText === finalText
               ? minimizedChunk
               : collapsedChunk;
           } catch {
@@ -170,11 +169,11 @@ function mergeSameFileUpdateGroupChunks(
   ];
 
   try {
-    const mergedText = deriveNewContentFromText(
+    const mergedText = resolveUpdate(
       filePath,
       group.baseText,
       mergedChunks,
-    );
+    ).nextText;
 
     return mergedText === finalText ? mergedChunks : undefined;
   } catch {
@@ -393,7 +392,7 @@ export async function rewritePatch(
         // instead of shipping a rewrite that cannot re-apply.
         try {
           if (
-            deriveNewContentFromText(filePath, current.text, next) !== nextText
+            resolveUpdate(filePath, current.text, next).nextText !== nextText
           ) {
             next = createCollapsedUpdateHunk(
               hunk.path,

@@ -1,10 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import {
   applyHits,
-  deriveNewContentFromText,
   locateChunk,
   resolveChunkStart,
-  resolveUpdateChunksFromText,
+  resolveUpdate,
 } from './resolution';
 import type { PatchChunk } from './types';
 
@@ -68,11 +67,10 @@ describe('apply-patch/resolution', () => {
     ],
   ])(
     'locateChunk canonicalizes %s matches',
-    (comparator, lines, oldLine, newLine, canonical) => {
+    (_, lines, oldLine, newLine, canonical) => {
       const chunk: PatchChunk = { old_lines: [oldLine], new_lines: [newLine] };
       const resolved = locateChunk(lines, 'sample.txt', chunk, 0);
       expect(resolved.rewritten).toBe(true);
-      expect(resolved.matchComparator).toBe(comparator);
       expect(resolved.canonical_old_lines).toEqual([canonical]);
       expect(resolved.canonical_new_lines).toEqual([newLine]);
     },
@@ -101,76 +99,71 @@ describe('apply-patch/resolution', () => {
     );
   });
 
-  test('deriveNewContentFromText resolves EOF updates', () => {
+  test('resolveUpdate resolves EOF updates', () => {
     expect(
-      deriveNewContentFromText('sample.txt', 'alpha\nbeta', [
+      resolveUpdate('sample.txt', 'alpha\nbeta', [
         {
           old_lines: ['beta'],
           new_lines: ['omega'],
           is_end_of_file: true,
         },
-      ]),
+      ]).nextText,
     ).toBe('alpha\nomega');
   });
 
-  test('deriveNewContentFromText preserves CRLF while rebuilding content', () => {
+  test('resolveUpdate preserves CRLF while rebuilding content', () => {
     expect(
-      deriveNewContentFromText('sample.txt', 'alpha\r\nbeta\r\ngamma\r\n', [
+      resolveUpdate('sample.txt', 'alpha\r\nbeta\r\ngamma\r\n', [
         {
           old_lines: ['alpha', 'beta', 'gamma'],
           new_lines: ['alpha', 'BETA', 'gamma'],
         },
-      ]),
+      ]).nextText,
     ).toBe('alpha\r\nBETA\r\ngamma\r\n');
   });
 
-  test('deriveNewContentFromText inserts an anchored block without moving it to EOF', () => {
+  test('resolveUpdate inserts an anchored block without moving it to EOF', () => {
     expect(
-      deriveNewContentFromText('sample.txt', 'top\nanchor\nbottom\n', [
+      resolveUpdate('sample.txt', 'top\nanchor\nbottom\n', [
         {
           old_lines: [],
           new_lines: ['middle'],
           change_context: 'anchor',
         },
-      ]),
+      ]).nextText,
     ).toBe('top\nanchor\nmiddle\nbottom\n');
   });
 
-  test('deriveNewContentFromText supports pure insertion at EOF with a single anchor', () => {
+  test('resolveUpdate supports pure insertion at EOF with a single anchor', () => {
     expect(
-      deriveNewContentFromText('sample.txt', 'top\nanchor\n', [
+      resolveUpdate('sample.txt', 'top\nanchor\n', [
         {
           old_lines: [],
           new_lines: ['middle'],
           change_context: 'anchor',
         },
-      ]),
+      ]).nextText,
     ).toBe('top\nanchor\nmiddle\n');
   });
 
-  test('resolveUpdateChunksFromText canonicalizes EOF insertion with a tolerant anchor', () => {
-    const { resolved } = resolveUpdateChunksFromText(
-      'sample.txt',
-      'top\n“anchor”\n',
-      [
-        {
-          old_lines: [],
-          new_lines: ['middle'],
-          change_context: '"anchor"',
-        },
-      ],
-    );
+  test('resolveUpdate canonicalizes EOF insertion with a tolerant anchor', () => {
+    const { resolved } = resolveUpdate('sample.txt', 'top\n“anchor”\n', [
+      {
+        old_lines: [],
+        new_lines: ['middle'],
+        change_context: '"anchor"',
+      },
+    ]);
 
     expect(resolved[0]).toMatchObject({
       canonical_change_context: '“anchor”',
       rewritten: true,
-      strategy: 'anchor',
-      matchComparator: 'unicode',
+      resolved_is_end_of_file: true,
     });
   });
 
-  test('resolveUpdateChunksFromText canonicalizes non-EOF insertion with a trim-end anchor', () => {
-    const { resolved } = resolveUpdateChunksFromText(
+  test('resolveUpdate canonicalizes non-EOF insertion with a trim-end anchor', () => {
+    const { resolved } = resolveUpdate(
       'sample.txt',
       'top\nanchor  \nbottom\n',
       [
@@ -185,8 +178,8 @@ describe('apply-patch/resolution', () => {
     expect(resolved[0]).toMatchObject({
       canonical_change_context: 'anchor  ',
       rewritten: true,
-      strategy: 'anchor',
-      matchComparator: 'trim-end',
+      canonical_old_lines: ['bottom'],
+      canonical_new_lines: ['middle', 'bottom'],
     });
   });
 
@@ -227,21 +220,19 @@ describe('apply-patch/resolution', () => {
       ],
       message: 'ambiguous',
     },
-  ])('deriveNewContentFromText rejects $name', ({ text, chunks, message }) => {
-    expect(() => deriveNewContentFromText('sample.txt', text, chunks)).toThrow(
-      message,
-    );
+  ])('resolveUpdate rejects $name', ({ text, chunks, message }) => {
+    expect(() => resolveUpdate('sample.txt', text, chunks)).toThrow(message);
   });
 
-  test('deriveNewContentFromText rescues a stale EOF and preserves the final update', () => {
+  test('resolveUpdate rescues a stale EOF and preserves the final update', () => {
     expect(
-      deriveNewContentFromText('sample.txt', 'alpha\nstale\nomega', [
+      resolveUpdate('sample.txt', 'alpha\nstale\nomega', [
         {
           old_lines: ['alpha', 'old', 'omega'],
           new_lines: ['alpha', 'new', 'omega'],
           is_end_of_file: true,
         },
-      ]),
+      ]).nextText,
     ).toBe('alpha\nnew\nomega');
   });
 

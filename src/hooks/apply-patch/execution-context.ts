@@ -4,7 +4,7 @@ import path from 'node:path';
 
 import { parsePatch } from './codec';
 import { ApplyPatchError, getErrorMessage } from './errors';
-import { applyHits, resolveUpdateChunksFromText } from './resolution';
+import { resolveUpdate } from './resolution';
 import type {
   AddPatchHunk,
   DeletePatchHunk,
@@ -65,7 +65,7 @@ export type PatchExecutionContext = {
 };
 
 export type ResolvedPreparedUpdate = {
-  resolved: Awaited<ReturnType<typeof resolveUpdateChunksFromText>>['resolved'];
+  resolved: ReturnType<typeof resolveUpdate>['resolved'];
   nextText: string;
 };
 
@@ -500,18 +500,7 @@ export function resolvePreparedUpdate(
   hunk: UpdatePatchHunk,
 ): ResolvedPreparedUpdate {
   try {
-    const { lines, resolved, eol, hasFinalNewline } =
-      resolveUpdateChunksFromText(filePath, currentText, hunk.chunks);
-
-    return {
-      resolved,
-      nextText: applyHits(
-        lines,
-        resolved.map((chunk) => chunk.hit),
-        eol,
-        hasFinalNewline,
-      ),
-    };
+    return resolveUpdate(filePath, currentText, hunk.chunks);
   } catch (error) {
     throw new ApplyPatchError('verification', getErrorMessage(error), error);
   }

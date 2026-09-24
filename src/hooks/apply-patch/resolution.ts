@@ -8,13 +8,7 @@ import {
   seek,
   seekMatch,
 } from './matching';
-import type {
-  ApplyPatchRescueStrategy,
-  MatchComparatorName,
-  MatchHit,
-  PatchChunk,
-  ResolvedChunk,
-} from './types';
+import type { MatchHit, PatchChunk, ResolvedChunk } from './types';
 
 type FileLines = {
   lines: string[];
@@ -59,16 +53,13 @@ function resolveUniqueAnchor(
       kind: 'match';
       index: number;
       exact: boolean;
-      comparator: MatchComparatorName;
       canonicalLine: string;
     } {
   let matchedIndex: number | undefined;
-  let matchedComparator: MatchComparatorName | undefined;
   const anchorTarget = prepareAutoRescueTarget(changeContext);
 
   for (let index = start; index < lines.length; index += 1) {
-    const comparator = matchesAt(lines[index], anchorTarget);
-    if (!comparator) {
+    if (!matchesAt(lines[index], anchorTarget)) {
       continue;
     }
 
@@ -77,7 +68,6 @@ function resolveUniqueAnchor(
     }
 
     matchedIndex = index;
-    matchedComparator = comparator;
   }
 
   if (matchedIndex === undefined) {
@@ -90,8 +80,29 @@ function resolveUniqueAnchor(
     kind: 'match',
     index: matchedIndex,
     exact: canonicalLine === changeContext,
-    comparator: matchedComparator ?? 'exact',
     canonicalLine,
+  };
+}
+
+function buildResolvedChunk(
+  lines: string[],
+  chunk: PatchChunk,
+  hit: MatchHit,
+  rewritten: boolean,
+  canonicalStart = hit.start,
+  canonicalEnd = hit.start + hit.del,
+  canonicalNewLines = chunk.new_lines,
+  canonicalChangeContext?: string,
+): ResolvedChunk {
+  return {
+    hit,
+    canonical_old_lines: lines.slice(canonicalStart, canonicalEnd),
+    canonical_new_lines: [...canonicalNewLines],
+    canonical_change_context: canonicalChangeContext,
+    resolved_is_end_of_file: canonicalEnd === lines.length,
+    rewritten,
+    canonical_start: canonicalStart,
+    canonical_end: canonicalEnd,
   };
 }
 
@@ -111,25 +122,12 @@ export function locateChunk(
   );
 
   if (match) {
-    const canonical_old_lines = lines.slice(
-      match.index,
-      match.index + old_lines.length,
+    return buildResolvedChunk(
+      lines,
+      chunk,
+      { start: match.index, del: old_lines.length, add: [...new_lines] },
+      !match.exact,
     );
-    const rewritten = !match.exact;
-
-    return {
-      hit: { start: match.index, del: old_lines.length, add: [...new_lines] },
-      old_lines,
-      canonical_old_lines,
-      canonical_new_lines: [...chunk.new_lines],
-      resolved_is_end_of_file:
-        match.index + canonical_old_lines.length === lines.length,
-      rewritten,
-      strategy: undefined,
-      matchComparator: match.comparator,
-      canonical_start: match.index,
-      canonical_end: match.index + canonical_old_lines.length,
-    };
   }
 
   const prefixSuffix = rescueByPrefixSuffix(lines, old_lines, new_lines, start);
@@ -152,18 +150,14 @@ export function locateChunk(
     const canonicalEnd =
       prefixSuffix.hit.start + prefixSuffix.hit.del + suffixLength;
 
-    return {
-      hit: prefixSuffix.hit,
-      old_lines,
-      canonical_old_lines: lines.slice(canonicalStart, canonicalEnd),
-      canonical_new_lines: [...chunk.new_lines],
-      resolved_is_end_of_file: canonicalEnd === lines.length,
-      rewritten: true,
-      strategy: 'prefix/suffix',
-      matchComparator: 'exact',
-      canonical_start: canonicalStart,
-      canonical_end: canonicalEnd,
-    };
+    return buildResolvedChunk(
+      lines,
+      chunk,
+      prefixSuffix.hit,
+      true,
+      canonicalStart,
+      canonicalEnd,
+    );
   }
 
   const lcs = rescueByLcs(lines, old_lines, new_lines, start);
@@ -175,21 +169,7 @@ export function locateChunk(
   }
 
   if (lcs.kind === 'match') {
-    return {
-      hit: lcs.hit,
-      old_lines,
-      canonical_old_lines: lines.slice(
-        lcs.hit.start,
-        lcs.hit.start + lcs.hit.del,
-      ),
-      canonical_new_lines: [...chunk.new_lines],
-      resolved_is_end_of_file: lcs.hit.start + lcs.hit.del === lines.length,
-      rewritten: true,
-      strategy: 'lcs',
-      matchComparator: 'exact',
-      canonical_start: lcs.hit.start,
-      canonical_end: lcs.hit.start + lcs.hit.del,
-    };
+    return buildResolvedChunk(lines, chunk, lcs.hit, true);
   }
 
   throw new Error(
@@ -217,42 +197,31 @@ export function applyHits(
   return hasFinalNewline ? `${rendered}${eol}` : rendered;
 }
 
-function resolveUpdateChunksFromFileLines(
+export function resolveUpdate(
   file: string,
-  state: FileLines,
+  text: string,
   chunks: PatchChunk[],
 ): {
-  lines: string[];
   resolved: ResolvedChunk[];
-  eol: '\n' | '\r\n';
-  hasFinalNewline: boolean;
+  nextText: string;
 } {
-  const lines = [...state.lines];
+  const { lines, eol, hasFinalNewline } = splitFileLines(text);
   const resolved: ResolvedChunk[] = [];
   let start = 0;
 
   for (const chunk of chunks) {
     const chunkStart = resolveChunkStart(lines, chunk, start);
-    let strategy: ApplyPatchRescueStrategy | undefined;
 
     if (chunk.old_lines.length === 0) {
       if (chunk.is_end_of_file) {
-        resolved.push({
-          hit: {
-            start: lines.length,
-            del: 0,
-            add: [...chunk.new_lines],
-          },
-          old_lines: [],
-          canonical_old_lines: [],
-          canonical_new_lines: [...chunk.new_lines],
-          resolved_is_end_of_file: true,
-          rewritten: false,
-          strategy,
-          matchComparator: 'exact',
-          canonical_start: lines.length,
-          canonical_end: lines.length,
-        });
+        resolved.push(
+          buildResolvedChunk(
+            lines,
+            chunk,
+            { start: lines.length, del: 0, add: [...chunk.new_lines] },
+            false,
+          ),
+        );
         start = lines.length;
         continue;
       }
@@ -279,52 +248,41 @@ function resolveUpdateChunksFromFileLines(
       }
 
       const insertAt = anchorMatch.index + 1;
+      const hit = { start: insertAt, del: 0, add: [...chunk.new_lines] };
+      const canonicalContext = anchorMatch.exact
+        ? undefined
+        : anchorMatch.canonicalLine;
       if (insertAt === lines.length) {
-        resolved.push({
-          hit: {
-            start: insertAt,
-            del: 0,
-            add: [...chunk.new_lines],
-          },
-          old_lines: [],
-          canonical_old_lines: [],
-          canonical_new_lines: [...chunk.new_lines],
-          canonical_change_context: anchorMatch.exact
-            ? undefined
-            : anchorMatch.canonicalLine,
-          resolved_is_end_of_file: insertAt === lines.length,
-          rewritten: !anchorMatch.exact,
-          strategy: anchorMatch.exact ? strategy : 'anchor',
-          matchComparator: anchorMatch.comparator,
-          canonical_start: insertAt,
-          canonical_end: insertAt,
-        });
+        resolved.push(
+          buildResolvedChunk(
+            lines,
+            chunk,
+            hit,
+            !anchorMatch.exact,
+            insertAt,
+            insertAt,
+            chunk.new_lines,
+            canonicalContext,
+          ),
+        );
         start = insertAt;
         continue;
       }
 
       const anchor = lines[insertAt];
 
-      strategy = 'anchor';
-      resolved.push({
-        hit: {
-          start: insertAt,
-          del: 0,
-          add: [...chunk.new_lines],
-        },
-        old_lines: [],
-        canonical_old_lines: [anchor],
-        canonical_new_lines: [...chunk.new_lines, anchor],
-        canonical_change_context: anchorMatch.exact
-          ? undefined
-          : anchorMatch.canonicalLine,
-        resolved_is_end_of_file: insertAt + 1 === lines.length,
-        rewritten: true,
-        strategy,
-        matchComparator: anchorMatch.comparator,
-        canonical_start: insertAt,
-        canonical_end: insertAt + 1,
-      });
+      resolved.push(
+        buildResolvedChunk(
+          lines,
+          chunk,
+          hit,
+          true,
+          insertAt,
+          insertAt + 1,
+          [...chunk.new_lines, anchor],
+          canonicalContext,
+        ),
+      );
       start = insertAt;
       continue;
     }
@@ -345,38 +303,12 @@ function resolveUpdateChunksFromFileLines(
   }
 
   return {
-    lines,
     resolved,
-    eol: state.eol,
-    hasFinalNewline: state.hasFinalNewline,
+    nextText: applyHits(
+      lines,
+      resolved.map((chunk) => chunk.hit),
+      eol,
+      hasFinalNewline,
+    ),
   };
-}
-
-export function deriveNewContentFromText(
-  file: string,
-  text: string,
-  chunks: PatchChunk[],
-): string {
-  const { lines, resolved, eol, hasFinalNewline } =
-    resolveUpdateChunksFromFileLines(file, splitFileLines(text), chunks);
-
-  return applyHits(
-    lines,
-    resolved.map((chunk) => chunk.hit),
-    eol,
-    hasFinalNewline,
-  );
-}
-
-export function resolveUpdateChunksFromText(
-  file: string,
-  text: string,
-  chunks: PatchChunk[],
-): {
-  lines: string[];
-  resolved: ResolvedChunk[];
-  eol: '\n' | '\r\n';
-  hasFinalNewline: boolean;
-} {
-  return resolveUpdateChunksFromFileLines(file, splitFileLines(text), chunks);
 }
