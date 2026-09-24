@@ -51,8 +51,16 @@ function getModelIds(model: unknown): string[] {
   });
 }
 
+/** opencode2 hosts read `plugins` natively and migrate the legacy
+ * singular `plugin` key (packages/core/src/config/normalize.ts merges
+ * both), so user files carry either key. Read plural-first; writers
+ * keep whichever key the file already uses. */
 function getPlugins(config: OpenCodeConfig): unknown[] {
-  return Array.isArray(config.plugin) ? config.plugin : [];
+  return Array.isArray(config.plugins)
+    ? config.plugins
+    : Array.isArray(config.plugin)
+      ? config.plugin
+      : [];
 }
 
 function getPluginSpec(entry: unknown): string | undefined {
@@ -483,9 +491,11 @@ export async function addPluginToOpenCodeConfig(): Promise<ConfigMergeResult> {
       (plugin) => !isMatchingPluginEntry(plugin),
     );
 
-    // Add fresh entry
+    // Add fresh entry, keeping the key the file already uses (both keys
+    // are accepted by the opencode2 host; `plugin` also works on v1).
     filteredPlugins.push(pluginEntry);
-    config.plugin = filteredPlugins;
+    if (Array.isArray(config.plugins)) config.plugins = filteredPlugins;
+    else config.plugin = filteredPlugins;
 
     writeConfig(configPath, config);
     return { success: true, configPath };
