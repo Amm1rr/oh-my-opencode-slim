@@ -281,6 +281,20 @@ const accepted: Accepted[] = [
     { 'a.txt': 'X\n' },
   ],
   [
+    'F1c level 1 tolerates only one final blank',
+    { 'a.txt': 'a\n\n' },
+    patch(
+      '*** Update File: a.txt',
+      '@@',
+      ' a',
+      '-',
+      '*** Update File: a.txt',
+      '@@',
+      '+b',
+    ),
+    { 'a.txt': 'a\nb\n' },
+  ],
+  [
     'F2 native cursor advances past context and hits',
     { 'a.txt': 'x\nx\nx\n' },
     patch('*** Update File: a.txt', '@@ x', '-x', '+X', '@@', '-x', '+Y'),
