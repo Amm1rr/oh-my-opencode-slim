@@ -649,6 +649,8 @@ describe('tui-state persistence', () => {
     // In-place rewrite (same inode, same length): mtime restored via
     // utimes. ctime cannot be restored by userspace, so the memo must
     // invalidate and re-record the value from the real file.
+    const sleeper = new Int32Array(new SharedArrayBuffer(4));
+    Atomics.wait(sleeper, 0, 0, 10);
     const external = readTuiSnapshot(tempDir);
     external.agentModels.explorer = 'model-y';
     const fd = fs.openSync(filePath, 'w');

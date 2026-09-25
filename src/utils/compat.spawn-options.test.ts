@@ -1,4 +1,14 @@
-import { afterAll, afterEach, describe, expect, it, mock } from 'bun:test';
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  mock,
+  spyOn,
+} from 'bun:test';
+import * as childProcess from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
@@ -35,11 +45,6 @@ const spawnMock = mock(
   },
 );
 
-mock.module('node:child_process', () => ({
-  spawn: spawnMock,
-  spawnSync: mock(() => ({ status: 0 })),
-}));
-
 const TEST_DIR = path.join(
   os.tmpdir(),
   `compat-spawn-options-test-${process.pid}`,
@@ -47,6 +52,12 @@ const TEST_DIR = path.join(
 const originalPlatform = process.platform;
 const originalPath = process.env.PATH;
 const originalComSpec = process.env.ComSpec;
+let importCounter = 0;
+let spawnSpy: ReturnType<typeof spyOn> | undefined;
+
+async function importCompat() {
+  return await import(`./compat.ts?spawn-options=${importCounter++}`);
+}
 
 function fixtureDir(name: string, files: string[]): string {
   const dir = path.join(TEST_DIR, name);
@@ -64,6 +75,10 @@ function setPlatform(platform: NodeJS.Platform): void {
   });
 }
 
+beforeEach(() => {
+  spawnSpy = spyOn(childProcess, 'spawn').mockImplementation(spawnMock);
+});
+
 afterEach(() => {
   setPlatform(originalPlatform);
   process.env.PATH = originalPath;
@@ -74,6 +89,8 @@ afterEach(() => {
   }
   spawnCalls.length = 0;
   spawnMock.mockClear();
+  spawnSpy?.mockRestore();
+  spawnSpy = undefined;
 });
 
 afterAll(() => {
@@ -85,7 +102,7 @@ describe('crossSpawn spawn options', () => {
     // Force the non-win32 branch so the command is spawned directly rather
     // than re-resolved through a .cmd shim on this host.
     setPlatform('linux');
-    const { crossSpawn } = await import('./compat');
+    const { crossSpawn } = await importCompat();
 
     crossSpawn(['bun', 'install'], { cwd: 'C:\\tmp' });
 
@@ -99,7 +116,7 @@ describe('crossSpawn spawn options', () => {
     const dir = fixtureDir('shim', ['mytool.cmd']);
     process.env.PATH = dir;
     setPlatform('win32');
-    const { crossSpawn } = await import('./compat');
+    const { crossSpawn } = await importCompat();
 
     crossSpawn(['mytool', 'arg']);
 

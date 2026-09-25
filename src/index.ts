@@ -42,6 +42,7 @@ import {
   createTaskSessionManagerHook,
   createToolLoopGuardHook,
   ForegroundFallbackManager,
+  formatChildInputWaitDelta,
   formatStoppedJobDelta,
   SessionLifecycle,
   stoppedJobRecoveryReason,
@@ -50,6 +51,11 @@ import { stripTaggedContent } from './hooks/cache-safe-injection';
 import { processImageAttachments } from './hooks/image-hook';
 import { clearAllWakeSessions } from './hooks/orchestrator-wake/wake-gate';
 import { PHASE_REMINDER_METADATA_KEY } from './hooks/phase-reminder';
+import type { ChildInputWaitRecord } from './hooks/task-session-manager/child-input-wait';
+import {
+  clearChildInputWaitsForSession,
+  getChildInputWait,
+} from './hooks/task-session-manager/child-input-wait';
 import { createBackgroundFallbackHandoff } from './hooks/task-session-manager/fallback-observation-transfer';
 import { createRevivedRunTracker } from './hooks/task-session-manager/revived-run-tracker';
 import type { ToolLoopGuardHook } from './hooks/tool-loop-guard/hook';
@@ -66,6 +72,7 @@ import {
   createAcpRunTool,
   createCancelTaskTool,
   createTaskMessageTool,
+  createTaskReplyTool,
   createTaskResultTool,
   createTaskReviveTool,
   createTaskStatusTool,
@@ -97,7 +104,10 @@ import {
   normalizeAgentName,
   resolveRuntimeAgentName,
 } from './utils';
-import type { ContextFile } from './utils/background-job-board';
+import type {
+  BackgroundJobRecord,
+  ContextFile,
+} from './utils/background-job-board';
 import {
   type BackgroundJobTerminalGate,
   createBackgroundJobTerminalGate,
@@ -339,9 +349,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   let reflectCommandHook: ReturnType<typeof createReflectCommandHook>;
   let loopCommandHook: ReturnType<typeof createLoopCommandHook>;
   let taskSessionManagerHook: ReturnType<typeof createTaskSessionManagerHook>;
-  let orchestratorWakeScheduler: ReturnType<
-    typeof createOrchestratorWakeScheduler
-  >;
   let phaseReminder: ReturnType<typeof createPhaseReminderHook>;
   let filterAvailableSkills: ReturnType<typeof createFilterAvailableSkillsHook>;
   let applyPatch: ReturnType<typeof createApplyPatchHook>;
@@ -360,6 +367,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   let companionManager: CompanionManager;
   let taskCancelTools: ReturnType<typeof createCancelTaskTool>;
   let taskMessageTools: ReturnType<typeof createTaskMessageTool>;
+  let taskReplyTools: ReturnType<typeof createTaskReplyTool>;
   let taskResultTools: ReturnType<typeof createTaskResultTool>;
   let taskReviveTools: ReturnType<typeof createTaskReviveTool>;
   let revivedRunTracker: ReturnType<typeof createRevivedRunTracker>;
@@ -380,6 +388,62 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
 
   // Counters for post-init health check (set inside try, checked outside)
   let toolCount = 0;
+
+  // The wake scheduler is created AFTER the task-session-manager hook (see
+  // the try block below): the hook's onChildInputWait closes over
+  // queueChildInputWaitWake, which drops notifications that arrive before
+  // the scheduler exists. The ask stays recorded in the sidecar and
+  // task_status still surfaces it, so the parent can answer via task_reply.
+  // In practice the scheduler is created synchronously in the same init,
+  // before any host event can arrive.
+  let orchestratorWakeScheduler:
+    | ReturnType<typeof createOrchestratorWakeScheduler>
+    | undefined;
+  function queueChildInputWaitWake(
+    record: BackgroundJobRecord,
+    wait: ChildInputWaitRecord,
+  ): void {
+    orchestratorWakeScheduler?.triggerChildInputWaitWake(
+      record.parentSessionID,
+      formatChildInputWaitDelta({
+        alias: record.alias,
+        taskID: record.taskID,
+        kind: wait.kind,
+        requestID: wait.requestID,
+        detail: formatChildInputWaitDetail(wait),
+      }),
+      `${record.taskID}:${wait.requestID}`,
+    );
+  }
+
+  /**
+   * Inline detail lines for a child input-wait wake delta: the ask content
+   * the parent needs to answer (question text + options, or permission
+   * summary).
+   */
+  function formatChildInputWaitDetail(wait: ChildInputWaitRecord): string {
+    const lines = [`request: ${wait.requestID}`, `kind: ${wait.kind}`];
+    if (wait.kind === 'permission') {
+      lines.push(`permission: ${wait.permission ?? 'unknown'}`);
+      if (wait.patterns && wait.patterns.length > 0) {
+        lines.push(`patterns: ${wait.patterns.join(', ')}`);
+      }
+      return lines.join('\n');
+    }
+    if (!wait.questions || wait.questions.length === 0) {
+      lines.push('(no question text captured)');
+      return lines.join('\n');
+    }
+    for (const entry of wait.questions) {
+      lines.push(`question: ${entry.question || entry.header}`);
+      for (const option of entry.options) {
+        lines.push(
+          `option: ${option.label}${option.description ? ` — ${option.description}` : ''}`,
+        );
+      }
+    }
+    return lines.join('\n');
+  }
 
   const resolvePrimaryModelFromFinalHostConfig = (
     agentType: string,
@@ -594,8 +658,8 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       // apply, correctly.
       onOwnershipReleased: (parentSessionID, taskID, generation) => {
         void orchestratorWakeScheduler
-          .triggerTerminalPublicationWake(parentSessionID, taskID, generation)
-          .catch(() => undefined);
+          ?.triggerTerminalPublicationWake(parentSessionID, taskID, generation)
+          ?.catch(() => undefined);
       },
     });
     backgroundJobCoordinator.addTerminalOutcomeListener((record) => {
@@ -678,8 +742,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       hasUntrackedRunningChild: async (parentSessionID?: string) => {
         if (!parentSessionID) return true;
         try {
-          const client = getClient(ctx);
-          const session = client.session as unknown as
+          const session = getClient(ctx).session as unknown as
             | { list?: unknown; status?: unknown }
             | undefined;
           // Old/mock hosts without the list API: probe unavailable, degrade
@@ -690,7 +753,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           ) {
             return false;
           }
-          const listed = await client.session.list();
+          const listed = await getClient(ctx).session.list();
           const children = (
             (listed.data ?? []) as Array<{ id: string; parentID?: string }>
           ).filter((s) => s.parentID === parentSessionID);
@@ -702,7 +765,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           );
           const untracked = children.filter((c) => !tracked.has(c.id));
           if (untracked.length === 0) return false;
-          const status = await client.session.status();
+          const status = await getClient(ctx).session.status();
           const map = (status.data ?? {}) as Record<string, { type?: string }>;
           return untracked.some((c) => {
             const t = map[c.id]?.type;
@@ -738,6 +801,19 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         foregroundFallback.willAttemptFallback(sessionID),
       coordinator: sessionLifecycle,
       revivedRunTracker,
+      onChildInputWait: (notification) => {
+        if (runtime.backgroundJobs.childInputWake === false) return;
+        const record = backgroundJobCoordinator.get(notification.taskID);
+        if (record?.state !== 'running') {
+          return;
+        }
+        const wait = getChildInputWait(
+          notification.taskID,
+          notification.requestID,
+        );
+        if (!wait) return;
+        queueChildInputWaitWake(record, wait);
+      },
     });
     markRevivedRunPending = taskSessionManagerHook.markRevivedRunPending;
     markRevivedRunSettled = taskSessionManagerHook.clearRevivedRunPending;
@@ -761,6 +837,13 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           record.terminalUnreconciled
         );
       },
+      isChildInputWaitCurrent: (taskID, requestID) => {
+        const record = backgroundJobCoordinator.get(taskID);
+        return (
+          record?.state === 'running' &&
+          getChildInputWait(taskID, requestID) !== undefined
+        );
+      },
       hasPendingDelegatedWork: (sessionID) =>
         backgroundJobCoordinator.hasRunning(sessionID) ||
         backgroundJobCoordinator.hasTerminalUnreconciled(sessionID),
@@ -770,6 +853,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       // A placeholder is not delegated work; its stop is not recoverable
       // by the parent until a task launch has attributed the session.
       if (record.provisional === true) return;
+      // A child's terminal state resolves any of its open input waits: the
+      // ask is gone with the run, so a queued wake must not fire for it.
+      clearChildInputWaitsForSession(record.taskID);
       if (record.state !== 'stopped' || !record.terminalUnreconciled) return;
       // Symmetric tracker suppression (M4): when the revived-run tracker
       // owns this generation's delivery — it already delivered the run's
@@ -793,7 +879,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         });
         return;
       }
-      orchestratorWakeScheduler.triggerStoppedJobRecovery(
+      orchestratorWakeScheduler?.triggerStoppedJobRecovery(
         record.parentSessionID,
         // Self-contained stop facts: the recovery wake is an
         // internal-initiator message, so under `checkpoint-compatible` it
@@ -864,12 +950,12 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         return;
       }
       void orchestratorWakeScheduler
-        .triggerTerminalPublicationWake(
+        ?.triggerTerminalPublicationWake(
           record.parentSessionID,
           record.taskID,
           record.generation,
         )
-        .catch(() => undefined);
+        ?.catch(() => undefined);
     });
 
     // Initialize hooks and wrapPostToolHook helper for error isolation
@@ -945,6 +1031,10 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       input: ctx,
       backgroundJobBoard: backgroundJobCoordinator,
     });
+    taskReplyTools = createTaskReplyTool({
+      input: ctx,
+      backgroundJobBoard: backgroundJobCoordinator,
+    });
     taskResultTools = createTaskResultTool({
       input: ctx,
       backgroundJobBoard: backgroundJobCoordinator,
@@ -975,7 +1065,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       },
       beginUserWait: (sessionID) => {
         taskSessionManagerHook.beginUserWait(sessionID);
-        orchestratorWakeScheduler.suppress(sessionID);
+        orchestratorWakeScheduler?.suppress(sessionID);
       },
       waitForUserGuardEnabled: runtime.backgroundJobs.waitForUserGuard,
       hasOutstandingBackgroundTasks: (sessionID) =>
@@ -987,6 +1077,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     tools = {
       ...taskCancelTools,
       ...taskMessageTools,
+      ...taskReplyTools,
       ...taskResultTools,
       ...taskReviveTools,
       ...taskStatusTools,

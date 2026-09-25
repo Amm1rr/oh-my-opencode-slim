@@ -2275,6 +2275,11 @@
           "default": true,
           "description": "When true, intercept wait_for_user calls made while background tasks are still running and the orchestrator wake scheduler is enabled, returning guidance to end the turn instead of blocking on manual input. Default enabled.",
           "type": "boolean"
+        },
+        "childInputWake": {
+          "default": true,
+          "description": "When true, a background child that asks a question or permission request wakes its parent with the ask content. Permissions can be answered with task_reply when the host exposes permission.reply; OpenCode v2 form questions are observable but not answerable through the pinned plugin context. Default enabled.",
+          "type": "boolean"
         }
       }
     },
