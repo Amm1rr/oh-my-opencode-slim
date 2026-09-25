@@ -64,10 +64,16 @@ const accepted: Accepted[] = [
     { 'a.txt': 'a\nb\nZ\n' },
   ],
   [
-    'T5 blank line between hunks',
-    { 'a.txt': 'a\n', 'b.txt': 'b\n' },
+    'T5 blank lines between hunks',
+    { 'a.txt': 'a\n', 'b.txt': 'b\n', 'd.txt': 'd\n' },
     patch(
+      '*** Add File: n.txt',
+      '+n',
+      '',
+      '*** Delete File: d.txt',
+      '',
       '*** Update File: a.txt',
+      '',
       '@@',
       '-a',
       '+A',
@@ -77,7 +83,7 @@ const accepted: Accepted[] = [
       '-b',
       '+B',
     ),
-    { 'a.txt': 'A\n', 'b.txt': 'B\n' },
+    { 'a.txt': 'A\n', 'b.txt': 'B\n', 'd.txt': null, 'n.txt': 'n\n' },
   ],
   [
     'T5b blank line before End Patch',
@@ -240,6 +246,7 @@ const accepted: Accepted[] = [
     {
       'a.py':
         'class A:\n    def m(self):\n        return 1\nclass B:\n    def m(self):\n        return 1\n',
+      'b.txt': 'x\ny  \nz\n',
     },
     patch(
       '*** Update File: a.py',
@@ -247,10 +254,17 @@ const accepted: Accepted[] = [
       '@@     def m(self):',
       '-        return 1',
       '+        return 2',
+      '*** Update File: b.txt',
+      '@@',
+      ' x',
+      '-y',
+      '+Y',
+      ' z',
     ),
     {
       'a.py':
         'class A:\n    def m(self):\n        return 1\nclass B:\n    def m(self):\n        return 2\n',
+      'b.txt': 'x\nY\nz\n',
     },
   ],
   [
