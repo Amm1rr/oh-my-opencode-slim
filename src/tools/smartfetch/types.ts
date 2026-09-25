@@ -39,7 +39,6 @@ export type RedirectStep = {
 };
 
 export type CachedFetch = {
-  requestedUrl: string;
   finalUrl: string;
   statusCode: number;
   contentType: string;
@@ -64,20 +63,12 @@ export type CachedFetch = {
   wordCount: number;
   qualitySignals?: string[];
   llmsProbeError?: string;
-  llmsProbeTruncated?: boolean;
-  cacheRevalidated?: boolean;
-  upstreamStatusCode?: number;
-  cacheHit?: boolean;
   decodedCharset?: string;
   decodeFallback?: boolean;
   decodeWarning?: string;
-  secondaryModelInputTruncated?: boolean;
-  secondaryModelInputChars?: number;
-  secondaryModelSourceChars?: number;
 };
 
 export type BinaryFetch = {
-  requestedUrl: string;
   finalUrl: string;
   statusCode: number;
   contentType: string;
@@ -93,13 +84,8 @@ export type BinaryFetch = {
   binary: true;
   binaryKind: 'image' | 'audio' | 'video' | 'pdf' | 'binary';
   downloadLimitBytes?: number;
-  metadataOnly?: boolean;
   data?: Uint8Array;
   llmsProbeError?: string;
-  llmsProbeTruncated?: boolean;
-  cacheRevalidated?: boolean;
-  upstreamStatusCode?: number;
-  cacheHit?: boolean;
 };
 
 export type FetchResult = CachedFetch | BinaryFetch;

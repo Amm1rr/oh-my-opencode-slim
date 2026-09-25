@@ -26,6 +26,79 @@ describe('smartfetch/tool', () => {
     mock.restore();
   });
 
+  test('rejects a pre-aborted request after permission without network I/O', async () => {
+    const controller = new AbortController();
+    controller.abort(new Error('pre-aborted'));
+    const fetchMock = mock(async () => new Response('unreachable'));
+    globalThis.fetch = fetchMock as typeof fetch;
+    const ctx = { ...createExecutionContext(), abort: controller.signal };
+    const webfetch = createWebfetchTool({ client: {} } as any);
+    await expect(
+      webfetch.execute(
+        {
+          url: 'https://example.com/page',
+          format: 'text',
+          extract_main: false,
+          prefer_llms_txt: 'never',
+          include_metadata: true,
+          save_binary: false,
+        },
+        ctx,
+      ),
+    ).rejects.toThrow('pre-aborted');
+    expect(ctx.ask).toHaveBeenCalledTimes(1);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test('does not revalidate cached responses or accept 304 as content', async () => {
+    const fetchMock = mock(
+      async (_url: string | URL | Request, init?: RequestInit) => {
+        expect(new Headers(init?.headers).has('If-None-Match')).toBe(false);
+        return new Response(null, { status: 304 });
+      },
+    );
+    globalThis.fetch = fetchMock as typeof fetch;
+    const webfetch = createWebfetchTool({ client: {} } as any);
+    await expect(
+      webfetch.execute(
+        {
+          url: 'https://example.com/page',
+          format: 'text',
+          extract_main: false,
+          prefer_llms_txt: 'never',
+          include_metadata: true,
+          save_binary: false,
+        },
+        createExecutionContext(),
+      ),
+    ).rejects.toThrow('Request failed with status code: 304');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('unsaved binary metadata includes the same download limit as saved binaries', async () => {
+    globalThis.fetch = mock(
+      async () =>
+        new Response(new Uint8Array([0, 1, 2]), {
+          headers: { 'content-type': 'image/png' },
+        }),
+    ) as typeof fetch;
+    const webfetch = createWebfetchTool({ client: {} } as any);
+    const result = await webfetch.execute(
+      {
+        url: 'https://example.com/figure.png',
+        format: 'markdown',
+        extract_main: true,
+        prefer_llms_txt: 'never',
+        include_metadata: true,
+        save_binary: false,
+      },
+      createExecutionContext(),
+    );
+    expect(result).toContain('download_limit_bytes: 2097152');
+    expect(result).toContain('save_binary: false');
+    expect(result).toContain('cache_hit: false');
+  });
+
   test('returns a required llms.txt message when prefer_llms_txt is always and no llms.txt is available', async () => {
     const fetchMock = mock(async (input: string | URL | Request) => {
       const url = typeof input === 'string' ? input : input.toString();
@@ -125,6 +198,61 @@ describe('smartfetch/tool', () => {
     expect(secondResult).toContain(
       'requested_url: "https://example.com/docs#sec2"',
     );
+  });
+
+  test('fetches and cleans a 1 MiB U+2028 page in under one second', async () => {
+    const page = `${'\u2028'.repeat(Math.floor((1024 * 1024) / 3))}![`;
+    globalThis.fetch = mock(
+      async () =>
+        new Response(page, {
+          headers: { 'content-type': 'text/plain; charset=utf-8' },
+        }),
+    ) as unknown as typeof fetch;
+    const webfetch = createWebfetchTool({ client: {} } as any);
+    const started = performance.now();
+    const result = await webfetch.execute(
+      {
+        url: 'https://example.com/large',
+        format: 'markdown',
+        extract_main: false,
+        prefer_llms_txt: 'never',
+        include_metadata: false,
+        save_binary: false,
+      },
+      createExecutionContext(),
+    );
+    expect(result).toBe('![');
+    expect(performance.now() - started).toBeLessThan(1_000);
+  });
+
+  test('a canonical URL does not share a credentialed response with another request', async () => {
+    const fetchMock = mock(async (input: string | URL | Request) => {
+      const url = String(input);
+      return new Response(
+        `<html><head><link rel="canonical" href="https://example.com/private"></head><body>${url.includes('user:pass@') ? 'private account' : 'public page'}</body></html>`,
+        { headers: { 'content-type': 'text/html' } },
+      );
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const webfetch = createWebfetchTool({ client: {} } as any);
+    const args = {
+      format: 'text' as const,
+      extract_main: false,
+      prefer_llms_txt: 'never' as const,
+      include_metadata: true,
+      save_binary: false,
+    };
+    const fetchPage = (url: string) =>
+      webfetch.execute({ ...args, url }, createExecutionContext());
+    const privateResult = await fetchPage(
+      'https://user:pass@example.com/private',
+    );
+    const publicResult = await fetchPage('https://example.com/private');
+    expect(privateResult).toContain('private account');
+    expect(publicResult).toContain('public page');
+    expect(publicResult).not.toContain('private account');
+    expect(publicResult).toContain('cache_hit: false');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   test('passes ctx.sessionID as parentID to the secondary-model session', async () => {

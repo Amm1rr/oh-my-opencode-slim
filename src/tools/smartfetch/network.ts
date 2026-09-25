@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { fitUtf8 } from './binary';
 import {
   BINARY_PREFIXES,
   DEFAULT_ACCEPT_LANGUAGE,
@@ -10,7 +11,6 @@ import {
 import type {
   BinaryFetch,
   DecodedBody,
-  FetchResult,
   FetchWithRedirectsResult,
   LlmsProbeResult,
 } from './types';
@@ -20,10 +20,8 @@ export function normalizeUrl(input: string): {
   url: string;
   upgradedToHttps: boolean;
   fallbackUrl: string | undefined;
-  originalUrl: string;
 } {
   const parsed = new URL(input);
-  const originalUrl = parsed.toString();
   let upgradedToHttps = false;
   let fallbackUrl: string | undefined;
   if (parsed.protocol === 'http:') {
@@ -33,14 +31,14 @@ export function normalizeUrl(input: string): {
   }
   // Fragments never reach the server (RFC 3986 §3.5); strip them from the
   // URLs actually fetched so the same document requested with different
-  // anchors issues a single request. originalUrl keeps the fragment.
+  // anchors issues a single request. The caller retains the requested URL.
   parsed.hash = '';
   if (fallbackUrl) {
     const fallback = new URL(fallbackUrl);
     fallback.hash = '';
     fallbackUrl = fallback.toString();
   }
-  return { url: parsed.toString(), upgradedToHttps, fallbackUrl, originalUrl };
+  return { url: parsed.toString(), upgradedToHttps, fallbackUrl };
 }
 
 export function isDocsLikeUrl(url: URL): boolean {
@@ -70,60 +68,28 @@ export function buildPermissionPatterns(
   return [...patterns];
 }
 
-export function buildAllowedOrigins(patterns: string[]) {
-  const origins = new Set<string>();
-  for (const pattern of patterns) {
-    try {
-      origins.add(new URL(pattern).origin);
-    } catch {
-      // ignore invalid patterns
-    }
-  }
-  return origins;
-}
-
-export function canUseCanonicalCacheAlias(baseUrl: string, aliasUrl: string) {
-  try {
-    const base = new URL(baseUrl);
-    const alias = new URL(aliasUrl);
-    if (alias.username || alias.password) return false;
-    return (
-      base.protocol === alias.protocol &&
-      base.hostname === alias.hostname &&
-      base.port === alias.port &&
-      base.pathname === alias.pathname &&
-      base.search === alias.search
-    );
-  } catch {
-    return false;
-  }
-}
-
-function isPermittedRedirect(
-  from: string,
-  to: string,
-  allowedOrigins?: Set<string>,
-) {
+function isPermittedRedirect(from: string, to: string) {
   try {
     const a = new URL(from);
     const b = new URL(to);
-    if (a.protocol !== b.protocol) return false;
-    if (a.port !== b.port) return false;
-    if (b.username || b.password) return false;
-    if (allowedOrigins) return allowedOrigins.has(b.origin);
-    return a.origin === b.origin;
+    return a.origin === b.origin && !b.username && !b.password;
   } catch {
     return false;
   }
 }
 
+function mimeOf(contentType: string) {
+  return contentType.split(';')[0]?.trim().toLowerCase() || '';
+}
+
 export function isBinaryContentType(contentType: string) {
-  const mime = contentType.split(';')[0]?.trim().toLowerCase() || '';
-  return BINARY_PREFIXES.some((prefix) => mime.startsWith(prefix));
+  return BINARY_PREFIXES.some((prefix) =>
+    mimeOf(contentType).startsWith(prefix),
+  );
 }
 
 export function getBinaryKind(contentType: string): BinaryFetch['binaryKind'] {
-  const mime = contentType.split(';')[0]?.trim().toLowerCase() || '';
+  const mime = mimeOf(contentType);
   if (mime.startsWith('image/')) return 'image';
   if (mime.startsWith('audio/')) return 'audio';
   if (mime.startsWith('video/')) return 'video';
@@ -131,17 +97,16 @@ export function getBinaryKind(contentType: string): BinaryFetch['binaryKind'] {
   return 'binary';
 }
 
-function acceptHeader(_format: 'text' | 'markdown' | 'html') {
-  return 'text/html;q=1.0, application/xhtml+xml;q=0.9, text/markdown;q=0.8, text/plain;q=0.8, */*;q=0.1';
-}
+const ACCEPT_HEADER =
+  'text/html;q=1.0, application/xhtml+xml;q=0.9, text/markdown;q=0.8, text/plain;q=0.8, */*;q=0.1';
 
 function inferCharsetFromHtml(text: string) {
   const metaCharset = text.match(
-    /<meta[^>]+charset\s*=\s*["']?([^\s"'>/;]+)/i,
+    /<meta[^<>]+charset\s*=\s*["']?([^\s"'>/;]+)/i,
   )?.[1];
   if (metaCharset) return metaCharset.trim();
   const httpEquiv = text.match(
-    /<meta[^>]+http-equiv\s*=\s*["']content-type["'][^>]+content\s*=\s*["'][^"']*charset=([^\s"'>;]+)/i,
+    /<meta[^<>]+http-equiv\s*=\s*["']content-type["'][^<>]+content\s*=\s*["'][^"']*charset=([^\s"'>;]+)/i,
   )?.[1];
   if (httpEquiv) return httpEquiv.trim();
   return undefined;
@@ -149,43 +114,6 @@ function inferCharsetFromHtml(text: string) {
 
 export function looksLikeHtmlText(text: string) {
   return /^\s*(<!doctype html|<html\b|<head\b|<body\b)/i.test(text);
-}
-
-function isLikelyDecodedText(text: string) {
-  if (!text) return false;
-  let suspicious = 0;
-  let printable = 0;
-  for (const char of text.slice(0, 2048)) {
-    const code = char.charCodeAt(0);
-    const isWhitespace =
-      code === 9 || code === 10 || code === 13 || code === 32;
-    const isControl = code < 32 && !isWhitespace;
-    if (isControl) suspicious++;
-    else printable++;
-  }
-  const total = Math.max(printable + suspicious, 1);
-  return suspicious / total < 0.02 && printable / total > 0.85;
-}
-
-function tryDecodeWithCharset(data: Uint8Array, charset: string) {
-  try {
-    return new TextDecoder(
-      charset,
-      charset.toLowerCase() === 'utf-8' ? { fatal: true } : undefined,
-    ).decode(data);
-  } catch {
-    return undefined;
-  }
-}
-
-function detectBestEffortCharset(data: Uint8Array) {
-  for (const charset of ['utf-8', 'windows-1252', 'iso-8859-1']) {
-    const decoded = tryDecodeWithCharset(data, charset);
-    if (decoded && isLikelyDecodedText(decoded)) {
-      return { charset, text: decoded };
-    }
-  }
-  return undefined;
 }
 
 export async function runWithScopedTimeout<T>(
@@ -225,7 +153,10 @@ export async function readBodyLimited(
     if (!value) continue;
     if (total + value.byteLength > maxBytes) {
       const allowed = maxBytes - total;
-      if (allowed > 0) chunks.push(value.slice(0, allowed));
+      if (allowed > 0) {
+        chunks.push(value.slice(0, allowed));
+        total += allowed;
+      }
       truncated = true;
       try {
         await reader.cancel();
@@ -238,25 +169,21 @@ export async function readBodyLimited(
     total += value.byteLength;
   }
 
-  const merged = new Uint8Array(
-    chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0),
-  );
-  let offset = 0;
-  for (const chunk of chunks) {
-    merged.set(chunk, offset);
-    offset += chunk.byteLength;
+  return { data: Buffer.concat(chunks, total), truncated };
+}
+
+export async function discard(response: Response) {
+  try {
+    await response.body?.cancel();
+  } catch {
+    // A failed cancellation must not mask the fetch result.
   }
-  return { data: merged, truncated };
 }
 
 export async function fetchWithRedirects(
   url: string,
-  _timeoutMs: number,
-  format: 'text' | 'markdown' | 'html',
   signal: AbortSignal,
   extraHeaders?: Record<string, string>,
-  method: 'GET' | 'HEAD' = 'GET',
-  allowedOrigins?: Set<string>,
 ): Promise<FetchWithRedirectsResult> {
   const redirects = [];
   let current = url;
@@ -265,30 +192,30 @@ export async function fetchWithRedirects(
     const response = await fetch(current, {
       redirect: 'manual',
       signal,
-      method,
       headers: {
         'User-Agent': 'opencode-smartfetch/1.0',
-        Accept: acceptHeader(format),
+        Accept: ACCEPT_HEADER,
         'Accept-Language': DEFAULT_ACCEPT_LANGUAGE,
         ...extraHeaders,
       },
     });
 
-    if (response.status >= 300 && response.status < 400) {
+    if ([301, 302, 303, 307, 308].includes(response.status)) {
       const location = response.headers.get('location');
       if (!location) {
+        await discard(response);
         throw new Error(
           `Redirect response missing location header: ${response.status}`,
         );
       }
+      if (!URL.canParse(location, current)) {
+        await discard(response);
+        throw new Error(`Invalid redirect location: ${location}`);
+      }
       const next = new URL(location, current).toString();
       redirects.push({ from: current, to: next, status: response.status });
-      if (!isPermittedRedirect(current, next, allowedOrigins)) {
-        try {
-          await response.body?.cancel();
-        } catch {
-          // ignore cancel failures
-        }
+      if (!isPermittedRedirect(current, next)) {
+        await discard(response);
         return {
           blockedRedirect: true,
           redirectUrl: next,
@@ -296,11 +223,7 @@ export async function fetchWithRedirects(
           redirectChain: redirects,
         };
       }
-      try {
-        await response.body?.cancel();
-      } catch {
-        // ignore cancel failures
-      }
+      await discard(response);
       current = next;
       continue;
     }
@@ -313,65 +236,37 @@ export async function fetchWithRedirects(
 
 export async function fetchWithUpgradeFallback(
   normalized: ReturnType<typeof normalizeUrl>,
-  timeoutMs: number,
-  format: 'text' | 'markdown' | 'html',
   signal: AbortSignal,
-  extraHeaders?: Record<string, string>,
-  method: 'GET' | 'HEAD' = 'GET',
-  allowedOrigins?: Set<string>,
 ) {
+  let primary: FetchWithRedirectsResult;
   try {
-    const result = await fetchWithRedirects(
-      normalized.url,
-      timeoutMs,
-      format,
-      signal,
-      extraHeaders,
-      method,
-      allowedOrigins,
-    );
-    if (normalized.fallbackUrl && 'blockedRedirect' in result) {
-      const fallbackResult = await fetchWithRedirects(
-        normalized.fallbackUrl,
-        timeoutMs,
-        format,
-        signal,
-        extraHeaders,
-        method,
-        allowedOrigins,
-      );
-      return { result: fallbackResult, upgradedToHttps: false };
-    }
-    if (
-      normalized.fallbackUrl &&
-      !('blockedRedirect' in result) &&
-      result.response.status !== 304 &&
-      !result.response.ok
-    ) {
-      const fallbackResult = await fetchWithRedirects(
-        normalized.fallbackUrl,
-        timeoutMs,
-        format,
-        signal,
-        extraHeaders,
-        method,
-        allowedOrigins,
-      );
-      return { result: fallbackResult, upgradedToHttps: false };
-    }
-    return { result, upgradedToHttps: normalized.upgradedToHttps };
+    primary = await fetchWithRedirects(normalized.url, signal);
   } catch (error) {
-    if (!normalized.fallbackUrl) throw error;
-    const result = await fetchWithRedirects(
-      normalized.fallbackUrl,
-      timeoutMs,
-      format,
-      signal,
-      extraHeaders,
-      method,
-      allowedOrigins,
-    );
+    if (!normalized.fallbackUrl || signal.aborted) throw error;
+    const result = await fetchWithRedirects(normalized.fallbackUrl, signal);
     return { result, upgradedToHttps: false };
+  }
+  if (
+    !normalized.fallbackUrl ||
+    (!('blockedRedirect' in primary) &&
+      (primary.response.ok || primary.response.status === 304))
+  ) {
+    return { result: primary, upgradedToHttps: normalized.upgradedToHttps };
+  }
+  if (!('blockedRedirect' in primary)) await discard(primary.response);
+  try {
+    const result = await fetchWithRedirects(normalized.fallbackUrl, signal);
+    if (
+      'blockedRedirect' in primary &&
+      ('blockedRedirect' in result || !result.response.ok)
+    ) {
+      if (!('blockedRedirect' in result)) await discard(result.response);
+      return { result: primary, upgradedToHttps: normalized.upgradedToHttps };
+    }
+    return { result, upgradedToHttps: false };
+  } catch (error) {
+    if (!('blockedRedirect' in primary) || signal.aborted) throw error;
+    return { result: primary, upgradedToHttps: normalized.upgradedToHttps };
   }
 }
 
@@ -388,7 +283,7 @@ function parseCharset(contentType: string) {
 }
 
 export function isHtmlLikeContentType(contentType: string) {
-  const mime = contentType.split(';')[0]?.trim().toLowerCase() || '';
+  const mime = mimeOf(contentType);
   return mime === 'text/html' || mime === 'application/xhtml+xml';
 }
 
@@ -398,28 +293,28 @@ export function decodeBody(
   contentType?: string,
 ): DecodedBody {
   let declaredCharset = charset?.trim() || undefined;
-  const utf8Text = new TextDecoder().decode(data);
-
   if (!declaredCharset && contentType && isHtmlLikeContentType(contentType)) {
-    declaredCharset = inferCharsetFromHtml(utf8Text);
+    declaredCharset = inferCharsetFromHtml(
+      new TextDecoder().decode(data.subarray(0, 2048)),
+    );
   }
 
   if (!declaredCharset) {
-    const detected = detectBestEffortCharset(data);
-    if (detected && detected.charset !== 'utf-8') {
+    try {
       return {
-        text: detected.text,
-        decodedCharset: detected.charset,
+        text: new TextDecoder('utf-8', { fatal: true }).decode(data),
+        decodedCharset: 'utf-8',
+        decodeFallback: false,
+        decodeWarning: undefined,
+      };
+    } catch {
+      return {
+        text: new TextDecoder('windows-1252').decode(data),
+        decodedCharset: 'windows-1252',
         decodeFallback: true,
-        decodeWarning: `Guessed charset without declaration: ${detected.charset}`,
+        decodeWarning: 'Guessed charset without declaration: windows-1252',
       };
     }
-    return {
-      text: utf8Text,
-      decodedCharset: 'utf-8',
-      decodeFallback: false,
-      decodeWarning: undefined,
-    };
   }
 
   try {
@@ -431,7 +326,7 @@ export function decodeBody(
     };
   } catch {
     return {
-      text: utf8Text,
+      text: new TextDecoder().decode(data),
       decodedCharset: 'utf-8',
       decodeFallback: true,
       decodeWarning: `Unsupported charset decoder: ${declaredCharset}`,
@@ -441,27 +336,17 @@ export function decodeBody(
 
 export function looksLikeTextBody(data: Uint8Array) {
   if (!data.byteLength) return true;
-  const sample = data.slice(0, Math.min(data.byteLength, 2048));
-  if (detectBestEffortCharset(sample)) return true;
-
-  let suspicious = 0;
-  let printableAscii = 0;
+  if (data.includes(0)) return false;
+  const sample = data.subarray(0, Math.min(data.byteLength, 2048));
+  let controls = 0;
   for (const byte of sample) {
-    if (byte === 0) return false;
-    const isWhitespace = byte === 9 || byte === 10 || byte === 13;
-    const isPrintableAscii = byte >= 32 && byte <= 126;
-    if (isWhitespace || isPrintableAscii) printableAscii++;
-    if (!isWhitespace && !isPrintableAscii) suspicious++;
+    if (byte < 32 && byte !== 9 && byte !== 10 && byte !== 13) controls++;
   }
-  return (
-    suspicious / sample.byteLength < 0.02 &&
-    printableAscii / sample.byteLength > 0.85
-  );
+  return controls / sample.byteLength < 0.02;
 }
 
 export function isGenericBinaryMime(contentType: string) {
-  const mime = contentType.split(';')[0]?.trim().toLowerCase() || '';
-  return mime === 'application/octet-stream';
+  return mimeOf(contentType) === 'application/octet-stream';
 }
 
 function parseFilenameFromContentDisposition(value: string | null) {
@@ -491,11 +376,10 @@ function inferFilenameFromUrl(url: string) {
 }
 
 function truncateFilename(name: string, maxLength = 180) {
-  if (name.length <= maxLength) return name;
+  if (name.length <= maxLength && Buffer.byteLength(name) <= 255) return name;
   const parsed = path.parse(name);
-  const ext = parsed.ext || '';
-  const baseLimit = Math.max(1, maxLength - ext.length);
-  return `${parsed.name.slice(0, baseLimit)}${ext}`;
+  const ext = Buffer.byteLength(parsed.ext) <= 255 ? parsed.ext : '';
+  return `${fitUtf8(ext ? parsed.name : name, 255 - Buffer.byteLength(ext), maxLength - ext.length)}${ext}`;
 }
 
 function sanitizeFilename(name: string) {
@@ -528,19 +412,8 @@ export function extractHeaderMetadata(headers: Headers, finalUrl: string) {
   };
 }
 
-export function buildConditionalHeaders(cached: FetchResult | undefined) {
-  if (!cached || (!cached.etag && !cached.lastModified)) {
-    return undefined;
-  }
-  const headers: Record<string, string> = {};
-  if (cached.etag) headers['If-None-Match'] = cached.etag;
-  if (cached.lastModified) headers['If-Modified-Since'] = cached.lastModified;
-  return Object.keys(headers).length ? headers : undefined;
-}
-
 export async function probeLlmsText(
   url: URL,
-  timeoutMs: number,
   signal: AbortSignal,
   fallbackOrigin?: string,
 ): Promise<LlmsProbeResult> {
@@ -548,35 +421,22 @@ export async function probeLlmsText(
   if (fallbackOrigin && !origins.includes(fallbackOrigin)) {
     origins.push(fallbackOrigin);
   }
-  const allowedOrigins = new Set(origins);
   let lastError: string | undefined;
   for (const candidate of origins.flatMap((origin) => [
     `${origin}/llms-full.txt`,
     `${origin}/llms.txt`,
   ])) {
     try {
-      const result = await fetchWithRedirects(
-        candidate,
-        timeoutMs,
-        'markdown',
-        signal,
-        {
-          Accept: 'text/plain, text/markdown;q=0.9, */*;q=0.1',
-        },
-        'GET',
-        allowedOrigins,
-      );
+      const result = await fetchWithRedirects(candidate, signal, {
+        Accept: 'text/plain, text/markdown;q=0.9, */*;q=0.1',
+      });
       if ('blockedRedirect' in result) {
         lastError = `llms.txt probe blocked by cross-host redirect: ${result.redirectUrl}`;
         continue;
       }
       const { response, finalUrl, redirectChain } = result;
       if (!response.ok) {
-        try {
-          await response.body?.cancel();
-        } catch {
-          // ignore cancel failures
-        }
+        await discard(response);
         continue;
       }
       const headers = extractHeaderMetadata(response.headers, finalUrl);
@@ -595,9 +455,9 @@ export async function probeLlmsText(
         contentType.includes('text/html') ||
         contentType.includes('application/xhtml+xml');
       const looksLikeHtmlBody = /^\s*(<!doctype html|<html\b)/i.test(text);
-      const looksLikeLoginWall =
-        /<title>\s*(log in|sign in|login)\b/i.test(text) ||
-        /\blog[ -]?in\b/i.test(finalUrl);
+      const looksLikeLoginWall = /<title>\s*(log in|sign in|login)\b/i.test(
+        text,
+      );
       if (!looksLikeLlmsPath) {
         lastError = `llms.txt probe resolved to non-llms path: ${finalUrl}`;
         continue;

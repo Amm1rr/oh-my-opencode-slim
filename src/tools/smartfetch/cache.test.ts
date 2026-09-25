@@ -1,116 +1,56 @@
 import { describe, expect, test } from 'bun:test';
-import { LRUCache } from 'lru-cache';
-import { buildCacheKey, calculateCacheSize } from './cache';
-import type { BinaryFetch, CachedFetch, FetchResult } from './types';
+import { buildCacheKey, CACHE, calculateCacheSize } from './cache';
+import type { BinaryFetch, CachedFetch } from './types';
+
+const cacheOptions = {
+  extract_main: true,
+  prefer_llms_txt: 'auto' as const,
+  save_binary: false,
+};
 
 describe('smartfetch/cache', () => {
-  test('includes save_binary but not format in the cache key', () => {
-    const markdownKey = buildCacheKey(
-      'https://example.com/docs',
-      true,
-      'auto',
-      false,
-    );
-    const htmlKey = buildCacheKey(
-      'https://example.com/docs',
-      true,
-      'auto',
-      false,
-    );
-    const binaryKey = buildCacheKey(
-      'https://example.com/docs',
-      true,
-      'auto',
-      true,
-    );
-
-    expect(markdownKey).toBe(htmlKey);
-    expect(markdownKey).not.toBe(binaryKey);
-    expect(JSON.parse(markdownKey)).toMatchObject({
-      saveBinary: false,
-    });
-    expect(JSON.parse(binaryKey)).toMatchObject({
-      saveBinary: true,
-    });
+  test('keeps the 50 MiB/15-minute LRU and charges stored payload bytes', () => {
+    expect(CACHE.maxSize).toBe(50 * 1024 * 1024);
+    expect(CACHE.ttl).toBe(15 * 60 * 1000);
+    try {
+      CACHE.set('size-probe', makeBinary(new Uint8Array(4096)));
+      expect(CACHE.calculatedSize).toBe(4096);
+    } finally {
+      CACHE.clear();
+    }
   });
 
   test('URL fragments are not part of the cache key (RFC 3986)', () => {
-    const noFragment = buildCacheKey(
-      'https://example.com/docs',
-      true,
-      'auto',
-      false,
-    );
-    const sec1 = buildCacheKey(
-      'https://example.com/docs#sec1',
-      true,
-      'auto',
-      false,
-    );
-    const sec2 = buildCacheKey(
-      'https://example.com/docs#sec2',
-      true,
-      'auto',
-      false,
-    );
-    const emptyFragment = buildCacheKey(
-      'https://example.com/docs#',
-      true,
-      'auto',
-      false,
-    );
-
-    expect(sec1).toBe(noFragment);
-    expect(sec2).toBe(noFragment);
-    expect(emptyFragment).toBe(noFragment);
+    const key = (url: string) => buildCacheKey(url, cacheOptions);
+    const noFragment = key('https://example.com/docs');
+    for (const fragment of ['#sec1', '#sec2', '#']) {
+      expect(key(`https://example.com/docs${fragment}`)).toBe(noFragment);
+    }
   });
 
   test('query strings still distinguish cache keys', () => {
     const page1 = buildCacheKey(
       'https://example.com/docs?page=1#x',
-      true,
-      'auto',
-      false,
+      cacheOptions,
     );
     const page2 = buildCacheKey(
       'https://example.com/docs?page=2#x',
-      true,
-      'auto',
-      false,
+      cacheOptions,
     );
-
     expect(page1).not.toBe(page2);
   });
 
   test('option changes still produce distinct cache keys', () => {
-    const base = buildCacheKey(
-      'https://example.com/docs#sec1',
-      true,
-      'auto',
-      false,
-    );
-    const noExtract = buildCacheKey(
-      'https://example.com/docs#sec1',
-      false,
-      'auto',
-      false,
-    );
-    const alwaysLlms = buildCacheKey(
-      'https://example.com/docs#sec1',
-      true,
-      'always',
-      false,
-    );
-    const saveBinary = buildCacheKey(
-      'https://example.com/docs#sec1',
-      true,
-      'auto',
-      true,
-    );
-
-    expect(noExtract).not.toBe(base);
-    expect(alwaysLlms).not.toBe(base);
-    expect(saveBinary).not.toBe(base);
+    const url = 'https://example.com/docs#sec1';
+    const base = buildCacheKey(url, cacheOptions);
+    for (const variant of [
+      { ...cacheOptions, extract_main: false },
+      { ...cacheOptions, prefer_llms_txt: 'always' as const },
+      { ...cacheOptions, save_binary: true },
+    ]) {
+      expect(buildCacheKey(url, variant)).not.toBe(base);
+    }
+    expect(JSON.parse(base)).toMatchObject({ saveBinary: false });
   });
 
   test('llms.txt-shaped result is charged once for its content', () => {
@@ -163,53 +103,10 @@ describe('smartfetch/cache', () => {
   test('binary result without data falls back to 1024 bytes', () => {
     expect(calculateCacheSize(makeBinary())).toBe(1024);
   });
-
-  test('real LRUCache holds ~4x more plain-text entries with deduped accounting', () => {
-    const maxSize = 20 * 1024 * 1024;
-    const entryBytes = 128 * 1024;
-    const content = 'x'.repeat(entryBytes);
-    const entry = makeCached({
-      rawContent: content,
-      html: content,
-      markdown: content,
-      text: content,
-    });
-
-    const deduped = new LRUCache<string, FetchResult>({
-      maxSize,
-      sizeCalculation: calculateCacheSize,
-    });
-    const naive = new LRUCache<string, FetchResult>({
-      maxSize,
-      sizeCalculation: (value: FetchResult) => {
-        const cached = value as CachedFetch;
-        return (
-          Buffer.byteLength(cached.rawContent) +
-          Buffer.byteLength(cached.html) +
-          Buffer.byteLength(cached.markdown) +
-          Buffer.byteLength(cached.text)
-        );
-      },
-    });
-
-    for (let i = 0; i < 500; i++) {
-      const key = `https://example.com/doc-${i}`;
-      deduped.set(key, entry);
-      naive.set(key, entry);
-    }
-
-    // 20MiB / 128KiB = 160 entries; allow a small implementation margin.
-    expect(deduped.size).toBeGreaterThanOrEqual(150);
-    expect(deduped.size).toBeLessThanOrEqual(161);
-    // Old accounting charges 4x per entry: 20MiB / 512KiB = 40.
-    expect(naive.size).toBeLessThanOrEqual(50);
-    expect(deduped.size).toBeGreaterThan(naive.size * 3);
-  });
 });
 
 function makeCached(overrides: Partial<CachedFetch>): CachedFetch {
   return {
-    requestedUrl: 'https://example.com/',
     finalUrl: 'https://example.com/',
     statusCode: 200,
     contentType: 'text/plain',
@@ -230,7 +127,6 @@ function makeCached(overrides: Partial<CachedFetch>): CachedFetch {
 
 function makeBinary(data?: Uint8Array): BinaryFetch {
   return {
-    requestedUrl: 'https://example.com/file',
     finalUrl: 'https://example.com/file',
     statusCode: 200,
     contentType: 'application/pdf',
