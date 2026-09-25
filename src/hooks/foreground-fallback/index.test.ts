@@ -3774,6 +3774,7 @@ describe('ForegroundFallbackManager inherit + fallback chain', () => {
     mgr: ForegroundFallbackManager,
     sessionID: string,
     modelID: string,
+    completed = false,
   ): Promise<void> {
     const [providerID, id] = modelID.split('/');
     return mgr.handleEvent({
@@ -3785,6 +3786,7 @@ describe('ForegroundFallbackManager inherit + fallback chain', () => {
           providerID,
           modelID: id,
           role: 'assistant',
+          ...(completed ? { time: { created: 1, completed: 2 } } : {}),
         },
       },
     });
@@ -4008,6 +4010,59 @@ describe('ForegroundFallbackManager inherit + fallback chain', () => {
         expect.objectContaining({
           body: expect.objectContaining({
             model: { providerID: 'openai', modelID: 'gpt-b' },
+          }),
+        }),
+      );
+    } finally {
+      Date.now = realNowFn;
+    }
+  });
+
+  test('a successful response resets the tried set so the next descent starts fresh', async () => {
+    // The combined agent's live model never equals the configured head, so
+    // the re-arm reset cannot clear cross-turn state; without a reset on
+    // success, each new descent would sink one link deeper (turn 2 would
+    // skip gpt-a because turn 1 already tried it, even though the streak
+    // ended with a success on gpt-a).
+    const { mocks } = createMockClient();
+    const mgr = new ForegroundFallbackManager(
+      { oracle: ['openai/gpt-a', 'openai/gpt-b'] },
+      true,
+      { directory: '/test' } as any,
+    );
+    const sessionID = 'sess-combined-success-reset';
+
+    const realNowFn = Date.now;
+    let fakeNow = realNowFn();
+    Date.now = () => fakeNow;
+    try {
+      const fail = async (modelID: string) => {
+        fakeNow += 6_000;
+        await observe(mgr, sessionID, modelID);
+        await mgr.handleEvent({
+          type: 'session.error',
+          properties: {
+            sessionID,
+            error: { message: 'rate limit exceeded' },
+          },
+        });
+      };
+
+      // Turn 1: live model fails → fall back to gpt-a, which then
+      // completes successfully.
+      await fail(LIVE_MODEL);
+      expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+      await observe(mgr, sessionID, 'openai/gpt-a', true);
+
+      // Turn 2: back on the live model, it fails again. gpt-a proved
+      // healthy last turn — the descent must revisit it, not skip to
+      // gpt-b.
+      await fail(LIVE_MODEL);
+      expect(mocks.promptAsync).toHaveBeenCalledTimes(2);
+      expect(mocks.promptAsync.mock.calls[1]?.[0]).toEqual(
+        expect.objectContaining({
+          body: expect.objectContaining({
+            model: { providerID: 'openai', modelID: 'gpt-a' },
           }),
         }),
       );

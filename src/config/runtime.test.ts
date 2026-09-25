@@ -459,3 +459,64 @@ describe('RuntimeConfig', () => {
     expect(runtime.modelArrays['councillor-alpha']).toBeUndefined();
   });
 });
+
+describe('RuntimeConfig combinedModelInheritanceSource', () => {
+  test('resolves the source for combined array + inherit policies', () => {
+    resetRegistry();
+    const runtime = RuntimeConfig.init(DIRECTORY, {
+      agents: {
+        fixer: {
+          model: ['chain/primary', 'chain/backup'],
+          inheritModelFrom: 'session',
+        },
+        librarian: {
+          model: [{ id: 'chain/primary' }],
+          inheritModelFrom: 'orchestrator',
+        },
+      },
+    } as PluginConfig);
+
+    expect(runtime.combinedModelInheritanceSource('fixer')).toBe('session');
+    expect(runtime.combinedModelInheritanceSource('librarian')).toBe(
+      'orchestrator',
+    );
+  });
+
+  test('resolves agent aliases to their canonical override', () => {
+    resetRegistry();
+    const runtime = RuntimeConfig.init(DIRECTORY, {
+      agents: {
+        explore: {
+          model: ['chain/primary'],
+          inheritModelFrom: 'session',
+        },
+      },
+    } as PluginConfig);
+
+    expect(runtime.combinedModelInheritanceSource('explorer')).toBe('session');
+  });
+
+  test('returns undefined for agents without a combined policy', () => {
+    resetRegistry();
+    const runtime = RuntimeConfig.init(DIRECTORY, {
+      agents: {
+        // Empty array: no usable chain.
+        fixer: { model: [], inheritModelFrom: 'session' },
+        // Array without an inheritance directive: fully static.
+        librarian: { model: ['chain/primary'] },
+        // Scalar model plus inheritance: explicit model wins.
+        explorer: { model: 'explorer-model', inheritModelFrom: 'session' },
+        // Inheritance without a chain: plain inherit, not combined.
+        observer: { inheritModelFrom: 'session' },
+      },
+    } as PluginConfig);
+
+    expect(runtime.combinedModelInheritanceSource('fixer')).toBeUndefined();
+    expect(runtime.combinedModelInheritanceSource('librarian')).toBeUndefined();
+    expect(runtime.combinedModelInheritanceSource('explorer')).toBeUndefined();
+    expect(runtime.combinedModelInheritanceSource('observer')).toBeUndefined();
+    expect(
+      runtime.combinedModelInheritanceSource('unconfigured-agent'),
+    ).toBeUndefined();
+  });
+});

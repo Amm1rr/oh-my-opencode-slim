@@ -245,8 +245,10 @@ function applyModelInheritance(
  * Combined array-chain policies (`model: [...]` + `inheritModelFrom`) are
  * honored here too: `session` inheritance clears the host model so the SDK
  * keeps following the live session model, and `orchestrator` inheritance
- * pins the resolved orchestrator model ahead of the chain. Scalar models
- * keep explicit precedence and skip inheritance entirely.
+ * pins the resolved orchestrator model ahead of the chain. A chain head's
+ * inline variant stamped by the earlier passes is cleared alongside the
+ * rewritten model. Scalar models keep explicit precedence and skip
+ * inheritance entirely.
  */
 export function applyModelInheritanceToConfig(
   configAgent: Record<string, unknown>,
@@ -280,6 +282,16 @@ export function applyModelInheritanceToConfig(
       delete agentConfig.model;
     } else {
       agentConfig.model = orchestratorModel;
+    }
+    // The array-primary and runtime preset passes stamp the chain head's
+    // inline variant into this entry next to its model. A combined policy
+    // rewrites or clears that model, so the stale variant — which belongs
+    // to the chain head model, not the inherited one — must go with it.
+    // Explicit agent-level variants win and are left alone; scalar-model
+    // agents never reach this point. Mirrors the agent-layer cleanup in
+    // applyModelInheritance.
+    if (Array.isArray(override.model) && override.variant === undefined) {
+      delete agentConfig.variant;
     }
   }
 }

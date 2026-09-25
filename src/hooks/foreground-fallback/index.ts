@@ -632,6 +632,15 @@ export class ForegroundFallbackManager {
           this.sessionRetries.delete(sessionID);
           this.chainExhaustion.delete(sessionID);
           this.lastFallbackTime.delete(sessionID);
+          // A success also ends any failure streak, so the models the
+          // streak marked tried are no longer proven dead. Static-chain
+          // agents already get this from the re-arm reset (a new turn
+          // re-sends the configured primary); combined inherit+chain
+          // agents re-send their live session model, which never equals
+          // the configured head, so without this reset their tried set
+          // only grows across turns and each new descent starts one link
+          // deeper.
+          this.sessionTried.delete(sessionID);
           // Cancel any pending initial delay on recovery
           const pendingDelay = this.pendingInitialDelay.get(sessionID);
           if (pendingDelay) {

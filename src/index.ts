@@ -1336,14 +1336,23 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         const entry = configAgent[agentDef.name] as
           | Record<string, unknown>
           | undefined;
+        // Session-following combined agents have no launch model of their
+        // own: entry.model is cleared, the chain head is only a fallback
+        // tail, and agentDef.config.model is deleted by inheritance. Skip
+        // the chain-head probe so they display 'default' like pure
+        // inherit agents instead of a model they do not run.
+        const followsSessionModel =
+          runtime.combinedModelInheritanceSource(agentDef.name) === 'session';
         const resolvedModel =
           typeof entry?.model === 'string'
             ? entry.model
-            : runtime.runtimeChains[agentDef.name]?.[0]
-              ? runtime.runtimeChains[agentDef.name][0]
-              : typeof agentDef.config.model === 'string'
-                ? agentDef.config.model
-                : undefined;
+            : followsSessionModel
+              ? undefined
+              : runtime.runtimeChains[agentDef.name]?.[0]
+                ? runtime.runtimeChains[agentDef.name][0]
+                : typeof agentDef.config.model === 'string'
+                  ? agentDef.config.model
+                  : undefined;
         const resolvedVariant =
           typeof entry?.variant === 'string'
             ? entry.variant

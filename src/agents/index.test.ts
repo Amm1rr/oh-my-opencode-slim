@@ -462,6 +462,88 @@ describe('model inheritance with fallback chains', () => {
 
     expect(configAgent.fixer).toEqual({ model: 'orchestrator-model' });
   });
+
+  test('combined session inheritance clears the chain head inline variant from the host config', () => {
+    // Post-array-pass host state: the chain head model and its inline
+    // variant are both stamped into the entry. Inheritance clears the
+    // model and must take the stale variant with it.
+    const runtime = runtimeFor({
+      agents: {
+        fixer: {
+          model: [{ id: 'chain/primary', variant: 'high' }, 'chain/backup'],
+          inheritModelFrom: 'session',
+        },
+      },
+    });
+    const configAgent: Record<string, unknown> = {
+      fixer: { model: 'chain/primary', variant: 'high', temperature: 0.2 },
+    };
+
+    applyModelInheritanceToConfig(configAgent, runtime);
+
+    expect(configAgent.fixer).toEqual({ temperature: 0.2 });
+  });
+
+  test('combined inheritance keeps an explicit agent-level variant in the host config', () => {
+    const runtime = runtimeFor({
+      agents: {
+        fixer: {
+          model: [{ id: 'chain/primary', variant: 'high' }, 'chain/backup'],
+          inheritModelFrom: 'session',
+          variant: 'custom',
+        },
+      },
+    });
+    const configAgent: Record<string, unknown> = {
+      fixer: { model: 'chain/primary', variant: 'custom' },
+    };
+
+    applyModelInheritanceToConfig(configAgent, runtime);
+
+    expect(configAgent.fixer).toEqual({ variant: 'custom' });
+  });
+
+  test('combined orchestrator inheritance clears the chain head inline variant', () => {
+    const runtime = runtimeFor({
+      agents: {
+        orchestrator: { model: 'orchestrator-model' },
+        fixer: {
+          model: [{ id: 'chain/primary', variant: 'high' }],
+          inheritModelFrom: 'orchestrator',
+        },
+      },
+    });
+    const configAgent: Record<string, unknown> = {
+      fixer: { model: 'chain/primary', variant: 'high' },
+    };
+
+    applyModelInheritanceToConfig(configAgent, runtime);
+
+    expect(configAgent.fixer).toEqual({ model: 'orchestrator-model' });
+  });
+
+  test('scalar model plus inheritance leaves the host variant untouched', () => {
+    // Scalar models keep explicit precedence and skip inheritance
+    // entirely — the host entry's variant is not rewritten either.
+    const runtime = runtimeFor({
+      agents: {
+        fixer: {
+          model: 'fixer-specific-model',
+          inheritModelFrom: 'session',
+        },
+      },
+    });
+    const configAgent: Record<string, unknown> = {
+      fixer: { model: 'fixer-specific-model', variant: 'host-variant' },
+    };
+
+    applyModelInheritanceToConfig(configAgent, runtime);
+
+    expect(configAgent.fixer).toEqual({
+      model: 'fixer-specific-model',
+      variant: 'host-variant',
+    });
+  });
 });
 
 describe('orchestrator agent', () => {

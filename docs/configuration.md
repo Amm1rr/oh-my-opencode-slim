@@ -577,6 +577,19 @@ re-fallback round runs on the last entry, then the session aborts instead of
 looping. A `/model` pick on such an agent is its follow target; it never
 disables the fallback chain.
 
+An inline `variant` on the first chain entry belongs to that entry's model.
+When inheritance makes the agent follow the session model, the inline variant
+is cleared at both the agent layer and the final host config — the followed
+model must not run with a variant meant for a fallback model. Set an explicit
+agent-level `variant` if you want one regardless of the followed model.
+
+Do not combine an array `model` with `inheritModelFrom: "session"` on the
+`orchestrator` itself. The orchestrator *is* the session: every config pass
+would clear the host-persisted model selection (including a manual `/model`
+pick) with nothing to follow, leaving the orchestrator without a stable
+configured model. Use a plain array `model` on the orchestrator and combined
+policies on subagents.
+
 ### Agent Colors
 
 Built-in agents ship without a default `color`, so the OpenCode TUI assigns
