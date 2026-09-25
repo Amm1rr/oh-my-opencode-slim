@@ -37,9 +37,12 @@ The TUI sidebar uses the compact layout by default. Set `compactSidebar` to
 }
 ```
 
-While an agent session reports `busy` or `retry`, the sidebar shows an
-animated Braille indicator after that agent's name. The indicator disappears
-after every active session for that agent becomes idle or is deleted.
+Click the `OMO-Slim` heading to collapse or expand its sidebar section. It
+starts expanded; the choice lasts for the current TUI window only. An idle
+agent has a `•` before its name. While an agent session reports `busy` or
+`retry`, an animated Braille indicator replaces the bullet in the same spot.
+The bullet returns after every active session for that agent becomes idle or
+is deleted.
 
 ---
 

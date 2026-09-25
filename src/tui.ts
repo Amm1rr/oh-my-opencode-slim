@@ -552,6 +552,8 @@ export function shortSessionID(sessionID: string): string {
  */
 export interface SidebarInteraction {
   navigate?: (sessionID: string) => void;
+  isOpen: () => boolean;
+  toggleOpen: () => void;
   expandedAgents: () => ReadonlySet<string>;
   toggleAgent: (agentName: string) => void;
   /** Reset expansion when the project directory or visible root changes. */
@@ -564,12 +566,15 @@ export function createSidebarInteraction(
   navigate: ((sessionID: string) => void) | undefined,
   hasSelectedText?: () => boolean,
 ): SidebarInteraction {
+  const [open, setOpen] = createSignal(true);
   const [expanded, setExpanded] = createSignal<ReadonlySet<string>>(new Set());
   let lastDirectory: string | undefined;
   let lastRootID: string | undefined;
   return {
     navigate,
     hasSelectedText,
+    isOpen: open,
+    toggleOpen: () => setOpen((value: boolean) => !value),
     expandedAgents: expanded,
     toggleAgent: (agentName: string) => {
       setExpanded((prev: ReadonlySet<string>) => {
@@ -816,20 +821,21 @@ function sessionStatusView(
   return { label: 'active', color: theme.success ?? STATUS_ACTIVE_COLOR };
 }
 
-function activityIndicator(
+export const STATUS_DOT_GLYPH = '•';
+
+function statusDot(
   active: boolean,
   now: () => number,
   theme: AgentRowTheme,
 ): JSX.Element {
-  // Nested reactive leaf: only this glyph re-renders on the 100 ms
-  // animation tick. Rebuilding the clickable parent on every frame
-  // would drop the mouse target between press and release.
   return text(
     {
-      fg: active ? (theme.accent ?? theme.text) : theme.textMuted,
+      fg: active ? (theme.success ?? STATUS_ACTIVE_COLOR) : theme.textMuted,
       width: 2,
     },
-    active ? [() => getSidebarActivityIndicator(true, now())] : [' '],
+    active
+      ? [() => `${getSidebarActivityIndicator(true, now())} `]
+      : [`${STATUS_DOT_GLYPH} `],
   );
 }
 
@@ -842,7 +848,7 @@ function historyDot(): JSX.Element {
       width: 2,
       selectable: false,
     },
-    // ✦ over ●/◈: its ink sits in the mid-cell band, so the glyph optically
+    // ✦ over •/◈: its ink sits in the mid-cell band, so the glyph optically
     // centers against the agent label, and its narrow waist reads as spaced
     // from the name without inserting a cell of whitespace (margins are
     // whole-cell in this layout: no sub-cell nudging exists).
@@ -897,6 +903,7 @@ function agentRow(
       shouldFill: true,
     },
     [
+      statusDot(active, now, theme),
       text(
         {
           fg: theme.textMuted,
@@ -907,7 +914,6 @@ function agentRow(
         [label],
       ),
       ...(showHistoryDot ? [historyDot()] : []),
-      activityIndicator(active, now, theme),
       ...(sessionCount !== undefined && sessionCount > 1
         ? [
             text({ fg: theme.textMuted, width: 4 }, [expanded ? ' ▴' : ' ▾']),
@@ -964,6 +970,7 @@ function compactAgentRow(
           shouldFill: false,
         },
         [
+          statusDot(active, now, theme),
           text(
             {
               fg: theme.textMuted,
@@ -975,7 +982,6 @@ function compactAgentRow(
           ),
           ...(showHistoryDot ? [historyDot()] : []),
           box({ flexGrow: 1, shouldFill: false }),
-          activityIndicator(active, now, theme),
         ],
       ),
       box({ flexDirection: 'row', flexGrow: 1, shouldFill: false }),
@@ -1146,16 +1152,47 @@ function renderSidebar(
       group.sessions,
     ]),
   );
-  // Green dot (#1197 follow-up): only rendered when clickable — a dot
-  // without navigation would be dead pixels (decision: no navigate, no
-  // dot, no handler).
+  // History marker (#1197 follow-up): only rendered when clickable — a
+  // marker without navigation would be dead pixels (no navigate, no marker).
   const navigate = interaction?.navigate;
   const reusableByAgent =
     navigate === undefined
       ? new Map<string, SidebarReusableTarget>()
       : getSidebarReusableTargets(snapshot, visibleRootID);
   const expandedAgents = interaction?.expandedAgents() ?? new Set<string>();
+  const sidebarOpen = interaction?.isOpen() ?? true;
   const hoverBackground = resolveHoverBackground(theme);
+  const header = box(
+    {
+      width: '100%',
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+    },
+    [
+      box({ flexDirection: 'row', alignItems: 'center' }, [
+        text({ fg: theme.textMuted, width: 2 }, [sidebarOpen ? '▼ ' : '▶ ']),
+        box({ paddingRight: 1, backgroundColor: theme.accent }, [
+          text(
+            {
+              fg: getContrastForeground(
+                theme.accent,
+                theme.text,
+                theme.background,
+              ),
+            },
+            ['OMO-Slim'],
+          ),
+        ]),
+      ]),
+      text({ fg: theme.textMuted }, [`v${version}`]),
+    ],
+  );
+  decorateInteractiveRow(header, {
+    hoverBackground,
+    onActivate: interaction?.toggleOpen,
+    hasSelectedText: interaction?.hasSelectedText,
+  });
   return box(
     {
       width: '100%',
@@ -1164,112 +1201,85 @@ function renderSidebar(
       borderColor: theme.borderActive,
       paddingTop: 1,
       paddingBottom: 1,
-      paddingLeft: 1,
       paddingRight: 1,
     },
     [
-      box(
-        {
-          width: '100%',
-          flexDirection: 'row',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-        },
-        [
-          box(
-            { paddingLeft: 1, paddingRight: 1, backgroundColor: theme.accent },
-            [
-              text(
-                {
-                  fg: getContrastForeground(
-                    theme.accent,
-                    theme.text,
-                    theme.background,
-                  ),
-                },
-                ['OMO-Slim'],
+      header,
+      ...(sidebarOpen ? [configStatusRow] : []),
+      ...(sidebarOpen
+        ? getSidebarAgentNames(snapshot).flatMap((agentName) => {
+            const model = snapshot.agentModels[agentName] ?? 'pending';
+            const variant = snapshot.agentVariants[agentName];
+            const active = activeAgents.has(agentName);
+            const sessions = targetsByAgent.get(agentName) ?? [];
+            const reusable = reusableByAgent.get(agentName);
+            // History is idle-only: while this agent has live sessions, #1197
+            // owns the row (navigate the live one / expand N). The history
+            // marker and idle-row click appear only when nothing is running.
+            const history =
+              sessions.length === 0 && reusable !== undefined
+                ? reusable
+                : undefined;
+            const clickable =
+              interaction?.navigate !== undefined &&
+              (sessions.length > 0 || history !== undefined);
+            const expanded =
+              sessions.length > 1 && clickable && expandedAgents.has(agentName);
+            const onAgentClick = clickable
+              ? () => {
+                  if (sessions.length === 1) {
+                    interaction?.navigate?.(sessions[0].sessionID);
+                  } else if (sessions.length > 1) {
+                    interaction?.toggleAgent(agentName);
+                  } else if (history !== undefined) {
+                    interaction?.navigate?.(history.taskID);
+                  }
+                }
+              : undefined;
+            const agentRowEl = compactSidebar
+              ? compactAgentRow(
+                  agentName,
+                  model,
+                  variant,
+                  active,
+                  now,
+                  theme,
+                  clickable ? sessions.length : undefined,
+                  expanded,
+                  onAgentClick,
+                  hoverBackground,
+                  interaction?.hasSelectedText,
+                  history !== undefined,
+                )
+              : agentRow(
+                  agentName,
+                  model,
+                  variant,
+                  active,
+                  now,
+                  theme,
+                  clickable ? sessions.length : undefined,
+                  expanded,
+                  onAgentClick,
+                  hoverBackground,
+                  interaction?.hasSelectedText,
+                  history !== undefined,
+                );
+            if (!expanded) return [agentRowEl];
+            return [
+              agentRowEl,
+              ...sessions.map((target) =>
+                sessionTargetRow(
+                  target,
+                  theme,
+                  () => interaction?.navigate?.(target.sessionID),
+                  hoverBackground,
+                  interaction?.hasSelectedText,
+                ),
               ),
-            ],
-          ),
-          text({ fg: theme.textMuted }, [`v${version}`]),
-        ],
-      ),
-      configStatusRow,
-      box({ width: '100%', marginTop: 1 }, [
-        text({ fg: theme.text }, ['Agents']),
-      ]),
-      ...getSidebarAgentNames(snapshot).flatMap((agentName) => {
-        const model = snapshot.agentModels[agentName] ?? 'pending';
-        const variant = snapshot.agentVariants[agentName];
-        const active = activeAgents.has(agentName);
-        const sessions = targetsByAgent.get(agentName) ?? [];
-        const reusable = reusableByAgent.get(agentName);
-        // History is idle-only: while this agent has live sessions, #1197
-        // owns the row (navigate the live one / expand N). The dot and
-        // idle-row click appear only when nothing is running.
-        const history =
-          sessions.length === 0 && reusable !== undefined
-            ? reusable
-            : undefined;
-        const clickable =
-          interaction?.navigate !== undefined &&
-          (sessions.length > 0 || history !== undefined);
-        const expanded =
-          sessions.length > 1 && clickable && expandedAgents.has(agentName);
-        const onAgentClick = clickable
-          ? () => {
-              if (sessions.length === 1) {
-                interaction?.navigate?.(sessions[0].sessionID);
-              } else if (sessions.length > 1) {
-                interaction?.toggleAgent(agentName);
-              } else if (history !== undefined) {
-                interaction?.navigate?.(history.taskID);
-              }
-            }
-          : undefined;
-        const agentRowEl = compactSidebar
-          ? compactAgentRow(
-              agentName,
-              model,
-              variant,
-              active,
-              now,
-              theme,
-              clickable ? sessions.length : undefined,
-              expanded,
-              onAgentClick,
-              hoverBackground,
-              interaction?.hasSelectedText,
-              history !== undefined,
-            )
-          : agentRow(
-              agentName,
-              model,
-              variant,
-              active,
-              now,
-              theme,
-              clickable ? sessions.length : undefined,
-              expanded,
-              onAgentClick,
-              hoverBackground,
-              interaction?.hasSelectedText,
-              history !== undefined,
-            );
-        if (!expanded) return [agentRowEl];
-        return [
-          agentRowEl,
-          ...sessions.map((target) =>
-            sessionTargetRow(
-              target,
-              theme,
-              () => interaction?.navigate?.(target.sessionID),
-              hoverBackground,
-              interaction?.hasSelectedText,
-            ),
-          ),
-        ];
-      }),
+            ];
+          })
+        : []),
     ],
   );
 }
@@ -1484,8 +1494,6 @@ async function setup(ctx: V2TuiContext): Promise<undefined | (() => void)> {
   scheduleRefresh();
   const renderTimer = setInterval(scheduleRefresh, 1000);
   const animationTimer = setInterval(() => {
-    // Same scoping as the render: hidden foreign-conversation activity
-    // must not keep this window's sidebar rerendering every frame.
     if (
       !disposed &&
       getActiveSidebarAgentNames(snapshot(), visibleSession()).size > 0
@@ -1653,8 +1661,6 @@ const plugin: TuiDualContractModule = {
     scheduleRefresh();
     const renderTimer = setInterval(scheduleRefresh, 1000);
     const animationTimer = setInterval(() => {
-      // Same scoping as the render: hidden foreign-conversation activity
-      // must not keep this window's sidebar rerendering every frame.
       if (
         getActiveSidebarAgentNames(
           snapshot(),

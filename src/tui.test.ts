@@ -23,6 +23,7 @@ import {
   resolveHoverBackground,
   resolveSidebarSlotOrder,
   resolveTuiPaneDirectory,
+  STATUS_DOT_GLYPH,
   selectionGuard,
   shortSessionID,
   splitSidebarModelId,
@@ -384,11 +385,18 @@ describe('tui sidebar agents', () => {
 
       // Explorer row should have the agent label on left and truncated model on right
       const explorerLine = lines[explorerLineIdx];
-      expect(explorerLine).toMatch(/explorer\s+account\.\.\.p5-turbo/);
+      expect(explorerLine).toMatch(/explorer\s+accounts\.\.\.p5-turbo/);
 
       // Oracle row should be single-line with right-aligned model
       const oracleLine = lines[oracleLineIdx];
       expect(oracleLine).toMatch(/oracle\s+gpt-6-luna-fast/);
+
+      const headerLine = lines.find((line) => line.includes('OMO-Slim')) ?? '';
+      expect(headerLine.indexOf('OMO-Slim')).toBeGreaterThan(-1);
+      expect(explorerLine.indexOf('explorer')).toBe(
+        headerLine.indexOf('OMO-Slim'),
+      );
+      expect(oracleLine.indexOf('oracle')).toBe(headerLine.indexOf('OMO-Slim'));
 
       // No unwrapped model path fragments should appear on separate lines
       expect(frame).not.toMatch(/fireworks\/routers\//);
@@ -401,8 +409,8 @@ describe('tui sidebar agents', () => {
 });
 
 describe('live TUI activity rendering', () => {
-  test('updates a mounted v1 sidebar when an agent becomes active', async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-spinner-live-'));
+  test('updates a mounted v1 sidebar dot when an agent becomes active', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-status-live-'));
     const projectDir = path.join(root, 'project');
     const originalDataHome = process.env.XDG_DATA_HOME;
     const disposers: Array<() => void> = [];
@@ -453,8 +461,23 @@ describe('live TUI activity rendering', () => {
         { width: 52, height: 14 },
       );
       await setup.renderOnce();
-      expect(setup.captureCharFrame()).not.toMatch(ACTIVITY_FRAME_PATTERN);
-
+      const initialFrame = setup.captureCharFrame().split('\n');
+      const initialRow = initialFrame.findIndex((line) =>
+        line.includes('explorer'),
+      );
+      expect(initialRow).toBeGreaterThan(-1);
+      expect(
+        initialFrame[initialRow]?.indexOf(STATUS_DOT_GLYPH),
+      ).toBeGreaterThanOrEqual(0);
+      expect(initialFrame[initialRow]?.indexOf(STATUS_DOT_GLYPH)).toBeLessThan(
+        initialFrame[initialRow]?.indexOf('explorer') ?? -1,
+      );
+      const initialDot = setup
+        .captureSpans()
+        .lines[initialRow]?.spans.find((span) =>
+          span.text.includes(STATUS_DOT_GLYPH),
+        );
+      expect(initialDot?.fg.toInts()).toEqual([170, 170, 170, 255]);
       recordTuiAgentActivity(
         {
           sessionID: 'explorer-session',
@@ -466,18 +489,56 @@ describe('live TUI activity rendering', () => {
       await Bun.sleep(1_100);
       await setup.renderOnce();
 
-      const firstFrame = setup
-        .captureCharFrame()
-        .match(ACTIVITY_FRAME_PATTERN)?.[0];
-      expect(firstFrame).toBeDefined();
+      const activeFrame = setup.captureCharFrame().split('\n');
+      const activeRow = activeFrame.findIndex((line) =>
+        line.includes('explorer'),
+      );
+      expect(activeRow).toBeGreaterThan(-1);
+      const firstSpinner = activeFrame[activeRow]?.match(
+        ACTIVITY_FRAME_PATTERN,
+      );
+      expect(firstSpinner).not.toBeNull();
+      expect(
+        activeFrame[activeRow]?.indexOf(firstSpinner?.[0] ?? ''),
+      ).toBeLessThan(activeFrame[activeRow]?.indexOf('explorer') ?? -1);
+      expect(
+        setup
+          .captureSpans()
+          .lines[activeRow]?.spans.find((span) =>
+            span.text.includes(firstSpinner?.[0] ?? ''),
+          )
+          ?.fg.toInts(),
+      ).toEqual([34, 197, 94, 255]);
+      expect(activeFrame[activeRow]).toContain('explorer');
 
       await Bun.sleep(200);
       await setup.renderOnce();
-      const nextFrame = setup
-        .captureCharFrame()
-        .match(ACTIVITY_FRAME_PATTERN)?.[0];
-      expect(nextFrame).toBeDefined();
-      expect(nextFrame).not.toBe(firstFrame);
+      const nextActiveFrame = setup.captureCharFrame().split('\n');
+      const nextSpinner = nextActiveFrame[activeRow]?.match(
+        ACTIVITY_FRAME_PATTERN,
+      );
+      expect(nextSpinner).not.toBeNull();
+      expect(nextSpinner?.[0]).not.toBe(firstSpinner?.[0]);
+
+      recordTuiAgentActivity(
+        { sessionID: 'explorer-session', active: false },
+        projectDir,
+      );
+      await Bun.sleep(1_100);
+      await setup.renderOnce();
+
+      const idleFrame = setup.captureCharFrame().split('\n');
+      const idleRow = idleFrame.findIndex((line) => line.includes('explorer'));
+      expect(idleRow).toBeGreaterThan(-1);
+      expect(idleFrame[idleRow]?.indexOf(STATUS_DOT_GLYPH)).toBeLessThan(
+        idleFrame[idleRow]?.indexOf('explorer') ?? -1,
+      );
+      const idleDot = setup
+        .captureSpans()
+        .lines[idleRow]?.spans.find((span) =>
+          span.text.includes(STATUS_DOT_GLYPH),
+        );
+      expect(idleDot?.fg.toInts()).toEqual([170, 170, 170, 255]);
     } finally {
       setup?.renderer.destroy();
       for (const dispose of disposers) dispose();
@@ -1196,6 +1257,95 @@ describe('clickable sidebar sessions', () => {
     };
   }
 
+  test('mounted sidebar heading toggles local content visibility', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-sidebar-toggle-'));
+    const projectDir = path.join(root, 'project');
+    fs.mkdirSync(path.join(projectDir, '.opencode'), { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDir, '.opencode', 'oh-my-opencode-slim.json'),
+      '{invalid',
+    );
+    const restoreDataHome = withIsolatedDataHome(root);
+    let setup: Awaited<ReturnType<typeof testRender>> | undefined;
+    let mounted: Awaited<ReturnType<typeof mountClickableSidebar>> | undefined;
+
+    try {
+      recordTuiAgentModels(
+        { agentModels: { explorer: 'openai/gpt-6-luna-fast' } },
+        projectDir,
+      );
+      mounted = await mountClickableSidebar({
+        projectDir,
+        sessionID: 'conv-1',
+      });
+      setup = await testRender(
+        () => mounted?.slotPlugin?.slots.sidebar_content() as never,
+        { width: 52, height: 14 },
+      );
+
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain('OMO-Slim');
+      expect(setup.captureCharFrame()).toContain('vtest');
+      expect(setup.captureCharFrame()).toContain('Config invalid');
+      expect(setup.captureCharFrame()).toContain('explorer');
+      expect(setup.captureCharFrame()).not.toContain('Agents');
+      const openHeader =
+        setup
+          .captureCharFrame()
+          .split('\n')
+          .find((line) => line.includes('OMO-Slim')) ?? '';
+      expect(openHeader.indexOf('▼')).toBeGreaterThanOrEqual(0);
+      expect(openHeader.indexOf('▼')).toBeLessThan(
+        openHeader.indexOf('OMO-Slim'),
+      );
+
+      const header = setup
+        .captureCharFrame()
+        .split('\n')
+        .findIndex((line) => line.includes('OMO-Slim'));
+      await setup.mockMouse.click(2, header);
+      await setup.renderOnce();
+
+      expect(setup.captureCharFrame()).toContain('OMO-Slim');
+      expect(setup.captureCharFrame()).toContain('vtest');
+      expect(setup.captureCharFrame()).not.toContain('Config invalid');
+      expect(setup.captureCharFrame()).not.toContain('explorer');
+      expect(setup.captureCharFrame()).not.toContain('Agents');
+      const closedHeader =
+        setup
+          .captureCharFrame()
+          .split('\n')
+          .find((line) => line.includes('OMO-Slim')) ?? '';
+      expect(closedHeader.indexOf('▶')).toBeGreaterThanOrEqual(0);
+      expect(closedHeader.indexOf('▶')).toBeLessThan(
+        closedHeader.indexOf('OMO-Slim'),
+      );
+
+      await setup.mockMouse.click(2, header);
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain('Config invalid');
+      expect(setup.captureCharFrame()).toContain('explorer');
+      expect(
+        setup
+          .captureCharFrame()
+          .split('\n')
+          .find((line) => line.includes('OMO-Slim'))
+          ?.indexOf('▼'),
+      ).toBeLessThan(
+        setup
+          .captureCharFrame()
+          .split('\n')
+          .find((line) => line.includes('OMO-Slim'))
+          ?.indexOf('OMO-Slim') ?? -1,
+      );
+    } finally {
+      setup?.renderer.destroy();
+      for (const dispose of mounted?.disposers ?? []) dispose();
+      restoreDataHome();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test('mounted sidebar: 1 session navigates', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-click-'));
     const projectDir = path.join(root, 'project');
@@ -1540,7 +1690,10 @@ describe('clickable sidebar sessions', () => {
       const lines = setup.captureCharFrame().split('\n');
       const oracleRow = lines.findIndex((l) => l.includes('oracle'));
       expect(oracleRow).toBeGreaterThan(-1);
-      expect(ACTIVITY_FRAME_PATTERN.test(lines[oracleRow])).toBe(true);
+      expect(lines[oracleRow]?.match(ACTIVITY_FRAME_PATTERN)).not.toBeNull();
+      expect(
+        lines[oracleRow]?.match(ACTIVITY_FRAME_PATTERN)?.index,
+      ).toBeLessThan(lines[oracleRow]?.indexOf('oracle') ?? -1);
       expect(lines[oracleRow]).not.toContain('✦');
 
       const col = Math.max(lines[oracleRow].indexOf('oracle'), 0);
@@ -1554,11 +1707,12 @@ describe('clickable sidebar sessions', () => {
     }
   });
 
-  test('mounted sidebar: spinner without history does not rebuild the row on animation frames', async () => {
+  test('mounted sidebar: animated status remains clickable without history', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-dot-spin-'));
     const projectDir = path.join(root, 'project');
     fs.mkdirSync(projectDir, { recursive: true });
     const restoreDataHome = withIsolatedDataHome(root);
+    const navigated: unknown[] = [];
     let setup: Awaited<ReturnType<typeof testRender>> | undefined;
     let mounted: Awaited<ReturnType<typeof mountClickableSidebar>> | undefined;
 
@@ -1580,7 +1734,7 @@ describe('clickable sidebar sessions', () => {
       mounted = await mountClickableSidebar({
         projectDir,
         sessionID: 'conv-1',
-        navigate: () => {},
+        navigate: (...args) => navigated.push(args),
       });
       setup = await testRender(
         () => mounted?.slotPlugin?.slots.sidebar_content() as never,
@@ -1591,7 +1745,11 @@ describe('clickable sidebar sessions', () => {
       const lines = setup.captureCharFrame().split('\n');
       const oracleRow = lines.findIndex((l) => l.includes('oracle'));
       expect(oracleRow).toBeGreaterThan(-1);
-      expect(ACTIVITY_FRAME_PATTERN.test(lines[oracleRow])).toBe(true);
+      const firstSpinner = lines[oracleRow]?.match(ACTIVITY_FRAME_PATTERN);
+      expect(firstSpinner).not.toBeNull();
+      expect(
+        lines[oracleRow]?.match(ACTIVITY_FRAME_PATTERN)?.index,
+      ).toBeLessThan(lines[oracleRow]?.indexOf('oracle') ?? -1);
       expect(lines[oracleRow]).not.toContain('✦');
 
       await Bun.sleep(200);
@@ -1599,7 +1757,15 @@ describe('clickable sidebar sessions', () => {
       const nextLines = setup.captureCharFrame().split('\n');
       const nextRow = nextLines.findIndex((l) => l.includes('oracle'));
       expect(nextRow).toBe(oracleRow);
-      expect(ACTIVITY_FRAME_PATTERN.test(nextLines[nextRow])).toBe(true);
+      const nextSpinner = nextLines[nextRow]?.match(ACTIVITY_FRAME_PATTERN);
+      expect(nextSpinner).not.toBeNull();
+      expect(nextSpinner?.[0]).not.toBe(firstSpinner?.[0]);
+      expect(
+        nextLines[nextRow]?.match(ACTIVITY_FRAME_PATTERN)?.index,
+      ).toBeLessThan(nextLines[nextRow]?.indexOf('oracle') ?? -1);
+      const oracleCol = nextLines[nextRow]?.indexOf('oracle') ?? 0;
+      await setup.mockMouse.click(oracleCol + 1, nextRow);
+      expect(navigated).toEqual([['session', { sessionID: 'ora-live' }]]);
     } finally {
       setup?.renderer.destroy();
       for (const dispose of mounted?.disposers ?? []) dispose();
@@ -2040,5 +2206,12 @@ describe('kill-all running subagents', () => {
       else process.env.XDG_DATA_HOME = originalDataHome;
       fs.rmSync(projectDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('status glyph', () => {
+  test('uses the exact small bullet glyph U+2022', () => {
+    expect(STATUS_DOT_GLYPH).toBe('\u2022');
+    expect(STATUS_DOT_GLYPH.charCodeAt(0)).toBe(0x2022);
   });
 });
