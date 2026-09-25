@@ -135,23 +135,7 @@ function isUsableSecondaryText(text: string) {
 const SESSION_DELETE_RETRIES = 3;
 const SESSION_DELETE_RETRY_DELAY_MS = 500;
 const SECONDARY_MODEL_TIMEOUT_MS = 30_000;
-const activeSecondaryModelClients = new WeakSet<object>();
-
-function acquireSecondaryModelLease(client: object): () => void {
-  if (activeSecondaryModelClients.has(client)) {
-    throw new Error(
-      'A secondary model session cleanup is still pending; using fetched content without starting another session',
-    );
-  }
-
-  activeSecondaryModelClients.add(client);
-  let released = false;
-  return () => {
-    if (released) return;
-    released = true;
-    activeSecondaryModelClients.delete(client);
-  };
-}
+const pendingSecondaryModelCleanups = new WeakMap<object, number>();
 
 /**
  * Exposed for tests so they can avoid real wall-clock sleeps.
@@ -289,7 +273,11 @@ async function runSecondaryModel(
 
   const client = getClient(input);
   const directory = input.directory;
-  const releaseLease = acquireSecondaryModelLease(client);
+  if (pendingSecondaryModelCleanups.has(client)) {
+    throw new Error(
+      'A secondary model session cleanup is still pending; using fetched content without starting another session',
+    );
+  }
   let sessionId: string | undefined;
   let promptPromise: Promise<unknown> | undefined;
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
@@ -357,6 +345,10 @@ async function runSecondaryModel(
       new Promise<never>((_, reject) => {
         timeoutHandle = setTimeout(() => {
           promptTimedOut = true;
+          pendingSecondaryModelCleanups.set(
+            client,
+            (pendingSecondaryModelCleanups.get(client) ?? 0) + 1,
+          );
           reject(new Error('Secondary model timed out'));
         }, _testConfig.secondaryModelTimeoutMs);
       }),
@@ -393,15 +385,14 @@ async function runSecondaryModel(
       void promptPromise
         .catch(() => undefined)
         .then(() => deleteSessionSafely(input, cleanupSessionId))
-        .finally(releaseLease);
+        .finally(() => {
+          const remaining =
+            (pendingSecondaryModelCleanups.get(client) ?? 1) - 1;
+          if (remaining) pendingSecondaryModelCleanups.set(client, remaining);
+          else pendingSecondaryModelCleanups.delete(client);
+        });
     } else if (cleanupSessionId) {
-      try {
-        await deleteSessionSafely(input, cleanupSessionId);
-      } finally {
-        releaseLease();
-      }
-    } else {
-      releaseLease();
+      await deleteSessionSafely(input, cleanupSessionId);
     }
   }
 }
