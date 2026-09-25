@@ -51,266 +51,333 @@ function nativeOutcome(
   return Object.fromEntries(state);
 }
 
+type Files = Record<string, string>;
+type Expected = Record<string, string | null>;
+type Accepted = [string, Files, string, Expected, boolean?];
+type Blocked = [string, Files, string, string];
+
+const accepted: Accepted[] = [
+  [
+    'T4 unanchored append',
+    { 'a.txt': 'a\nb\n' },
+    patch('*** Update File: a.txt', '@@', '+Z'),
+    { 'a.txt': 'a\nb\nZ\n' },
+  ],
+  [
+    'T5 blank line between hunks',
+    { 'a.txt': 'a\n', 'b.txt': 'b\n' },
+    patch(
+      '*** Update File: a.txt',
+      '@@',
+      '-a',
+      '+A',
+      '',
+      '*** Update File: b.txt',
+      '@@',
+      '-b',
+      '+B',
+    ),
+    { 'a.txt': 'A\n', 'b.txt': 'B\n' },
+  ],
+  [
+    'T5b blank line before End Patch',
+    { 'a.txt': 'a\n' },
+    patch('*** Update File: a.txt', '@@', '-a', '+A', ''),
+    { 'a.txt': 'A\n' },
+  ],
+  [
+    'T6 fence outside markers',
+    { 'a.txt': 'a\n' },
+    `${patch('*** Update File: a.txt', '@@', '-a', '+A')}\n\`\`\``,
+    { 'a.txt': 'A\n' },
+  ],
+  [
+    'T6b fence around markers',
+    { 'a.txt': 'a\n' },
+    `\`\`\`patch\n${patch('*** Update File: a.txt', '@@', '-a', '+A')}\n\`\`\``,
+    { 'a.txt': 'A\n' },
+  ],
+  [
+    'T7 rename without chunks',
+    { 'a.txt': 'a\n' },
+    patch('*** Update File: a.txt', '*** Move to: b.txt'),
+    { 'a.txt': null, 'b.txt': 'a\n' },
+  ],
+  [
+    'T8 unified-diff header as absent context',
+    { 'a.txt': 'a\nb\nc\n' },
+    patch('*** Update File: a.txt', '@@ -1,3 +1,3 @@', ' a', '-b', '+B', ' c'),
+    { 'a.txt': 'a\nB\nc\n' },
+  ],
+  [
+    'T8b stale @@ context',
+    { 'a.txt': 'def f(x):\n    return x\n' },
+    patch(
+      '*** Update File: a.txt',
+      '@@ def f(x, y):',
+      '-    return x',
+      '+    return x + 1',
+    ),
+    { 'a.txt': 'def f(x):\n    return x + 1\n' },
+  ],
+  [
+    'T9 @@ context consumed by prior chunk',
+    { 'a.txt': 'L0\nL1\nL2\nL3\nL4\nL5\n' },
+    patch(
+      '*** Update File: a.txt',
+      '@@',
+      ' L1',
+      '-L2',
+      '+X',
+      ' L3',
+      '@@ L3',
+      '-L4',
+      '+Y',
+    ),
+    { 'a.txt': 'L0\nL1\nX\nL3\nY\nL5\n' },
+  ],
+  [
+    'T11 folded EOF chunks keep final marker',
+    { 'a.txt': 'a\nb\nc\n' },
+    patch(
+      '*** Update File: a.txt',
+      '@@',
+      '-c',
+      '+C',
+      '*** End of File',
+      '*** Update File: a.txt',
+      '@@',
+      '+Z',
+      '*** End of File',
+    ),
+    { 'a.txt': 'a\nb\nC\nZ\n' },
+  ],
+  [
+    'P0-4 folded middle insertion retains native old lines',
+    { 'a.txt': 'a\nc\n' },
+    patch(
+      '*** Update File: a.txt',
+      '@@ a',
+      '+X',
+      '*** Update File: a.txt',
+      '*** Move to: b.txt',
+      '@@',
+      ' a',
+    ),
+    { 'a.txt': null, 'b.txt': 'a\nX\nc\n' },
+  ],
+  [
+    'T12 retry without final empty context',
+    { 'a.txt': 'a\nb\n' },
+    patch('*** Update File: a.txt', '@@', ' a', '-b', '+B', ' '),
+    { 'a.txt': 'a\nB\n' },
+  ],
+  [
+    'T13 trim precedes unicode',
+    { 'a.txt': 'x\n“k”\ny\n  "k"\ny\n' },
+    patch('*** Update File: a.txt', '@@ "k"', '-y', '+Y'),
+    { 'a.txt': 'x\n“k”\ny\n  "k"\nY\n' },
+  ],
+  [
+    'T14 Add with final empty line',
+    {},
+    patch('*** Add File: n.txt', '+a', '+'),
+    { 'n.txt': 'a\n' },
+  ],
+  [
+    'T14b Add with only empty line',
+    {},
+    patch('*** Add File: n.txt', '+'),
+    { 'n.txt': '' },
+  ],
+  [
+    'T15 missing @@ on EOF insertion removed',
+    { 'a.txt': 'a\n' },
+    patch('*** Update File: a.txt', '@@ nope', '+Z', '*** End of File'),
+    { 'a.txt': 'a\nZ\n' },
+  ],
+  [
+    'T17 second update uses new @@ anchor',
+    { 'a.txt': 'L0\nL1\nL2\n' },
+    patch(
+      '*** Update File: a.txt',
+      '@@ L1',
+      '+N',
+      '*** Update File: a.txt',
+      '@@ N',
+      '-L2',
+      '+M',
+    ),
+    { 'a.txt': 'L0\nL1\nN\nM\n' },
+  ],
+  [
+    'U1 fuzzy whitespace edge preserves bytes',
+    { 'a.txt': 'foo  \nold\nbar\n' },
+    patch('*** Update File: a.txt', '@@', ' foo', '-stale', '+new', ' bar'),
+    { 'a.txt': 'foo  \nnew\nbar\n' },
+  ],
+  [
+    'U2 fuzzy unicode edge preserves bytes',
+    { 'a.py': 'msg = “hi”\nold()\nend()\n' },
+    patch(
+      '*** Update File: a.py',
+      '@@',
+      ' msg = "hi"',
+      '-stale()',
+      '+new()',
+      ' end()',
+    ),
+    { 'a.py': 'msg = “hi”\nnew()\nend()\n' },
+  ],
+  [
+    'N4 EOF insertion preserves interior and final blanks',
+    { 'a.txt': 'a\n\nb\n\n' },
+    patch('*** Update File: a.txt', '@@', '+X', '*** End of File'),
+    { 'a.txt': 'a\n\nb\nX\n' },
+  ],
+  [
+    'N10 stacked @@ context matches native',
+    {
+      'a.py':
+        'class A:\n    def m(self):\n        return 1\nclass B:\n    def m(self):\n        return 1\n',
+    },
+    patch(
+      '*** Update File: a.py',
+      '@@ class B:',
+      '@@     def m(self):',
+      '-        return 1',
+      '+        return 2',
+    ),
+    {
+      'a.py':
+        'class A:\n    def m(self):\n        return 1\nclass B:\n    def m(self):\n        return 2\n',
+    },
+  ],
+  [
+    'N1 CRLF two updates compare native modulo EOL',
+    { 'a.txt': 'a\r\nb\r\nc\r\nd\r\n' },
+    patch(
+      '*** Update File: a.txt',
+      '@@',
+      '-a',
+      '+A',
+      '*** Update File: a.txt',
+      '@@',
+      '-d',
+      '+D',
+    ),
+    { 'a.txt': 'A\r\nb\r\nc\r\nD\r\n' },
+    true,
+  ],
+];
+
+const blocked: Blocked[] = [
+  [
+    'T1 repeated closing brace EOF',
+    {
+      'a.ts':
+        'function a() {\n  return 1;\n}\n\nfunction b() {\n  return 2;\n}\n',
+    },
+    patch(
+      '*** Update File: a.ts',
+      '@@',
+      ' }',
+      '+',
+      '+export { a, b };',
+      '*** End of File',
+    ),
+    'apply_patch verification failed:',
+  ],
+  [
+    'T10 unbounded prefix/suffix deletion',
+    { 'a.txt': 'start\nold\nx1\nx2\nx3\nx4\nx5\nx6\nx7\nx8\nend\n' },
+    patch('*** Update File: a.txt', '@@', ' start', '-stale', '+new', ' end'),
+    'apply_patch verification failed:',
+  ],
+  [
+    'T16 Add followed by Delete',
+    {},
+    patch('*** Add File: n.txt', '+a', '*** Delete File: n.txt'),
+    'apply_patch verification failed:',
+  ],
+  [
+    'N6 mid-chunk empty line is rejected',
+    { 'a.py': 'def foo():\n    x = 1\n    y = 2\n\n    return x\n' },
+    patch(
+      '*** Update File: a.py',
+      '@@ def foo():',
+      '     x = 1',
+      '-    y = 2',
+      '+    y = 3',
+      '',
+      '     return x',
+    ),
+    'apply_patch validation failed:',
+  ],
+  [
+    'N8 indented @@ would edit wrong native occurrence',
+    {
+      'a.py':
+        'class A:\n    def run(self):\n        return 1\ndef run(self):\n    return 1\n',
+    },
+    patch(
+      '*** Update File: a.py',
+      '@@     def run(self):',
+      '-        return 1',
+      '+        return 2',
+    ),
+    'Native apply_patch would not reproduce',
+  ],
+  [
+    'Pa missing @@ insertion anchor fails closed',
+    { 'a.txt': 'a\n' },
+    patch('*** Update File: a.txt', '@@ nope', '+X'),
+    'Failed to find insertion anchor',
+  ],
+  [
+    'Pb stale @@ with duplicate old lines fails closed',
+    { 'a.py': 'def f(x):\n    return x\n\ndef g(x):\n    return x\n' },
+    patch(
+      '*** Update File: a.py',
+      '@@ def g_new(x):',
+      '-    return x',
+      '+    return x + 1',
+    ),
+    'Failed to find context',
+  ],
+];
+
 describe('apply-patch/native regressions', () => {
-  test.each([
-    {
-      name: 'T4 unanchored append',
-      files: { 'a.txt': 'a\nb\n' },
-      input: patch('*** Update File: a.txt', '@@', '+Z'),
-      expected: { 'a.txt': 'a\nb\nZ\n' },
-    },
-    {
-      name: 'T5 blank line between hunks',
-      files: { 'a.txt': 'a\n', 'b.txt': 'b\n' },
-      input: patch(
-        '*** Update File: a.txt',
-        '@@',
-        '-a',
-        '+A',
-        '',
-        '*** Update File: b.txt',
-        '@@',
-        '-b',
-        '+B',
-      ),
-      expected: { 'a.txt': 'A\n', 'b.txt': 'B\n' },
-    },
-    {
-      name: 'T5b blank line before End Patch',
-      files: { 'a.txt': 'a\n' },
-      input: patch('*** Update File: a.txt', '@@', '-a', '+A', ''),
-      expected: { 'a.txt': 'A\n' },
-    },
-    {
-      name: 'T6 fence outside markers',
-      files: { 'a.txt': 'a\n' },
-      input: `${patch('*** Update File: a.txt', '@@', '-a', '+A')}\n\`\`\``,
-      expected: { 'a.txt': 'A\n' },
-    },
-    {
-      name: 'T6b fence before and after markers',
-      files: { 'a.txt': 'a\n' },
-      input: `\`\`\`patch\n${patch('*** Update File: a.txt', '@@', '-a', '+A')}\n\`\`\``,
-      expected: { 'a.txt': 'A\n' },
-    },
-    {
-      name: 'T7 rename without chunks',
-      files: { 'a.txt': 'a\n' },
-      input: patch('*** Update File: a.txt', '*** Move to: b.txt'),
-      expected: { 'a.txt': null, 'b.txt': 'a\n' },
-    },
-    {
-      name: 'T8 unified-diff header as absent context',
-      files: { 'a.txt': 'a\nb\nc\n' },
-      input: patch(
-        '*** Update File: a.txt',
-        '@@ -1,3 +1,3 @@',
-        ' a',
-        '-b',
-        '+B',
-        ' c',
-      ),
-      expected: { 'a.txt': 'a\nB\nc\n' },
-    },
-    {
-      name: 'T8b stale @@ context',
-      files: { 'a.txt': 'def f(x):\n    return x\n' },
-      input: patch(
-        '*** Update File: a.txt',
-        '@@ def f(x, y):',
-        '-    return x',
-        '+    return x + 1',
-      ),
-      expected: { 'a.txt': 'def f(x):\n    return x + 1\n' },
-    },
-    {
-      name: 'T9 @@ context already consumed by previous chunk',
-      files: { 'a.txt': 'L0\nL1\nL2\nL3\nL4\nL5\n' },
-      input: patch(
-        '*** Update File: a.txt',
-        '@@',
-        ' L1',
-        '-L2',
-        '+X',
-        ' L3',
-        '@@ L3',
-        '-L4',
-        '+Y',
-      ),
-      expected: { 'a.txt': 'L0\nL1\nX\nL3\nY\nL5\n' },
-    },
-    {
-      name: 'T11 folded EOF chunks keep only the final marker',
-      files: { 'a.txt': 'a\nb\nc\n' },
-      input: patch(
-        '*** Update File: a.txt',
-        '@@',
-        '-c',
-        '+C',
-        '*** End of File',
-        '*** Update File: a.txt',
-        '@@',
-        '+Z',
-        '*** End of File',
-      ),
-      expected: { 'a.txt': 'a\nb\nC\nZ\n' },
-    },
-    {
-      name: 'P0-4 folded insertion in the middle keeps native-matchable old lines',
-      files: { 'a.txt': 'a\nc\n' },
-      input: patch(
-        '*** Update File: a.txt',
-        '@@ a',
-        '+X',
-        '*** Update File: a.txt',
-        '*** Move to: b.txt',
-        '@@',
-        ' a',
-      ),
-      expected: { 'a.txt': null, 'b.txt': 'a\nX\nc\n' },
-    },
-    {
-      name: 'T12 native retries without trailing empty context line',
-      files: { 'a.txt': 'a\nb\n' },
-      input: patch('*** Update File: a.txt', '@@', ' a', '-b', '+B', ' '),
-      expected: { 'a.txt': 'a\nB\n' },
-    },
-    {
-      name: 'T13 native prioritizes trim over unicode',
-      files: { 'a.txt': 'x\n“k”\ny\n  "k"\ny\n' },
-      input: patch('*** Update File: a.txt', '@@ "k"', '-y', '+Y'),
-      expected: { 'a.txt': 'x\n“k”\ny\n  "k"\nY\n' },
-    },
-    {
-      name: 'T14 Add with final empty line',
-      files: {},
-      input: patch('*** Add File: n.txt', '+a', '+'),
-      expected: { 'n.txt': 'a\n' },
-    },
-    {
-      name: 'T14b Add with only an empty line',
-      files: {},
-      input: patch('*** Add File: n.txt', '+'),
-      expected: { 'n.txt': '' },
-    },
-    {
-      name: 'T15 missing @@ anchor on EOF insertion is removed',
-      files: { 'a.txt': 'a\n' },
-      input: patch(
-        '*** Update File: a.txt',
-        '@@ nope',
-        '+Z',
-        '*** End of File',
-      ),
-      expected: { 'a.txt': 'a\nZ\n' },
-    },
-    {
-      name: 'T17 second update uses a freshly inserted @@ anchor',
-      files: { 'a.txt': 'L0\nL1\nL2\n' },
-      input: patch(
-        '*** Update File: a.txt',
-        '@@ L1',
-        '+N',
-        '*** Update File: a.txt',
-        '@@ N',
-        '-L2',
-        '+M',
-      ),
-      expected: { 'a.txt': 'L0\nL1\nN\nM\n' },
-    },
-    {
-      name: 'U1 fuzzy trailing-space edge must retain file bytes',
-      files: { 'a.txt': 'foo  \nold\nbar\n' },
-      input: patch(
-        '*** Update File: a.txt',
-        '@@',
-        ' foo',
-        '-stale',
-        '+new',
-        ' bar',
-      ),
-      expected: { 'a.txt': 'foo  \nnew\nbar\n' },
-    },
-    {
-      name: 'U2 fuzzy unicode edge must retain file bytes',
-      files: { 'a.py': 'msg = “hi”\nold()\nend()\n' },
-      input: patch(
-        '*** Update File: a.py',
-        '@@',
-        ' msg = "hi"',
-        '-stale()',
-        '+new()',
-        ' end()',
-      ),
-      expected: { 'a.py': 'msg = “hi”\nnew()\nend()\n' },
-    },
-    {
-      name: 'U3 EOF insertion precedes a real final empty line',
-      files: { 'a.txt': 'a\n\n' },
-      input: patch('*** Update File: a.txt', '@@', '+X', '*** End of File'),
-      expected: { 'a.txt': 'a\nX\n' },
-    },
-  ])('$name', async ({ files, input, expected }) => {
+  test.each(accepted)('%s', async (...row: Accepted) => {
+    const [, files, input, expected, allowEol] = row;
     const root = await createTempDir();
-    for (const [file, text] of Object.entries(files)) {
+    for (const [file, text] of Object.entries(files))
       await writeFixture(root, file, text);
-    }
     const rewritten = await rewritePatchText(root, input);
-    expect(nativeOutcome(root, files, rewritten)).toEqual(
-      Object.fromEntries(
-        Object.entries(expected).filter(([, text]) => text !== null),
-      ),
-    );
+    const native = nativeOutcome(root, files, rewritten);
+    const existing = Object.fromEntries(
+      Object.entries(expected).filter(([, text]) => text !== null),
+    ) as Files;
+    if (allowEol) {
+      const eol = (value: string) =>
+        value.replace(/\r\n/g, '\n').replace(/\n*$/, '\n');
+      const normalize = (state: Files) =>
+        Object.fromEntries(
+          Object.entries(state).map(([file, text]) => [file, eol(text)]),
+        );
+      expect(normalize(native)).toEqual(normalize(existing));
+    } else expect(native).toEqual(existing);
     await applyPatch(root, rewritten);
     for (const [file, text] of Object.entries(expected)) {
-      if (text === null) {
-        await expect(readText(root, file)).rejects.toThrow();
-      } else {
-        expect(await readText(root, file)).toBe(text);
-      }
+      if (text === null) await expect(readText(root, file)).rejects.toThrow();
+      else expect(await readText(root, file)).toBe(text);
     }
   });
 
-  test.each([
-    {
-      name: 'T1 repeated closing brace makes EOF-first match unsafe',
-      files: {
-        'a.ts':
-          'function a() {\n  return 1;\n}\n\nfunction b() {\n  return 2;\n}\n',
-      },
-      input: patch(
-        '*** Update File: a.ts',
-        '@@',
-        ' }',
-        '+',
-        '+export { a, b };',
-        '*** End of File',
-      ),
-    },
-    {
-      name: 'T10 prefix/suffix cannot delete an unbounded span',
-      files: { 'a.txt': 'start\nold\nx1\nx2\nx3\nx4\nx5\nx6\nx7\nx8\nend\n' },
-      input: patch(
-        '*** Update File: a.txt',
-        '@@',
-        ' start',
-        '-stale',
-        '+new',
-        ' end',
-      ),
-    },
-    {
-      name: 'T16 Add followed by Delete cannot be verified by native',
-      files: {},
-      input: patch('*** Add File: n.txt', '+a', '*** Delete File: n.txt'),
-    },
-  ])('$name is blocked', async ({ files, input }) => {
+  test.each(blocked)('%s is blocked', async (_name, files, input, error) => {
     const root = await createTempDir();
-    for (const [file, text] of Object.entries(files)) {
+    for (const [file, text] of Object.entries(files))
       await writeFixture(root, file, text);
-    }
-    await expect(rewritePatchText(root, input)).rejects.toThrow(
-      'apply_patch verification failed:',
-    );
+    await expect(rewritePatchText(root, input)).rejects.toThrow(error);
   });
 });

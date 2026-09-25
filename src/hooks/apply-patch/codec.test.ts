@@ -151,12 +151,13 @@ PATCH`);
 
   test.each([
     ['', ''],
-    ['\n', ''],
+    ['\n', '\n'],
+    ['\n\n', '\n\n'],
     ['a', 'a'],
     ['a\n', 'a'],
     ['a\nb', 'a\nb'],
     ['a\nb\n', 'a\nb'],
-    ['a\n\n', 'a\n'],
+    ['a\n\n', 'a\n\n'],
   ])('formatPatch preserves Add File contents %j', (contents, expected) => {
     const hunk = { type: 'add' as const, path: 'added.txt', contents };
     const formatted = formatPatch({ hunks: [hunk] });

@@ -101,12 +101,12 @@ describe('apply-patch/resolution', () => {
     });
   });
 
-  test('T1 blocks an EOF match when native would use an earlier occurrence', () => {
-    expect(() =>
+  test('T1 resolves EOF at the tail; native verification blocks the earlier match', () => {
+    expect(
       resolveUpdate('sample.txt', 'beta\nalpha\nbeta', [
         { old_lines: ['beta'], new_lines: ['omega'], is_end_of_file: true },
-      ]),
-    ).toThrow('ambiguous');
+      ]).nextText,
+    ).toBe('beta\nalpha\nomega');
   });
 
   test('resolveUpdate preserves CRLF while rebuilding content', () => {
@@ -197,6 +197,14 @@ describe('apply-patch/resolution', () => {
         { old_lines: [], new_lines: ['middle'], change_context: '"anchor"' },
       ],
       message: 'Insertion anchor was ambiguous',
+    },
+    {
+      name: 'missing insertion anchor',
+      text: 'alpha\n',
+      chunks: [
+        { old_lines: [], new_lines: ['middle'], change_context: 'nope' },
+      ],
+      message: 'Failed to find insertion anchor',
     },
     {
       name: 'ambiguous later chunk',
