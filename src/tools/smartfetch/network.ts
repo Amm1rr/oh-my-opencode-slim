@@ -82,23 +82,6 @@ export function buildAllowedOrigins(patterns: string[]) {
   return origins;
 }
 
-export function canUseCanonicalCacheAlias(baseUrl: string, aliasUrl: string) {
-  try {
-    const base = new URL(baseUrl);
-    const alias = new URL(aliasUrl);
-    if (alias.username || alias.password) return false;
-    return (
-      base.protocol === alias.protocol &&
-      base.hostname === alias.hostname &&
-      base.port === alias.port &&
-      base.pathname === alias.pathname &&
-      base.search === alias.search
-    );
-  } catch {
-    return false;
-  }
-}
-
 function isPermittedRedirect(
   from: string,
   to: string,

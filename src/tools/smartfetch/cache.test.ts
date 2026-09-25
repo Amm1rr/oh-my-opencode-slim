@@ -1,9 +1,28 @@
 import { describe, expect, test } from 'bun:test';
 import { LRUCache } from 'lru-cache';
-import { buildCacheKey, calculateCacheSize } from './cache';
+import {
+  buildCacheKey,
+  calculateCacheSize,
+  isInvalidLlmsResult,
+} from './cache';
 import type { BinaryFetch, CachedFetch, FetchResult } from './types';
 
 describe('smartfetch/cache', () => {
+  test('recognizes invalid llms cache entries', () => {
+    const valid = makeCached({
+      finalUrl: 'https://example.com/llms.txt',
+      sourceKind: 'llms_txt',
+      usedLlmsTxt: true,
+    });
+    expect([
+      isInvalidLlmsResult(valid),
+      isInvalidLlmsResult({ ...valid, finalUrl: 'https://example.com/page' }),
+      isInvalidLlmsResult({ ...valid, contentType: 'text/html' }),
+      isInvalidLlmsResult({ ...valid, rawContent: '<html>login' }),
+      isInvalidLlmsResult({ ...valid, rawContent: '<title>log in' }),
+    ]).toEqual([false, true, true, true, true]);
+  });
+
   test('includes save_binary but not format in the cache key', () => {
     const markdownKey = buildCacheKey(
       'https://example.com/docs',

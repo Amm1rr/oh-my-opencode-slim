@@ -1,5 +1,5 @@
 import { LRUCache } from 'lru-cache';
-import { canUseCanonicalCacheAlias, isHtmlLikeContentType } from './network';
+import { isHtmlLikeContentType } from './network';
 import type { FetchResult } from './types';
 
 export function calculateCacheSize(value: FetchResult): number {
@@ -41,54 +41,21 @@ export function buildCacheKey(
   });
 }
 
-function cacheKeysFor(
-  fetchResult: FetchResult,
-  extractMain: boolean,
-  preferLlmsTxt: 'auto' | 'always' | 'never',
-  saveBinary: boolean,
-) {
-  const keys = new Set<string>();
-  keys.add(
-    buildCacheKey(
-      fetchResult.requestedUrl,
-      extractMain,
-      preferLlmsTxt,
-      saveBinary,
-    ),
-  );
-  keys.add(
-    buildCacheKey(fetchResult.finalUrl, extractMain, preferLlmsTxt, saveBinary),
-  );
-  if (
-    fetchResult.canonicalUrl &&
-    canUseCanonicalCacheAlias(fetchResult.finalUrl, fetchResult.canonicalUrl)
-  ) {
-    keys.add(
-      buildCacheKey(
-        fetchResult.canonicalUrl,
-        extractMain,
-        preferLlmsTxt,
-        saveBinary,
-      ),
-    );
-  }
-  return [...keys];
-}
-
 export function cacheFetchResult(
   fetchResult: FetchResult,
   extractMain: boolean,
   preferLlmsTxt: 'auto' | 'always' | 'never',
   saveBinary: boolean,
 ) {
-  for (const key of cacheKeysFor(
+  CACHE.set(
+    buildCacheKey(
+      fetchResult.requestedUrl,
+      extractMain,
+      preferLlmsTxt,
+      saveBinary,
+    ),
     fetchResult,
-    extractMain,
-    preferLlmsTxt,
-    saveBinary,
-  )) {
-    CACHE.set(key, fetchResult);
-  }
+  );
 }
 
 export function isInvalidLlmsResult(fetchResult: FetchResult | undefined) {

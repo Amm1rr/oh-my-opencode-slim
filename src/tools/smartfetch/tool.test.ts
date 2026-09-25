@@ -127,6 +127,36 @@ describe('smartfetch/tool', () => {
     );
   });
 
+  test('a canonical URL does not share a credentialed response with another request', async () => {
+    const fetchMock = mock(async (input: string | URL | Request) => {
+      const url = String(input);
+      return new Response(
+        `<html><head><link rel="canonical" href="https://example.com/private"></head><body>${url.includes('user:pass@') ? 'private account' : 'public page'}</body></html>`,
+        { headers: { 'content-type': 'text/html' } },
+      );
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const webfetch = createWebfetchTool({ client: {} } as any);
+    const args = {
+      format: 'text' as const,
+      extract_main: false,
+      prefer_llms_txt: 'never' as const,
+      include_metadata: true,
+      save_binary: false,
+    };
+    const fetchPage = (url: string) =>
+      webfetch.execute({ ...args, url }, createExecutionContext());
+    const privateResult = await fetchPage(
+      'https://user:pass@example.com/private',
+    );
+    const publicResult = await fetchPage('https://example.com/private');
+    expect(privateResult).toContain('private account');
+    expect(publicResult).toContain('public page');
+    expect(publicResult).not.toContain('private account');
+    expect(publicResult).toContain('cache_hit: false');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   test('passes ctx.sessionID as parentID to the secondary-model session', async () => {
     const fetchMock = mock(async () => {
       return new Response(
