@@ -12,9 +12,7 @@ export type ApplyPatchErrorCode =
 
 export type MatchComparatorName =
   | 'exact'
-  | 'unicode'
   | 'trim-end'
-  | 'unicode-trim-end'
   | 'trim'
   | 'unicode-trim';
 

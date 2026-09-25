@@ -113,14 +113,16 @@ export function locateChunk(
   chunk: PatchChunk,
   start: number,
 ): ResolvedChunk {
-  const old_lines = chunk.old_lines;
-  const new_lines = chunk.new_lines;
-  const match = seekMatch(
-    lines,
-    old_lines,
-    start,
-    chunk.is_end_of_file ?? false,
-  );
+  let old_lines = chunk.old_lines;
+  let new_lines = chunk.new_lines;
+  let match = seekMatch(lines, old_lines, start, chunk.is_end_of_file ?? false);
+  let retried = false;
+  if (!match && old_lines.at(-1) === '') {
+    old_lines = old_lines.slice(0, -1);
+    if (new_lines.at(-1) === '') new_lines = new_lines.slice(0, -1);
+    match = seekMatch(lines, old_lines, start, chunk.is_end_of_file ?? false);
+    retried = !!match;
+  }
 
   if (match) {
     if (
@@ -133,7 +135,10 @@ export function locateChunk(
       lines,
       chunk,
       { start: match.index, del: old_lines.length, add: [...new_lines] },
-      !match.exact,
+      !match.exact || retried,
+      match.index,
+      match.index + old_lines.length,
+      new_lines,
     );
   }
 
@@ -156,6 +161,14 @@ export function locateChunk(
     const canonicalStart = prefixSuffix.hit.start - prefixLength;
     const canonicalEnd =
       prefixSuffix.hit.start + prefixSuffix.hit.del + suffixLength;
+    const canonicalNewLines = [
+      ...lines.slice(canonicalStart, prefixSuffix.hit.start),
+      ...prefixSuffix.hit.add,
+      ...lines.slice(
+        prefixSuffix.hit.start + prefixSuffix.hit.del,
+        canonicalEnd,
+      ),
+    ];
 
     return buildResolvedChunk(
       lines,
@@ -164,6 +177,7 @@ export function locateChunk(
       true,
       canonicalStart,
       canonicalEnd,
+      canonicalNewLines,
     );
   }
 
@@ -218,58 +232,59 @@ export function resolveUpdate(
 
   for (const chunk of chunks) {
     const chunkStart = resolveChunkStart(lines, chunk, start);
+    const canonicalContext =
+      chunk.change_context && chunkStart > start
+        ? lines[chunkStart - 1]
+        : undefined;
+    const contextRewritten = canonicalContext !== chunk.change_context;
 
     if (chunk.old_lines.length === 0) {
-      if (chunk.is_end_of_file) {
+      const appendAt = lines.at(-1) === '' ? lines.length - 1 : lines.length;
+      if (chunk.is_end_of_file || !canonicalContext) {
+        const consumesBlank = appendAt < lines.length ? 1 : 0;
         resolved.push(
           buildResolvedChunk(
             lines,
             chunk,
-            { start: lines.length, del: 0, add: [...chunk.new_lines] },
-            false,
+            { start: appendAt, del: consumesBlank, add: [...chunk.new_lines] },
+            contextRewritten || consumesBlank !== 0,
+            appendAt,
+            appendAt + consumesBlank,
+            chunk.new_lines,
+            canonicalContext,
           ),
         );
-        start = lines.length;
+        start = appendAt;
         continue;
       }
 
-      if (!chunk.change_context) {
-        throw new Error(`Missing insertion anchor in ${file}`);
-      }
-
-      const anchorMatch = resolveUniqueAnchor(
-        lines,
-        chunk.change_context,
-        start,
-      );
-      if (anchorMatch.kind === 'missing') {
-        throw new Error(
-          `Failed to find insertion anchor in ${file}:\n${chunk.change_context}`,
-        );
-      }
-
+      const anchorMatch = resolveUniqueAnchor(lines, canonicalContext, start);
       if (anchorMatch.kind === 'ambiguous') {
         throw new Error(
           `Insertion anchor was ambiguous in ${file}:\n${chunk.change_context}`,
         );
       }
 
+      if (anchorMatch.kind === 'missing') {
+        throw new Error(
+          `Failed to find insertion anchor in ${file}:\n${canonicalContext}`,
+        );
+      }
+
       const insertAt = anchorMatch.index + 1;
       const hit = { start: insertAt, del: 0, add: [...chunk.new_lines] };
-      const canonicalContext = anchorMatch.exact
-        ? undefined
-        : anchorMatch.canonicalLine;
+      const insertionContext = canonicalContext;
       if (insertAt === lines.length) {
         resolved.push(
           buildResolvedChunk(
             lines,
             chunk,
             hit,
-            !anchorMatch.exact,
+            !anchorMatch.exact || contextRewritten,
             insertAt,
             insertAt,
             chunk.new_lines,
-            canonicalContext,
+            insertionContext,
           ),
         );
         start = insertAt;
@@ -277,17 +292,20 @@ export function resolveUpdate(
       }
 
       const anchor = lines[insertAt];
+      const trailingBlank = anchor === '' && insertAt === lines.length - 1;
 
       resolved.push(
         buildResolvedChunk(
           lines,
           chunk,
-          hit,
+          trailingBlank
+            ? { start: insertAt, del: 1, add: [...chunk.new_lines] }
+            : hit,
           true,
           insertAt,
           insertAt + 1,
-          [...chunk.new_lines, anchor],
-          canonicalContext,
+          trailingBlank ? chunk.new_lines : [...chunk.new_lines, anchor],
+          insertionContext,
         ),
       );
       start = insertAt;
@@ -295,6 +313,8 @@ export function resolveUpdate(
     }
 
     const found = locateChunk(lines, file, chunk, chunkStart);
+    found.canonical_change_context = canonicalContext;
+    found.rewritten ||= contextRewritten;
     resolved.push(found);
     start = found.hit.start + found.hit.del;
   }

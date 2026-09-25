@@ -23,7 +23,7 @@ describe('apply-patch/codec', () => {
     expect(parsed.hunks[0]).toEqual({
       type: 'add',
       path: 'added.txt',
-      contents: 'alpha\n',
+      contents: 'alpha',
     });
     expect(parsed.hunks[1]).toEqual({ type: 'delete', path: 'removed.txt' });
     expect(parsed.hunks[2]).toEqual({
@@ -117,11 +117,6 @@ PATCH`);
       'unexpected line between hunks',
     ],
     [
-      'garbage after End Patch',
-      '*** Delete File: sample.txt\n*** End Patch\ngarbage',
-      'unexpected line after End Patch',
-    ],
-    [
       'Update File without @@',
       '*** Update File: sample.txt\n*** End Patch',
       'missing @@ chunk body',
@@ -156,19 +151,20 @@ PATCH`);
 
   test.each([
     ['', ''],
-    ['\n', '\n'],
-    ['a', 'a\n'],
-    ['a\n', 'a\n'],
-    ['a\nb', 'a\nb\n'],
-    ['a\nb\n', 'a\nb\n'],
-    ['a\n\n', 'a\n\n'],
+    ['\n', ''],
+    ['a', 'a'],
+    ['a\n', 'a'],
+    ['a\nb', 'a\nb'],
+    ['a\nb\n', 'a\nb'],
+    ['a\n\n', 'a\n'],
   ])('formatPatch preserves Add File contents %j', (contents, expected) => {
     const hunk = { type: 'add' as const, path: 'added.txt', contents };
     const formatted = formatPatch({ hunks: [hunk] });
     const parsed = parsePatch(formatted);
 
     expect(parsed.hunks).toEqual([{ ...hunk, contents: expected }]);
-    expect(formatPatch(parsed)).toBe(formatted);
+    const canonical = formatPatch(parsed);
+    expect(formatPatch(parsePatch(canonical))).toBe(canonical);
   });
 
   test('normalizeUnicode unifies expected typographic variants', () => {

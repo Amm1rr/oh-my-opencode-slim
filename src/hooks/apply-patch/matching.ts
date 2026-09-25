@@ -42,13 +42,7 @@ export type PreparedAutoRescueTarget = Record<MatchComparatorName, string>;
 
 const LEVELS: NamedComparator[] = [
   { name: 'exact', exact: true, norm: (line) => line },
-  { name: 'unicode', exact: false, norm: normalizeUnicode },
   { name: 'trim-end', exact: false, norm: (line) => line.trimEnd() },
-  {
-    name: 'unicode-trim-end',
-    exact: false,
-    norm: (line) => normalizeUnicode(line.trimEnd()),
-  },
   { name: 'trim', exact: false, norm: (line) => line.trim() },
   {
     name: 'unicode-trim',
@@ -78,9 +72,8 @@ export function matchesAt(
   return undefined;
 }
 
-// The chain mirrors native OpenCode's matching passes (exact, then trim()
-// both ends, plus unicode and trim-end variants) so the pre-native gate
-// never rejects a patch native would accept (issue #1207).
+// Native prefers exact, trim-end, trim, then unicode-trim matches across the
+// entire file (not the first position that matches any level).
 function tryMatch(
   lines: string[],
   pattern: string[],
@@ -201,10 +194,11 @@ export function rescueByPrefixSuffix(
 
   // Only the unicode + trim-end level is safe for fuzzy edges. Full-trim
   // would bind stale patches across indentation depths.
-  const norm = LEVELS[3].norm;
+  const norm = (line: string) => normalizeUnicode(line.trimEnd());
   const left = old_lines.slice(0, prefixLength).map(norm);
   const right = old_lines.slice(old_lines.length - suffixLength).map(norm);
   const middle = new_lines.slice(prefixLength, new_lines.length - suffixLength);
+  const maxDeletion = 2 * (old_lines.length - prefixLength - suffixLength) + 4;
   const normalized = lines.map(norm);
   const leftHits: number[] = [];
   const rightHits: number[] = [];
@@ -240,6 +234,7 @@ export function rescueByPrefixSuffix(
       index += 1
     ) {
       const rightIndex = rightHits[index];
+      if (rightIndex - from > maxDeletion) continue;
       if (hit) {
         return { kind: 'ambiguous', phase: 'prefix_suffix' };
       }

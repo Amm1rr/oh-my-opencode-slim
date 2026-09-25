@@ -276,7 +276,7 @@ garbage
     expect(rewritten.hunks[0]).toEqual({
       type: 'add',
       path: 'added.txt',
-      contents: 'fresh\n',
+      contents: 'fresh',
     });
     expect(rewritten.hunks[1]).toEqual({
       type: 'update',
@@ -326,7 +326,7 @@ garbage
     expect(parsePatch(output.args.patchText as string).hunks[0]).toMatchObject({
       type: 'add',
       path: '../shared.txt',
-      contents: 'fresh\n',
+      contents: 'fresh',
     });
   });
 

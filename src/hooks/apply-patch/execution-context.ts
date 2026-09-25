@@ -107,7 +107,10 @@ async function real(target: string): Promise<string> {
 
 function inside(root: string, target: string): boolean {
   const rel = path.relative(root, target);
-  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+  return (
+    rel === '' ||
+    (rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel))
+  );
 }
 
 async function guard(ctx: PathGuardContext, target: string): Promise<void> {
@@ -295,7 +298,7 @@ async function createPatchExecutionContext(
     }
 
     const stat = await statOrNull(filePath);
-    if (!stat || stat.isDirectory()) {
+    if (!stat?.isFile()) {
       throw new ApplyPatchError(
         'verification',
         `Failed to read file to ${verb}: ${filePath}`,
@@ -337,6 +340,7 @@ export async function simulatePatch(
     assertPreparedPathMissing,
   } = await createPatchExecutionContext(root, patchText, worktree);
   const steps: SimulatedStep[] = [];
+  const addedPaths = new Set<string>();
 
   for (const hunk of hunks) {
     const filePath = path.resolve(root, hunk.path);
@@ -345,11 +349,18 @@ export async function simulatePatch(
       await assertPreparedPathMissing(filePath, 'add');
       const finalText = stageAddedText(hunk.contents);
       steps.push({ type: 'add', hunk, filePath, finalText });
+      addedPaths.add(filePath);
       staged.set(filePath, { exists: true, text: finalText, derived: true });
       continue;
     }
 
     if (hunk.type === 'delete') {
+      if (addedPaths.has(filePath)) {
+        throw new ApplyPatchError(
+          'verification',
+          `Failed to read file to delete: ${filePath}`,
+        );
+      }
       await getPreparedFileState(filePath, 'delete');
       steps.push({ type: 'delete', hunk, filePath });
       staged.set(filePath, { exists: false, derived: true });

@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { execFileSync } from 'node:child_process';
 import { symlink } from 'node:fs/promises';
 import path from 'node:path';
 
@@ -273,7 +274,7 @@ garbage
       'Add File',
       'added.txt',
       '*** Add File: %s\n+fresh',
-      { type: 'add', path: 'added.txt', contents: 'fresh\n' },
+      { type: 'add', path: 'added.txt', contents: 'fresh' },
     ],
     [
       'Move to',
@@ -358,6 +359,28 @@ garbage
       `apply_patch verification failed: Add File target already exists: ${path.join(root, 'added.txt')}`,
     );
   });
+
+  test('P3 accepts a sibling filename beginning with two dots', async () => {
+    const root = await createTempDir();
+    await writeFixture(root, '..foo.txt', 'a\n');
+    const input = `*** Begin Patch\n*** Update File: ..foo.txt\n@@\n-a\n+b\n*** End Patch`;
+    await applyPatch(root, await rewritePatchText(root, input));
+    expect(await readText(root, '..foo.txt')).toBe('b\n');
+  });
+
+  test.skipIf(process.platform === 'win32')(
+    'P3 rejects a FIFO before attempting to read it',
+    async () => {
+      const root = await createTempDir();
+      execFileSync('mkfifo', [path.join(root, 'pipe.txt')]);
+      await expect(
+        rewritePatchText(
+          root,
+          `*** Begin Patch\n*** Update File: pipe.txt\n@@\n-a\n+b\n*** End Patch`,
+        ),
+      ).rejects.toThrow('Failed to read file to update');
+    },
+  );
 
   test('rewritePatchText rejects Move to on a different existing destination', async () => {
     const root = await createTempDir();
@@ -542,7 +565,7 @@ garbage
       {
         type: 'add',
         path: 'added.txt',
-        contents: 'alpha\nBETA\n',
+        contents: 'alpha\nBETA',
       },
     ]);
   });
@@ -570,7 +593,7 @@ garbage
       {
         type: 'add',
         path: 'nested/after.txt',
-        contents: 'alpha\nBETA\n',
+        contents: 'alpha\nBETA',
       },
     ]);
   });
@@ -921,7 +944,7 @@ garbage
     const hunks = parsePatch(result.patchText).hunks;
     expect(hunks[hunks.length - 1]).toMatchObject({
       type: 'add',
-      contents: 'hello\n',
+      contents: 'hello',
     });
 
     await applyPatch(root, result.patchText);

@@ -65,6 +65,10 @@ function parseChunks(lines: string[], index: number) {
   let at = index;
 
   while (at < lines.length && !lines[at].startsWith('***')) {
+    if (lines[at] === '') {
+      at += 1;
+      continue;
+    }
     if (!lines[at].startsWith('@@')) {
       unexpectedPatchLine('in update body', lines[at]);
     }
@@ -85,6 +89,11 @@ function parseChunks(lines: string[], index: number) {
       (!lines[at].startsWith('***') || lines[at] === '*** End of File')
     ) {
       const line = lines[at];
+
+      if (line === '') {
+        at += 1;
+        continue;
+      }
 
       if (line === '*** End of File') {
         eof = true;
@@ -142,11 +151,10 @@ function parseAdd(lines: string[], index: number) {
     unexpectedPatchLine('in Add File body', lines[at]);
   }
 
-  // Canonical Add representation: either empty (no lines) or newline-
-  // terminated. `+a` followed by `+` must describe two lines ("a\n\n"),
-  // not collapse into one; a lone `+` is a single empty line ("\n").
+  // Native drops the last line terminator while parsing Add. Staging adds
+  // one only when the resulting content is nonempty and unterminated.
   return {
-    content: contents.length === 0 ? '' : `${contents.join('\n')}\n`,
+    content: contents.join('\n'),
     next: at,
   };
 }
@@ -165,20 +173,16 @@ export function parsePatch(patchText: string): ParsedPatch {
     throw new Error('Invalid patch format: missing Begin/End markers');
   }
 
-  for (const line of lines.slice(0, begin)) {
-    unexpectedPatchLine('before Begin Patch', line);
-  }
-
-  for (const line of lines.slice(end + 1)) {
-    unexpectedPatchLine('after End Patch', line);
-  }
-
   const hunks: PatchHunk[] = [];
   let index = begin + 1;
 
   while (index < end) {
     const header = parseHeader(lines, index);
 
+    if (!header && lines[index] === '') {
+      index += 1;
+      continue;
+    }
     if (!header) {
       unexpectedPatchLine('between hunks', lines[index]);
     }
@@ -201,7 +205,7 @@ export function parsePatch(patchText: string): ParsedPatch {
     }
 
     const next = parseChunks(lines, header.next);
-    if (next.chunks.length === 0) {
+    if (next.chunks.length === 0 && !header.move) {
       throw new Error(
         `Invalid patch format: Update File is missing @@ chunk body: ${header.file}`,
       );
@@ -279,8 +283,14 @@ export function formatPatch(patch: ParsedPatch): string {
     if (hunk.move_path) {
       lines.push(`*** Move to: ${hunk.move_path}`);
     }
-    for (const chunk of hunk.chunks) {
-      lines.push(...renderChunk(chunk));
+    for (const [index, chunk] of hunk.chunks.entries()) {
+      lines.push(
+        ...renderChunk(
+          index === hunk.chunks.length - 1
+            ? chunk
+            : { ...chunk, is_end_of_file: undefined },
+        ),
+      );
     }
   }
 

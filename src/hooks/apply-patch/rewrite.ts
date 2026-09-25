@@ -4,7 +4,8 @@ import { formatPatch, normalizePatchText } from './codec';
 import { ensureApplyPatchError } from './errors';
 import { simulatePatch, stageAddedText } from './execution-context';
 import { commonEdges } from './matching';
-import { resolveUpdate, splitFileLines } from './resolution';
+import { nativeDeriveUpdate } from './native-update';
+import { splitFileLines } from './resolution';
 import type { PatchHunk, UpdatePatchHunk } from './types';
 
 export type RewritePatchResult = {
@@ -31,7 +32,7 @@ function reproduces(
   finalText: string,
 ): boolean {
   try {
-    return resolveUpdate(filePath, baseText, chunks).nextText === finalText;
+    return nativeDeriveUpdate(filePath, baseText, chunks) === finalText;
   } catch {
     return false;
   }
@@ -59,6 +60,11 @@ function createCollapsedUpdateHunk(
       : reproduces(filePath, baseText, [minimizedChunk], finalText)
         ? minimizedChunk
         : collapsedChunk;
+  if (!reproduces(filePath, baseText, [chunk], finalText)) {
+    throw new Error(
+      `Native update cannot reproduce the resolved file: ${filePath}`,
+    );
+  }
 
   return {
     type: 'update',
@@ -80,6 +86,17 @@ function minimizeMergedChunk(chunk: UpdatePatchHunk['chunks'][number]) {
       new_lines: [...chunk.new_lines],
       change_context: chunk.change_context,
       is_end_of_file: chunk.is_end_of_file,
+    };
+  }
+
+  if (
+    chunk.old_lines.length === prefixLength + suffixLength &&
+    (suffixLength > 0 || !chunk.is_end_of_file)
+  ) {
+    return {
+      ...chunk,
+      old_lines: [...chunk.old_lines],
+      new_lines: [...chunk.new_lines],
     };
   }
 
@@ -128,8 +145,8 @@ export async function rewritePatch(
     // touches its paths: reordering around interleaved hunks (delete of the
     // move destination, add recreating the move source) is exactly where
     // folded patches stop being order-equivalent. On any interference the
-    // fold is abandoned and the caller emits the update standalone, which
-    // preserves the original patch ordering and is always safe.
+    // fold is abandoned and the update stays in order. Native still verifies
+    // each separate update against the pre-patch file, not the staged state.
     function reemitFoldedGroup(
       groupIndex: number,
       rendered: PatchHunk,
@@ -172,10 +189,11 @@ export async function rewritePatch(
       let lastCanonicalEnd = -1;
       let sawCanonicalOverlap = false;
       for (const [index, chunk] of resolved.entries()) {
-        const changeContext =
-          chunk.canonical_change_context ?? hunk.chunks[index].change_context;
+        const changeContext = chunk.canonical_change_context;
         const isEndOfFile =
-          hunk.chunks[index].is_end_of_file && chunk.resolved_is_end_of_file
+          index === resolved.length - 1 &&
+          hunk.chunks[index].is_end_of_file &&
+          chunk.resolved_is_end_of_file
             ? true
             : undefined;
 
@@ -189,16 +207,15 @@ export async function rewritePatch(
           chunk.canonical_old_lines.length >= overlap
         ) {
           // A rescue extended this chunk's canonical range over lines the
-          // previous chunk already claimed. Serialize both as one chunk so
-          // every source line is consumed exactly once; separate chunks
-          // would re-match consumed context and fail on re-apply.
+          // previous chunk already claimed. Serialize as one chunk, then
+          // verify it with native matching before forwarding the rewrite.
           previous.old_lines = previous.old_lines
             .slice(0, previous.old_lines.length - overlap)
             .concat(chunk.canonical_old_lines);
           previous.new_lines = previous.new_lines
             .slice(0, previous.new_lines.length - overlap)
             .concat(chunk.canonical_new_lines);
-          previous.is_end_of_file = isEndOfFile ?? previous.is_end_of_file;
+          previous.is_end_of_file = isEndOfFile;
           lastCanonicalEnd = Math.max(lastCanonicalEnd, chunk.canonical_end);
           sawCanonicalOverlap = true;
           continue;
@@ -218,9 +235,8 @@ export async function rewritePatch(
       }
 
       if (sawCanonicalOverlap) {
-        // Overlap merges must reproduce the accepted hits exactly. If an
-        // exotic shape does not, fall back to a verified whole-file chunk
-        // instead of shipping a rewrite that cannot re-apply.
+        // Native matching checks this merged shape; use a whole-file chunk
+        // only if it too reproduces the staged text under native semantics.
         if (!reproduces(filePath, current.text, next, nextText)) {
           next = createCollapsedUpdateHunk(
             hunk.path,
@@ -261,6 +277,9 @@ export async function rewritePatch(
               ...group.chunks.map(minimizeMergedChunk),
               ...next.map(minimizeMergedChunk),
             ];
+            for (const chunk of merged.slice(0, -1)) {
+              chunk.is_end_of_file = undefined;
+            }
             if (reproduces(filePath, group.baseText, merged, nextText)) {
               chunks = merged;
             }

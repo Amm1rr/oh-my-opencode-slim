@@ -88,15 +88,17 @@ describe('apply-patch/resolution', () => {
     expect(resolved.canonical_new_lines).toEqual(['omega', '']);
   });
 
-  test('locateChunk fails if the patch adds a non-existent final blank line', () => {
+  test('T12 retries without the non-existent final blank context line', () => {
     const chunk: PatchChunk = {
       old_lines: ['alpha', ''],
       new_lines: ['omega', ''],
     };
 
-    expect(() => locateChunk(['alpha'], 'sample.txt', chunk, 0)).toThrow(
-      'Failed to find expected lines',
-    );
+    expect(locateChunk(['alpha'], 'sample.txt', chunk, 0)).toMatchObject({
+      rewritten: true,
+      canonical_old_lines: ['alpha'],
+      canonical_new_lines: ['omega'],
+    });
   });
 
   test('T1 blocks an EOF match when native would use an earlier occurrence', () => {
@@ -180,14 +182,6 @@ describe('apply-patch/resolution', () => {
   });
 
   test.each([
-    {
-      name: 'missing anchor',
-      text: 'top\nbottom\n',
-      chunks: [
-        { old_lines: [], new_lines: ['middle'], change_context: 'anchor' },
-      ],
-      message: 'Failed to find insertion anchor',
-    },
     {
       name: 'ambiguous anchor',
       text: 'top\nanchor\none\nsplit\nanchor\ntwo\n',
