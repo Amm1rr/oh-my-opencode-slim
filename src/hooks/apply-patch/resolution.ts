@@ -35,9 +35,7 @@ export function resolveChunkStart(
   chunk: PatchChunk,
   start: number,
 ): number {
-  if (!chunk.change_context) {
-    return start;
-  }
+  if (!chunk.change_context) return start;
 
   const at = seek(lines, [chunk.change_context], start);
   return at === -1 ? start : at + 1;
@@ -48,13 +46,11 @@ function resolveUniqueAnchor(
   changeContext: string,
   start: number,
 ):
-  | { kind: 'missing' }
   | { kind: 'ambiguous' }
   | {
       kind: 'match';
       index: number;
       exact: boolean;
-      canonicalLine: string;
     } {
   let matchedIndex: number | undefined;
   const anchorTarget = prepareAutoRescueTarget(changeContext);
@@ -71,17 +67,12 @@ function resolveUniqueAnchor(
     matchedIndex = index;
   }
 
-  if (matchedIndex === undefined) {
-    return { kind: 'missing' };
-  }
-
-  const canonicalLine = lines[matchedIndex];
+  if (matchedIndex === undefined) throw new Error('Missing insertion anchor');
 
   return {
     kind: 'match',
     index: matchedIndex,
-    exact: canonicalLine === changeContext,
-    canonicalLine,
+    exact: lines[matchedIndex] === changeContext,
   };
 }
 
@@ -125,12 +116,6 @@ export function locateChunk(
   }
 
   if (match) {
-    if (
-      chunk.is_end_of_file &&
-      seekMatch(lines, old_lines, start)?.index !== match.index
-    ) {
-      throw new Error(`EOF match is ambiguous in ${file}`);
-    }
     return buildResolvedChunk(
       lines,
       chunk,
@@ -240,7 +225,7 @@ export function resolveUpdate(
 
     if (chunk.old_lines.length === 0) {
       const appendAt = lines.at(-1) === '' ? lines.length - 1 : lines.length;
-      if (chunk.is_end_of_file || !canonicalContext) {
+      if (chunk.is_end_of_file || !chunk.change_context) {
         const consumesBlank = appendAt < lines.length ? 1 : 0;
         resolved.push(
           buildResolvedChunk(
@@ -258,6 +243,11 @@ export function resolveUpdate(
         continue;
       }
 
+      if (!canonicalContext) {
+        throw new Error(
+          `Failed to find insertion anchor in ${file}:\n${chunk.change_context}`,
+        );
+      }
       const anchorMatch = resolveUniqueAnchor(lines, canonicalContext, start);
       if (anchorMatch.kind === 'ambiguous') {
         throw new Error(
@@ -265,15 +255,8 @@ export function resolveUpdate(
         );
       }
 
-      if (anchorMatch.kind === 'missing') {
-        throw new Error(
-          `Failed to find insertion anchor in ${file}:\n${canonicalContext}`,
-        );
-      }
-
       const insertAt = anchorMatch.index + 1;
       const hit = { start: insertAt, del: 0, add: [...chunk.new_lines] };
-      const insertionContext = canonicalContext;
       if (insertAt === lines.length) {
         resolved.push(
           buildResolvedChunk(
@@ -284,7 +267,7 @@ export function resolveUpdate(
             insertAt,
             insertAt,
             chunk.new_lines,
-            insertionContext,
+            canonicalContext,
           ),
         );
         start = insertAt;
@@ -305,7 +288,7 @@ export function resolveUpdate(
           insertAt,
           insertAt + 1,
           trailingBlank ? chunk.new_lines : [...chunk.new_lines, anchor],
-          insertionContext,
+          canonicalContext,
         ),
       );
       start = insertAt;
@@ -313,6 +296,15 @@ export function resolveUpdate(
     }
 
     const found = locateChunk(lines, file, chunk, chunkStart);
+    if (
+      chunk.change_context &&
+      !canonicalContext &&
+      seek(lines, found.canonical_old_lines, found.canonical_start + 1) >= 0
+    ) {
+      throw new Error(
+        `Failed to find context '${chunk.change_context}' in ${file}`,
+      );
+    }
     found.canonical_change_context = canonicalContext;
     found.rewritten ||= contextRewritten;
     resolved.push(found);

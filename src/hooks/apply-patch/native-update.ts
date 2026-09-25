@@ -16,7 +16,7 @@ export function nativeDeriveUpdate(
 
   for (const chunk of chunks) {
     if (chunk.change_context) {
-      const at = seek(lines, [chunk.change_context], cursor);
+      const at = seek(lines, [chunk.change_context.trim()], cursor);
       if (at < 0) {
         throw new Error(
           `Failed to find context '${chunk.change_context}' in ${file}`,

@@ -1,7 +1,7 @@
 import path from 'node:path';
 
 import { formatPatch, normalizePatchText } from './codec';
-import { ensureApplyPatchError } from './errors';
+import { ApplyPatchError, ensureApplyPatchError } from './errors';
 import { simulatePatch, stageAddedText } from './execution-context';
 import { commonEdges } from './matching';
 import { nativeDeriveUpdate } from './native-update';
@@ -25,6 +25,8 @@ type RewriteDependencyGroup =
       chunks?: UpdatePatchHunk['chunks'];
     };
 
+const eol = (text: string) => text.replace(/\r\n/g, '\n').replace(/\n*$/, '\n');
+
 function reproduces(
   filePath: string,
   baseText: string,
@@ -32,7 +34,8 @@ function reproduces(
   finalText: string,
 ): boolean {
   try {
-    return nativeDeriveUpdate(filePath, baseText, chunks) === finalText;
+    const actual = nativeDeriveUpdate(filePath, baseText, chunks);
+    return eol(actual) === eol(finalText);
   } catch {
     return false;
   }
@@ -61,7 +64,8 @@ function createCollapsedUpdateHunk(
         ? minimizedChunk
         : collapsedChunk;
   if (!reproduces(filePath, baseText, [chunk], finalText)) {
-    throw new Error(
+    throw new ApplyPatchError(
+      'verification',
       `Native update cannot reproduce the resolved file: ${filePath}`,
     );
   }
@@ -247,7 +251,23 @@ export async function rewritePatch(
         }
       }
 
-      changed ||= resolved.some((chunk) => chunk.rewritten);
+      const rewrittenHunk = resolved.some((chunk) => chunk.rewritten);
+      const text = current.text;
+      let keepOriginal = false;
+      if (
+        !current.derived &&
+        !(rewrittenHunk && reproduces(filePath, text, next, nextText))
+      ) {
+        keepOriginal = reproduces(filePath, text, hunk.chunks, nextText);
+        if (!keepOriginal) {
+          throw new ApplyPatchError(
+            'verification',
+            `Native apply_patch would not reproduce the verified update: ${filePath}`,
+          );
+        }
+        next = hunk.chunks;
+      }
+      changed ||= !keepOriginal && rewrittenHunk;
 
       const nextOutputPath = hunk.move_path ?? hunk.path;
       const nextOutputFilePath = movePath ?? filePath;

@@ -91,8 +91,12 @@ function parseChunks(lines: string[], index: number) {
       const line = lines[at];
 
       if (line === '') {
-        at += 1;
-        continue;
+        let next = at;
+        while (lines[next] === '') next += 1;
+        if (!/^[ +-]/.test(lines[next] ?? '')) {
+          at = next;
+          continue;
+        }
       }
 
       if (line === '*** End of File') {
@@ -258,7 +262,7 @@ function renderAddContents(contents: string): string[] {
 
   // Drop only the terminator's empty element, retaining unterminated lines.
   const lines = contents.split('\n');
-  if (contents.endsWith('\n')) {
+  if (/[^\n]\n$/.test(contents)) {
     lines.pop();
   }
   return lines.map((line) => `+${line}`);
