@@ -204,13 +204,13 @@ export function cleanHeadingText(input: string): string {
 export function cleanFetchedMarkdown(input: string): string {
   const output = mapOutsideCodeBlocks(input, (value) =>
     value
-      .replace(/^\s*!\[[^\]]*\]\([^)]+\)\s*$/gm, 'Image omitted')
+      .replace(/^[^\S\n]*!\[[^\]]*\]\([^)]+\)[^\S\n]*$/gm, 'Image omitted')
       .replace(/(^|\n)Image(?=\n|$)/g, '$1Image omitted')
-      .replace(/^\s*(#{1,6})\s*\\?\['([^'\n]+)'\s*$/gm, '$1 $2')
-      .replace(/^\s*(#{1,6})\s*'([^'\n]+)'\]\s*$/gm, '$1 $2')
-      .replace(/^\s*(#{1,6})\s*'([^'\n]+)'\s*$/gm, '$1 $2')
-      .replace(/(#{1,6}[^\n]*?)\s*\[¶\]\(#.*?"Permanent link"\)\s*$/gm, '$1')
-      .replace(/\s+\(#[A-Za-z0-9_-]+\)\s*$/gm, ''),
+      .replace(/^[^\S\n]*(#{1,6})[^\S\n]*\\?\['([^'\n]+)'[^\S\n]*$/gm, '$1 $2')
+      .replace(/^[^\S\n]*(#{1,6})[^\S\n]*'([^'\n]+)'\][^\S\n]*$/gm, '$1 $2')
+      .replace(/^[^\S\n]*(#{1,6})[^\S\n]*'([^'\n]+)'[^\S\n]*$/gm, '$1 $2')
+      .replace(/^(#.*?)[^\S\n]*\[¶\]\(#.*?"Permanent link"\)[^\S\n]*$/gm, '$1')
+      .replace(/(?<![^\S\n])[^\S\n]+\(#[A-Za-z0-9_-]+\)[^\S\n]*$/gm, ''),
   );
 
   return trimBlankRuns(output);

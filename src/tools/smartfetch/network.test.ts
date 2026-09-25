@@ -2,11 +2,19 @@ import { afterEach, describe, expect, mock, test } from 'bun:test';
 import {
   buildAllowedOrigins,
   buildConditionalHeaders,
+  decodeBody,
   fetchWithRedirects,
   normalizeUrl,
 } from './network';
 
 describe('smartfetch/network', () => {
+  test('sniffs repeated incomplete HTML tags without quadratic backtracking', () => {
+    const input = new TextEncoder().encode('<meta '.repeat(200_000));
+    const start = performance.now();
+    decodeBody(input, undefined, 'text/html');
+    expect(performance.now() - start).toBeLessThan(1_000);
+  });
+
   const originalFetch = globalThis.fetch;
 
   afterEach(() => {

@@ -137,11 +137,11 @@ function acceptHeader(_format: 'text' | 'markdown' | 'html') {
 
 function inferCharsetFromHtml(text: string) {
   const metaCharset = text.match(
-    /<meta[^>]+charset\s*=\s*["']?([^\s"'>/;]+)/i,
+    /<meta[^<>]+charset\s*=\s*["']?([^\s"'>/;]+)/i,
   )?.[1];
   if (metaCharset) return metaCharset.trim();
   const httpEquiv = text.match(
-    /<meta[^>]+http-equiv\s*=\s*["']content-type["'][^>]+content\s*=\s*["'][^"']*charset=([^\s"'>;]+)/i,
+    /<meta[^<>]+http-equiv\s*=\s*["']content-type["'][^<>]+content\s*=\s*["'][^"']*charset=([^\s"'>;]+)/i,
   )?.[1];
   if (httpEquiv) return httpEquiv.trim();
   return undefined;
