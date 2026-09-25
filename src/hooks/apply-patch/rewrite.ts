@@ -297,9 +297,6 @@ export async function rewritePatch(
               ...group.chunks.map(minimizeMergedChunk),
               ...next.map(minimizeMergedChunk),
             ];
-            for (const chunk of merged.slice(0, -1)) {
-              chunk.is_end_of_file = undefined;
-            }
             if (reproduces(filePath, group.baseText, merged, nextText)) {
               chunks = merged;
             }

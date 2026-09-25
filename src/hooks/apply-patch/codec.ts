@@ -146,6 +146,7 @@ function parseAdd(lines: string[], index: number) {
   let at = index;
 
   while (at < lines.length && !lines[at].startsWith('***')) {
+    if (lines[at] === '') break;
     if (lines[at].startsWith('+')) {
       contents.push(lines[at].slice(1));
       at += 1;
