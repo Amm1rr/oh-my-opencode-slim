@@ -403,74 +403,56 @@ export function createWebfetchTool(
           },
         });
 
+        const baseMeta = {
+          requested_url: args.url,
+          final_url: fetchResult.finalUrl,
+          canonical_url: fetchResult.canonicalUrl,
+          status_code: fetchResult.statusCode,
+          source_content_type: fetchResult.contentType,
+          charset: fetchResult.charset,
+          etag: fetchResult.etag,
+          last_modified: fetchResult.lastModified,
+          content_length: fetchResult.contentLength,
+          filename: fetchResult.filename,
+        };
+        const chain = fetchResult.redirectChain.map(
+          (step: RedirectStep) => `${step.status} ${step.from} -> ${step.to}`,
+        );
+        const render = (meta: Record<string, unknown>, body: string) =>
+          joinRenderedContent(
+            args.include_metadata ? frontmatter(meta) : '',
+            body,
+            args.format,
+          );
+
         if ('binary' in fetchResult) {
+          const binaryMeta = {
+            ...baseMeta,
+            binary_kind: fetchResult.binaryKind,
+            redirect_chain: chain,
+            upgraded_to_https: fetchResult.upgradedToHttps,
+            llms_probe_error: fetchResult.llmsProbeError,
+            cache_hit: cacheHit,
+            truncated: fetchResult.truncated,
+            download_limit_bytes:
+              fetchResult.downloadLimitBytes ?? MAX_BINARY_DOWNLOAD_BYTES,
+          };
           if (!fetchResult.data) {
-            const metadata = args.include_metadata
-              ? frontmatter({
-                  requested_url: args.url,
-                  final_url: fetchResult.finalUrl,
-                  canonical_url: fetchResult.canonicalUrl,
-                  status_code: fetchResult.statusCode,
-                  source_content_type: fetchResult.contentType,
-                  charset: fetchResult.charset,
-                  etag: fetchResult.etag,
-                  last_modified: fetchResult.lastModified,
-                  content_length: fetchResult.contentLength,
-                  filename: fetchResult.filename,
-                  binary_kind: fetchResult.binaryKind,
-                  redirect_chain: fetchResult.redirectChain.map(
-                    (step: RedirectStep) =>
-                      `${step.status} ${step.from} -> ${step.to}`,
-                  ),
-                  upgraded_to_https: fetchResult.upgradedToHttps,
-                  llms_probe_error: fetchResult.llmsProbeError,
-                  cache_hit: cacheHit,
-                  truncated: fetchResult.truncated,
-                  download_limit_bytes:
-                    fetchResult.downloadLimitBytes ?? MAX_BINARY_DOWNLOAD_BYTES,
-                  binary_metadata_only: true,
-                })
-              : '';
-            return joinRenderedContent(
-              metadata,
+            return render(
+              { ...binaryMeta, binary_metadata_only: true },
               renderMessageForFormat(
                 buildBinaryResultMessage(fetchResult),
                 args.format,
               ),
-              args.format,
             );
           }
           if (!args.save_binary) {
-            const metadata = args.include_metadata
-              ? frontmatter({
-                  requested_url: args.url,
-                  final_url: fetchResult.finalUrl,
-                  canonical_url: fetchResult.canonicalUrl,
-                  status_code: fetchResult.statusCode,
-                  source_content_type: fetchResult.contentType,
-                  charset: fetchResult.charset,
-                  etag: fetchResult.etag,
-                  last_modified: fetchResult.lastModified,
-                  content_length: fetchResult.contentLength,
-                  filename: fetchResult.filename,
-                  binary_kind: fetchResult.binaryKind,
-                  redirect_chain: fetchResult.redirectChain.map(
-                    (step: RedirectStep) =>
-                      `${step.status} ${step.from} -> ${step.to}`,
-                  ),
-                  upgraded_to_https: fetchResult.upgradedToHttps,
-                  truncated: fetchResult.truncated,
-                  save_binary: false,
-                  cache_hit: cacheHit,
-                })
-              : '';
-            return joinRenderedContent(
-              metadata,
+            return render(
+              { ...binaryMeta, save_binary: false },
               renderMessageForFormat(
                 `${fetchResult.binaryKind.toUpperCase()} content fetched but not saved. Re-run with save_binary=true to persist it.`,
                 args.format,
               ),
-              args.format,
             );
           }
           const savedPath = await saveBinary(
@@ -479,39 +461,12 @@ export function createWebfetchTool(
             fetchResult.contentType,
             fetchResult.filename,
           );
-          const metadata = args.include_metadata
-            ? frontmatter({
-                requested_url: args.url,
-                final_url: fetchResult.finalUrl,
-                canonical_url: fetchResult.canonicalUrl,
-                status_code: fetchResult.statusCode,
-                source_content_type: fetchResult.contentType,
-                charset: fetchResult.charset,
-                etag: fetchResult.etag,
-                last_modified: fetchResult.lastModified,
-                content_length: fetchResult.contentLength,
-                filename: fetchResult.filename,
-                binary_kind: fetchResult.binaryKind,
-                redirect_chain: fetchResult.redirectChain.map(
-                  (step: RedirectStep) =>
-                    `${step.status} ${step.from} -> ${step.to}`,
-                ),
-                upgraded_to_https: fetchResult.upgradedToHttps,
-                llms_probe_error: fetchResult.llmsProbeError,
-                cache_hit: cacheHit,
-                truncated: fetchResult.truncated,
-                download_limit_bytes:
-                  fetchResult.downloadLimitBytes ?? MAX_BINARY_DOWNLOAD_BYTES,
-                saved_path: savedPath,
-              })
-            : '';
-          return joinRenderedContent(
-            metadata,
+          return render(
+            { ...binaryMeta, saved_path: savedPath },
             renderMessageForFormat(
               buildBinaryResultMessage(fetchResult, savedPath),
               args.format,
             ),
-            args.format,
           );
         }
 
@@ -521,52 +476,41 @@ export function createWebfetchTool(
           args.prompt,
           secondaryModels,
         );
-        const metadata = args.include_metadata
-          ? frontmatter({
-              requested_url: args.url,
-              final_url: fetchResult.finalUrl,
-              canonical_url: fetchResult.canonicalUrl,
-              status_code: fetchResult.statusCode,
-              source_content_type: fetchResult.contentType,
-              charset: fetchResult.charset,
-              etag: fetchResult.etag,
-              last_modified: fetchResult.lastModified,
-              content_length: fetchResult.contentLength,
-              filename: fetchResult.filename,
-              headings: fetchResult.headings,
-              title: fetchResult.title,
-              source_kind: fetchResult.sourceKind,
-              used_llms_txt: fetchResult.usedLlmsTxt,
-              extracted_main: fetchResult.extractedMain,
-              redirect_chain: fetchResult.redirectChain.map(
-                (step: RedirectStep) =>
-                  `${step.status} ${step.from} -> ${step.to}`,
-              ),
-              upgraded_to_https: fetchResult.upgradedToHttps,
-              llms_probe_error: fetchResult.llmsProbeError,
-              llms_probe_truncated:
-                fetchResult.usedLlmsTxt && fetchResult.truncated,
-              cache_hit: cacheHit,
-              truncated: fetchResult.truncated,
-              word_count: fetchResult.wordCount,
-              quality_signals: fetchResult.qualitySignals,
-              decoded_charset: fetchResult.decodedCharset,
-              decode_fallback: fetchResult.decodeFallback,
-              decode_warning: fetchResult.decodeWarning,
-              secondary_model: undefined,
-              secondary_model_skipped_reason:
-                !secondaryModelDecision.use && args.prompt
-                  ? secondaryModelDecision.reason
-                  : undefined,
-            })
-          : '';
+        const textMeta = {
+          ...baseMeta,
+          headings: fetchResult.headings,
+          title: fetchResult.title,
+          source_kind: fetchResult.sourceKind,
+          used_llms_txt: fetchResult.usedLlmsTxt,
+          extracted_main: fetchResult.extractedMain,
+          redirect_chain: chain,
+          upgraded_to_https: fetchResult.upgradedToHttps,
+          llms_probe_error: fetchResult.llmsProbeError,
+          llms_probe_truncated:
+            fetchResult.usedLlmsTxt && fetchResult.truncated,
+          cache_hit: cacheHit,
+          truncated: fetchResult.truncated,
+          word_count: fetchResult.wordCount,
+          quality_signals: fetchResult.qualitySignals,
+          decoded_charset: fetchResult.decodedCharset,
+          decode_fallback: fetchResult.decodeFallback,
+          decode_warning: fetchResult.decodeWarning,
+        };
 
         if (!secondaryModelDecision.use) {
-          return joinRenderedContent(metadata, baseContent, args.format);
+          return render(
+            {
+              ...textMeta,
+              secondary_model_skipped_reason: args.prompt
+                ? secondaryModelDecision.reason
+                : undefined,
+            },
+            baseContent,
+          );
         }
 
         if (!secondaryModels.length) {
-          return joinRenderedContent(metadata, baseContent, args.format);
+          return render(textMeta, baseContent);
         }
         let secondaryRun:
           | Awaited<ReturnType<typeof runSecondaryModelWithFallback>>
@@ -586,92 +530,25 @@ export function createWebfetchTool(
         }
 
         if (!secondaryRun) {
-          const degradedMetadata = args.include_metadata
-            ? frontmatter({
-                requested_url: args.url,
-                final_url: fetchResult.finalUrl,
-                canonical_url: fetchResult.canonicalUrl,
-                status_code: fetchResult.statusCode,
-                source_content_type: fetchResult.contentType,
-                charset: fetchResult.charset,
-                etag: fetchResult.etag,
-                last_modified: fetchResult.lastModified,
-                content_length: fetchResult.contentLength,
-                filename: fetchResult.filename,
-                headings: fetchResult.headings,
-                title: fetchResult.title,
-                source_kind: fetchResult.sourceKind,
-                used_llms_txt: fetchResult.usedLlmsTxt,
-                extracted_main: fetchResult.extractedMain,
-                redirect_chain: fetchResult.redirectChain.map(
-                  (step: RedirectStep) =>
-                    `${step.status} ${step.from} -> ${step.to}`,
-                ),
-                upgraded_to_https: fetchResult.upgradedToHttps,
-                llms_probe_error: fetchResult.llmsProbeError,
-                llms_probe_truncated:
-                  fetchResult.usedLlmsTxt && fetchResult.truncated,
-                cache_hit: cacheHit,
-                truncated: fetchResult.truncated,
-                word_count: fetchResult.wordCount,
-                quality_signals: fetchResult.qualitySignals,
-                decoded_charset: fetchResult.decodedCharset,
-                decode_fallback: fetchResult.decodeFallback,
-                decode_warning: fetchResult.decodeWarning,
-                secondary_model: undefined,
-                secondary_model_skipped_reason: 'secondary_model_failed',
-                secondary_model_error: secondaryModelError,
-              })
-            : '';
-          return joinRenderedContent(
-            degradedMetadata,
+          return render(
+            {
+              ...textMeta,
+              secondary_model_skipped_reason: 'secondary_model_failed',
+              secondary_model_error: secondaryModelError,
+            },
             baseContent,
-            args.format,
           );
         }
 
-        const metadataWithSecondary = args.include_metadata
-          ? frontmatter({
-              requested_url: args.url,
-              final_url: fetchResult.finalUrl,
-              canonical_url: fetchResult.canonicalUrl,
-              status_code: fetchResult.statusCode,
-              source_content_type: fetchResult.contentType,
-              charset: fetchResult.charset,
-              etag: fetchResult.etag,
-              last_modified: fetchResult.lastModified,
-              content_length: fetchResult.contentLength,
-              filename: fetchResult.filename,
-              headings: fetchResult.headings,
-              title: fetchResult.title,
-              source_kind: fetchResult.sourceKind,
-              used_llms_txt: fetchResult.usedLlmsTxt,
-              extracted_main: fetchResult.extractedMain,
-              redirect_chain: fetchResult.redirectChain.map(
-                (step: RedirectStep) =>
-                  `${step.status} ${step.from} -> ${step.to}`,
-              ),
-              upgraded_to_https: fetchResult.upgradedToHttps,
-              llms_probe_error: fetchResult.llmsProbeError,
-              llms_probe_truncated:
-                fetchResult.usedLlmsTxt && fetchResult.truncated,
-              cache_hit: cacheHit,
-              truncated: fetchResult.truncated,
-              word_count: fetchResult.wordCount,
-              quality_signals: fetchResult.qualitySignals,
-              decoded_charset: fetchResult.decodedCharset,
-              decode_fallback: fetchResult.decodeFallback,
-              decode_warning: fetchResult.decodeWarning,
-              secondary_model_input_truncated: secondaryRun.inputTruncated,
-              secondary_model_input_chars: secondaryRun.inputChars,
-              secondary_model_source_chars: secondaryRun.sourceChars,
-              secondary_model: `${secondaryRun.model.providerID}/${secondaryRun.model.modelID}${secondaryRun.model.variant ? `#${secondaryRun.model.variant}` : ''}`,
-            })
-          : '';
-        return joinRenderedContent(
-          metadataWithSecondary,
+        return render(
+          {
+            ...textMeta,
+            secondary_model_input_truncated: secondaryRun.inputTruncated,
+            secondary_model_input_chars: secondaryRun.inputChars,
+            secondary_model_source_chars: secondaryRun.sourceChars,
+            secondary_model: `${secondaryRun.model.providerID}/${secondaryRun.model.modelID}${secondaryRun.model.variant ? `#${secondaryRun.model.variant}` : ''}`,
+          },
           renderMessageForFormat(secondaryRun.text, args.format),
-          args.format,
         );
       });
     },

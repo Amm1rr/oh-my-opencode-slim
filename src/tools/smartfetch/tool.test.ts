@@ -75,6 +75,30 @@ describe('smartfetch/tool', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  test('unsaved binary metadata includes the same download limit as saved binaries', async () => {
+    globalThis.fetch = mock(
+      async () =>
+        new Response(new Uint8Array([0, 1, 2]), {
+          headers: { 'content-type': 'image/png' },
+        }),
+    ) as typeof fetch;
+    const webfetch = createWebfetchTool({ client: {} } as any);
+    const result = await webfetch.execute(
+      {
+        url: 'https://example.com/figure.png',
+        format: 'markdown',
+        extract_main: true,
+        prefer_llms_txt: 'never',
+        include_metadata: true,
+        save_binary: false,
+      },
+      createExecutionContext(),
+    );
+    expect(result).toContain('download_limit_bytes: 2097152');
+    expect(result).toContain('save_binary: false');
+    expect(result).toContain('cache_hit: false');
+  });
+
   test('returns a required llms.txt message when prefer_llms_txt is always and no llms.txt is available', async () => {
     const fetchMock = mock(async (input: string | URL | Request) => {
       const url = typeof input === 'string' ? input : input.toString();
