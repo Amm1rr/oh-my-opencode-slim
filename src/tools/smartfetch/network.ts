@@ -116,43 +116,6 @@ export function looksLikeHtmlText(text: string) {
   return /^\s*(<!doctype html|<html\b|<head\b|<body\b)/i.test(text);
 }
 
-function isLikelyDecodedText(text: string) {
-  if (!text) return false;
-  let suspicious = 0;
-  let printable = 0;
-  for (const char of text.slice(0, 2048)) {
-    const code = char.charCodeAt(0);
-    const isWhitespace =
-      code === 9 || code === 10 || code === 13 || code === 32;
-    const isControl = code < 32 && !isWhitespace;
-    if (isControl) suspicious++;
-    else printable++;
-  }
-  const total = Math.max(printable + suspicious, 1);
-  return suspicious / total < 0.02 && printable / total > 0.85;
-}
-
-function tryDecodeWithCharset(data: Uint8Array, charset: string) {
-  try {
-    return new TextDecoder(
-      charset,
-      charset.toLowerCase() === 'utf-8' ? { fatal: true } : undefined,
-    ).decode(data);
-  } catch {
-    return undefined;
-  }
-}
-
-function detectBestEffortCharset(data: Uint8Array) {
-  for (const charset of ['utf-8', 'windows-1252']) {
-    const decoded = tryDecodeWithCharset(data, charset);
-    if (decoded && isLikelyDecodedText(decoded)) {
-      return { charset, text: decoded };
-    }
-  }
-  return undefined;
-}
-
 export async function runWithScopedTimeout<T>(
   parentSignal: AbortSignal,
   timeoutMs: number,
@@ -335,28 +298,28 @@ export function decodeBody(
   contentType?: string,
 ): DecodedBody {
   let declaredCharset = charset?.trim() || undefined;
-  const utf8Text = new TextDecoder().decode(data);
-
   if (!declaredCharset && contentType && isHtmlLikeContentType(contentType)) {
-    declaredCharset = inferCharsetFromHtml(utf8Text);
+    declaredCharset = inferCharsetFromHtml(
+      new TextDecoder().decode(data.subarray(0, 2048)),
+    );
   }
 
   if (!declaredCharset) {
-    const detected = detectBestEffortCharset(data);
-    if (detected && detected.charset !== 'utf-8') {
+    try {
       return {
-        text: detected.text,
-        decodedCharset: detected.charset,
+        text: new TextDecoder('utf-8', { fatal: true }).decode(data),
+        decodedCharset: 'utf-8',
+        decodeFallback: false,
+        decodeWarning: undefined,
+      };
+    } catch {
+      return {
+        text: new TextDecoder('windows-1252').decode(data),
+        decodedCharset: 'windows-1252',
         decodeFallback: true,
-        decodeWarning: `Guessed charset without declaration: ${detected.charset}`,
+        decodeWarning: 'Guessed charset without declaration: windows-1252',
       };
     }
-    return {
-      text: utf8Text,
-      decodedCharset: 'utf-8',
-      decodeFallback: false,
-      decodeWarning: undefined,
-    };
   }
 
   try {
@@ -368,7 +331,7 @@ export function decodeBody(
     };
   } catch {
     return {
-      text: utf8Text,
+      text: new TextDecoder().decode(data),
       decodedCharset: 'utf-8',
       decodeFallback: true,
       decodeWarning: `Unsupported charset decoder: ${declaredCharset}`,
@@ -378,22 +341,13 @@ export function decodeBody(
 
 export function looksLikeTextBody(data: Uint8Array) {
   if (!data.byteLength) return true;
-  const sample = data.slice(0, Math.min(data.byteLength, 2048));
-  if (detectBestEffortCharset(sample)) return true;
-
-  let suspicious = 0;
-  let printableAscii = 0;
+  if (data.includes(0)) return false;
+  const sample = data.subarray(0, Math.min(data.byteLength, 2048));
+  let controls = 0;
   for (const byte of sample) {
-    if (byte === 0) return false;
-    const isWhitespace = byte === 9 || byte === 10 || byte === 13;
-    const isPrintableAscii = byte >= 32 && byte <= 126;
-    if (isWhitespace || isPrintableAscii) printableAscii++;
-    if (!isWhitespace && !isPrintableAscii) suspicious++;
+    if (byte < 32 && byte !== 9 && byte !== 10 && byte !== 13) controls++;
   }
-  return (
-    suspicious / sample.byteLength < 0.02 &&
-    printableAscii / sample.byteLength > 0.85
-  );
+  return controls / sample.byteLength < 0.02;
 }
 
 export function isGenericBinaryMime(contentType: string) {

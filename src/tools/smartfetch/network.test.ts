@@ -5,6 +5,7 @@ import {
   extractHeaderMetadata,
   fetchWithRedirects,
   fetchWithUpgradeFallback,
+  looksLikeTextBody,
   normalizeUrl,
   probeLlmsText,
 } from './network';
@@ -15,6 +16,42 @@ describe('smartfetch/network', () => {
     const start = performance.now();
     decodeBody(input, undefined, 'text/html');
     expect(performance.now() - start).toBeLessThan(1_000);
+  });
+
+  test('decodes undeclared UTF-8 losslessly and invalid UTF-8 as warned windows-1252', () => {
+    const valid = decodeBody(
+      new TextEncoder().encode('café'),
+      undefined,
+      'text/plain',
+    );
+    expect(valid.text).toBe('café');
+    expect(valid.decodeFallback).toBe(false);
+    const fallback = decodeBody(
+      Uint8Array.of(0x63, 0x61, 0x66, 0xe9),
+      undefined,
+      'text/plain',
+    );
+    expect(fallback.text).toBe('café');
+    expect(fallback.decodedCharset).toBe('windows-1252');
+    expect(fallback.decodeWarning).toContain('windows-1252');
+    expect(
+      decodeBody(Uint8Array.of(1, 0xe9), undefined, 'text/plain').text,
+    ).toBe('\u0001é');
+  });
+
+  test('sniffs control bytes in the first 2 KiB and rejects NUL anywhere', () => {
+    const text = new TextEncoder().encode('é'.repeat(100));
+    expect(looksLikeTextBody(text)).toBe(true);
+    expect(looksLikeTextBody(Uint8Array.from([...text, 0]))).toBe(false);
+    expect(
+      looksLikeTextBody(Uint8Array.from([...new Uint8Array(2048).fill(65), 0])),
+    ).toBe(false);
+    expect(
+      looksLikeTextBody(Uint8Array.from([...new Uint8Array(96).fill(65), 1])),
+    ).toBe(true);
+    expect(
+      looksLikeTextBody(Uint8Array.from([...new Uint8Array(49).fill(65), 1])),
+    ).toBe(false);
   });
 
   const originalFetch = globalThis.fetch;
