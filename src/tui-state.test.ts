@@ -468,26 +468,30 @@ describe('tui-state persistence', () => {
         updatedAt: Date.now(),
         reusableByAgent: {
           'parent-1': {
-            oracle: {
-              taskID: 'ses_1',
-              alias: 'ora-1',
-              terminalState: 'completed',
-              completedAt: 200,
-              lastUsedAt: 300,
-            },
+            oracle: [
+              {
+                taskID: 'ses_1',
+                alias: 'ora-1',
+                terminalState: 'completed',
+                completedAt: 200,
+                lastUsedAt: 300,
+              },
+            ],
           },
         },
       }),
     );
 
     const snapshot = readTuiSnapshot(tempDir);
-    expect(snapshot.reusableByAgent['parent-1']?.oracle).toEqual({
-      taskID: 'ses_1',
-      alias: 'ora-1',
-      terminalState: 'completed',
-      completedAt: 200,
-      lastUsedAt: 300,
-    });
+    expect(snapshot.reusableByAgent['parent-1']?.oracle).toEqual([
+      {
+        taskID: 'ses_1',
+        alias: 'ora-1',
+        terminalState: 'completed',
+        completedAt: 200,
+        lastUsedAt: 300,
+      },
+    ]);
   });
 
   test('parseSnapshot drops malformed reusableByAgent entries', () => {
@@ -516,12 +520,14 @@ describe('tui-state persistence', () => {
     const base = readTuiSnapshot(tempDir);
     const sameAgentModels = readTuiSnapshot(tempDir);
     sameAgentModels.reusableByAgent['parent-1'] = {
-      oracle: {
-        taskID: 'ses_1',
-        alias: 'ora-1',
-        terminalState: 'completed',
-        lastUsedAt: 300,
-      },
+      oracle: [
+        {
+          taskID: 'ses_1',
+          alias: 'ora-1',
+          terminalState: 'completed',
+          lastUsedAt: 300,
+        },
+      ],
     };
     // A reusableByAgent-only difference must break equality…
     expect(snapshotSectionsEqual(base, sameAgentModels)).toBe(false);

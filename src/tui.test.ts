@@ -1077,24 +1077,28 @@ describe('clickable sidebar sessions', () => {
   test('getSidebarReusableTargets scopes dots to the visible conversation root', () => {
     const reusable = {
       'conv-1': {
-        oracle: {
-          taskID: 'ora-old',
-          alias: 'ora-1',
-          terminalState: 'completed' as const,
-          lastUsedAt: 300,
-        },
+        oracle: [
+          {
+            taskID: 'ora-old',
+            alias: 'ora-1',
+            terminalState: 'completed' as const,
+            lastUsedAt: 300,
+          },
+        ],
       },
       'conv-2': {
-        oracle: {
-          taskID: 'ora-foreign',
-          alias: 'ora-9',
-          terminalState: 'completed' as const,
-          lastUsedAt: 900,
-        },
+        oracle: [
+          {
+            taskID: 'ora-foreign',
+            alias: 'ora-9',
+            terminalState: 'completed' as const,
+            lastUsedAt: 900,
+          },
+        ],
       },
     };
 
-    // Parent of the visible conversation: dot offered.
+    // Parent of the visible conversation: reusable destination offered.
     expect(
       getSidebarReusableTargets(
         createSnapshot({ reusableByAgent: reusable }),
@@ -1102,7 +1106,7 @@ describe('clickable sidebar sessions', () => {
       ),
     ).toEqual(
       new Map([
-        ['oracle', { taskID: 'ora-old', alias: 'ora-1', lastUsedAt: 300 }],
+        ['oracle', [{ taskID: 'ora-old', alias: 'ora-1', lastUsedAt: 300 }]],
       ]),
     );
     // Different root: no dots.
@@ -1125,27 +1129,47 @@ describe('clickable sidebar sessions', () => {
     );
   });
 
-  test('getSidebarReusableTargets keeps the most recently used entry across nested parents of one root', () => {
+  test('getSidebarReusableTargets lists reusable entries across nested parents in recency order', () => {
     const reusable = {
       // Main conversation dispatched a fixer most recently.
       'conv-1': {
-        fixer: {
-          taskID: 'fix-new',
-          alias: 'fix-2',
-          terminalState: 'completed' as const,
-          lastUsedAt: 900,
-        },
+        fixer: [
+          {
+            taskID: 'fix-new',
+            alias: 'fix-2',
+            terminalState: 'completed' as const,
+            completedAt: 1_000,
+            lastUsedAt: 100,
+          },
+          {
+            taskID: 'fix-shared',
+            alias: 'fix-main',
+            terminalState: 'completed' as const,
+            completedAt: 500,
+            lastUsedAt: 200,
+          },
+        ],
       },
       // A nested oracle child of the same conversation dispatched an
       // older fixer that was tracked later (insertion order must not
       // decide the winner).
       'child-1': {
-        fixer: {
-          taskID: 'fix-old',
-          alias: 'fix-1',
-          terminalState: 'completed' as const,
-          lastUsedAt: 100,
-        },
+        fixer: [
+          {
+            taskID: 'fix-old',
+            alias: 'fix-1',
+            terminalState: 'completed' as const,
+            completedAt: 100,
+            lastUsedAt: 900,
+          },
+          {
+            taskID: 'fix-shared',
+            alias: 'fix-nested',
+            terminalState: 'completed' as const,
+            completedAt: 1_200,
+            lastUsedAt: 300,
+          },
+        ],
       },
     };
     const snapshot = createSnapshot({
@@ -1155,7 +1179,29 @@ describe('clickable sidebar sessions', () => {
 
     expect(getSidebarReusableTargets(snapshot, 'conv-1')).toEqual(
       new Map([
-        ['fixer', { taskID: 'fix-new', alias: 'fix-2', lastUsedAt: 900 }],
+        [
+          'fixer',
+          [
+            {
+              taskID: 'fix-shared',
+              alias: 'fix-nested',
+              completedAt: 1_200,
+              lastUsedAt: 300,
+            },
+            {
+              taskID: 'fix-new',
+              alias: 'fix-2',
+              completedAt: 1_000,
+              lastUsedAt: 100,
+            },
+            {
+              taskID: 'fix-old',
+              alias: 'fix-1',
+              completedAt: 100,
+              lastUsedAt: 900,
+            },
+          ],
+        ],
       ]),
     );
   });
@@ -1346,6 +1392,73 @@ describe('clickable sidebar sessions', () => {
     }
   });
 
+  test('places the session disclosure after the agent name in both layouts', async () => {
+    for (const compactSidebar of [true, false]) {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-sidebar-row-'));
+      const projectDir = path.join(root, 'project');
+      fs.mkdirSync(path.join(projectDir, '.opencode'), { recursive: true });
+      fs.writeFileSync(
+        path.join(projectDir, '.opencode', 'oh-my-opencode-slim.json'),
+        JSON.stringify({ compactSidebar }),
+      );
+      const restoreDataHome = withIsolatedDataHome(root);
+      let setup: Awaited<ReturnType<typeof testRender>> | undefined;
+      let mounted:
+        | Awaited<ReturnType<typeof mountClickableSidebar>>
+        | undefined;
+
+      try {
+        recordTuiAgentModels(
+          { agentModels: { oracle: 'openai/gpt-6-luna-fast' } },
+          projectDir,
+        );
+        for (const sessionID of ['ora-1', 'ora-2']) {
+          recordTuiSessionParent(sessionID, 'conv-1', projectDir);
+          recordTuiAgentActivity(
+            { sessionID, agentName: 'oracle', active: true },
+            projectDir,
+          );
+        }
+        mounted = await mountClickableSidebar({
+          projectDir,
+          sessionID: 'conv-1',
+          navigate: () => {},
+        });
+        setup = await testRender(
+          () => mounted?.slotPlugin?.slots.sidebar_content() as never,
+          { width: 100, height: 16 },
+        );
+
+        await setup.renderOnce();
+        const agentLine = setup
+          .captureCharFrame()
+          .split('\n')
+          .find((line) => line.includes('oracle'));
+        expect(agentLine).toBeDefined();
+        expect(agentLine).toMatch(/oracle ▸2/);
+
+        const agentCol = agentLine?.indexOf('oracle') ?? -1;
+        expect(agentCol).toBeGreaterThanOrEqual(0);
+        const agentRow = setup
+          .captureCharFrame()
+          .split('\n')
+          .findIndex((line) => line.includes('oracle'));
+        await setup.mockMouse.click(agentCol + 1, agentRow);
+        await setup.renderOnce();
+        const expandedAgentLine = setup
+          .captureCharFrame()
+          .split('\n')
+          .find((line) => line.includes('oracle'));
+        expect(expandedAgentLine).toMatch(/oracle ▾2/);
+      } finally {
+        setup?.renderer.destroy();
+        for (const dispose of mounted?.disposers ?? []) dispose();
+        restoreDataHome();
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    }
+  });
+
   test('mounted sidebar: 1 session navigates', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-click-'));
     const projectDir = path.join(root, 'project');
@@ -1471,11 +1584,20 @@ describe('clickable sidebar sessions', () => {
       );
       expect(secondChildRow).toBeGreaterThan(childRow);
       const secondChildLine = lines[secondChildRow];
-      expect(firstChildLine.indexOf('active')).toBeGreaterThan(
-        firstChildLine.indexOf('gpt-6-astra-xhigh'),
+      const firstIndicator = firstChildLine.match(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/)?.[0];
+      const secondIndicator = secondChildLine.match(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/)?.[0];
+      expect(firstIndicator).toBeDefined();
+      expect(secondIndicator).toBeDefined();
+      expect(firstChildLine.indexOf(firstIndicator ?? '')).toBeLessThan(
+        firstChildLine.indexOf('ora-1'),
       );
-      expect(firstChildLine).toMatch(/gpt-6-astra-xhigh\s+active/);
-      expect(secondChildLine).toMatch(/claude-opus-long-context\s+retrying/);
+      expect(secondChildLine.indexOf(secondIndicator ?? '')).toBeLessThan(
+        secondChildLine.indexOf('ora-2'),
+      );
+      expect(firstChildLine).not.toContain('gpt-6-astra-xhigh');
+      expect(firstChildLine).not.toContain('active');
+      expect(secondChildLine).not.toContain('claude-opus-long-context');
+      expect(secondChildLine).not.toContain('retrying');
 
       const beforeHover = setup
         .captureSpans()
@@ -1540,12 +1662,14 @@ describe('clickable sidebar sessions', () => {
       updateSnapshot(projectDir, (snapshot) => {
         snapshot.reusableByAgent = {
           'conv-1': {
-            oracle: {
-              taskID: 'ora-old',
-              alias: 'ora-1',
-              terminalState: 'completed',
-              lastUsedAt: 300,
-            },
+            oracle: [
+              {
+                taskID: 'ora-old',
+                alias: 'ora-1',
+                terminalState: 'completed',
+                lastUsedAt: 300,
+              },
+            ],
           },
         };
       });
@@ -1594,12 +1718,14 @@ describe('clickable sidebar sessions', () => {
       updateSnapshot(projectDir, (snapshot) => {
         snapshot.reusableByAgent = {
           'conv-1': {
-            oracle: {
-              taskID: 'ora-latest',
-              alias: 'ora-1',
-              terminalState: 'completed',
-              lastUsedAt: 300,
-            },
+            oracle: [
+              {
+                taskID: 'ora-latest',
+                alias: 'ora-1',
+                terminalState: 'completed',
+                lastUsedAt: 300,
+              },
+            ],
           },
         };
       });
@@ -1621,11 +1747,9 @@ describe('clickable sidebar sessions', () => {
       const oracleRow = lines.findIndex((l) => l.includes('oracle'));
       expect(oracleRow).toBeGreaterThan(-1);
       const nameCol = lines[oracleRow].indexOf('oracle');
-      const dotCol = lines[oracleRow].indexOf('✦');
-      expect(dotCol).toBeGreaterThan(nameCol);
-      expect(dotCol).toBeLessThan(lines[oracleRow].indexOf('gpt-6'));
-      // Pegged to the name: no more than one column of padding.
-      expect(dotCol - (nameCol + 'oracle'.length)).toBeLessThanOrEqual(1);
+      const starCol = lines[oracleRow].indexOf('✦');
+      expect(starCol).toBeGreaterThanOrEqual(0);
+      expect(starCol).toBeLessThan(nameCol);
 
       await setup.mockMouse.click(nameCol + 1, oracleRow);
       expect(navigated).toEqual([['session', { sessionID: 'ora-latest' }]]);
@@ -1664,12 +1788,14 @@ describe('clickable sidebar sessions', () => {
       updateSnapshot(projectDir, (snapshot) => {
         snapshot.reusableByAgent = {
           'conv-1': {
-            oracle: {
-              taskID: 'ora-old',
-              alias: 'ora-1',
-              terminalState: 'completed',
-              lastUsedAt: 300,
-            },
+            oracle: [
+              {
+                taskID: 'ora-old',
+                alias: 'ora-1',
+                terminalState: 'completed',
+                lastUsedAt: 300,
+              },
+            ],
           },
         };
       });
@@ -1698,6 +1824,30 @@ describe('clickable sidebar sessions', () => {
 
       const col = Math.max(lines[oracleRow].indexOf('oracle'), 0);
       await setup.mockMouse.click(col + 2, oracleRow);
+      await setup.renderOnce();
+      const expandedLines = setup.captureCharFrame().split('\n');
+      const liveRow = expandedLines.findIndex((line) => line.includes('ora-1'));
+      expect(liveRow).toBeGreaterThan(-1);
+      const reusableRow = expandedLines.findIndex(
+        (line, index) => index > liveRow && line.includes('ora-1'),
+      );
+      expect(reusableRow).toBeGreaterThan(liveRow);
+      expect(expandedLines[reusableRow]).not.toContain('✦');
+      expect(expandedLines[reusableRow]).not.toContain('reusable');
+      expect(expandedLines[reusableRow]).not.toContain('gpt-6');
+      const liveAliasCol = expandedLines[liveRow].indexOf('ora-1');
+      const reusableAliasCol = expandedLines[reusableRow].indexOf('ora-1');
+      expect(reusableAliasCol).toBe(liveAliasCol);
+      expect(
+        expandedLines[reusableRow].slice(
+          reusableAliasCol - 2,
+          reusableAliasCol,
+        ),
+      ).toBe('• ');
+      await setup.mockMouse.click(
+        expandedLines[liveRow].indexOf('ora-1') + 1,
+        liveRow,
+      );
       expect(navigated).toEqual([['session', { sessionID: 'ora-live' }]]);
     } finally {
       setup?.renderer.destroy();

@@ -55,7 +55,7 @@ export interface BackgroundJobPromptMetadata {
   terminalUnreconciledTaskIDs: BackgroundJobExecution[];
 }
 
-/** Latest accessible reconciled session of an agent (sidebar dot target). */
+/** Metadata for an accessible reusable session selected from the sidebar. */
 export interface ReusableSessionSelection {
   taskID: string;
   alias: string;
@@ -1256,26 +1256,14 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     return this.list(parent).filter((j) => isReusable(j, this.maxContextLines));
   }
 
-  /** Finished sessions the sidebar may surface (dot + idle-row click).
+  /** Finished sessions the sidebar may surface as reusable destinations.
    *  Independent of parent acknowledgment: a child that has reached a
    *  canonical terminal state is history even while still unreconciled. */
   private listSidebarHistory(parent?: string): BackgroundJobRecord[] {
     return this.list(parent).filter(isSidebarHistory);
   }
 
-  /**
-   * Read-only projection for the sidebar's history dot: per agent of a
-   * parent, the latest finished session (completed/error/cancelled).
-   * Appears as soon as the child reaches a canonical terminal state —
-   * parent acknowledgment (`markReconciled`) is NOT required, otherwise
-   * the dot lags until the parent reads the result.
-   *
-   * Recency is max(lastUsedAt, completedAt): finishing and markUsed
-   * both move the selection. Excludes running, status-uncertain, and
-   * stopped-retained. Never mutates lastUsedAt.
-   */
-  /** Shared comparator for the sidebar projection: recency, then taskID
-   *  tiebreak. Single implementation backing both projections below. */
+  /** Shared selection logic for sidebar recency and taskID tiebreaks. */
   private upsertSidebarSelection(
     latest: Map<string, ReusableSessionSelection>,
     job: BackgroundJobRecord,
@@ -1309,18 +1297,34 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     return latest;
   }
 
-  /** Same selection as latestReconciledByAgent, for every parent at once.
-   *  Single pass over the board: every mutation runs this synchronously,
-   *  so per-parent rescans (O(parents x jobs)) are not acceptable here. */
-  latestReconciledByParentAgent() {
-    const byParent = new Map<string, Map<string, ReusableSessionSelection>>();
+  /** Every accessible terminal session, grouped for TUI navigation. */
+  sidebarHistoryByParentAgent() {
+    const byParent = new Map<string, Map<string, ReusableSessionSelection[]>>();
     for (const job of this.listSidebarHistory()) {
-      let latest = byParent.get(job.parentSessionID);
-      if (!latest) {
-        latest = new Map<string, ReusableSessionSelection>();
-        byParent.set(job.parentSessionID, latest);
+      let byAgent = byParent.get(job.parentSessionID);
+      if (!byAgent) {
+        byAgent = new Map<string, ReusableSessionSelection[]>();
+        byParent.set(job.parentSessionID, byAgent);
       }
-      this.upsertSidebarSelection(latest, job);
+      const sessions = byAgent.get(job.agent) ?? [];
+      sessions.push({
+        taskID: job.taskID,
+        alias: job.alias,
+        terminalState:
+          job.terminalState ?? terminalStateOf(job.state) ?? 'completed',
+        completedAt: job.completedAt,
+        lastUsedAt: job.lastUsedAt,
+      });
+      byAgent.set(job.agent, sessions);
+    }
+    for (const byAgent of byParent.values()) {
+      for (const sessions of byAgent.values()) {
+        sessions.sort(
+          (a, b) =>
+            sidebarRecency(b) - sidebarRecency(a) ||
+            b.taskID.localeCompare(a.taskID),
+        );
+      }
     }
     return byParent;
   }

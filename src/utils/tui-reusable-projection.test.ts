@@ -71,7 +71,7 @@ describe('tui-reusable-projection', () => {
       });
 
       expect(
-        readTuiSnapshot(projectDir).reusableByAgent['parent-1']?.oracle,
+        readTuiSnapshot(projectDir).reusableByAgent['parent-1']?.oracle?.[0],
       ).toMatchObject({
         taskID: 'ses_1',
         terminalState: 'completed',
@@ -89,11 +89,29 @@ describe('tui-reusable-projection', () => {
       seedReconciled(board, 'ses_1');
 
       const snapshot = readTuiSnapshot(projectDir);
-      expect(snapshot.reusableByAgent['parent-1']?.oracle).toMatchObject({
+      expect(snapshot.reusableByAgent['parent-1']?.oracle?.[0]).toMatchObject({
         taskID: 'ses_1',
         alias: 'ora-1',
         terminalState: 'completed',
       });
+    } finally {
+      projection.dispose();
+    }
+  });
+
+  test('projects every reusable session for an agent in newest-first order', () => {
+    const board = new BackgroundJobBoard();
+    const projection = createTuiReusableProjection({ board, projectDir });
+
+    try {
+      seedReconciled(board, 'ses_old', { launchAt: 100 });
+      seedReconciled(board, 'ses_new', { launchAt: 300 });
+
+      expect(
+        readTuiSnapshot(projectDir).reusableByAgent['parent-1']?.oracle?.map(
+          (entry) => entry.taskID,
+        ),
+      ).toEqual(['ses_new', 'ses_old']);
     } finally {
       projection.dispose();
     }
@@ -106,7 +124,7 @@ describe('tui-reusable-projection', () => {
     try {
       seedReconciled(board, 'ses_1');
       expect(
-        readTuiSnapshot(projectDir).reusableByAgent['parent-1']?.oracle,
+        readTuiSnapshot(projectDir).reusableByAgent['parent-1']?.oracle?.[0],
       ).toBeDefined();
     } finally {
       first.dispose();
@@ -168,7 +186,7 @@ describe('tui-reusable-projection', () => {
     try {
       seedReconciled(board, 'ses_1');
       expect(readTuiSnapshot(projectDir).reusableByAgent['parent-1']).toEqual(
-        expect.objectContaining({ oracle: expect.anything() }),
+        expect.objectContaining({ oracle: expect.any(Array) }),
       );
 
       board.drop('ses_1');
@@ -205,10 +223,10 @@ describe('tui-reusable-projection', () => {
 
       const snapshot = readTuiSnapshot(projectDir);
       expect(snapshot.sessionParents.ses_1).toBe('parent-1');
-      expect(snapshot.reusableByAgent['parent-1']?.oracle?.taskID).toBe(
+      expect(snapshot.reusableByAgent['parent-1']?.oracle?.[0]?.taskID).toBe(
         'ses_1',
       );
-      expect(snapshot.reusableByAgent['parent-2']?.fixer?.taskID).toBe(
+      expect(snapshot.reusableByAgent['parent-2']?.fixer?.[0]?.taskID).toBe(
         'ses_fix',
       );
     } finally {

@@ -38,8 +38,11 @@ export function createTuiReusableProjection(input: {
   const project = (): void => {
     if (disposed) return;
     updateSnapshot(projectDir, (snapshot) => {
-      const next: Record<string, Record<string, ReusableSessionSelection>> = {};
-      for (const [parent, byAgent] of board.latestReconciledByParentAgent()) {
+      const next: Record<
+        string,
+        Record<string, ReusableSessionSelection[]>
+      > = {};
+      for (const [parent, byAgent] of board.sidebarHistoryByParentAgent()) {
         next[parent] = Object.fromEntries(byAgent);
       }
       snapshot.reusableByAgent = next;

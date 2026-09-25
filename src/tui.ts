@@ -403,7 +403,7 @@ export interface SidebarSessionTarget {
   agentName: string;
   alias?: string;
   model?: string;
-  status?: 'busy' | 'retry';
+  status?: 'busy' | 'retry' | 'reusable';
 }
 
 export interface SidebarAgentTargets {
@@ -474,48 +474,69 @@ function disambiguateDuplicateAliases(
   });
 }
 
-/** One clickable reusable destination: the latest reconciled session of
- * an agent in the visible conversation (sidebar green dot). */
+/** One clickable reusable destination of an agent in the visible conversation. */
 export interface SidebarReusableTarget {
   taskID: string;
   alias: string;
+  completedAt?: number;
   lastUsedAt: number;
 }
 
 /**
- * Latest reconciled reusable session per agent for the visible
- * conversation's sidebar dot. Mirrors the parent-scoping of
+ * Reusable sessions per agent for the visible conversation. Mirrors the
+ * parent-scoping of
  * getSidebarAgentTargets (#1147): only entries whose parent session
  * resolves to the same conversation root as the visible session are
  * offered; without a visible session there is no conversation to scope
- * to and no dots are rendered.
+ * to and no reusable destinations are rendered.
  */
 export function getSidebarReusableTargets(
   snapshot: TuiSnapshot,
   visibleRootID?: string,
-): Map<string, SidebarReusableTarget> {
-  const targets = new Map<string, SidebarReusableTarget>();
+): Map<string, SidebarReusableTarget[]> {
+  const targets = new Map<string, SidebarReusableTarget[]>();
   const root = visibleConversationRoot(snapshot, visibleRootID);
   if (root === undefined) return targets;
   for (const [parentSessionID, byAgent] of Object.entries(
     snapshot.reusableByAgent,
   )) {
     if (resolveTuiSnapshotRoot(snapshot, parentSessionID) !== root) continue;
-    for (const [agentName, entry] of Object.entries(byAgent)) {
-      const current = targets.get(agentName);
-      // Multiple parents of the same visible tree can hold the same
-      // agent (nested dispatch): the dot must open the most recently
-      // used entry, not whichever parent happened to be iterated last.
-      if (current === undefined || entry.lastUsedAt >= current.lastUsedAt) {
-        targets.set(agentName, {
+    for (const [agentName, entries] of Object.entries(byAgent)) {
+      const current = targets.get(agentName) ?? [];
+      const byTaskID = new Map(current.map((entry) => [entry.taskID, entry]));
+      for (const entry of entries) {
+        const candidate: SidebarReusableTarget = {
           taskID: entry.taskID,
           alias: entry.alias,
+          ...(entry.completedAt !== undefined
+            ? { completedAt: entry.completedAt }
+            : {}),
           lastUsedAt: entry.lastUsedAt,
-        });
+        };
+        const existing = byTaskID.get(entry.taskID);
+        if (
+          existing === undefined ||
+          reusableRecency(candidate) > reusableRecency(existing)
+        ) {
+          byTaskID.set(entry.taskID, candidate);
+        }
       }
+      const merged = [...byTaskID.values()];
+      targets.set(agentName, merged);
     }
   }
+  for (const entries of targets.values()) {
+    entries.sort(
+      (a, b) =>
+        reusableRecency(b) - reusableRecency(a) ||
+        b.taskID.localeCompare(a.taskID),
+    );
+  }
   return targets;
+}
+
+function reusableRecency(target: SidebarReusableTarget): number {
+  return Math.max(target.lastUsedAt, target.completedAt ?? 0);
 }
 
 function compareSidebarTargets(
@@ -648,7 +669,6 @@ interface AgentRowTheme {
 
 const STATUS_ACTIVE_COLOR = '#22c55e';
 const STATUS_RETRY_COLOR = '#f59e0b';
-const STATUS_COLUMN_WIDTH = 8;
 
 function hasPrimarySelection(hasSelectedText?: () => boolean): boolean {
   try {
@@ -811,48 +831,26 @@ function decorateInteractiveRow(
   return node;
 }
 
-function sessionStatusView(
-  status: SidebarSessionTarget['status'],
-  theme: AgentRowTheme,
-): { label: string; color: unknown } {
-  if (status === 'retry') {
-    return { label: 'retrying', color: theme.warning ?? STATUS_RETRY_COLOR };
-  }
-  return { label: 'active', color: theme.success ?? STATUS_ACTIVE_COLOR };
-}
-
 export const STATUS_DOT_GLYPH = '•';
 
 function statusDot(
   active: boolean,
+  hasHistory: boolean,
   now: () => number,
   theme: AgentRowTheme,
 ): JSX.Element {
   return text(
     {
-      fg: active ? (theme.success ?? STATUS_ACTIVE_COLOR) : theme.textMuted,
+      fg: active
+        ? (theme.success ?? STATUS_ACTIVE_COLOR)
+        : hasHistory
+          ? '#60a5fa'
+          : theme.textMuted,
       width: 2,
     },
     active
       ? [() => `${getSidebarActivityIndicator(true, now())} `]
-      : [`${STATUS_DOT_GLYPH} `],
-  );
-}
-
-/** Visual-only history glyph. Click/hover belong to the row. */
-function historyDot(): JSX.Element {
-  return text(
-    {
-      // Emerald: softer than theme.success, distinct from running-state green.
-      fg: '#34d399',
-      width: 2,
-      selectable: false,
-    },
-    // ✦ over •/◈: its ink sits in the mid-cell band, so the glyph optically
-    // centers against the agent label, and its narrow waist reads as spaced
-    // from the name without inserting a cell of whitespace (margins are
-    // whole-cell in this layout: no sub-cell nudging exists).
-    ['✦'],
+      : [hasHistory ? '✦ ' : `${STATUS_DOT_GLYPH} `],
   );
 }
 
@@ -868,7 +866,7 @@ function agentRow(
   onClick?: () => void,
   hoverBackground?: unknown,
   hasSelectedText?: () => boolean,
-  showHistoryDot?: boolean,
+  hasHistory?: boolean,
 ): JSX.Element {
   const modelParts = splitSidebarModelId(model);
   const detailRows: JSX.Element[] = [];
@@ -903,7 +901,7 @@ function agentRow(
       shouldFill: true,
     },
     [
-      statusDot(active, now, theme),
+      statusDot(active, hasHistory ?? false, now, theme),
       text(
         {
           fg: theme.textMuted,
@@ -913,11 +911,11 @@ function agentRow(
         },
         [label],
       ),
-      ...(showHistoryDot ? [historyDot()] : []),
       ...(sessionCount !== undefined && sessionCount > 1
         ? [
-            text({ fg: theme.textMuted, width: 4 }, [expanded ? ' ▴' : ' ▾']),
-            text({ fg: theme.textMuted }, [`${sessionCount}`]),
+            text({ fg: theme.textMuted, wrapMode: 'none', flexShrink: 0 }, [
+              ` ${expanded ? '▾' : '▸'}${sessionCount}`,
+            ]),
           ]
         : []),
     ],
@@ -951,7 +949,7 @@ function compactAgentRow(
   onClick?: () => void,
   hoverBackground?: unknown,
   hasSelectedText?: () => boolean,
-  showHistoryDot?: boolean,
+  hasHistory?: boolean,
 ): JSX.Element {
   const modelName = splitSidebarModelId(model).model;
   const row = box(
@@ -970,7 +968,7 @@ function compactAgentRow(
           shouldFill: false,
         },
         [
-          statusDot(active, now, theme),
+          statusDot(active, hasHistory ?? false, now, theme),
           text(
             {
               fg: theme.textMuted,
@@ -980,7 +978,18 @@ function compactAgentRow(
             },
             [label],
           ),
-          ...(showHistoryDot ? [historyDot()] : []),
+          ...(sessionCount !== undefined && sessionCount > 1
+            ? [
+                text(
+                  {
+                    fg: theme.textMuted,
+                    wrapMode: 'none',
+                    flexShrink: 0,
+                  },
+                  [` ${expanded ? '▾' : '▸'}${sessionCount}`],
+                ),
+              ]
+            : []),
           box({ flexGrow: 1, shouldFill: false }),
         ],
       ),
@@ -992,11 +1001,7 @@ function compactAgentRow(
           truncate: true,
           flexShrink: 1,
         },
-        [
-          sessionCount !== undefined && sessionCount > 1
-            ? `${expanded ? '▴' : '▾'}${sessionCount} ${modelName}`
-            : modelName,
-        ],
+        [modelName],
       ),
     ],
   );
@@ -1008,30 +1013,45 @@ function compactAgentRow(
 }
 
 /**
- * One expanded subagent destination: `ora-1  model  status`.
+ * One expanded subagent destination: a fixed-width status indicator and alias.
  * Hover mutates this box in place so the click target survives ticks.
  */
 function sessionTargetRow(
   target: SidebarSessionTarget,
   theme: AgentRowTheme,
+  now: () => number,
   onActivate: () => void,
   hoverBackground: unknown,
   hasSelectedText?: () => boolean,
 ): JSX.Element {
   const label = target.alias ?? shortSessionID(target.sessionID);
-  const status = sessionStatusView(target.status, theme);
-  const modelName = target.model
-    ? splitSidebarModelId(target.model).model
-    : '—';
+  const reusable = target.status === 'reusable';
+  const indicatorColor = reusable
+    ? theme.textMuted
+    : target.status === 'retry'
+      ? (theme.warning ?? STATUS_RETRY_COLOR)
+      : (theme.success ?? STATUS_ACTIVE_COLOR);
   const row = box(
     {
       width: '100%',
       flexDirection: 'row',
       paddingLeft: 2,
-      columnGap: 1,
       shouldFill: true,
     },
     [
+      text(
+        {
+          fg: indicatorColor,
+          width: 2,
+          flexShrink: 0,
+          wrapMode: 'none',
+        },
+        [
+          reusable
+            ? `${STATUS_DOT_GLYPH} `
+            : () => `${getSidebarActivityIndicator(true, now())} `,
+        ],
+      ),
       text(
         {
           fg: theme.textMuted,
@@ -1039,26 +1059,6 @@ function sessionTargetRow(
           wrapMode: 'none',
         },
         [label],
-      ),
-      text(
-        {
-          fg: theme.textMuted,
-          wrapMode: 'none',
-          truncate: true,
-          flexGrow: 1,
-          flexShrink: 1,
-          minWidth: 0,
-        },
-        [modelName],
-      ),
-      text(
-        {
-          fg: status.color,
-          width: STATUS_COLUMN_WIDTH,
-          flexShrink: 0,
-          wrapMode: 'none',
-        },
-        [status.label],
       ),
     ],
   );
@@ -1157,7 +1157,7 @@ function renderSidebar(
   const navigate = interaction?.navigate;
   const reusableByAgent =
     navigate === undefined
-      ? new Map<string, SidebarReusableTarget>()
+      ? new Map<string, SidebarReusableTarget[]>()
       : getSidebarReusableTargets(snapshot, visibleRootID);
   const expandedAgents = interaction?.expandedAgents() ?? new Set<string>();
   const sidebarOpen = interaction?.isOpen() ?? true;
@@ -1212,27 +1212,35 @@ function renderSidebar(
             const variant = snapshot.agentVariants[agentName];
             const active = activeAgents.has(agentName);
             const sessions = targetsByAgent.get(agentName) ?? [];
-            const reusable = reusableByAgent.get(agentName);
-            // History is idle-only: while this agent has live sessions, #1197
-            // owns the row (navigate the live one / expand N). The history
-            // marker and idle-row click appear only when nothing is running.
-            const history =
-              sessions.length === 0 && reusable !== undefined
-                ? reusable
-                : undefined;
+            const reusable = reusableByAgent.get(agentName) ?? [];
+            const seenSessionIDs = new Set(
+              sessions.map((target) => target.sessionID),
+            );
+            const reusableTargets = reusable
+              .filter((target) => !seenSessionIDs.has(target.taskID))
+              .map(
+                (target): SidebarSessionTarget => ({
+                  sessionID: target.taskID,
+                  agentName,
+                  alias: target.alias,
+                  model,
+                  status: 'reusable',
+                }),
+              );
+            const allTargets = [...sessions, ...reusableTargets];
+            const history = reusableTargets.length > 0;
             const clickable =
-              interaction?.navigate !== undefined &&
-              (sessions.length > 0 || history !== undefined);
+              interaction?.navigate !== undefined && allTargets.length > 0;
             const expanded =
-              sessions.length > 1 && clickable && expandedAgents.has(agentName);
+              allTargets.length > 1 &&
+              clickable &&
+              expandedAgents.has(agentName);
             const onAgentClick = clickable
               ? () => {
-                  if (sessions.length === 1) {
-                    interaction?.navigate?.(sessions[0].sessionID);
-                  } else if (sessions.length > 1) {
+                  if (allTargets.length === 1) {
+                    interaction?.navigate?.(allTargets[0].sessionID);
+                  } else if (allTargets.length > 1) {
                     interaction?.toggleAgent(agentName);
-                  } else if (history !== undefined) {
-                    interaction?.navigate?.(history.taskID);
                   }
                 }
               : undefined;
@@ -1244,12 +1252,12 @@ function renderSidebar(
                   active,
                   now,
                   theme,
-                  clickable ? sessions.length : undefined,
+                  clickable ? allTargets.length : undefined,
                   expanded,
                   onAgentClick,
                   hoverBackground,
                   interaction?.hasSelectedText,
-                  history !== undefined,
+                  !active && history,
                 )
               : agentRow(
                   agentName,
@@ -1258,20 +1266,21 @@ function renderSidebar(
                   active,
                   now,
                   theme,
-                  clickable ? sessions.length : undefined,
+                  clickable ? allTargets.length : undefined,
                   expanded,
                   onAgentClick,
                   hoverBackground,
                   interaction?.hasSelectedText,
-                  history !== undefined,
+                  !active && history,
                 );
             if (!expanded) return [agentRowEl];
             return [
               agentRowEl,
-              ...sessions.map((target) =>
+              ...allTargets.map((target) =>
                 sessionTargetRow(
                   target,
                   theme,
+                  now,
                   () => interaction?.navigate?.(target.sessionID),
                   hoverBackground,
                   interaction?.hasSelectedText,

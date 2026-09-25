@@ -17,9 +17,9 @@ export interface TuiSessionDetails {
   status?: 'busy' | 'retry';
 }
 
-/** Latest accessible reconciled session per agent of a parent session
- * (sidebar green dot). Written only by the host-side board projection;
- * the TUI never writes this section. Empty on hosts without a board. */
+/** Accessible reusable sessions per agent of a parent session. Written only
+ * by the host-side board projection; the TUI never writes this section.
+ * Empty on hosts without a board. */
 export type TuiReusableSession = ReusableSessionSelection;
 
 export interface TuiSnapshot {
@@ -45,14 +45,11 @@ export interface TuiSnapshot {
   /** Per-active-session details (alias/model/status) for the sidebar. */
   sessionDetails: Record<string, TuiSessionDetails>;
   /**
-   * Latest reconciled reusable session per agent, keyed by parent
-   * sessionID (sidebar green dot). Version stays 1: `parseSnapshot`
-   * defaults this to `{}` so old snapshots remain readable and old
-   * writers' snapshots simply gain an empty section on rewrite.
-   * Host-board state is process-local by design (dots die on host
-   * restart), so this section is never restored from a stale file.
+   * All accessible reusable sessions per agent, keyed by parent
+   * sessionID. Host-board state is process-local by design, so this
+   * section is never restored from a stale file.
    */
-  reusableByAgent: Record<string, Record<string, TuiReusableSession>>;
+  reusableByAgent: Record<string, Record<string, TuiReusableSession[]>>;
 }
 
 const STATE_DIR = 'oh-my-opencode-slim';
@@ -145,44 +142,49 @@ function parseSessionDetails(
 
 function parseReusableByAgent(
   value: unknown,
-): Record<string, Record<string, TuiReusableSession>> {
+): Record<string, Record<string, TuiReusableSession[]>> {
   if (value === null || typeof value !== 'object') return {};
-  const out: Record<string, Record<string, TuiReusableSession>> = {};
+  const out: Record<string, Record<string, TuiReusableSession[]>> = {};
   for (const [parentID, byAgent] of Object.entries(
     value as Record<string, unknown>,
   )) {
     if (byAgent === null || typeof byAgent !== 'object') continue;
-    const agents: Record<string, TuiReusableSession> = {};
+    const agents: Record<string, TuiReusableSession[]> = {};
     for (const [agentName, entry] of Object.entries(
       byAgent as Record<string, unknown>,
     )) {
-      if (entry === null || typeof entry !== 'object') continue;
-      const rec = entry as {
-        taskID?: unknown;
-        alias?: unknown;
-        terminalState?: unknown;
-        completedAt?: unknown;
-        lastUsedAt?: unknown;
-      };
-      if (
-        typeof rec.taskID !== 'string' ||
-        typeof rec.alias !== 'string' ||
-        (rec.terminalState !== 'completed' &&
-          rec.terminalState !== 'error' &&
-          rec.terminalState !== 'cancelled') ||
-        typeof rec.lastUsedAt !== 'number'
-      ) {
-        continue;
+      if (!Array.isArray(entry)) continue;
+      const sessions: TuiReusableSession[] = [];
+      for (const item of entry) {
+        if (item === null || typeof item !== 'object') continue;
+        const rec = item as {
+          taskID?: unknown;
+          alias?: unknown;
+          terminalState?: unknown;
+          completedAt?: unknown;
+          lastUsedAt?: unknown;
+        };
+        if (
+          typeof rec.taskID !== 'string' ||
+          typeof rec.alias !== 'string' ||
+          (rec.terminalState !== 'completed' &&
+            rec.terminalState !== 'error' &&
+            rec.terminalState !== 'cancelled') ||
+          typeof rec.lastUsedAt !== 'number'
+        ) {
+          continue;
+        }
+        sessions.push({
+          taskID: rec.taskID,
+          alias: rec.alias,
+          terminalState: rec.terminalState,
+          ...(typeof rec.completedAt === 'number'
+            ? { completedAt: rec.completedAt }
+            : {}),
+          lastUsedAt: rec.lastUsedAt,
+        });
       }
-      agents[agentName] = {
-        taskID: rec.taskID,
-        alias: rec.alias,
-        terminalState: rec.terminalState,
-        ...(typeof rec.completedAt === 'number'
-          ? { completedAt: rec.completedAt }
-          : {}),
-        lastUsedAt: rec.lastUsedAt,
-      };
+      if (sessions.length > 0) agents[agentName] = sessions;
     }
     if (Object.keys(agents).length > 0) out[parentID] = agents;
   }
@@ -203,9 +205,8 @@ function parseSnapshot(value: string): TuiSnapshot {
     activityPids: parsePidRecord(parsed.activityPids),
     sessionParents: parseStringRecord(parsed.sessionParents),
     sessionDetails: parseSessionDetails(parsed.sessionDetails),
-    // Absent (pre-dot snapshots) parses as {}: old writers stay
-    // readable. Present values parse normally so the TUI can render the
-    // host board's live projection.
+    // The host-board projection is absent until its first write. Present
+    // values parse as arrays for the TUI's reusable-session navigation.
     reusableByAgent: parseReusableByAgent(parsed.reusableByAgent),
   };
 }
