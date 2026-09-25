@@ -169,6 +169,7 @@ function cleanHeadingText(input: string): string {
 }
 
 export function cleanFetchedMarkdown(input: string): string {
+  const PL = '"Permanent link")';
   const output = mapOutsideCodeBlocks(input, (value) =>
     value
       .split('\n')
@@ -182,15 +183,15 @@ export function cleanFetchedMarkdown(input: string): string {
           )
           .replace(/^[^\S\n]*(#{1,6})[^\S\n]*'([^'\n]+)'\][^\S\n]*$/, '$1 $2')
           .replace(/^[^\S\n]*(#{1,6})[^\S\n]*'([^'\n]+)'[^\S\n]*$/, '$1 $2');
-        if (
-          cleaned.startsWith('#') &&
-          cleaned.indexOf('[¶](#') !== -1 &&
-          /"Permanent link"\)[^\S\n]*$/.test(cleaned)
-        ) {
-          cleaned = cleaned.replace(
-            /^(#.*?)[^\S\n]*\[¶\]\(#.*?"Permanent link"\)[^\S\n]*$/,
-            '$1',
-          );
+        const p = cleaned.startsWith('#') ? cleaned.indexOf('[¶](#', 1) : -1;
+        if (p !== -1) {
+          const t = cleaned.lastIndexOf(PL);
+          if (
+            t >= p + 5 &&
+            /^[^\S\n]*$/.test(cleaned.slice(t + PL.length)) &&
+            !/[\r\u2028\u2029]/.test(cleaned.slice(0, t))
+          )
+            cleaned = cleaned.slice(0, p).trimEnd();
         }
         return cleaned.replace(
           /(?<![^\S\n])[^\S\n]+\(#[A-Za-z0-9_-]+\)[^\S\n]*$/,
@@ -330,11 +331,13 @@ export async function extractFromHtml(
       const articleContent = article?.content;
       const articleHtml = articleContent?.innerHTML;
       if (articleContent && articleHtml?.trim()) {
+        const reparsed = document.createElement('div');
+        reparsed.innerHTML = articleHtml;
         return {
           title: article?.title || title,
           rawContent: html,
           html: articleHtml,
-          text: extractStructuredText(articleContent),
+          text: extractStructuredText(reparsed),
           markdown: trimBlankRuns(turndown.turndown(articleHtml)),
           extractedMain: true,
           canonicalUrl,

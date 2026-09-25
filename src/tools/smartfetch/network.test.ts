@@ -229,17 +229,21 @@ describe('smartfetch/network', () => {
   });
 
   test('accepts llms text even when its URL contains login', async () => {
+    let accept: string | null = null;
     globalThis.fetch = mock(
-      async () =>
-        new Response('# Docs about logging in', {
+      async (_url: string | URL | Request, init?: RequestInit) => {
+        accept = new Headers(init?.headers).get('Accept');
+        return new Response('# Docs about logging in', {
           headers: { 'content-type': 'text/plain' },
-        }),
+        });
+      },
     ) as typeof fetch;
     const result = await probeLlmsText(
       new URL('https://login.example.com/'),
       new AbortController().signal,
     );
     expect('text' in result && result.text).toBe('# Docs about logging in');
+    expect(accept).toBe('text/plain, text/markdown;q=0.9, */*;q=0.1');
   });
 
   test('rejects HTML/login responses before they reach the cache', async () => {

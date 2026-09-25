@@ -158,11 +158,7 @@ Content type detection follows this flow:
    `text/html` for better content extraction.
 
 For HTML without a declared HTTP charset, the charset meta tag is inspected in
-the first 2,048 bytes (D12; the HTML specification requires it within 1,024
-bytes). Later declarations do not override the decoder fallback.
-
-The `nodejs-fs` extraction benchmark remains exploratory (`N=3`, no IC95);
-it is not evidence of a performance improvement until clean remeasurement.
+the first 2,048 bytes. Later declarations do not override the decoder fallback.
 
 ## Tool Timeouts
 

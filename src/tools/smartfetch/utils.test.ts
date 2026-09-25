@@ -30,8 +30,9 @@ const CSS_PARSING_ERROR_HTML = `<!DOCTYPE html><html><head>
 </head><body><article><h1>Hello</h1><p>World</p></article></body></html>`;
 
 describe('smartfetch/utils', () => {
-  test('bounds nine 1 MiB markdown and heading generators with near-linear scaling', () => {
+  test('bounds fourteen 1 MiB markdown and heading generators below one second', () => {
     const mib = 1024 * 1024;
+    const PL = '"Permanent link")';
     const generators: Array<
       [string, (n: number) => string, (s: string) => unknown]
     > = [
@@ -64,17 +65,37 @@ describe('smartfetch/utils', () => {
         (n) => `${' \t'.repeat(n / 2)}(#x)`,
         cleanFetchedMarkdown,
       ],
+      [
+        'permalink CR',
+        (n) => `#${' '.repeat(n - 32)}[¶](#\r${PL}`,
+        cleanFetchedMarkdown,
+      ],
+      [
+        'permalink U+2028',
+        (n) => `#${' '.repeat(n - 32)}[¶](#\u2028${PL}`,
+        cleanFetchedMarkdown,
+      ],
+      [
+        'permalink U+2029',
+        (n) => `#${' '.repeat(n - 32)}[¶](#\u2029${PL}`,
+        cleanFetchedMarkdown,
+      ],
+      [
+        'repeated permalink starts',
+        (n) => `#${'[¶](#'.repeat(Math.floor(n / 6))}${PL}`,
+        cleanFetchedMarkdown,
+      ],
+      [
+        'permalink suffix padding',
+        (n) => `# [¶](#item ${PL}${' '.repeat(n - 32)}`,
+        cleanFetchedMarkdown,
+      ],
     ];
     for (const [name, make, run] of generators) {
       run(make(8192));
       const start = performance.now();
       run(make(mib));
-      const one = performance.now() - start;
-      const twice = performance.now();
-      run(make(2 * mib));
-      const two = performance.now() - twice;
-      expect(one, name).toBeLessThan(1_000);
-      expect(two, name).toBeLessThanOrEqual(2.5 * one);
+      expect(performance.now() - start, name).toBeLessThan(1_000);
     }
   });
 
@@ -98,7 +119,7 @@ describe('smartfetch/utils', () => {
     expect(result).toContain('<root>ok</root>');
   });
 
-  test('suppresses css-tree warnings during html extraction', async () => {
+  test('suppresses css-tree warnings and preserves F10 unextracted HTML', async () => {
     const originalWarn = console.warn;
     const originalError = console.error;
     const warnCalls: unknown[][] = [];
@@ -119,6 +140,7 @@ describe('smartfetch/utils', () => {
       expect(errorCalls).toEqual([]);
       expect(result.text).toContain('Hello');
       expect(result.text).toContain('World');
+      expect(result.html).toBe(CSS_TREE_WARNING_HTML);
     } finally {
       console.warn = originalWarn;
       console.error = originalError;

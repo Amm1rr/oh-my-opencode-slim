@@ -182,6 +182,7 @@ export async function discard(response: Response) {
 export async function fetchWithRedirects(
   url: string,
   signal: AbortSignal,
+  extraHeaders?: Record<string, string>,
 ): Promise<FetchWithRedirectsResult> {
   const redirects = [];
   let current = url;
@@ -194,6 +195,7 @@ export async function fetchWithRedirects(
         'User-Agent': 'opencode-smartfetch/1.0',
         Accept: ACCEPT_HEADER,
         'Accept-Language': DEFAULT_ACCEPT_LANGUAGE,
+        ...extraHeaders,
       },
     });
 
@@ -436,7 +438,9 @@ export async function probeLlmsText(
     `${origin}/llms.txt`,
   ])) {
     try {
-      const result = await fetchWithRedirects(candidate, signal);
+      const result = await fetchWithRedirects(candidate, signal, {
+        Accept: 'text/plain, text/markdown;q=0.9, */*;q=0.1',
+      });
       if ('blockedRedirect' in result) {
         lastError = `llms.txt probe blocked by cross-host redirect: ${result.redirectUrl}`;
         continue;
