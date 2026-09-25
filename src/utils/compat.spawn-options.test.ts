@@ -6,7 +6,9 @@ import {
   expect,
   it,
   mock,
+  spyOn,
 } from 'bun:test';
+import * as childProcess from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
@@ -51,6 +53,7 @@ const originalPlatform = process.platform;
 const originalPath = process.env.PATH;
 const originalComSpec = process.env.ComSpec;
 let importCounter = 0;
+let spawnSpy: ReturnType<typeof spyOn> | undefined;
 
 async function importCompat() {
   return await import(`./compat.ts?spawn-options=${importCounter++}`);
@@ -73,13 +76,7 @@ function setPlatform(platform: NodeJS.Platform): void {
 }
 
 beforeEach(() => {
-  // Some suites call mock.restore(), which removes module mocks globally in
-  // Bun's test process. Reinstall this suite's child_process mock before each
-  // cache-busted compat import so assertions observe the local fake spawn.
-  mock.module('node:child_process', () => ({
-    spawn: spawnMock,
-    spawnSync: mock(() => ({ status: 0 })),
-  }));
+  spawnSpy = spyOn(childProcess, 'spawn').mockImplementation(spawnMock);
 });
 
 afterEach(() => {
@@ -92,6 +89,8 @@ afterEach(() => {
   }
   spawnCalls.length = 0;
   spawnMock.mockClear();
+  spawnSpy?.mockRestore();
+  spawnSpy = undefined;
 });
 
 afterAll(() => {
