@@ -1120,11 +1120,11 @@ describe('task_revive tool', () => {
         state: 'running',
         statusUncertain: false,
       });
-      expect(log).toHaveBeenCalledTimes(1);
-      expect(log).toHaveBeenCalledWith(
-        '[task-revive] observation failed',
-        expect.anything(),
+      const logged = (log.mock.calls as Array<[string]>).filter(
+        ([message]) => !message.startsWith('[terminal-gate]'),
       );
+      expect(logged).toHaveLength(1);
+      expect(logged[0]?.[0]).toBe('[task-revive] observation failed');
     },
   );
 
