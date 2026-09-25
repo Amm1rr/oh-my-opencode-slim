@@ -171,7 +171,7 @@ export async function readBodyLimited(
   return { data: Buffer.concat(chunks, total), truncated };
 }
 
-async function discard(response: Response) {
+export async function discard(response: Response) {
   try {
     await response.body?.cancel();
   } catch {
@@ -182,7 +182,6 @@ async function discard(response: Response) {
 export async function fetchWithRedirects(
   url: string,
   signal: AbortSignal,
-  extraHeaders?: Record<string, string>,
 ): Promise<FetchWithRedirectsResult> {
   const redirects = [];
   let current = url;
@@ -195,7 +194,6 @@ export async function fetchWithRedirects(
         'User-Agent': 'opencode-smartfetch/1.0',
         Accept: ACCEPT_HEADER,
         'Accept-Language': DEFAULT_ACCEPT_LANGUAGE,
-        ...extraHeaders,
       },
     });
 
@@ -206,6 +204,10 @@ export async function fetchWithRedirects(
         throw new Error(
           `Redirect response missing location header: ${response.status}`,
         );
+      }
+      if (!URL.canParse(location, current)) {
+        await discard(response);
+        throw new Error(`Invalid redirect location: ${location}`);
       }
       const next = new URL(location, current).toString();
       redirects.push({ from: current, to: next, status: response.status });
@@ -232,18 +234,13 @@ export async function fetchWithRedirects(
 export async function fetchWithUpgradeFallback(
   normalized: ReturnType<typeof normalizeUrl>,
   signal: AbortSignal,
-  extraHeaders?: Record<string, string>,
 ) {
   let primary: FetchWithRedirectsResult;
   try {
-    primary = await fetchWithRedirects(normalized.url, signal, extraHeaders);
+    primary = await fetchWithRedirects(normalized.url, signal);
   } catch (error) {
     if (!normalized.fallbackUrl || signal.aborted) throw error;
-    const result = await fetchWithRedirects(
-      normalized.fallbackUrl,
-      signal,
-      extraHeaders,
-    );
+    const result = await fetchWithRedirects(normalized.fallbackUrl, signal);
     return { result, upgradedToHttps: false };
   }
   if (
@@ -255,11 +252,7 @@ export async function fetchWithUpgradeFallback(
   }
   if (!('blockedRedirect' in primary)) await discard(primary.response);
   try {
-    const result = await fetchWithRedirects(
-      normalized.fallbackUrl,
-      signal,
-      extraHeaders,
-    );
+    const result = await fetchWithRedirects(normalized.fallbackUrl, signal);
     if (
       'blockedRedirect' in primary &&
       ('blockedRedirect' in result || !result.response.ok)
@@ -443,9 +436,7 @@ export async function probeLlmsText(
     `${origin}/llms.txt`,
   ])) {
     try {
-      const result = await fetchWithRedirects(candidate, signal, {
-        Accept: 'text/plain, text/markdown;q=0.9, */*;q=0.1',
-      });
+      const result = await fetchWithRedirects(candidate, signal);
       if ('blockedRedirect' in result) {
         lastError = `llms.txt probe blocked by cross-host redirect: ${result.redirectUrl}`;
         continue;

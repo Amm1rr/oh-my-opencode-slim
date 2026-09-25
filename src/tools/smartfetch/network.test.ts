@@ -38,6 +38,22 @@ describe('smartfetch/network', () => {
     ).toBe('\u0001é');
   });
 
+  test('sniffs HTML meta charset only inside the accepted 2048-byte window', () => {
+    const makeBody = (padding: number) =>
+      Uint8Array.from([
+        ...new TextEncoder().encode(
+          `${' '.repeat(padding)}<meta charset="windows-1252">`,
+        ),
+        0xe9,
+      ]);
+    expect(
+      decodeBody(makeBody(1900), undefined, 'text/html').decodeFallback,
+    ).toBe(false);
+    const afterWindow = decodeBody(makeBody(2050), undefined, 'text/html');
+    expect(afterWindow.decodeFallback).toBe(true);
+    expect(afterWindow.decodedCharset).toBe('windows-1252');
+  });
+
   test('sniffs control bytes in the first 2 KiB and rejects NUL anywhere', () => {
     const text = new TextEncoder().encode('é'.repeat(100));
     expect(looksLikeTextBody(text)).toBe(true);
@@ -110,6 +126,20 @@ describe('smartfetch/network', () => {
         status: 302,
       },
     ]);
+  });
+
+  test('discards a malformed redirect response before reporting its location', async () => {
+    const response = new Response('redirect body', {
+      status: 302,
+      headers: { location: 'http://[invalid' },
+    });
+    const fetchMock = mock(async () => response);
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    await expect(
+      fetchWithRedirects('https://example.com/', new AbortController().signal),
+    ).rejects.toThrow('Invalid redirect location: http://[invalid');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(response.bodyUsed).toBe(true);
   });
 
   test('blocks cross-origin redirects when the origin is not allowed', async () => {

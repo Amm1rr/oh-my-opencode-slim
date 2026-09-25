@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { buildCacheKey, calculateCacheSize } from './cache';
+import { buildCacheKey, CACHE, calculateCacheSize } from './cache';
 import type { BinaryFetch, CachedFetch } from './types';
 
 const cacheOptions = {
@@ -9,6 +9,17 @@ const cacheOptions = {
 };
 
 describe('smartfetch/cache', () => {
+  test('keeps the 50 MiB/15-minute LRU and charges stored payload bytes', () => {
+    expect(CACHE.maxSize).toBe(50 * 1024 * 1024);
+    expect(CACHE.ttl).toBe(15 * 60 * 1000);
+    try {
+      CACHE.set('size-probe', makeBinary(new Uint8Array(4096)));
+      expect(CACHE.calculatedSize).toBe(4096);
+    } finally {
+      CACHE.clear();
+    }
+  });
+
   test('URL fragments are not part of the cache key (RFC 3986)', () => {
     const key = (url: string) => buildCacheKey(url, cacheOptions);
     const noFragment = key('https://example.com/docs');

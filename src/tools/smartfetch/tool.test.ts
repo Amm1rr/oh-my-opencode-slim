@@ -200,6 +200,31 @@ describe('smartfetch/tool', () => {
     );
   });
 
+  test('fetches and cleans a 1 MiB U+2028 page in under one second', async () => {
+    const page = `${'\u2028'.repeat(Math.floor((1024 * 1024) / 3))}![`;
+    globalThis.fetch = mock(
+      async () =>
+        new Response(page, {
+          headers: { 'content-type': 'text/plain; charset=utf-8' },
+        }),
+    ) as unknown as typeof fetch;
+    const webfetch = createWebfetchTool({ client: {} } as any);
+    const started = performance.now();
+    const result = await webfetch.execute(
+      {
+        url: 'https://example.com/large',
+        format: 'markdown',
+        extract_main: false,
+        prefer_llms_txt: 'never',
+        include_metadata: false,
+        save_binary: false,
+      },
+      createExecutionContext(),
+    );
+    expect(result).toBe('![');
+    expect(performance.now() - started).toBeLessThan(1_000);
+  });
+
   test('a canonical URL does not share a credentialed response with another request', async () => {
     const fetchMock = mock(async (input: string | URL | Request) => {
       const url = String(input);

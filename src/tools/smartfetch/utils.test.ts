@@ -30,11 +30,51 @@ const CSS_PARSING_ERROR_HTML = `<!DOCTYPE html><html><head>
 </head><body><article><h1>Hello</h1><p>World</p></article></body></html>`;
 
 describe('smartfetch/utils', () => {
-  test('cleans pathological markdown in linear time', () => {
-    for (const input of [' \n'.repeat(524_288), '#'.repeat(200_000)]) {
+  test('bounds nine 1 MiB markdown and heading generators with near-linear scaling', () => {
+    const mib = 1024 * 1024;
+    const generators: Array<
+      [string, (n: number) => string, (s: string) => unknown]
+    > = [
+      [
+        'U+2028',
+        (n) => `${'\u2028'.repeat(Math.floor(n / 3))}![`,
+        cleanFetchedMarkdown,
+      ],
+      ['lone CR', (n) => ' \r'.repeat(n / 2), cleanFetchedMarkdown],
+      ['hashes', (n) => '#'.repeat(n), cleanFetchedMarkdown],
+      [
+        'heading pilcrows',
+        (n) => `# ${'¶'.repeat(Math.floor(n / 2) - 2)}#`,
+        extractHeadingsFromMarkdown,
+      ],
+      [
+        'permalink prefix',
+        (n) => `${'#'.repeat(n - 7)}[¶](#`,
+        cleanFetchedMarkdown,
+      ],
+      ['incomplete images', (n) => '![]('.repeat(n / 4), cleanFetchedMarkdown],
+      [
+        'Image lines',
+        (n) => 'Image\n'.repeat(Math.floor(n / 6)),
+        cleanFetchedMarkdown,
+      ],
+      ['spaces and newlines', (n) => ' \n'.repeat(n / 2), cleanFetchedMarkdown],
+      [
+        'anchor whitespace',
+        (n) => `${' \t'.repeat(n / 2)}(#x)`,
+        cleanFetchedMarkdown,
+      ],
+    ];
+    for (const [name, make, run] of generators) {
+      run(make(8192));
       const start = performance.now();
-      cleanFetchedMarkdown(input);
-      expect(performance.now() - start).toBeLessThan(1_000);
+      run(make(mib));
+      const one = performance.now() - start;
+      const twice = performance.now();
+      run(make(2 * mib));
+      const two = performance.now() - twice;
+      expect(one, name).toBeLessThan(1_000);
+      expect(two, name).toBeLessThanOrEqual(2.5 * one);
     }
   });
 
@@ -116,7 +156,7 @@ describe('smartfetch/utils', () => {
     }
   });
 
-  test('suppresses jsdom css-parsing errors on both extraction paths', async () => {
+  test('suppresses css-parsing errors on both paths but forwards other jsdomErrors', async () => {
     const originalError = console.error;
     const errorCalls: unknown[][] = [];
     console.error = (...args: unknown[]) => errorCalls.push(args);
@@ -130,16 +170,6 @@ describe('smartfetch/utils', () => {
         expect(result.text).toContain('Hello');
       }
       expect(errorCalls).toEqual([]);
-    } finally {
-      console.error = originalError;
-    }
-  });
-
-  test('filters css-parsing errors but forwards other jsdomErrors', async () => {
-    const originalError = console.error;
-    const errorCalls: unknown[][] = [];
-    console.error = (...args: unknown[]) => errorCalls.push(args);
-    try {
       const { VirtualConsole } = await loadJSDOM();
       withJsdomCssParsingErrorsSuppressed((vc) => {
         vc.emit('jsdomError', {

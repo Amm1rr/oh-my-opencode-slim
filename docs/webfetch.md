@@ -17,7 +17,7 @@ the tool is registered under the same `webfetch` name to override the default.
 | `format` | `"text"` \| `"markdown"` \| `"html"` | `"markdown"` | Output format for the fetched content. |
 | `timeout` | number | `30` | Timeout in seconds (max `120`). |
 | `prompt` | string | optional | An extraction task for the secondary model to run against the fetched content (see [Secondary Model](#secondary-model)). |
-| `extract_main` | boolean | `true` | Extract main content from HTML using Mozilla Readability. When disabled, returns the full page body. |
+| `extract_main` | boolean | `true` | Extract main content from HTML using Mozilla Readability for pages with at most 15,000 elements; larger pages skip Readability. When disabled, returns the unextracted page. |
 | `prefer_llms_txt` | `"auto"` \| `"always"` \| `"never"` | `"auto"` | Prefer `/llms.txt` or `/llms-full.txt` over the page itself. `"auto"` probes only for docs-like domains (readthedocs, gitbook, netlify, vercel, etc.). |
 | `include_metadata` | boolean | `true` | Include YAML frontmatter with fetch metadata (status code, content type, charset, redirect chain, cache info, etc.). |
 | `save_binary` | boolean | `false` | Save binary payloads (images, PDFs, audio, video) to disk under the system temp dir. When disabled, binary content reports metadata-only. |
@@ -113,14 +113,9 @@ Fetches are cached in memory with an LRU cache (50 MiB max, 15-minute TTL).
 The cache key includes the URL plus behavior-affecting options (`extract_main`,
 `prefer_llms_txt`, `save_binary`), so changing these re-fetches the URL.
 
-**Revalidation:** Cache entries with `ETag` or `Last-Modified` headers support
-conditional revalidation. When a stale entry exists, `webfetch` sends
-`If-None-Match` / `If-Modified-Since` headers. A `304 Not Modified` response
-refreshes the TTL without re-downloading.
-
-**llms.txt validation:** Cached `llms.txt` results are validated — if the
-cached entry doesn't actually look like an llms.txt response (wrong path,
-HTML content, login page), it is evicted and re-fetched.
+Expired cache entries are fetched anew; conditional `ETag`/`Last-Modified`
+revalidation and `304` cache refresh are not used. The llms.txt probe validates
+the response before caching it; cached responses are not validated again.
 
 ## llms.txt Probing
 
@@ -161,6 +156,13 @@ Content type detection follows this flow:
    distinguish text from binary.
 3. Content declared as text/plain that looks like HTML is upgraded to
    `text/html` for better content extraction.
+
+For HTML without a declared HTTP charset, the charset meta tag is inspected in
+the first 2,048 bytes (D12; the HTML specification requires it within 1,024
+bytes). Later declarations do not override the decoder fallback.
+
+The `nodejs-fs` extraction benchmark remains exploratory (`N=3`, no IC95);
+it is not evidence of a performance improvement until clean remeasurement.
 
 ## Tool Timeouts
 
@@ -275,7 +277,7 @@ these modules:
 | `tool.ts` | Entry point — permission prompts, cache lookup, llms.txt preference logic, binary-vs-text branching, metadata emission, secondary-model integration |
 | `network.ts` | URL normalization, redirect policy, charset/body decoding, header extraction, llms.txt probing, HTTP fetch with HTTPS upgrade fallback |
 | `utils.ts` | HTML extraction (Mozilla Readability + Turndown), heading cleanup, markdown/text cleaning, frontmatter generation, quality signal detection |
-| `cache.ts` | LRU cache keyed by URL + behavioral options, conditional revalidation, canonical URL aliasing, llms result invalidation |
+| `cache.ts` | LRU cache keyed by URL + behavioral options; entries expire by TTL without conditional revalidation, canonical aliases or cache-time llms invalidation |
 | `binary.ts` | Binary content persistence to disk, MIME-to-extension mapping, safe filename allocation |
 | `secondary-model.ts` | Dedicated webfetch/`small_model` config resolution, temporary session creation, content truncation, model fallback chain |
 | `constants.ts` | Timeouts, size limits, docs domain heuristics, binary MIME prefixes, tool description |

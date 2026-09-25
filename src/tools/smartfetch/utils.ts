@@ -157,8 +157,10 @@ function extractStructuredText(root: Element | null) {
   return cleanExtractedText(chunks.join(''));
 }
 
-export function cleanHeadingText(input: string): string {
-  const normalized = trimBlankRuns(input).replace(/¶+$/g, '').trim();
+function cleanHeadingText(input: string): string {
+  const normalized = trimBlankRuns(input)
+    .replace(/(?<!¶)¶+$/, '')
+    .trim();
   if (/^(?:C|F)#$/.test(normalized)) return normalized;
   if (/\s#+$/.test(normalized)) {
     return normalized.replace(/\s#+$/g, '').trim();
@@ -169,13 +171,33 @@ export function cleanHeadingText(input: string): string {
 export function cleanFetchedMarkdown(input: string): string {
   const output = mapOutsideCodeBlocks(input, (value) =>
     value
-      .replace(/^[^\S\n]*!\[[^\]]*\]\([^)]+\)[^\S\n]*$/gm, 'Image omitted')
-      .replace(/(^|\n)Image(?=\n|$)/g, '$1Image omitted')
-      .replace(/^[^\S\n]*(#{1,6})[^\S\n]*\\?\['([^'\n]+)'[^\S\n]*$/gm, '$1 $2')
-      .replace(/^[^\S\n]*(#{1,6})[^\S\n]*'([^'\n]+)'\][^\S\n]*$/gm, '$1 $2')
-      .replace(/^[^\S\n]*(#{1,6})[^\S\n]*'([^'\n]+)'[^\S\n]*$/gm, '$1 $2')
-      .replace(/^(#.*?)[^\S\n]*\[¶\]\(#.*?"Permanent link"\)[^\S\n]*$/gm, '$1')
-      .replace(/(?<![^\S\n])[^\S\n]+\(#[A-Za-z0-9_-]+\)[^\S\n]*$/gm, ''),
+      .split('\n')
+      .map((line) => {
+        let cleaned = line
+          .replace(/^[^\S\n]*!\[[^\]]*\]\([^)]+\)[^\S\n]*$/, 'Image omitted')
+          .replace(/^Image$/, 'Image omitted')
+          .replace(
+            /^[^\S\n]*(#{1,6})[^\S\n]*\\?\['([^'\n]+)'[^\S\n]*$/,
+            '$1 $2',
+          )
+          .replace(/^[^\S\n]*(#{1,6})[^\S\n]*'([^'\n]+)'\][^\S\n]*$/, '$1 $2')
+          .replace(/^[^\S\n]*(#{1,6})[^\S\n]*'([^'\n]+)'[^\S\n]*$/, '$1 $2');
+        if (
+          cleaned.startsWith('#') &&
+          cleaned.indexOf('[¶](#') !== -1 &&
+          /"Permanent link"\)[^\S\n]*$/.test(cleaned)
+        ) {
+          cleaned = cleaned.replace(
+            /^(#.*?)[^\S\n]*\[¶\]\(#.*?"Permanent link"\)[^\S\n]*$/,
+            '$1',
+          );
+        }
+        return cleaned.replace(
+          /(?<![^\S\n])[^\S\n]+\(#[A-Za-z0-9_-]+\)[^\S\n]*$/,
+          '',
+        );
+      })
+      .join('\n'),
   );
 
   return trimBlankRuns(output);
@@ -183,16 +205,6 @@ export function cleanFetchedMarkdown(input: string): string {
 
 export function cleanFetchedText(input: string): string {
   return trimBlankRuns(input);
-}
-
-export function withTruncationMarker(
-  content: string,
-  format: 'text' | 'markdown' | 'html',
-  truncated: boolean,
-): string {
-  if (!truncated) return content;
-  if (format === 'html') return `${content}\n<!-- [..content truncated..] -->`;
-  return `${content}\n\n[..content truncated..]`;
 }
 
 export function joinRenderedContent(
@@ -296,14 +308,10 @@ export async function extractFromHtml(
   const canonical =
     document.querySelector('link[rel="canonical"]')?.getAttribute('href') ||
     undefined;
-  const canonicalUrl = (() => {
-    if (!canonical) return undefined;
-    try {
-      return new URL(canonical, finalUrl).toString();
-    } catch {
-      return undefined;
-    }
-  })();
+  const canonicalUrl =
+    canonical && URL.canParse(canonical, finalUrl)
+      ? new URL(canonical, finalUrl).toString()
+      : undefined;
   const headings = Array.from(
     document.querySelectorAll<HTMLElement>('h1, h2, h3'),
   )
@@ -356,12 +364,9 @@ export async function extractFromHtml(
 export function inferCanonicalUrlFromText(content: string, finalUrl: string) {
   const frontmatterData = parseFrontmatter(content);
   const raw = frontmatterData?.url;
-  if (!raw) return undefined;
-  try {
-    return new URL(raw, finalUrl).toString();
-  } catch {
-    return undefined;
-  }
+  return raw && URL.canParse(raw, finalUrl)
+    ? new URL(raw, finalUrl).toString()
+    : undefined;
 }
 
 export function extractHeadingsFromMarkdown(content: string) {
@@ -414,28 +419,4 @@ export function detectQualitySignals(
   }
 
   return [...signals];
-}
-
-export function pickContent(
-  fetchResult: CachedFetch,
-  format: 'text' | 'markdown' | 'html',
-) {
-  let content: string;
-  if (format === 'html') {
-    if (fetchResult.sourceKind === 'html') {
-      content = fetchResult.extractedMain
-        ? fetchResult.html
-        : fetchResult.rawContent;
-    } else {
-      content = renderMessageForFormat(
-        fetchResult.text || fetchResult.rawContent,
-        format,
-      );
-    }
-  } else if (format === 'text') {
-    content = cleanFetchedText(fetchResult.text);
-  } else {
-    content = cleanFetchedMarkdown(fetchResult.markdown);
-  }
-  return withTruncationMarker(content, format, fetchResult.truncated);
 }

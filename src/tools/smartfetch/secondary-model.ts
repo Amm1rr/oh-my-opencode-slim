@@ -4,7 +4,7 @@ import { abortSessionWithTimeout } from '../../utils/session';
 import { MAX_MODEL_CONTENT_CHARS } from './constants';
 import type { CachedFetch, SecondaryModel } from './types';
 
-export interface SecondaryModelResolutionInput {
+interface SecondaryModelResolutionInput {
   /** Dedicated webfetch model(s) from the plugin config (highest priority). */
   webfetchModels?: Array<{ id: string; variant?: string }>;
   /** `small_model` from the host's already-loaded merged OpenCode config. */

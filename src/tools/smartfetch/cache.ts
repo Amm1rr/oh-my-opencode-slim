@@ -1,7 +1,7 @@
 import { LRUCache } from 'lru-cache';
 import type { FetchResult } from './types';
 
-export type CacheOptions = {
+type CacheOptions = {
   extract_main: boolean;
   prefer_llms_txt: 'auto' | 'always' | 'never';
   save_binary: boolean;

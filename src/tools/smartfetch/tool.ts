@@ -18,6 +18,7 @@ import {
 import {
   buildPermissionPatterns,
   decodeBody,
+  discard,
   extractHeaderMetadata,
   fetchWithUpgradeFallback,
   getBinaryKind,
@@ -37,10 +38,11 @@ import {
   resolveSecondaryModels,
   runSecondaryModelWithFallback,
 } from './secondary-model';
-import type { RedirectStep, SmartfetchOptions } from './types';
+import type { CachedFetch, RedirectStep, SmartfetchOptions } from './types';
 import {
   buildLlmsRequiredMessage,
   buildRedirectResultMessage,
+  cleanFetchedMarkdown,
   cleanFetchedText,
   detectQualitySignals,
   extractFromHtml,
@@ -48,13 +50,35 @@ import {
   frontmatter,
   inferCanonicalUrlFromText,
   joinRenderedContent,
-  pickContent,
   renderMessageForFormat,
   trimBlankRuns,
   wordCount,
 } from './utils';
 
 const z = tool.schema;
+
+function pickContent(
+  fetchResult: CachedFetch,
+  format: 'text' | 'markdown' | 'html',
+) {
+  const content =
+    format === 'html'
+      ? fetchResult.sourceKind === 'html'
+        ? fetchResult.extractedMain
+          ? fetchResult.html
+          : fetchResult.rawContent
+        : renderMessageForFormat(
+            fetchResult.text || fetchResult.rawContent,
+            format,
+          )
+      : format === 'text'
+        ? cleanFetchedText(fetchResult.text)
+        : cleanFetchedMarkdown(fetchResult.markdown);
+  if (!fetchResult.truncated) return content;
+  return format === 'html'
+    ? `${content}\n<!-- [..content truncated..] -->`
+    : `${content}\n\n[..content truncated..]`;
+}
 
 export function createWebfetchTool(
   pluginCtx: PluginInput,
@@ -247,11 +271,7 @@ export function createWebfetchTool(
 
             const { response, finalUrl, redirectChain } = result;
             if (!response.ok) {
-              try {
-                await response.body?.cancel();
-              } catch {
-                // A failed body cancellation does not change the HTTP error.
-              }
+              await discard(response);
               throw new Error(
                 `Request failed with status code: ${response.status}`,
               );
@@ -273,11 +293,7 @@ export function createWebfetchTool(
               headerMetadata.contentLength > binaryDownloadLimit;
             let body = { data: new Uint8Array(), truncated: false };
             if (oversizedBinary) {
-              try {
-                await response.body?.cancel();
-              } catch {
-                // ignore cancel failures
-              }
+              await discard(response);
             } else {
               const readLimit =
                 explicitBinary && !genericBinaryMime

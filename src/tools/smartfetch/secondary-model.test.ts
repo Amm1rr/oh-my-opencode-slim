@@ -27,34 +27,23 @@ mock.module('../../utils/opencode-client', () => ({
 
 function createV2ClientMock(
   steps: PromptStep[],
-  deleteBehavior?: {
-    failTimes?: number;
-  },
+  deleteBehavior?: { failTimes?: number },
 ) {
   let createCount = 0;
   let promptCount = 0;
   let deleteCallCount = 0;
-  const failTimes = deleteBehavior?.failTimes ?? 0;
 
   mockV2Session = {
     abort: mock(async () => ({ data: true })),
     create: mock(async () => ({ data: { id: `session-${createCount++}` } })),
     prompt: mock(async () => {
       const step = steps[promptCount++] ?? {};
-      if (step.error) {
-        throw step.error;
-      }
-      return {
-        data: {
-          parts: [{ type: 'text', text: step.text ?? '' }],
-        },
-      };
+      if (step.error) throw step.error;
+      return { data: { parts: [{ type: 'text', text: step.text ?? '' }] } };
     }),
     delete: mock(async () => {
-      deleteCallCount++;
-      if (deleteCallCount <= failTimes) {
+      if (deleteCallCount++ < (deleteBehavior?.failTimes ?? 0))
         throw new Error('delete failed');
-      }
       return { data: true };
     }),
   };
@@ -62,10 +51,7 @@ function createV2ClientMock(
     ids: mock(async () => ({ data: ['read', 'bash'] })),
   };
 
-  return {
-    session: mockV2Session,
-    tool: mockV2Tool,
-  };
+  return { session: mockV2Session, tool: mockV2Tool };
 }
 
 describe('smartfetch/secondary-model', () => {
@@ -96,6 +82,10 @@ describe('smartfetch/secondary-model', () => {
       expect(result.model).toEqual(models[1]);
       expect(mockV2Session.prompt).toHaveBeenCalledTimes(2);
       expect(mockV2Session.delete).toHaveBeenCalledTimes(2);
+      expect(mockV2Session.create).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({ body: { title: 'smartfetch-secondary' } }),
+      );
     }
   });
 
@@ -348,40 +338,6 @@ describe('smartfetch/secondary-model', () => {
       _testConfig.secondaryModelTimeoutMs = originalTimeout;
     }
   });
-
-  test('adds parentID only when parentSessionID is provided', async () => {
-    mockV2Client = createV2ClientMock([{ text: 'Answer' }, { text: 'Answer' }]);
-
-    const result = await runSecondaryModelWithFallback(
-      testInput,
-      [models[0]],
-      'Summarize',
-      'This is enough fetched content to clear the short-content guard.',
-      'parent-session-id',
-    );
-
-    expect(result.text).toBe('Answer');
-    expect(mockV2Session.create).toHaveBeenCalledWith(
-      expect.objectContaining({
-        body: expect.objectContaining({
-          title: 'smartfetch-secondary',
-          parentID: 'parent-session-id',
-        }),
-      }),
-    );
-    await runSecondaryModelWithFallback(
-      testInput,
-      [models[0]],
-      'Summarize',
-      'This is enough fetched content to clear the short-content guard.',
-    );
-    expect(mockV2Session.create).toHaveBeenNthCalledWith(
-      2,
-      expect.objectContaining({
-        body: { title: 'smartfetch-secondary' },
-      }),
-    );
-  });
 });
 
 describe('smartfetch/secondary-model v2 generateText channel', () => {
@@ -488,32 +444,6 @@ describe('smartfetch/secondary-model v2 generateText channel', () => {
     expect(result.inputTruncated).toBe(true);
     expect(result.inputChars).toBe(MAX_MODEL_CONTENT_CHARS);
     expect(result.sourceChars).toBe(content.length);
-  });
-
-  test('falls back to the next model when generateText throws', async () => {
-    mockV2Client = createV2ClientMock([]);
-    let calls = 0;
-    const generateText = mock(async () => {
-      calls++;
-      if (calls === 1) throw new Error('primary v2 model failed');
-      return { text: 'Recovered v2 answer' };
-    });
-    const input = {
-      directory: '/tmp/project',
-      experimental_v2: { generateText },
-    } as never;
-
-    const result = await runSecondaryModelWithFallback(
-      input,
-      models,
-      'Summarize',
-      'This is enough fetched content to clear the short-content guard.',
-    );
-
-    expect(result.text).toBe('Recovered v2 answer');
-    expect(result.model).toEqual(models[1]);
-    expect(generateText).toHaveBeenCalledTimes(2);
-    expect(mockV2Session.create).toHaveBeenCalledTimes(0);
   });
 
   test('rejects with the shared timeout error on v2', async () => {

@@ -1,111 +1,69 @@
 import { describe, expect, test } from 'bun:test';
 import { pickAgentModelRef, resolveSecondaryModels } from './secondary-model';
 
-describe('smartfetch/resolveSecondaryModels', () => {
-  test('dedicated webfetch models take highest priority, in order', () => {
-    const models = resolveSecondaryModels({
-      webfetchModels: [
-        { id: 'openai/gpt-4o-mini' },
-        { id: 'anthropic/claude-haiku', variant: 'cheap' },
-      ],
-      smallModel: 'openai/gpt-4o-mini',
-      explorerModel: 'openai/gpt-4o-mini',
-    });
-
-    expect(models).toEqual([
-      { providerID: 'openai', modelID: 'gpt-4o-mini' },
+describe('smartfetch model resolution', () => {
+  const A = 'openai/m',
+    B = 'anthropic/n',
+    C = 'google/o';
+  const a = { providerID: 'openai', modelID: 'm' };
+  const b = { providerID: 'anthropic', modelID: 'n' };
+  const c = { providerID: 'google', modelID: 'o' };
+  type Case = [
+    string,
+    Parameters<typeof resolveSecondaryModels>[0],
+    ReturnType<typeof resolveSecondaryModels>,
+  ];
+  const cases: Case[] = [
+    [
+      'dedicated priority',
+      { webfetchModels: [{ id: A }, { id: B, variant: 'v' }], smallModel: A },
+      [a, { ...b, variant: 'v' }],
+    ],
+    [
+      'small/explorer/librarian order',
+      { smallModel: A, explorerModel: B, librarianModel: C },
+      [a, b, c],
+    ],
+    [
+      'dedupe across sources',
       {
-        providerID: 'anthropic',
-        modelID: 'claude-haiku',
-        variant: 'cheap',
+        webfetchModels: [{ id: A }],
+        smallModel: A,
+        explorerModel: A,
+        librarianModel: A,
       },
-    ]);
-  });
-
-  test('falls back to smallModel then agent models in priority order', () => {
-    const models = resolveSecondaryModels({
-      smallModel: 'openai/gpt-4o-mini',
-      explorerModel: 'anthropic/claude-haiku',
-      librarianModel: 'google/gemini-flash',
-    });
-
-    expect(models).toEqual([
-      { providerID: 'openai', modelID: 'gpt-4o-mini' },
-      { providerID: 'anthropic', modelID: 'claude-haiku' },
-      { providerID: 'google', modelID: 'gemini-flash' },
-    ]);
-  });
-
-  test('deduplicates identical provider/model across sources', () => {
-    const models = resolveSecondaryModels({
-      webfetchModels: [{ id: 'openai/gpt-4o-mini' }],
-      smallModel: 'openai/gpt-4o-mini',
-      explorerModel: 'openai/gpt-4o-mini',
-      librarianModel: 'openai/gpt-4o-mini',
-    });
-
-    expect(models).toEqual([{ providerID: 'openai', modelID: 'gpt-4o-mini' }]);
-  });
-
-  test('skips malformed model references', () => {
-    const models = resolveSecondaryModels({
-      webfetchModels: [
-        { id: 'openai/gpt-4o-mini' },
-        { id: 'no-slash' },
-        { id: '/missing-provider' },
-        { id: '' },
-      ],
-      smallModel: 'no-slash',
-      explorerModel: '/missing-provider',
-    });
-
-    expect(models).toEqual([{ providerID: 'openai', modelID: 'gpt-4o-mini' }]);
-  });
-
-  test('returns an empty list when nothing is configured', () => {
-    expect(resolveSecondaryModels({})).toEqual([]);
-    expect(resolveSecondaryModels()).toEqual([]);
-  });
-
-  test('variant distinguishes dedupe keys (parity with prior behavior)', () => {
-    const models = resolveSecondaryModels({
-      webfetchModels: [{ id: 'openai/gpt-4o-mini', variant: 'fast' }],
-      smallModel: 'openai/gpt-4o-mini',
-    });
-
-    // The dedupe key includes the variant, so the variant-tagged dedicated
-    // entry and the plain small_model ref are kept as separate candidates.
-    expect(models).toEqual([
+      [a],
+    ],
+    [
+      'invalid refs skipped',
       {
-        providerID: 'openai',
-        modelID: 'gpt-4o-mini',
-        variant: 'fast',
+        webfetchModels: [{ id: A }, { id: 'x' }, { id: '/' }, { id: '' }],
+        smallModel: 'x',
+        explorerModel: '/',
       },
-      { providerID: 'openai', modelID: 'gpt-4o-mini' },
-    ]);
-  });
-});
+      [a],
+    ],
+    ['empty configuration', {}, []],
+    [
+      'variant distinguishes dedupe key',
+      { webfetchModels: [{ id: A, variant: 'fast' }], smallModel: A },
+      [{ ...a, variant: 'fast' }, a],
+    ],
+  ];
+  for (const [name, input, expected] of cases)
+    test(name, () => expect(resolveSecondaryModels(input)).toEqual(expected));
+  test('no arguments means empty chain', () =>
+    expect(resolveSecondaryModels()).toEqual([]));
 
-describe('smartfetch/pickAgentModelRef', () => {
-  test('resolves a bare string', () => {
-    expect(pickAgentModelRef('openai/gpt-4o-mini')).toBe('openai/gpt-4o-mini');
-  });
-
-  test('resolves the first usable entry in an array', () => {
-    expect(
-      pickAgentModelRef([
-        { id: 'openai/gpt-4o-mini', variant: 'fast' },
-        'anthropic/claude-haiku',
-      ]),
-    ).toBe('openai/gpt-4o-mini');
-    expect(pickAgentModelRef(['anthropic/claude-haiku'])).toBe(
-      'anthropic/claude-haiku',
-    );
-  });
-
-  test('returns undefined for non-model values', () => {
-    expect(pickAgentModelRef(undefined)).toBeUndefined();
-    expect(pickAgentModelRef(null)).toBeUndefined();
-    expect(pickAgentModelRef(42)).toBeUndefined();
+  test('uses the first usable agent model reference', () => {
+    for (const [input, expected] of [
+      [A, A],
+      [[{ id: A, variant: 'fast' }, B], A],
+      [[B], B],
+      [undefined, undefined],
+      [null, undefined],
+      [42, undefined],
+    ] as const)
+      expect(pickAgentModelRef(input)).toBe(expected);
   });
 });
