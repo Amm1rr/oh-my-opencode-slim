@@ -25,19 +25,22 @@ type RewriteDependencyGroup =
       chunks?: UpdatePatchHunk['chunks'];
     };
 
-const eol = (text: string) => text.replace(/\r\n/g, '\n').replace(/\n*$/, '\n');
+const lf = (text: string) =>
+  text.replace(/\r\n/g, '\n').replace(/([^\n])$/, '$1\n');
 
 function reproduces(
   filePath: string,
   baseText: string,
   chunks: UpdatePatchHunk['chunks'],
   finalText: string,
-): boolean {
+): 0 | 1 | 2 {
+  // 2: exact modulo CRLF/final newline; 1: native's writer dropped one final blank line.
   try {
-    const actual = nativeDeriveUpdate(filePath, baseText, chunks);
-    return eol(actual) === eol(finalText);
+    const actual = lf(nativeDeriveUpdate(filePath, baseText, chunks));
+    const expected = lf(finalText);
+    return actual === expected ? 2 : `${actual}\n` === expected ? 1 : 0;
   } catch {
-    return false;
+    return 0;
   }
 }
 
@@ -254,18 +257,20 @@ export async function rewritePatch(
       const rewrittenHunk = resolved.some((chunk) => chunk.rewritten);
       const text = current.text;
       let keepOriginal = false;
-      if (
-        !current.derived &&
-        !(rewrittenHunk && reproduces(filePath, text, next, nextText))
-      ) {
-        keepOriginal = reproduces(filePath, text, hunk.chunks, nextText);
-        if (!keepOriginal) {
+      if (!current.derived) {
+        const rewrite = rewrittenHunk
+          ? reproduces(filePath, text, next, nextText)
+          : 0;
+        const original =
+          rewrite === 2 ? 0 : reproduces(filePath, text, hunk.chunks, nextText);
+        if (!rewrite && !original) {
           throw new ApplyPatchError(
             'verification',
             `Native apply_patch would not reproduce the verified update: ${filePath}`,
           );
         }
-        next = hunk.chunks;
+        keepOriginal = original > rewrite;
+        if (keepOriginal) next = hunk.chunks;
       }
       changed ||= !keepOriginal && rewrittenHunk;
 

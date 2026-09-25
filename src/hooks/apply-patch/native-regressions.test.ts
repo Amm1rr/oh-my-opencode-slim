@@ -53,7 +53,7 @@ function nativeOutcome(
 
 type Files = Record<string, string>;
 type Expected = Record<string, string | null>;
-type Accepted = [string, Files, string, Expected, boolean?];
+type Accepted = [string, Files, string, Expected, Files?];
 type Blocked = [string, Files, string, string];
 
 const accepted: Accepted[] = [
@@ -268,6 +268,25 @@ const accepted: Accepted[] = [
     },
   ],
   [
+    'F1 EOF append keeps a blank-ended file native-exact',
+    { 'a.txt': 'a\n\n' },
+    patch('*** Update File: a.txt', '@@', '+b', '+', '*** End of File'),
+    { 'a.txt': 'a\nb\n\n' },
+  ],
+  [
+    'F1b native writer drops one final blank line',
+    { 'a.txt': 'x\n\n' },
+    patch('*** Update File: a.txt', '@@', '-x', '+X'),
+    { 'a.txt': 'X\n\n' },
+    { 'a.txt': 'X\n' },
+  ],
+  [
+    'F2 native cursor advances past context and hits',
+    { 'a.txt': 'x\nx\nx\n' },
+    patch('*** Update File: a.txt', '@@ x', '-x', '+X', '@@', '-x', '+Y'),
+    { 'a.txt': 'x\nX\nY\n' },
+  ],
+  [
     'N1 CRLF two updates compare native modulo EOL',
     { 'a.txt': 'a\r\nb\r\nc\r\nd\r\n' },
     patch(
@@ -281,7 +300,7 @@ const accepted: Accepted[] = [
       '+D',
     ),
     { 'a.txt': 'A\r\nb\r\nc\r\nD\r\n' },
-    true,
+    { 'a.txt': 'A\nb\r\nc\r\nD\n' },
   ],
 ];
 
@@ -363,24 +382,17 @@ const blocked: Blocked[] = [
 
 describe('apply-patch/native regressions', () => {
   test.each(accepted)('%s', async (...row: Accepted) => {
-    const [, files, input, expected, allowEol] = row;
+    const [, files, input, expected, nativeExpected] = row;
     const root = await createTempDir();
     for (const [file, text] of Object.entries(files))
       await writeFixture(root, file, text);
     const rewritten = await rewritePatchText(root, input);
-    const native = nativeOutcome(root, files, rewritten);
     const existing = Object.fromEntries(
       Object.entries(expected).filter(([, text]) => text !== null),
     ) as Files;
-    if (allowEol) {
-      const eol = (value: string) =>
-        value.replace(/\r\n/g, '\n').replace(/\n*$/, '\n');
-      const normalize = (state: Files) =>
-        Object.fromEntries(
-          Object.entries(state).map(([file, text]) => [file, eol(text)]),
-        );
-      expect(normalize(native)).toEqual(normalize(existing));
-    } else expect(native).toEqual(existing);
+    expect(nativeOutcome(root, files, rewritten)).toEqual(
+      nativeExpected ?? existing,
+    );
     await applyPatch(root, rewritten);
     for (const [file, text] of Object.entries(expected)) {
       if (text === null) await expect(readText(root, file)).rejects.toThrow();
