@@ -665,7 +665,7 @@ describe('task_reply v2 event transport integration', () => {
     expect(reply.mock.calls[0]?.[0]).toEqual({
       sessionID: 'ses_child1',
       requestID: 'per_1',
-      reply: 'always',
+      decision: 'always',
     });
     expect(getChildInputWait('ses_child1', 'per_1')).toBeUndefined();
   });

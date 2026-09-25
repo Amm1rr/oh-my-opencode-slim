@@ -304,7 +304,7 @@ export interface V2Context {
     reply(input: {
       sessionID: string;
       requestID: string;
-      reply: 'once' | 'always' | 'reject';
+      decision: 'once' | 'always' | 'reject';
       message?: string;
     }): Promise<unknown>;
   };

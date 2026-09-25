@@ -640,7 +640,7 @@ export function buildPluginInput(
                 sessionID: sessionIDOf(args),
                 requestID:
                   typeof args.requestID === 'string' ? args.requestID : '',
-                reply:
+                decision:
                   args.reply === 'always' || args.reply === 'reject'
                     ? args.reply
                     : 'once',

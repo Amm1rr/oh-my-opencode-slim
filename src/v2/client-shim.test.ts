@@ -111,7 +111,7 @@ describe('v2 client shim delegation', () => {
     });
 
     expect(calls).toEqual([
-      { sessionID: 'ses_child1', requestID: 'per_1', reply: 'always' },
+      { sessionID: 'ses_child1', requestID: 'per_1', decision: 'always' },
     ]);
   });
 
