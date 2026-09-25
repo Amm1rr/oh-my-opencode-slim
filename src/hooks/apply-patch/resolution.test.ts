@@ -1,26 +1,13 @@
 import { describe, expect, test } from 'bun:test';
-import path from 'node:path';
-
 import {
   applyHits,
-  deriveNewContent,
   locateChunk,
-  readFileLines,
   resolveChunkStart,
-  resolveUpdateChunks,
+  resolveUpdate,
 } from './resolution';
-import { createTempDir, DEFAULT_OPTIONS, writeFixture } from './test-helpers';
 import type { PatchChunk } from './types';
 
 describe('apply-patch/resolution', () => {
-  test('readFileLines removes the final synthetic empty line', async () => {
-    const root = await createTempDir();
-    const file = path.join(root, 'sample.txt');
-    await writeFixture(root, 'sample.txt', 'alpha\nbeta\n');
-
-    expect(await readFileLines(file)).toEqual(['alpha', 'beta']);
-  });
-
   test('resolveChunkStart uses change_context as an anchor when present', () => {
     const chunk: PatchChunk = {
       old_lines: [],
@@ -50,7 +37,6 @@ describe('apply-patch/resolution', () => {
       'sample.txt',
       chunk,
       0,
-      DEFAULT_OPTIONS,
     );
 
     expect(resolved.rewritten).toBe(true);
@@ -62,87 +48,33 @@ describe('apply-patch/resolution', () => {
     expect(resolved.canonical_new_lines).toEqual(chunk.new_lines);
   });
 
-  test('locateChunk canonicalizes a tolerant unicode match', () => {
-    const chunk: PatchChunk = {
-      old_lines: ['const title = "Hola";'],
-      new_lines: ['const title = "Hola mundo";'],
-    };
-
-    const resolved = locateChunk(
+  test.each([
+    [
+      'unicode',
       ['const title = “Hola”;'],
-      'sample.txt',
-      chunk,
-      0,
-      DEFAULT_OPTIONS,
-    );
-
-    expect(resolved.rewritten).toBe(true);
-    expect(resolved.matchComparator).toBe('unicode');
-    expect(resolved.canonical_old_lines).toEqual(['const title = “Hola”;']);
-    expect(resolved.canonical_new_lines).toEqual([
+      'const title = "Hola";',
       'const title = "Hola mundo";',
-    ]);
-  });
-
-  test('locateChunk canonicalizes a tolerant trim-end match', () => {
-    const chunk: PatchChunk = {
-      old_lines: ['alpha'],
-      new_lines: ['omega'],
-    };
-
-    const resolved = locateChunk(
-      ['alpha  '],
-      'sample.txt',
-      chunk,
-      0,
-      DEFAULT_OPTIONS,
-    );
-
-    expect(resolved.rewritten).toBe(true);
-    expect(resolved.matchComparator).toBe('trim-end');
-    expect(resolved.canonical_old_lines).toEqual(['alpha  ']);
-    expect(resolved.canonical_new_lines).toEqual(['omega']);
-  });
-
-  test('locateChunk canonicalizes a tolerant trim match (native-compatible)', () => {
-    const chunk: PatchChunk = {
-      old_lines: ['alpha'],
-      new_lines: ['omega'],
-    };
-
-    const resolved = locateChunk(
-      [' alpha  '],
-      'sample.txt',
-      chunk,
-      0,
-      DEFAULT_OPTIONS,
-    );
-
-    expect(resolved.rewritten).toBe(true);
-    expect(resolved.matchComparator).toBe('trim');
-    expect(resolved.canonical_old_lines).toEqual([' alpha  ']);
-    expect(resolved.canonical_new_lines).toEqual(['omega']);
-  });
-
-  test('locateChunk canonicalizes an indented match (native-compatible)', () => {
-    const chunk: PatchChunk = {
-      old_lines: ['enabled: false'],
-      new_lines: ['enabled: true'],
-    };
-
-    const resolved = locateChunk(
+      'const title = “Hola”;',
+    ],
+    ['trim-end', ['  alpha', 'alpha  '], 'alpha', 'omega', 'alpha  '],
+    ['trim', [' alpha  '], 'alpha', 'omega', ' alpha  '],
+    [
+      'trim',
       ['root:', '  child:', '    enabled: false', 'done: true'],
-      'sample.yml',
-      chunk,
-      0,
-      DEFAULT_OPTIONS,
-    );
-
-    expect(resolved.rewritten).toBe(true);
-    expect(resolved.matchComparator).toBe('trim');
-    expect(resolved.canonical_old_lines).toEqual(['    enabled: false']);
-    expect(resolved.canonical_new_lines).toEqual(['enabled: true']);
-  });
+      'enabled: false',
+      'enabled: true',
+      '    enabled: false',
+    ],
+  ])(
+    'locateChunk canonicalizes %s matches',
+    (_, lines, oldLine, newLine, canonical) => {
+      const chunk: PatchChunk = { old_lines: [oldLine], new_lines: [newLine] };
+      const resolved = locateChunk(lines, 'sample.txt', chunk, 0);
+      expect(resolved.rewritten).toBe(true);
+      expect(resolved.canonical_old_lines).toEqual([canonical]);
+      expect(resolved.canonical_new_lines).toEqual([newLine]);
+    },
+  );
 
   test('locateChunk preserves a real final blank line when it exists in the file', () => {
     const chunk: PatchChunk = {
@@ -150,140 +82,88 @@ describe('apply-patch/resolution', () => {
       new_lines: ['omega', ''],
     };
 
-    const resolved = locateChunk(
-      ['alpha', ''],
-      'sample.txt',
-      chunk,
-      0,
-      DEFAULT_OPTIONS,
-    );
+    const resolved = locateChunk(['alpha', ''], 'sample.txt', chunk, 0);
 
     expect(resolved.canonical_old_lines).toEqual(['alpha', '']);
     expect(resolved.canonical_new_lines).toEqual(['omega', '']);
   });
 
-  test('locateChunk fails if the patch adds a non-existent final blank line', () => {
+  test('T12 retries without the non-existent final blank context line', () => {
     const chunk: PatchChunk = {
       old_lines: ['alpha', ''],
       new_lines: ['omega', ''],
     };
 
-    expect(() =>
-      locateChunk(['alpha'], 'sample.txt', chunk, 0, DEFAULT_OPTIONS),
-    ).toThrow('Failed to find expected lines');
+    expect(locateChunk(['alpha'], 'sample.txt', chunk, 0)).toMatchObject({
+      rewritten: true,
+      canonical_old_lines: ['alpha'],
+      canonical_new_lines: ['omega'],
+    });
   });
 
-  test('deriveNewContent resolves EOF updates', async () => {
-    const root = await createTempDir();
-    const file = path.join(root, 'sample.txt');
-    await writeFixture(root, 'sample.txt', 'alpha\nbeta');
-
+  test('T1 resolves EOF at the tail; native verification blocks the earlier match', () => {
     expect(
-      await deriveNewContent(
-        file,
-        [
-          {
-            old_lines: ['beta'],
-            new_lines: ['omega'],
-            is_end_of_file: true,
-          },
-        ],
-        DEFAULT_OPTIONS,
-      ),
-    ).toBe('alpha\nomega');
+      resolveUpdate('sample.txt', 'beta\nalpha\nbeta', [
+        { old_lines: ['beta'], new_lines: ['omega'], is_end_of_file: true },
+      ]).nextText,
+    ).toBe('beta\nalpha\nomega');
   });
 
-  test('deriveNewContent preserves CRLF while rebuilding content', async () => {
-    const root = await createTempDir();
-    const file = path.join(root, 'sample.txt');
-    await writeFixture(root, 'sample.txt', 'alpha\r\nbeta\r\ngamma\r\n');
-
+  test('resolveUpdate preserves CRLF while rebuilding content', () => {
     expect(
-      await deriveNewContent(
-        file,
-        [
-          {
-            old_lines: ['alpha', 'beta', 'gamma'],
-            new_lines: ['alpha', 'BETA', 'gamma'],
-          },
-        ],
-        DEFAULT_OPTIONS,
-      ),
+      resolveUpdate('sample.txt', 'alpha\r\nbeta\r\ngamma\r\n', [
+        {
+          old_lines: ['alpha', 'beta', 'gamma'],
+          new_lines: ['alpha', 'BETA', 'gamma'],
+        },
+      ]).nextText,
     ).toBe('alpha\r\nBETA\r\ngamma\r\n');
   });
 
-  test('deriveNewContent inserts an anchored block without moving it to EOF', async () => {
-    const root = await createTempDir();
-    const file = path.join(root, 'sample.txt');
-    await writeFixture(root, 'sample.txt', 'top\nanchor\nbottom\n');
-
+  test('resolveUpdate inserts an anchored block without moving it to EOF', () => {
     expect(
-      await deriveNewContent(
-        file,
-        [
-          {
-            old_lines: [],
-            new_lines: ['middle'],
-            change_context: 'anchor',
-          },
-        ],
-        DEFAULT_OPTIONS,
-      ),
-    ).toBe('top\nanchor\nmiddle\nbottom\n');
-  });
-
-  test('deriveNewContent supports pure insertion at EOF with a single anchor', async () => {
-    const root = await createTempDir();
-    const file = path.join(root, 'sample.txt');
-    await writeFixture(root, 'sample.txt', 'top\nanchor\n');
-
-    expect(
-      await deriveNewContent(
-        file,
-        [
-          {
-            old_lines: [],
-            new_lines: ['middle'],
-            change_context: 'anchor',
-          },
-        ],
-        DEFAULT_OPTIONS,
-      ),
-    ).toBe('top\nanchor\nmiddle\n');
-  });
-
-  test('resolveUpdateChunks canonicalizes EOF insertion with a tolerant anchor', async () => {
-    const root = await createTempDir();
-    const file = path.join(root, 'sample.txt');
-    await writeFixture(root, 'sample.txt', 'top\n“anchor”\n');
-
-    const { resolved } = await resolveUpdateChunks(
-      file,
-      [
+      resolveUpdate('sample.txt', 'top\nanchor\nbottom\n', [
         {
           old_lines: [],
           new_lines: ['middle'],
-          change_context: '"anchor"',
+          change_context: 'anchor',
         },
-      ],
-      DEFAULT_OPTIONS,
-    );
+      ]).nextText,
+    ).toBe('top\nanchor\nmiddle\nbottom\n');
+  });
+
+  test('resolveUpdate supports pure insertion at EOF with a single anchor', () => {
+    expect(
+      resolveUpdate('sample.txt', 'top\nanchor\n', [
+        {
+          old_lines: [],
+          new_lines: ['middle'],
+          change_context: 'anchor',
+        },
+      ]).nextText,
+    ).toBe('top\nanchor\nmiddle\n');
+  });
+
+  test('resolveUpdate canonicalizes EOF insertion with a tolerant anchor', () => {
+    const { resolved } = resolveUpdate('sample.txt', 'top\n“anchor”\n', [
+      {
+        old_lines: [],
+        new_lines: ['middle'],
+        change_context: '"anchor"',
+      },
+    ]);
 
     expect(resolved[0]).toMatchObject({
       canonical_change_context: '“anchor”',
       rewritten: true,
-      strategy: 'anchor',
-      matchComparator: 'unicode',
+      resolved_is_end_of_file: true,
     });
   });
 
-  test('resolveUpdateChunks canonicalizes non-EOF insertion with a trim-end anchor', async () => {
-    const root = await createTempDir();
-    const file = path.join(root, 'sample.txt');
-    await writeFixture(root, 'sample.txt', 'top\nanchor  \nbottom\n');
-
-    const { resolved } = await resolveUpdateChunks(
-      file,
+  test('resolveUpdate canonicalizes non-EOF insertion with a trim-end anchor', () => {
+    const { resolved } = resolveUpdate(
+      'sample.txt',
+      'top\nanchor  \nbottom\n',
       [
         {
           old_lines: [],
@@ -291,125 +171,66 @@ describe('apply-patch/resolution', () => {
           change_context: 'anchor',
         },
       ],
-      DEFAULT_OPTIONS,
     );
 
     expect(resolved[0]).toMatchObject({
       canonical_change_context: 'anchor  ',
       rewritten: true,
-      strategy: 'anchor',
-      matchComparator: 'trim-end',
+      canonical_old_lines: ['bottom'],
+      canonical_new_lines: ['middle', 'bottom'],
     });
   });
 
-  test('deriveNewContent fails if a pure insertion cannot find its anchor', async () => {
-    const root = await createTempDir();
-    const file = path.join(root, 'sample.txt');
-    await writeFixture(root, 'sample.txt', 'top\nbottom\n');
-
-    await expect(
-      deriveNewContent(
-        file,
-        [
-          {
-            old_lines: [],
-            new_lines: ['middle'],
-            change_context: 'anchor',
-          },
-        ],
-        DEFAULT_OPTIONS,
-      ),
-    ).rejects.toThrow('Failed to find insertion anchor');
+  test.each([
+    {
+      name: 'ambiguous anchor',
+      text: 'top\nanchor\none\nsplit\nanchor\ntwo\n',
+      chunks: [
+        { old_lines: [], new_lines: ['middle'], change_context: 'anchor' },
+      ],
+      message: 'Insertion anchor was ambiguous',
+    },
+    {
+      name: 'ambiguous tolerant anchor',
+      text: 'top\n“anchor”\n"anchor"\n',
+      chunks: [
+        { old_lines: [], new_lines: ['middle'], change_context: '"anchor"' },
+      ],
+      message: 'Insertion anchor was ambiguous',
+    },
+    {
+      name: 'missing insertion anchor',
+      text: 'alpha\n',
+      chunks: [
+        { old_lines: [], new_lines: ['middle'], change_context: 'nope' },
+      ],
+      message: 'Failed to find insertion anchor',
+    },
+    {
+      name: 'ambiguous later chunk',
+      text: 'alpha\none\nomega\nsplit\nleft\nstale-one\nright\ngap\nleft\nstale-two\nright\n',
+      chunks: [
+        { old_lines: ['one'], new_lines: ['ONE'] },
+        {
+          old_lines: ['left', 'old', 'right'],
+          new_lines: ['left', 'new', 'right'],
+        },
+      ],
+      message: 'ambiguous',
+    },
+  ])('resolveUpdate rejects $name', ({ text, chunks, message }) => {
+    expect(() => resolveUpdate('sample.txt', text, chunks)).toThrow(message);
   });
 
-  test('deriveNewContent fails if a pure insertion has an ambiguous anchor', async () => {
-    const root = await createTempDir();
-    const file = path.join(root, 'sample.txt');
-    await writeFixture(
-      root,
-      'sample.txt',
-      'top\nanchor\none\nsplit\nanchor\ntwo\n',
-    );
-
-    await expect(
-      deriveNewContent(
-        file,
-        [
-          {
-            old_lines: [],
-            new_lines: ['middle'],
-            change_context: 'anchor',
-          },
-        ],
-        DEFAULT_OPTIONS,
-      ),
-    ).rejects.toThrow('Insertion anchor was ambiguous');
-  });
-
-  test('deriveNewContent fails if a tolerant insertion anchor is ambiguous', async () => {
-    const root = await createTempDir();
-    const file = path.join(root, 'sample.txt');
-    await writeFixture(root, 'sample.txt', 'top\n“anchor”\n"anchor"\n');
-
-    await expect(
-      deriveNewContent(
-        file,
-        [
-          {
-            old_lines: [],
-            new_lines: ['middle'],
-            change_context: '"anchor"',
-          },
-        ],
-        DEFAULT_OPTIONS,
-      ),
-    ).rejects.toThrow('Insertion anchor was ambiguous');
-  });
-
-  test('deriveNewContent fails if a later chunk remains ambiguous', async () => {
-    const root = await createTempDir();
-    const file = path.join(root, 'sample.txt');
-    await writeFixture(
-      root,
-      'sample.txt',
-      'alpha\none\nomega\nsplit\nleft\nstale-one\nright\ngap\nleft\nstale-two\nright\n',
-    );
-
-    await expect(
-      deriveNewContent(
-        file,
-        [
-          {
-            old_lines: ['one'],
-            new_lines: ['ONE'],
-          },
-          {
-            old_lines: ['left', 'old', 'right'],
-            new_lines: ['left', 'new', 'right'],
-          },
-        ],
-        DEFAULT_OPTIONS,
-      ),
-    ).rejects.toThrow('ambiguous');
-  });
-
-  test('deriveNewContent rescues a stale EOF and preserves the final update', async () => {
-    const root = await createTempDir();
-    const file = path.join(root, 'sample.txt');
-    await writeFixture(root, 'sample.txt', 'alpha\nstale\nomega');
-
+  test('resolveUpdate rescues a stale EOF and preserves the final update', () => {
     expect(
-      await deriveNewContent(
-        file,
-        [
-          {
-            old_lines: ['alpha', 'old', 'omega'],
-            new_lines: ['alpha', 'new', 'omega'],
-            is_end_of_file: true,
-          },
-        ],
-        DEFAULT_OPTIONS,
-      ),
+      resolveUpdate('sample.txt', 'alpha\nstale\nomega', [
+        {
+          old_lines: ['alpha', 'old', 'omega'],
+          new_lines: ['alpha', 'new', 'omega'],
+          is_end_of_file: true,
+        },
+      ]).nextText,
     ).toBe('alpha\nnew\nomega');
   });
 

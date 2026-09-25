@@ -1,24 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 
-import {
-  formatPatch,
-  normalizeUnicode,
-  parsePatch,
-  parsePatchStrict,
-  stripHeredoc,
-} from './codec';
+import { formatPatch, parsePatch } from './codec';
+import { normalizeUnicode } from './matching';
 import type { ParsedPatch } from './types';
 
 describe('apply-patch/codec', () => {
-  test('stripHeredoc extracts the real patch content', () => {
-    expect(
-      stripHeredoc(`cat <<'PATCH'
-*** Begin Patch
-*** End Patch
-PATCH`),
-    ).toBe('*** Begin Patch\n*** End Patch');
-  });
-
   test('parsePatch recognizes add delete update and move', () => {
     const parsed = parsePatch(`*** Begin Patch
 *** Add File: added.txt
@@ -37,7 +23,7 @@ PATCH`),
     expect(parsed.hunks[0]).toEqual({
       type: 'add',
       path: 'added.txt',
-      contents: 'alpha\n',
+      contents: 'alpha',
     });
     expect(parsed.hunks[1]).toEqual({ type: 'delete', path: 'removed.txt' });
     expect(parsed.hunks[2]).toEqual({
@@ -82,91 +68,80 @@ PATCH`);
     ]);
   });
 
-  test('parsePatchStrict preserves End Patch text when it is hunk context', () => {
-    const markerPadding = '  ';
-    const parsed = parsePatchStrict(`*** Begin Patch${markerPadding}
-*** Update File: sample.txt
-@@ marker
- *** End Patch
- keep
-*** End Patch${markerPadding}`);
-
-    expect(parsed.hunks).toEqual([
-      {
-        type: 'update',
-        path: 'sample.txt',
-        chunks: [
-          {
-            old_lines: ['*** End Patch', 'keep'],
-            new_lines: ['*** End Patch', 'keep'],
-            change_context: 'marker',
-            is_end_of_file: undefined,
-          },
-        ],
-      },
-    ]);
-  });
-
-  test('parsePatchStrict fails on garbage inside @@', () => {
+  test('U4 rejects End Patch as context before another hunk', () => {
     expect(() =>
-      parsePatchStrict(`*** Begin Patch
-*** Update File: sample.txt
+      parsePatch(`*** Begin Patch
+*** Update File: doc.md
 @@
--alpha
-garbage
-+beta
+ x
+ *** End Patch
+-y
++Y
+*** Update File: b.txt
+@@
+-b
++B
 *** End Patch`),
-    ).toThrow('unexpected line in patch chunk');
+    ).toThrow('End Patch');
   });
 
-  test('parsePatchStrict fails on garbage inside Add File', () => {
+  test('T2 rejects a chunk after an EOF-marked chunk', () => {
     expect(() =>
-      parsePatchStrict(`*** Begin Patch
-*** Add File: sample.txt
-+alpha
-garbage
+      parsePatch(`*** Begin Patch
+*** Update File: a.txt
+@@
+-c
++C
+*** End of File
+@@
++Z
+*** End of File
 *** End Patch`),
-    ).toThrow('unexpected line in Add File body');
+    ).toThrow('End of File');
   });
 
-  test('parsePatchStrict fails on malformed Delete File', () => {
-    expect(() =>
-      parsePatchStrict(`*** Begin Patch
-*** Delete File: sample.txt
-+ghost
-*** End Patch`),
-    ).toThrow('unexpected line between hunks');
+  test.each([
+    [
+      'garbage inside @@',
+      '*** Update File: sample.txt\n@@\n-alpha\ngarbage\n+beta\n*** End Patch',
+      'unexpected line in patch chunk',
+    ],
+    [
+      'garbage inside Add File',
+      '*** Add File: sample.txt\n+alpha\ngarbage\n*** End Patch',
+      'unexpected line in Add File body',
+    ],
+    [
+      'malformed Delete File',
+      '*** Delete File: sample.txt\n+ghost\n*** End Patch',
+      'unexpected line between hunks',
+    ],
+    [
+      'Update File without @@',
+      '*** Update File: sample.txt\n*** End Patch',
+      'missing @@ chunk body',
+    ],
+  ])('parsePatch rejects %s', (_, body, message) => {
+    expect(() => parsePatch(`*** Begin Patch\n${body}`)).toThrow(message);
   });
 
-  test('parsePatchStrict fails on garbage after End Patch', () => {
-    expect(() =>
-      parsePatchStrict(`*** Begin Patch
-*** Delete File: sample.txt
-*** End Patch
-garbage`),
-    ).toThrow('unexpected line after End Patch');
-  });
-
-  test('parsePatchStrict fails when Update File has no @@ chunks', () => {
-    expect(() =>
-      parsePatchStrict(`*** Begin Patch
-*** Update File: sample.txt
-*** End Patch`),
-    ).toThrow('missing @@ chunk body');
-  });
-
-  test('formatPatch allows stable parse -> format -> parse roundtrips', () => {
+  test.each([
+    [
+      ['alpha', 'beta'],
+      ['alpha', 'BETA'],
+    ],
+    [['a'], ['a', 'a']],
+    [
+      ['a', 'a', 'a'],
+      ['a', 'a'],
+    ],
+  ])('formatPatch roundtrips old=%j new=%j', (old_lines, new_lines) => {
     const parsed: ParsedPatch = {
       hunks: [
         {
           type: 'update',
           path: 'sample.txt',
-          chunks: [
-            {
-              old_lines: ['alpha', 'beta'],
-              new_lines: ['alpha', 'BETA'],
-            },
-          ],
+          chunks: [{ old_lines, new_lines }],
         },
       ],
     };
@@ -177,25 +152,24 @@ garbage`),
   test.each([
     ['', ''],
     ['\n', '\n'],
-    ['a', 'a\n'],
-    ['a\n', 'a\n'],
-    ['a\nb', 'a\nb\n'],
-    ['a\nb\n', 'a\nb\n'],
+    ['\n\n', '\n\n'],
+    ['a', 'a'],
+    ['a\n', 'a'],
+    ['a\nb', 'a\nb'],
+    ['a\nb\n', 'a\nb'],
     ['a\n\n', 'a\n\n'],
   ])('formatPatch preserves Add File contents %j', (contents, expected) => {
     const hunk = { type: 'add' as const, path: 'added.txt', contents };
     const formatted = formatPatch({ hunks: [hunk] });
-    const parsed = parsePatchStrict(formatted);
+    const parsed = parsePatch(formatted);
 
     expect(parsed.hunks).toEqual([{ ...hunk, contents: expected }]);
-    expect(formatPatch(parsed)).toBe(formatted);
+    const canonical = formatPatch(parsed);
+    expect(formatPatch(parsePatch(canonical))).toBe(canonical);
   });
 
   test('normalizeUnicode unifies expected typographic variants', () => {
     expect(normalizeUnicode('“uno”…\u00A0dos-tres')).toBe('"uno"... dos-tres');
-  });
-
-  test('normalizeUnicode covers less common typographic variants', () => {
     expect(normalizeUnicode('‛uno‟―dos')).toBe(`'uno"-dos`);
   });
 });

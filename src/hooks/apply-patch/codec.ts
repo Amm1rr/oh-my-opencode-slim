@@ -1,18 +1,8 @@
+import { commonEdges } from './matching';
 import type { ParsedPatch, PatchChunk, PatchHunk } from './types';
 
-type ParseMode = 'permissive' | 'strict';
-
-function normalizeLineEndings(text: string): string {
-  return text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-}
-
-export function normalizeUnicode(text: string): string {
-  return text
-    .replace(/[\u2018\u2019\u201A\u201B]/g, "'")
-    .replace(/[\u201C\u201D\u201E\u201F]/g, '"')
-    .replace(/[\u2010\u2011\u2012\u2013\u2014\u2015]/g, '-')
-    .replace(/\u2026/g, '...')
-    .replace(/\u00A0/g, ' ');
+export function normalizeLineEndings(text: string): string {
+  return text.replace(/\r\n?/g, '\n');
 }
 
 export function stripHeredoc(input: string): string {
@@ -27,38 +17,27 @@ export function normalizePatchText(patchText: string): string {
   return stripHeredoc(normalizeLineEndings(patchText).trim());
 }
 
+const HEADERS = [
+  { prefix: '*** Add File:', type: 'add' },
+  { prefix: '*** Delete File:', type: 'delete' },
+  { prefix: '*** Update File:', type: 'update' },
+] as const;
+
 function parseHeader(lines: string[], index: number) {
-  const line = lines[index];
+  const header = HEADERS.find(({ prefix }) => lines[index].startsWith(prefix));
+  if (!header) return null;
+  const file = lines[index].slice(header.prefix.length).trim();
+  if (!file) return null;
 
-  if (line.startsWith('*** Add File:')) {
-    const file = line.slice('*** Add File:'.length).trim();
-    return file ? { file, next: index + 1 } : null;
+  let move: string | undefined;
+  let next = index + 1;
+  if (header.type === 'update' && lines[next]?.startsWith('*** Move to:')) {
+    move = lines[next].slice('*** Move to:'.length).trim();
+    if (!move) return null;
+    next += 1;
   }
 
-  if (line.startsWith('*** Delete File:')) {
-    const file = line.slice('*** Delete File:'.length).trim();
-    return file ? { file, next: index + 1 } : null;
-  }
-
-  if (line.startsWith('*** Update File:')) {
-    const file = line.slice('*** Update File:'.length).trim();
-    let move: string | undefined;
-    let next = index + 1;
-
-    if (next < lines.length && lines[next].startsWith('*** Move to:')) {
-      const moveTarget = lines[next].slice('*** Move to:'.length).trim();
-      if (!moveTarget) {
-        return null;
-      }
-
-      move = moveTarget;
-      next += 1;
-    }
-
-    return file ? { file, move, next } : null;
-  }
-
-  return null;
+  return { type: header.type, file, move, next };
 }
 
 function unexpectedPatchLine(context: string, line: string): never {
@@ -81,17 +60,20 @@ function isPatchBoundary(line: string, marker: string): boolean {
   return line.trimEnd() === marker;
 }
 
-function parseChunks(lines: string[], index: number, mode: ParseMode) {
+function parseChunks(lines: string[], index: number) {
   const chunks: PatchChunk[] = [];
   let at = index;
 
   while (at < lines.length && !lines[at].startsWith('***')) {
-    if (!lines[at].startsWith('@@')) {
-      if (mode === 'strict') {
-        unexpectedPatchLine('in update body', lines[at]);
-      }
+    if (lines[at] === '') {
       at += 1;
       continue;
+    }
+    if (!lines[at].startsWith('@@')) {
+      unexpectedPatchLine('in update body', lines[at]);
+    }
+    if (chunks[chunks.length - 1]?.is_end_of_file) {
+      throw new Error('Invalid patch format: chunk follows End of File');
     }
 
     const context = parseChangeContext(lines[at]);
@@ -108,6 +90,15 @@ function parseChunks(lines: string[], index: number, mode: ParseMode) {
     ) {
       const line = lines[at];
 
+      if (line === '') {
+        let next = at;
+        while (lines[next] === '') next += 1;
+        if (!/^[ +-]/.test(lines[next] ?? '')) {
+          at = next;
+          continue;
+        }
+      }
+
       if (line === '*** End of File') {
         eof = true;
         at += 1;
@@ -115,6 +106,9 @@ function parseChunks(lines: string[], index: number, mode: ParseMode) {
       }
 
       if (line.startsWith(' ')) {
+        if (line.trim() === '*** End Patch') {
+          throw new Error('Invalid patch format: End Patch in hunk context');
+        }
         old_lines.push(line.slice(1));
         new_lines.push(line.slice(1));
         at += 1;
@@ -133,11 +127,7 @@ function parseChunks(lines: string[], index: number, mode: ParseMode) {
         continue;
       }
 
-      if (mode === 'strict') {
-        unexpectedPatchLine('in patch chunk', line);
-      }
-
-      at += 1;
+      unexpectedPatchLine('in patch chunk', line);
     }
 
     chunks.push({
@@ -151,34 +141,30 @@ function parseChunks(lines: string[], index: number, mode: ParseMode) {
   return { chunks, next: at };
 }
 
-function parseAdd(lines: string[], index: number, mode: ParseMode) {
+function parseAdd(lines: string[], index: number) {
   const contents: string[] = [];
   let at = index;
 
   while (at < lines.length && !lines[at].startsWith('***')) {
+    if (lines[at] === '') break;
     if (lines[at].startsWith('+')) {
       contents.push(lines[at].slice(1));
       at += 1;
       continue;
     }
 
-    if (mode === 'strict') {
-      unexpectedPatchLine('in Add File body', lines[at]);
-    }
-
-    at += 1;
+    unexpectedPatchLine('in Add File body', lines[at]);
   }
 
-  // Canonical Add representation: either empty (no lines) or newline-
-  // terminated. `+a` followed by `+` must describe two lines ("a\n\n"),
-  // not collapse into one; a lone `+` is a single empty line ("\n").
+  // Native drops the last line terminator while parsing Add. Staging adds
+  // one only when the resulting content is nonempty and unterminated.
   return {
-    content: contents.length === 0 ? '' : `${contents.join('\n')}\n`,
+    content: contents.join('\n'),
     next: at,
   };
 }
 
-function parsePatchInternal(patchText: string, mode: ParseMode): ParsedPatch {
+export function parsePatch(patchText: string): ParsedPatch {
   const clean = normalizePatchText(patchText);
   const lines = clean.split('\n');
   const begin = lines.findIndex((line) =>
@@ -192,32 +178,22 @@ function parsePatchInternal(patchText: string, mode: ParseMode): ParsedPatch {
     throw new Error('Invalid patch format: missing Begin/End markers');
   }
 
-  if (mode === 'strict') {
-    for (const line of lines.slice(0, begin)) {
-      unexpectedPatchLine('before Begin Patch', line);
-    }
-
-    for (const line of lines.slice(end + 1)) {
-      unexpectedPatchLine('after End Patch', line);
-    }
-  }
-
   const hunks: PatchHunk[] = [];
   let index = begin + 1;
 
   while (index < end) {
     const header = parseHeader(lines, index);
 
-    if (!header) {
-      if (mode === 'strict') {
-        unexpectedPatchLine('between hunks', lines[index]);
-      }
+    if (!header && lines[index] === '') {
       index += 1;
       continue;
     }
+    if (!header) {
+      unexpectedPatchLine('between hunks', lines[index]);
+    }
 
-    if (lines[index].startsWith('*** Add File:')) {
-      const next = parseAdd(lines, header.next, mode);
+    if (header.type === 'add') {
+      const next = parseAdd(lines, header.next);
       hunks.push({
         type: 'add',
         path: header.file,
@@ -227,14 +203,14 @@ function parsePatchInternal(patchText: string, mode: ParseMode): ParsedPatch {
       continue;
     }
 
-    if (lines[index].startsWith('*** Delete File:')) {
+    if (header.type === 'delete') {
       hunks.push({ type: 'delete', path: header.file });
       index = header.next;
       continue;
     }
 
-    const next = parseChunks(lines, header.next, mode);
-    if (mode === 'strict' && next.chunks.length === 0) {
+    const next = parseChunks(lines, header.next);
+    if (next.chunks.length === 0 && !header.move) {
       throw new Error(
         `Invalid patch format: Update File is missing @@ chunk body: ${header.file}`,
       );
@@ -252,67 +228,26 @@ function parsePatchInternal(patchText: string, mode: ParseMode): ParsedPatch {
   return { hunks };
 }
 
-export function parsePatch(patchText: string): ParsedPatch {
-  return parsePatchInternal(patchText, 'permissive');
-}
-
-export function parsePatchStrict(patchText: string): ParsedPatch {
-  return parsePatchInternal(patchText, 'strict');
-}
-
-function diffMatrix(old_lines: string[], new_lines: string[]): number[][] {
-  const dp = Array.from({ length: old_lines.length + 1 }, () =>
-    Array<number>(new_lines.length + 1).fill(0),
-  );
-
-  for (let oldIndex = 1; oldIndex <= old_lines.length; oldIndex += 1) {
-    for (let newIndex = 1; newIndex <= new_lines.length; newIndex += 1) {
-      dp[oldIndex][newIndex] =
-        old_lines[oldIndex - 1] === new_lines[newIndex - 1]
-          ? dp[oldIndex - 1][newIndex - 1] + 1
-          : Math.max(dp[oldIndex - 1][newIndex], dp[oldIndex][newIndex - 1]);
-    }
-  }
-
-  return dp;
-}
-
 function renderChunk(chunk: PatchChunk): string[] {
   const lines = [chunk.change_context ? `@@ ${chunk.change_context}` : '@@'];
-  const dp = diffMatrix(chunk.old_lines, chunk.new_lines);
-  const body: string[] = [];
-  let oldIndex = chunk.old_lines.length;
-  let newIndex = chunk.new_lines.length;
+  const { prefixLength: prefix, suffixLength: suffix } = commonEdges(
+    chunk.old_lines,
+    chunk.new_lines,
+  );
 
-  while (oldIndex > 0 && newIndex > 0) {
-    if (chunk.old_lines[oldIndex - 1] === chunk.new_lines[newIndex - 1]) {
-      body.push(` ${chunk.old_lines[oldIndex - 1]}`);
-      oldIndex -= 1;
-      newIndex -= 1;
-      continue;
-    }
-
-    if (dp[oldIndex - 1][newIndex] >= dp[oldIndex][newIndex - 1]) {
-      body.push(`-${chunk.old_lines[oldIndex - 1]}`);
-      oldIndex -= 1;
-      continue;
-    }
-
-    body.push(`+${chunk.new_lines[newIndex - 1]}`);
-    newIndex -= 1;
-  }
-
-  while (oldIndex > 0) {
-    body.push(`-${chunk.old_lines[oldIndex - 1]}`);
-    oldIndex -= 1;
-  }
-
-  while (newIndex > 0) {
-    body.push(`+${chunk.new_lines[newIndex - 1]}`);
-    newIndex -= 1;
-  }
-
-  lines.push(...body.reverse());
+  for (const line of chunk.old_lines.slice(0, prefix)) lines.push(` ${line}`);
+  for (const line of chunk.old_lines.slice(
+    prefix,
+    chunk.old_lines.length - suffix,
+  ))
+    lines.push(`-${line}`);
+  for (const line of chunk.new_lines.slice(
+    prefix,
+    chunk.new_lines.length - suffix,
+  ))
+    lines.push(`+${line}`);
+  for (const line of chunk.old_lines.slice(chunk.old_lines.length - suffix))
+    lines.push(` ${line}`);
 
   if (chunk.is_end_of_file) {
     lines.push('*** End of File');
@@ -328,7 +263,7 @@ function renderAddContents(contents: string): string[] {
 
   // Drop only the terminator's empty element, retaining unterminated lines.
   const lines = contents.split('\n');
-  if (contents.endsWith('\n')) {
+  if (/[^\n]\n$/.test(contents)) {
     lines.pop();
   }
   return lines.map((line) => `+${line}`);
@@ -353,8 +288,14 @@ export function formatPatch(patch: ParsedPatch): string {
     if (hunk.move_path) {
       lines.push(`*** Move to: ${hunk.move_path}`);
     }
-    for (const chunk of hunk.chunks) {
-      lines.push(...renderChunk(chunk));
+    for (const [index, chunk] of hunk.chunks.entries()) {
+      lines.push(
+        ...renderChunk(
+          index === hunk.chunks.length - 1
+            ? chunk
+            : { ...chunk, is_end_of_file: undefined },
+        ),
+      );
     }
   }
 

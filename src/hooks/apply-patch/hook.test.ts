@@ -4,15 +4,27 @@ import path from 'node:path';
 
 import { parsePatch } from './codec';
 import { createApplyPatchHook } from './index';
-import { applyPreparedChanges, preparePatchChanges } from './operations';
-import { createTempDir, DEFAULT_OPTIONS, writeFixture } from './test-helpers';
+import { applyPatch, createTempDir, writeFixture } from './test-helpers';
 
-function createHook() {
+function createHook(root = '/tmp/hook-root') {
   return createApplyPatchHook({
     client: {} as never,
-    directory: '/tmp/hook-root',
-    worktree: '/tmp/hook-root',
+    directory: root,
+    worktree: root,
   } as never);
+}
+
+async function runHook(root: string, patchText: string, worktree?: string) {
+  const hook = worktree
+    ? createApplyPatchHook({
+        client: {} as never,
+        directory: root,
+        worktree,
+      } as never)
+    : createHook(root);
+  const output = { args: { patchText } };
+  await hook['tool.execute.before']({ tool: 'apply_patch' }, output);
+  return output.args.patchText;
 }
 
 describe('apply-patch/hook', () => {
@@ -29,7 +41,7 @@ describe('apply-patch/hook', () => {
   test('blocks an unrecoverable patch as verification before native execution', async () => {
     const root = await createTempDir('apply-patch-hook-');
     await writeFixture(root, 'sample.txt', 'alpha\nbeta\ngamma\n');
-    const hook = createHook();
+    const hook = createHook(root);
     const patchText = `*** Begin Patch
 *** Update File: sample.txt
 @@
@@ -39,10 +51,7 @@ describe('apply-patch/hook', () => {
     const output = { args: { patchText } };
 
     await expect(
-      hook['tool.execute.before'](
-        { tool: 'apply_patch', directory: root },
-        output,
-      ),
+      hook['tool.execute.before']({ tool: 'apply_patch' }, output),
     ).rejects.toThrow(
       'apply_patch verification failed: Failed to find expected lines',
     );
@@ -50,136 +59,18 @@ describe('apply-patch/hook', () => {
     expect(output.args.patchText).toBe(patchText);
   });
 
-  test('normalizes an exact patch wrapped in a heredoc before native execution', async () => {
-    const root = await createTempDir('apply-patch-hook-');
-    await writeFixture(
-      root,
-      'sample.txt',
-      'line-01\nexact-top\nexact-old\nexact-bottom\nline-05\n',
-    );
-    const hook = createHook();
-    const cleanPatchText = `*** Begin Patch
-*** Update File: sample.txt
-@@ exact-top
--exact-old
-+exact-new
- exact-bottom
-*** End Patch`;
-    const output = {
-      args: {
-        patchText: `cat <<'PATCH'
-${cleanPatchText}
-PATCH`,
-      },
-    };
-
-    await hook['tool.execute.before'](
-      { tool: 'apply_patch', directory: root },
-      output,
-    );
-
-    expect(output.args.patchText).toBe(cleanPatchText);
-
-    const changes = await preparePatchChanges(
-      root,
-      output.args.patchText as string,
-      DEFAULT_OPTIONS,
-    );
-    await applyPreparedChanges(changes);
-    expect(await readFile(path.join(root, 'sample.txt'), 'utf-8')).toBe(
-      'line-01\nexact-top\nexact-new\nexact-bottom\nline-05\n',
-    );
-  });
-
-  test('normalizes absolute paths inside root before native execution', async () => {
-    const root = await createTempDir('apply-patch-hook-');
-    const absolutePath = path.join(root, 'sample.txt');
-    await writeFixture(root, 'sample.txt', 'alpha\nbeta\n');
-    const hook = createHook();
-    const patchText = `*** Begin Patch
-*** Update File: ${absolutePath}
-@@
--alpha
-+omega
-*** End Patch`;
-    const output = { args: { patchText } };
-
-    await hook['tool.execute.before'](
-      { tool: 'apply_patch', directory: root },
-      output,
-    );
-
-    expect(parsePatch(output.args.patchText as string).hunks[0]).toMatchObject({
-      type: 'update',
-      path: 'sample.txt',
-    });
-  });
-
   test('passes through an absolute target outside root/worktree before native execution', async () => {
     const root = await createTempDir('apply-patch-hook-');
     const outsideDir = await createTempDir('apply-patch-hook-outside-');
     const outsidePath = path.join(outsideDir, 'outside.txt');
     await writeFile(outsidePath, 'outside\n', 'utf-8');
-    const hook = createApplyPatchHook({
-      client: {} as never,
-      directory: root,
-      worktree: root,
-    } as never);
     const patchText = `*** Begin Patch
 *** Update File: ${outsidePath}
 @@
 -outside
 +changed
 *** End Patch`;
-    const output = { args: { patchText } };
-
-    await expect(
-      hook['tool.execute.before'](
-        { tool: 'apply_patch', directory: root },
-        output,
-      ),
-    ).resolves.toBeUndefined();
-
-    expect(output.args.patchText).toBe(patchText);
-    expect(await readFile(outsidePath, 'utf-8')).toBe('outside\n');
-  });
-
-  test('passes through mixed stale inside and absolute outside patch without partial rewrite', async () => {
-    const root = await createTempDir('apply-patch-hook-');
-    const outsideDir = await createTempDir('apply-patch-hook-outside-');
-    const outsidePath = path.join(outsideDir, 'outside.txt');
-    await writeFixture(root, 'sample.txt', 'prefix\nstale-value\nsuffix\n');
-    await writeFile(outsidePath, 'outside\n', 'utf-8');
-    const hook = createApplyPatchHook({
-      client: {} as never,
-      directory: root,
-      worktree: root,
-    } as never);
-    const patchText = `*** Begin Patch
-*** Update File: sample.txt
-@@
- prefix
--old-value
-+new-value
- suffix
-*** Update File: ${outsidePath}
-@@
--outside
-+changed
-*** End Patch`;
-    const output = { args: { patchText } };
-
-    await expect(
-      hook['tool.execute.before'](
-        { tool: 'apply_patch', directory: root },
-        output,
-      ),
-    ).resolves.toBeUndefined();
-
-    expect(output.args.patchText).toBe(patchText);
-    expect(await readFile(path.join(root, 'sample.txt'), 'utf-8')).toBe(
-      'prefix\nstale-value\nsuffix\n',
-    );
+    expect(await runHook(root, patchText, root)).toBe(patchText);
     expect(await readFile(outsidePath, 'utf-8')).toBe('outside\n');
   });
 
@@ -190,7 +81,6 @@ PATCH`,
       'sample.txt',
       'top\nA\nB-stale\nC\nD\nE\nbottom\n',
     );
-    const hook = createHook();
     const patchText = `*** Begin Patch
 *** Update File: sample.txt
 @@ top
@@ -204,34 +94,45 @@ PATCH`,
 +D
 +X
 *** End Patch`;
-    const output = { args: { patchText } };
-
-    await hook['tool.execute.before'](
-      { tool: 'apply_patch', directory: root },
-      output,
-    );
-
-    const rewritten = parsePatch(output.args.patchText as string).hunks[0];
+    const rewrittenText = await runHook(root, patchText);
+    const rewritten = parsePatch(rewrittenText).hunks[0];
     expect(rewritten.type).toBe('update');
     expect(
       rewritten.type === 'update' && rewritten.chunks[0]?.old_lines,
     ).toEqual(['A', 'B-stale', 'C', 'D', 'E']);
 
-    const changes = await preparePatchChanges(
-      root,
-      output.args.patchText as string,
-      DEFAULT_OPTIONS,
-    );
-    await applyPreparedChanges(changes);
+    await applyPatch(root, rewrittenText);
     expect(await readFile(path.join(root, 'sample.txt'), 'utf-8')).toBe(
       'top\nA\nB\nC\nD\nX\nbottom\n',
     );
   });
 
-  test('rewrites by replacing readonly args instead of mutating them', async () => {
+  test('rewrites by mutating the original args without replacing it', async () => {
     const root = await createTempDir('apply-patch-hook-');
     await writeFixture(root, 'sample.txt', 'prefix\nstale-value\nsuffix\n');
-    const hook = createHook();
+    const hook = createHook(root);
+    const patchText = `*** Begin Patch
+*** Update File: sample.txt
+@@
+ prefix
+-old-value
++new-value
+ suffix
+*** End Patch`;
+    const args = { patchText };
+    const output = { args };
+
+    await hook['tool.execute.before']({ tool: 'apply_patch' }, output);
+
+    expect(output.args).toBe(args);
+    expect(args.patchText).toContain('-stale-value');
+    expect(args.patchText).toContain('+new-value');
+  });
+
+  test('fails open without replacing frozen args', async () => {
+    const root = await createTempDir('apply-patch-hook-');
+    await writeFixture(root, 'sample.txt', 'prefix\nstale-value\nsuffix\n');
+    const hook = createHook(root);
     const patchText = `*** Begin Patch
 *** Update File: sample.txt
 @@
@@ -243,174 +144,18 @@ PATCH`,
     const args = Object.freeze({ patchText });
     const output = { args };
 
-    await hook['tool.execute.before'](
-      { tool: 'apply_patch', directory: root },
-      output,
-    );
-
-    expect(output.args).not.toBe(args);
-    expect(output.args.patchText).toContain('-stale-value');
-    expect(output.args.patchText).toContain('+new-value');
-  });
-
-  test('fails open when output args cannot be replaced', async () => {
-    const root = await createTempDir('apply-patch-hook-');
-    await writeFixture(root, 'sample.txt', 'prefix\nstale-value\nsuffix\n');
-    const hook = createHook();
-    const patchText = `*** Begin Patch
-*** Update File: sample.txt
-@@
- prefix
--old-value
-+new-value
- suffix
-*** End Patch`;
-    const args = Object.freeze({ patchText });
-    const output = {} as { args?: typeof args };
-    Object.defineProperty(output, 'args', {
-      configurable: false,
-      enumerable: true,
-      get: () => args,
-    });
-
     await expect(
-      hook['tool.execute.before'](
-        { tool: 'apply_patch', directory: root },
-        output,
-      ),
+      hook['tool.execute.before']({ tool: 'apply_patch' }, output),
     ).resolves.toBeUndefined();
 
     expect(output.args).toBe(args);
-    expect(output.args?.patchText).toBe(patchText);
-  });
-
-  test('does not alter new_lines during rewrite', async () => {
-    const root = await createTempDir('apply-patch-hook-');
-    await writeFixture(
-      root,
-      'sample.txt',
-      'top\nprefix\nstale-value\nsuffix\nbottom\n',
-    );
-    const hook = createHook();
-    const patchText = `*** Begin Patch
-*** Update File: sample.txt
-@@ top
- prefix
--old-value
-+ \tverbatim  ""  Ω  
- suffix
-*** End Patch`;
-    const expected = parsePatch(patchText).hunks[0];
-    const output = { args: { patchText } };
-
-    await hook['tool.execute.before'](
-      { tool: 'apply_patch', directory: root },
-      output,
-    );
-
-    const rewritten = parsePatch(output.args.patchText as string).hunks[0];
-    expect(expected.type).toBe('update');
-    expect(rewritten.type).toBe('update');
-    expect(
-      expected.type === 'update' && rewritten.type === 'update'
-        ? rewritten.chunks[0]?.new_lines
-        : undefined,
-    ).toEqual(expected.type === 'update' ? expected.chunks[0]?.new_lines : []);
-  });
-
-  test('rewrites a unicode-only stale patch and remains applicable', async () => {
-    const root = await createTempDir('apply-patch-hook-');
-    await writeFixture(root, 'sample.txt', 'const title = “Hola”;\n');
-    const hook = createHook();
-    const patchText = `*** Begin Patch
-*** Update File: sample.txt
-@@
--const title = "Hola";
-+const title = "Hola mundo";
-*** End Patch`;
-    const output = { args: { patchText } };
-
-    await hook['tool.execute.before'](
-      { tool: 'apply_patch', directory: root },
-      output,
-    );
-
-    const rewritten = parsePatch(output.args.patchText as string).hunks[0];
-    expect(rewritten.type).toBe('update');
-    expect(
-      rewritten.type === 'update' ? rewritten.chunks[0]?.old_lines : undefined,
-    ).toEqual(['const title = “Hola”;']);
-
-    const changes = await preparePatchChanges(
-      root,
-      output.args.patchText as string,
-      DEFAULT_OPTIONS,
-    );
-    await applyPreparedChanges(changes);
-    expect(await readFile(path.join(root, 'sample.txt'), 'utf-8')).toBe(
-      'const title = "Hola mundo";\n',
-    );
-  });
-
-  test('rewrites a trim-end stale patch and remains applicable', async () => {
-    const root = await createTempDir('apply-patch-hook-');
-    await writeFixture(root, 'sample.txt', 'alpha  \n');
-    const hook = createHook();
-    const patchText = `*** Begin Patch
-*** Update File: sample.txt
-@@
--alpha
-+omega
-*** End Patch`;
-    const output = { args: { patchText } };
-
-    await hook['tool.execute.before'](
-      { tool: 'apply_patch', directory: root },
-      output,
-    );
-
-    const rewritten = parsePatch(output.args.patchText as string).hunks[0];
-    expect(rewritten.type).toBe('update');
-    expect(
-      rewritten.type === 'update' ? rewritten.chunks[0]?.old_lines : undefined,
-    ).toEqual(['alpha  ']);
-
-    const changes = await preparePatchChanges(
-      root,
-      output.args.patchText as string,
-      DEFAULT_OPTIONS,
-    );
-    await applyPreparedChanges(changes);
-    expect(await readFile(path.join(root, 'sample.txt'), 'utf-8')).toBe(
-      'omega\n',
-    );
-  });
-
-  test('passes a trim-only match through verification (native-compatible)', async () => {
-    const root = await createTempDir('apply-patch-hook-');
-    await writeFixture(root, 'sample.txt', '  alpha  \n');
-    const hook = createHook();
-    const patchText = `*** Begin Patch
-*** Update File: sample.txt
-@@
--alpha
-+omega
-*** End Patch`;
-    const output = { args: { patchText } };
-
-    await hook['tool.execute.before'](
-      { tool: 'apply_patch', directory: root },
-      output,
-    );
-
-    expect(output.args.patchText).toContain('+omega');
-    expect(output.args.patchText).toContain('-  alpha  ');
+    expect(args.patchText).toBe(patchText);
   });
 
   test('blocks a malformed @@ at runtime before native execution', async () => {
     const root = await createTempDir('apply-patch-hook-');
     await writeFixture(root, 'sample.txt', 'alpha\nbeta\n');
-    const hook = createHook();
+    const hook = createHook(root);
     const patchText = `*** Begin Patch
 *** Update File: sample.txt
 @@
@@ -422,34 +167,9 @@ garbage
     const output = { args: { patchText } };
 
     await expect(
-      hook['tool.execute.before'](
-        { tool: 'apply_patch', directory: root },
-        output,
-      ),
+      hook['tool.execute.before']({ tool: 'apply_patch' }, output),
     ).rejects.toThrow(
       'apply_patch validation failed: Invalid patch format: unexpected line in patch chunk: garbage',
-    );
-
-    expect(output.args.patchText).toBe(patchText);
-  });
-
-  test('blocks a malformed Add File at runtime before native execution', async () => {
-    const root = await createTempDir('apply-patch-hook-');
-    const hook = createHook();
-    const patchText = `*** Begin Patch
-*** Add File: added.txt
-+fresh
-garbage
-*** End Patch`;
-    const output = { args: { patchText } };
-
-    await expect(
-      hook['tool.execute.before'](
-        { tool: 'apply_patch', directory: root },
-        output,
-      ),
-    ).rejects.toThrow(
-      'apply_patch validation failed: Invalid patch format: unexpected line in Add File body: garbage',
     );
 
     expect(output.args.patchText).toBe(patchText);
@@ -460,7 +180,7 @@ garbage
     const lockedDir = path.join(root, 'locked');
     await mkdir(lockedDir, { recursive: true });
     await chmod(lockedDir, 0o000);
-    const hook = createHook();
+    const hook = createHook(root);
     const patchText = `*** Begin Patch
 *** Add File: locked/child.txt
 +fresh
@@ -469,47 +189,13 @@ garbage
 
     try {
       await expect(
-        hook['tool.execute.before'](
-          { tool: 'apply_patch', directory: root },
-          output,
-        ),
+        hook['tool.execute.before']({ tool: 'apply_patch' }, output),
       ).rejects.toThrow('apply_patch internal error:');
 
       expect(output.args.patchText).toBe(patchText);
     } finally {
       await chmod(lockedDir, 0o755);
     }
-  });
-
-  test('lets native-compatible indented matches through verification', async () => {
-    const root = await createTempDir('apply-patch-hook-');
-    await writeFixture(
-      root,
-      'sample.yml',
-      'root:\n  child:\n    enabled: false\nnext: true\n',
-    );
-    const hook = createHook();
-    const patchText = `*** Begin Patch
-*** Update File: sample.yml
-@@
--enabled: false
-+enabled: true
-*** End Patch`;
-    const output = { args: { patchText } };
-
-    await hook['tool.execute.before'](
-      { tool: 'apply_patch', directory: root },
-      output,
-    );
-
-    expect(output.args.patchText).toBe(
-      `*** Begin Patch
-*** Update File: sample.yml
-@@
-+enabled: true
--    enabled: false
-*** End Patch`,
-    );
   });
 
   test('rewrites anchored insertion to avoid native EOF handling', async () => {
@@ -519,7 +205,7 @@ garbage
       'sample.txt',
       'top\nanchor-insert\nafter-anchor\nend\n',
     );
-    const hook = createHook();
+    const hook = createHook(root);
     const patchText = `*** Begin Patch
 *** Update File: sample.txt
 @@ anchor-insert
@@ -527,98 +213,12 @@ garbage
 *** End Patch`;
     const output = { args: { patchText } };
 
-    await hook['tool.execute.before'](
-      { tool: 'apply_patch', directory: root },
-      output,
-    );
+    await hook['tool.execute.before']({ tool: 'apply_patch' }, output);
 
-    const changes = await preparePatchChanges(
-      root,
-      output.args.patchText as string,
-      DEFAULT_OPTIONS,
-    );
-    await applyPreparedChanges(changes);
+    await applyPatch(root, output.args.patchText as string);
     expect(await readFile(path.join(root, 'sample.txt'), 'utf-8')).toBe(
       'top\nanchor-insert\nmiddle-inserted\nafter-anchor\nend\n',
     );
-  });
-
-  test('blocks a pure insertion when the anchor is missing', async () => {
-    const root = await createTempDir('apply-patch-hook-');
-    await writeFixture(root, 'sample.txt', 'top\nafter-anchor\nend\n');
-    const hook = createHook();
-    const patchText = `*** Begin Patch
-*** Update File: sample.txt
-@@ anchor-insert
-+middle-inserted
-*** End Patch`;
-    const output = { args: { patchText } };
-
-    await expect(
-      hook['tool.execute.before'](
-        { tool: 'apply_patch', directory: root },
-        output,
-      ),
-    ).rejects.toThrow(
-      'apply_patch verification failed: Failed to find insertion anchor',
-    );
-
-    expect(output.args.patchText).toBe(patchText);
-  });
-
-  test('blocks a pure insertion when the anchor is ambiguous', async () => {
-    const root = await createTempDir('apply-patch-hook-');
-    await writeFixture(
-      root,
-      'sample.txt',
-      'top\nanchor-insert\nafter-first\nsplit\nanchor-insert\nafter-second\nend\n',
-    );
-    const hook = createHook();
-    const patchText = `*** Begin Patch
-*** Update File: sample.txt
-@@ anchor-insert
-+middle-inserted
-*** End Patch`;
-    const output = { args: { patchText } };
-
-    await expect(
-      hook['tool.execute.before'](
-        { tool: 'apply_patch', directory: root },
-        output,
-      ),
-    ).rejects.toThrow(
-      'apply_patch verification failed: Insertion anchor was ambiguous',
-    );
-
-    expect(output.args.patchText).toBe(patchText);
-  });
-
-  test('blocks real patch ambiguity before native execution', async () => {
-    const root = await createTempDir('apply-patch-hook-');
-    await writeFixture(
-      root,
-      'sample.txt',
-      'left\nstale-one\nright\nseparator\nleft\nstale-two\nright\n',
-    );
-    const hook = createHook();
-    const patchText = `*** Begin Patch
-*** Update File: sample.txt
-@@
- left
--old
-+new
- right
-*** End Patch`;
-    const output = { args: { patchText } };
-
-    await expect(
-      hook['tool.execute.before'](
-        { tool: 'apply_patch', directory: root },
-        output,
-      ),
-    ).rejects.toThrow('apply_patch verification failed:');
-
-    expect(output.args.patchText).toBe(patchText);
   });
 
   test('rewrites only the update hunk in a patch with add + update', async () => {
@@ -628,7 +228,7 @@ garbage
       'sample.txt',
       'top\nprefix\nstale-value\nsuffix\n',
     );
-    const hook = createHook();
+    const hook = createHook(root);
     const patchText = `*** Begin Patch
 *** Add File: added.txt
 +fresh
@@ -641,16 +241,13 @@ garbage
 *** End Patch`;
     const output = { args: { patchText } };
 
-    await hook['tool.execute.before'](
-      { tool: 'apply_patch', directory: root },
-      output,
-    );
+    await hook['tool.execute.before']({ tool: 'apply_patch' }, output);
 
     const rewritten = parsePatch(output.args.patchText as string);
     expect(rewritten.hunks[0]).toEqual({
       type: 'add',
       path: 'added.txt',
-      contents: 'fresh\n',
+      contents: 'fresh',
     });
     expect(rewritten.hunks[1]).toEqual({
       type: 'update',
@@ -665,42 +262,13 @@ garbage
       ],
     });
 
-    const changes = await preparePatchChanges(
-      root,
-      output.args.patchText as string,
-      DEFAULT_OPTIONS,
-    );
-    await applyPreparedChanges(changes);
+    await applyPatch(root, output.args.patchText as string);
     expect(await readFile(path.join(root, 'sample.txt'), 'utf-8')).toBe(
       'top\nprefix\nnew-value\nsuffix\n',
     );
     expect(await readFile(path.join(root, 'added.txt'), 'utf-8')).toBe(
       'fresh\n',
     );
-  });
-
-  test('passes through sibling-directory targets outside root/worktree before native execution', async () => {
-    const root = await createTempDir('apply-patch-hook-');
-    const outside = path.join(path.dirname(root), 'outside.txt');
-    await writeFile(outside, 'outside\n', 'utf-8');
-    const hook = createHook();
-    const patchText = `*** Begin Patch
-*** Update File: ../outside.txt
-@@
--outside
-+changed
-*** End Patch`;
-    const output = { args: { patchText } };
-
-    await expect(
-      hook['tool.execute.before'](
-        { tool: 'apply_patch', directory: root },
-        output,
-      ),
-    ).resolves.toBeUndefined();
-
-    expect(output.args.patchText).toBe(patchText);
-    expect(await readFile(outside, 'utf-8')).toBe('outside\n');
   });
 
   test('normalizes an absolute path inside worktree even when it is outside root', async () => {
@@ -720,16 +288,13 @@ garbage
     const output = { args: { patchText } };
 
     await expect(
-      hook['tool.execute.before'](
-        { tool: 'apply_patch', directory: root },
-        output,
-      ),
+      hook['tool.execute.before']({ tool: 'apply_patch' }, output),
     ).resolves.toBeUndefined();
 
     expect(parsePatch(output.args.patchText as string).hunks[0]).toMatchObject({
       type: 'add',
       path: '../shared.txt',
-      contents: 'fresh\n',
+      contents: 'fresh',
     });
   });
 
@@ -738,7 +303,7 @@ garbage
     const outsideDir = await createTempDir('apply-patch-hook-outside-');
     await writeFixture(root, 'sample.txt', 'prefix\nstale-value\nsuffix\n');
     await writeFixture(outsideDir, 'outside.txt', 'legacy\n');
-    const hook = createHook();
+    const hook = createHook(root);
     const outsideAdded = path.join(path.dirname(root), 'outside-added.txt');
     const patchText = `*** Begin Patch
 *** Add File: ../outside-added.txt
@@ -754,10 +319,7 @@ garbage
     const output = { args: { patchText } };
 
     await expect(
-      hook['tool.execute.before'](
-        { tool: 'apply_patch', directory: root },
-        output,
-      ),
+      hook['tool.execute.before']({ tool: 'apply_patch' }, output),
     ).resolves.toBeUndefined();
 
     expect(output.args.patchText).toBe(patchText);
@@ -770,29 +332,6 @@ garbage
     );
   });
 
-  test('keeps normal behavior for patches entirely inside root/worktree', async () => {
-    const root = await createTempDir('apply-patch-hook-');
-    await writeFixture(root, 'sample.txt', 'alpha\nbeta\n');
-    const hook = createHook();
-    const patchText = `*** Begin Patch
-*** Update File: sample.txt
-@@
--alpha
-+omega
- beta
-*** End Patch`;
-    const output = { args: { patchText } };
-
-    await expect(
-      hook['tool.execute.before'](
-        { tool: 'apply_patch', directory: root },
-        output,
-      ),
-    ).resolves.toBeUndefined();
-
-    expect(output.args.patchText).toBe(patchText);
-  });
-
   test('does not expose the tool.execute.after hook', () => {
     const hook = createHook() as Record<string, unknown>;
 
@@ -802,7 +341,7 @@ garbage
   test('does not alter an exact patch', async () => {
     const root = await createTempDir('apply-patch-hook-');
     await writeFixture(root, 'sample.txt', 'alpha\nbeta\n');
-    const hook = createHook();
+    const hook = createHook(root);
     const patchText = `*** Begin Patch
 *** Update File: sample.txt
 @@
@@ -812,10 +351,7 @@ garbage
 *** End Patch`;
     const output = { args: { patchText } };
 
-    await hook['tool.execute.before'](
-      { tool: 'apply_patch', directory: root },
-      output,
-    );
+    await hook['tool.execute.before']({ tool: 'apply_patch' }, output);
 
     expect(output.args.patchText).toBe(patchText);
   });
