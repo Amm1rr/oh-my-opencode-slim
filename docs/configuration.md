@@ -530,19 +530,52 @@ Supported values are:
 
 `orchestrator` means the model resolved during plugin configuration. It does
 not dynamically follow a later foreground fallback to another model.
-Runtime fallback behavior is independent of `inheritModelFrom`.
+Runtime fallback behavior is independent of `inheritModelFrom` — unless the
+same override also configures an array `model` chain, which combines with it
+(see the rules below).
 
 Model selection follows these rules:
 
-- If the same effective agent override contains both `model` and
+- If the same effective agent override contains both a scalar `model` and
   `inheritModelFrom`, the explicit `model` wins.
 - If `model` is omitted, `inheritModelFrom` is an explicit higher-layer
   directive: it clears a lower-layer `model` value, including a model supplied
   by the host agent configuration, and resolves the requested source.
+- If the same effective agent override contains both an **array** `model`
+  (an ordered fallback chain) and `inheritModelFrom`, the two combine: the
+  agent follows the session/orchestrator model, and the array serves as the
+  fallback chain tried when that model fails. See
+  [Following the session model with a fallback chain](#following-the-session-model-with-a-fallback-chain).
 - If neither field is present, the existing model precedence and the historical
   fixer-to-librarian fallback remain unchanged.
 
 The setting works in both root `agents` overrides and preset agent overrides.
+
+#### Following the session model with a fallback chain
+
+Combine `inheritModelFrom` with an array `model` when a subagent should
+prefer the main agent's current model — including manual `/model` switches —
+but still survive that model dying (rate limit, quota, outage):
+
+```jsonc
+{
+  "agents": {
+    "oracle": {
+      "model": ["anthropic/claude-sonnet-4-6", "openai/gpt-6"],
+      "inheritModelFrom": "session"
+    }
+  }
+}
+```
+
+At launch the agent inherits the session model instead of the chain head.
+When a failover-worthy error hits, the runtime chain is
+`[<current session model>, ...configured chain]`: the live model is never
+re-picked, the first configured entry takes over, and later entries follow in
+order. Chain exhaustion stays bounded — after the whole chain fails once, one
+re-fallback round runs on the last entry, then the session aborts instead of
+looping. A `/model` pick on such an agent is its follow target; it never
+disables the fallback chain.
 
 ### Agent Colors
 

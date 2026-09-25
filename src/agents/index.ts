@@ -210,13 +210,18 @@ function applyOverrides(
  * Apply an explicit model inheritance policy after the agent factory has
  * supplied its built-in fallback model. OpenCode uses the parent session model
  * when an agent config does not specify `model`.
+ *
+ * A combined array-chain policy (`model: [...]` + `inheritModelFrom`) keeps
+ * the SDK-level inheritance: the agent follows the session/orchestrator model
+ * and `_modelArray` remains the runtime fallback chain. A scalar `model`
+ * still wins outright (explicit model precedence, see getModelForAgent).
  */
 function applyModelInheritance(
   agent: AgentDefinition,
   override: AgentOverrideConfig | undefined,
   orchestratorModel: string | undefined,
 ): void {
-  if (override?.model !== undefined) return;
+  if (override?.model !== undefined && !Array.isArray(override.model)) return;
 
   if (
     override?.inheritModelFrom === 'session' ||
@@ -224,6 +229,11 @@ function applyModelInheritance(
       orchestratorModel === undefined)
   ) {
     delete agent.config.model;
+    // The chain head's inline variant belongs to the chain head model, not
+    // to the inherited session model; drop it unless explicitly configured.
+    if (override?.variant === undefined) {
+      delete agent.config.variant;
+    }
   }
 }
 
@@ -231,6 +241,12 @@ function applyModelInheritance(
  * Apply model inheritance to the final host agent config after the host layer
  * has been merged. This clears stale host models for `session` inheritance,
  * which cannot be handled by the agent definition alone.
+ *
+ * Combined array-chain policies (`model: [...]` + `inheritModelFrom`) are
+ * honored here too: `session` inheritance clears the host model so the SDK
+ * keeps following the live session model, and `orchestrator` inheritance
+ * pins the resolved orchestrator model ahead of the chain. Scalar models
+ * keep explicit precedence and skip inheritance entirely.
  */
 export function applyModelInheritanceToConfig(
   configAgent: Record<string, unknown>,
@@ -245,7 +261,7 @@ export function applyModelInheritanceToConfig(
     const override = getOverrideFromAgents(mergedAgents, agentName);
     if (!override) continue;
     if (
-      override.model !== undefined ||
+      (override.model !== undefined && !Array.isArray(override.model)) ||
       override.inheritModelFrom === undefined
     ) {
       continue;

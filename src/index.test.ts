@@ -1968,6 +1968,39 @@ describe('plugin config model inheritance', () => {
     }
   });
 
+  test('combined inherit + chain keeps the final config on the session model', async () => {
+    // Array model + inheritModelFrom: the chain head must not be pinned as
+    // the launch model by the array-resolution pass — the agent follows the
+    // session model and keeps the array purely as the fallback chain.
+    const hooks = await loadConfiguredPlugin({
+      agents: {
+        fixer: {
+          model: ['chain/primary', 'chain/backup'],
+          inheritModelFrom: 'session',
+        },
+      },
+    });
+    const hostConfig: Record<string, unknown> = {
+      agent: {
+        orchestrator: { model: 'host/orchestrator' },
+        fixer: { model: 'host/stale-fixer', temperature: 0.3 },
+      },
+    };
+
+    try {
+      await hooks.config?.(hostConfig);
+
+      const agents = hostConfig.agent as Record<
+        string,
+        Record<string, unknown>
+      >;
+      expect(agents.fixer?.model).toBeUndefined();
+      expect(agents.fixer?.temperature).toBe(0.3);
+    } finally {
+      await hooks.dispose?.();
+    }
+  });
+
   test('config() keeps compaction exception after host council prompt override', async () => {
     const hooks = await loadConfiguredPlugin({
       council: {

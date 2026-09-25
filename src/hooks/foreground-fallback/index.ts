@@ -1093,6 +1093,16 @@ export class ForegroundFallbackManager {
     const chain = this.resolveChain(agentName, currentModel);
     // Callers pre-check via hasFallbackChain; keep as defensive guard only.
     if (!chain.length) return;
+    // The CONFIGURED chain head, not resolveChain's resolved head: a combined
+    // inherit+chain session prepends its live model as a dynamic head that
+    // by construction always equals observedModel, so comparing against
+    // chain[0] there would re-arm every error and ping-pong the descent
+    // (reset → re-descend → exhaust → reset again). Only an observed return
+    // to the configured primary re-arms. Unknown agents resolve a static
+    // chain, where chain[0] already is the configured head.
+    const configuredChain =
+      agentName === undefined ? undefined : this.chains[agentName];
+    const rearmHead = configuredChain?.[0] ?? chain[0];
 
     // When the agent is known but no model was captured (common for
     // subagent error events that fire before message.updated), infer
@@ -1111,26 +1121,27 @@ export class ForegroundFallbackManager {
 
     // A new user turn always re-sends the agent's configured primary:
     // promptAsync's `model` is a per-message override, so a fallback never
-    // persists past the message it was applied to. Landing here on chain[0]
-    // with a tried set that already walked past it therefore means the
-    // previous descent has ended and its state is stale. Without this the
-    // next descent resumes one link deeper every turn (link 2, then 3, then
-    // 4...) until the chain is spent and the session aborts, instead of
-    // re-walking from link 2 each turn.
+    // persists past the message it was applied to. Landing here on the
+    // configured primary (rearmHead) with a tried set that already walked
+    // past it therefore means the previous descent has ended and its state
+    // is stale. Without this the next descent resumes one link deeper every
+    // turn (link 2, then 3, then 4...) until the chain is spent and the
+    // session aborts, instead of re-walking from link 2 each turn.
     //
     // This does not weaken the backward-fallback guard below: currentModel
-    // is re-added immediately after, so chain[0] still can never be picked.
-    // Only an OBSERVED chain[0] counts. execFallback infers
-    // `currentModel = chain[0]` above when no model was ever captured for
-    // this session, which is the opposite situation — resetting there would
-    // re-pick chain[1] on every error instead of descending.
+    // is re-added immediately after, so the re-arm head still can never be
+    // picked. Only an OBSERVED configured primary counts. execFallback
+    // infers `currentModel = chain[0]` above when no model was ever
+    // captured for this session, which is the opposite situation —
+    // resetting there would re-pick chain[1] on every error instead of
+    // descending.
     // size > 1 means a previous descent actually selected a fallback
     // (tried.add(nextModel) below), so there is stale state to clear. A
     // single-entry chain never gets there and must stay terminal after its
     // one abort rather than re-aborting on every error.
     if (
       observedModel !== undefined &&
-      observedModel === chain[0] &&
+      observedModel === rearmHead &&
       tried.size > 1
     ) {
       tried = new Set();
@@ -1551,7 +1562,11 @@ export class ForegroundFallbackManager {
    * Determine the fallback chain to use for a session.
    *
    * Priority:
-   * 1. Agent name known AND has a configured chain → return it directly
+   * 1. Agent name known AND has a configured chain → return it, with the
+   *    session's live model prepended as a dynamic head when that model is
+   *    not part of the configured chain (combined inheritModelFrom + chain
+   *    mode: follow the session model first, descend into the configured
+   *    entries only when it fails)
    * 2. Agent name known but NO chain → return [] (no fallback; never
    *    bleed into other agents' chains)
    * 3. Agent name unknown, current model known → search all chains for
@@ -1565,7 +1580,20 @@ export class ForegroundFallbackManager {
   ): string[] {
     if (agentName) {
       const chain = this.chains[agentName];
-      if (chain) return chain;
+      if (chain) {
+        // Dynamic head: when the session runs a model outside the
+        // configured chain (session-inherited or /model-picked), that model
+        // leads the descent and the configured entries back it. The head is
+        // never re-picked — selectFallbackModel marks the current model
+        // tried before scanning, so the first untried entry is the
+        // configured head.
+        // Empty chains (disableChain) must stay empty: prepending onto []
+        // would resurrect fallback for an agent whose chain was disabled.
+        if (currentModel && chain.length > 0 && !chain.includes(currentModel)) {
+          return [currentModel, ...chain];
+        }
+        return chain;
+      }
       // Any known agent without a configured chain: no fallback.
       // Don't bleed into other agents' chains via model-matching —
       // that switches the session to the wrong agent (e.g. Build

@@ -353,6 +353,117 @@ describe('fixer agent fallback', () => {
   });
 });
 
+describe('model inheritance with fallback chains', () => {
+  test('array model plus session inheritance follows the session model and keeps the chain', () => {
+    const config: PluginConfig = {
+      agents: {
+        fixer: {
+          model: ['chain/primary', 'chain/backup'],
+          inheritModelFrom: 'session',
+        },
+      },
+    };
+    const agents = createAgents(runtimeFor(config));
+    const fixer = agents.find((a) => a.name === 'fixer');
+
+    // SDK layer: no pinned model — the subagent follows the session model.
+    expect(fixer?.config.model).toBeUndefined();
+    // The configured array survives as the runtime fallback chain.
+    expect(fixer?._modelArray).toEqual([
+      { id: 'chain/primary' },
+      { id: 'chain/backup' },
+    ]);
+  });
+
+  test('array model plus session inheritance drops the chain head inline variant', () => {
+    const config: PluginConfig = {
+      agents: {
+        fixer: {
+          model: [{ id: 'chain/primary', variant: 'high' }, 'chain/backup'],
+          inheritModelFrom: 'session',
+        },
+      },
+    };
+    const agents = createAgents(runtimeFor(config));
+    const fixer = agents.find((a) => a.name === 'fixer');
+
+    expect(fixer?.config.model).toBeUndefined();
+    // The inline variant belongs to the chain head model, not to the
+    // inherited session model.
+    expect(fixer?.config.variant).toBeUndefined();
+    expect(fixer?._modelArray?.[0]?.variant).toBe('high');
+  });
+
+  test('explicit agent-level variant survives combined session inheritance', () => {
+    const config: PluginConfig = {
+      agents: {
+        fixer: {
+          model: [{ id: 'chain/primary', variant: 'high' }],
+          inheritModelFrom: 'session',
+          variant: 'custom',
+        },
+      },
+    };
+    const agents = createAgents(runtimeFor(config));
+    const fixer = agents.find((a) => a.name === 'fixer');
+
+    expect(fixer?.config.model).toBeUndefined();
+    expect(fixer?.config.variant).toBe('custom');
+  });
+
+  test('scalar model still takes precedence over inheritance policy', () => {
+    const config: PluginConfig = {
+      agents: {
+        fixer: {
+          model: 'fixer-specific-model',
+          inheritModelFrom: 'session',
+        },
+      },
+    };
+    const agents = createAgents(runtimeFor(config));
+    const fixer = agents.find((a) => a.name === 'fixer');
+
+    expect(fixer?.config.model).toBe('fixer-specific-model');
+  });
+
+  test('combined session inheritance clears a stale host model after config merging', () => {
+    const runtime = runtimeFor({
+      agents: {
+        fixer: {
+          model: ['chain/primary', 'chain/backup'],
+          inheritModelFrom: 'session',
+        },
+      },
+    });
+    const configAgent: Record<string, unknown> = {
+      fixer: { model: 'stale-host-model', temperature: 0.2 },
+    };
+
+    applyModelInheritanceToConfig(configAgent, runtime);
+
+    expect(configAgent.fixer).toEqual({ temperature: 0.2 });
+  });
+
+  test('combined orchestrator inheritance pins the orchestrator model over the chain head', () => {
+    const runtime = runtimeFor({
+      agents: {
+        orchestrator: { model: 'orchestrator-model' },
+        fixer: {
+          model: ['chain/primary', 'chain/backup'],
+          inheritModelFrom: 'orchestrator',
+        },
+      },
+    });
+    const configAgent: Record<string, unknown> = {
+      fixer: { model: 'stale-host-model' },
+    };
+
+    applyModelInheritanceToConfig(configAgent, runtime);
+
+    expect(configAgent.fixer).toEqual({ model: 'orchestrator-model' });
+  });
+});
+
 describe('orchestrator agent', () => {
   test('orchestrator is first in agents array', () => {
     const agents = createAgents(runtimeFor());
