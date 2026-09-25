@@ -6,12 +6,7 @@ import {
   tool,
 } from '@opencode-ai/plugin';
 import { buildBinaryResultMessage, saveBinary } from './binary';
-import {
-  buildCacheKey,
-  CACHE,
-  cacheFetchResult,
-  isInvalidLlmsResult,
-} from './cache';
+import { buildCacheKey, CACHE, cacheFetchResult } from './cache';
 import {
   DEFAULT_TIMEOUT_SECONDS,
   MAX_BINARY_DOWNLOAD_BYTES,
@@ -105,12 +100,12 @@ export function createWebfetchTool(
       });
       const normalized = normalizeUrl(args.url);
       const url = new URL(normalized.url);
-      const cacheKey = buildCacheKey(
-        args.url,
-        args.extract_main,
-        args.prefer_llms_txt,
-        args.save_binary,
-      );
+      const cacheOptions = {
+        extract_main: args.extract_main,
+        prefer_llms_txt: args.prefer_llms_txt,
+        save_binary: args.save_binary,
+      };
+      const cacheKey = buildCacheKey(args.url, cacheOptions);
       const shouldProbeLlmsTxt =
         args.prefer_llms_txt === 'always' ||
         (args.prefer_llms_txt === 'auto' && isDocsLikeUrl(url));
@@ -147,10 +142,6 @@ export function createWebfetchTool(
 
       try {
         let fetchResult = CACHE.get(cacheKey);
-        if (isInvalidLlmsResult(fetchResult)) {
-          CACHE.delete(cacheKey);
-          fetchResult = undefined;
-        }
         const cacheHit = !!fetchResult;
         if (fetchResult) {
           fetchResult = {
@@ -160,14 +151,10 @@ export function createWebfetchTool(
           };
         }
         if (!fetchResult) {
-          let staleFetchResult = CACHE.get(cacheKey, {
+          const staleFetchResult = CACHE.get(cacheKey, {
             allowStale: true,
             noDeleteOnStaleGet: true,
           });
-          if (isInvalidLlmsResult(staleFetchResult)) {
-            CACHE.delete(cacheKey);
-            staleFetchResult = undefined;
-          }
           let llmsProbeError: string | undefined;
 
           if (shouldProbeLlmsTxt) {
@@ -224,12 +211,7 @@ export function createWebfetchTool(
                 decodeWarning: llms.decodeWarning,
                 cacheHit: false,
               };
-              cacheFetchResult(
-                fetchResult,
-                args.extract_main,
-                args.prefer_llms_txt,
-                args.save_binary,
-              );
+              cacheFetchResult(fetchResult, cacheOptions);
             } else if (llms?.error) {
               llmsProbeError = llms.error;
             }
@@ -300,12 +282,7 @@ export function createWebfetchTool(
                 upstreamStatusCode: 304,
                 cacheHit: false,
               };
-              cacheFetchResult(
-                fetchResult,
-                args.extract_main,
-                args.prefer_llms_txt,
-                args.save_binary,
-              );
+              cacheFetchResult(fetchResult, cacheOptions);
             } else {
               if (!response.ok) {
                 throw new Error(
@@ -362,12 +339,7 @@ export function createWebfetchTool(
                   llmsProbeTruncated: false,
                   cacheHit: false,
                 };
-                cacheFetchResult(
-                  fetchResult,
-                  args.extract_main,
-                  args.prefer_llms_txt,
-                  args.save_binary,
-                );
+                cacheFetchResult(fetchResult, cacheOptions);
               } else {
                 const readLimit =
                   explicitBinary && !genericBinaryMime
@@ -430,12 +402,7 @@ export function createWebfetchTool(
                     llmsProbeTruncated: false,
                     cacheHit: false,
                   };
-                  cacheFetchResult(
-                    fetchResult,
-                    args.extract_main,
-                    args.prefer_llms_txt,
-                    args.save_binary,
-                  );
+                  cacheFetchResult(fetchResult, cacheOptions);
                 } else {
                   const decoded =
                     provisionalDecoded ||
@@ -509,12 +476,7 @@ export function createWebfetchTool(
                     decodeWarning: decoded.decodeWarning,
                     cacheHit: false,
                   };
-                  cacheFetchResult(
-                    fetchResult,
-                    args.extract_main,
-                    args.prefer_llms_txt,
-                    args.save_binary,
-                  );
+                  cacheFetchResult(fetchResult, cacheOptions);
                 }
               }
             }

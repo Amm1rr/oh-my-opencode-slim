@@ -213,6 +213,22 @@ describe('smartfetch/network', () => {
     expect('text' in result && result.text).toBe('# Docs about logging in');
   });
 
+  test('rejects HTML/login responses before they reach the cache', async () => {
+    const fetchMock = mock(
+      async () =>
+        new Response('<html><title>Login</title></html>', {
+          headers: { 'content-type': 'text/html' },
+        }),
+    );
+    globalThis.fetch = fetchMock as typeof fetch;
+    const result = await probeLlmsText(
+      new URL('https://docs.example.com/'),
+      new AbortController().signal,
+    );
+    expect('text' in result).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   test('limits multibyte filenames to 255 UTF-8 bytes', () => {
     const headers = new Headers({
       'content-disposition': `attachment; filename="${'é'.repeat(180)}.pdf"`,
