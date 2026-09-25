@@ -21,7 +21,6 @@ import {
   WEBFETCH_DESCRIPTION,
 } from './constants';
 import {
-  buildAllowedOrigins,
   buildConditionalHeaders,
   buildPermissionPatterns,
   decodeBody,
@@ -119,7 +118,6 @@ export function createWebfetchTool(
         normalized,
         shouldProbeLlmsTxt,
       );
-      const allowedOrigins = buildAllowedOrigins(permissionPatterns);
 
       await ctx.ask({
         permission: 'webfetch',
@@ -261,8 +259,6 @@ export function createWebfetchTool(
               normalized,
               controller.signal,
               buildConditionalHeaders(staleFetchResult),
-              'GET',
-              allowedOrigins,
             );
             if ('blockedRedirect' in result) {
               const metadata = args.include_metadata

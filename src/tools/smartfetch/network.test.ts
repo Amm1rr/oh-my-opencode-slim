@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, mock, test } from 'bun:test';
 import {
-  buildAllowedOrigins,
   buildConditionalHeaders,
   decodeBody,
+  extractHeaderMetadata,
   fetchWithRedirects,
+  fetchWithUpgradeFallback,
   normalizeUrl,
+  probeLlmsText,
 } from './network';
 
 describe('smartfetch/network', () => {
@@ -22,43 +24,14 @@ describe('smartfetch/network', () => {
     mock.restore();
   });
 
-  test('normalizeUrl strips the fragment from fetch URLs', () => {
-    const normalized = normalizeUrl('https://example.com/docs#sec1');
-
-    expect(normalized.url).toBe('https://example.com/docs');
-    expect(normalized.fallbackUrl).toBeUndefined();
-    expect(normalized.upgradedToHttps).toBe(false);
-  });
-
-  test('normalizeUrl strips fragments from the http fallback URL too', () => {
+  test('normalizeUrl strips fragments from both HTTPS and HTTP URLs', () => {
     const normalized = normalizeUrl('http://example.com/docs#sec1');
-
     expect(normalized.url).toBe('https://example.com/docs');
     expect(normalized.fallbackUrl).toBe('http://example.com/docs');
     expect(normalized.upgradedToHttps).toBe(true);
-  });
-
-  test('normalizeUrl keeps origin and query string while dropping the fragment', () => {
-    const normalized = normalizeUrl('https://example.com/docs?page=2#anchor');
-
-    expect(normalized.url).toBe('https://example.com/docs?page=2');
-    expect(new URL(normalized.url).origin).toBe('https://example.com');
-  });
-
-  test('collects unique allowed origins from permission patterns', () => {
-    const origins = [
-      ...buildAllowedOrigins([
-        'https://docs.example.com/page',
-        'https://docs.example.com/llms.txt',
-        'https://cdn.example.com/asset',
-        'not-a-url',
-      ]),
-    ].sort();
-
-    expect(origins).toEqual([
-      'https://cdn.example.com',
-      'https://docs.example.com',
-    ]);
+    expect(normalizeUrl('https://example.com/docs?page=2#anchor').url).toBe(
+      'https://example.com/docs?page=2',
+    );
   });
 
   test('follows permitted same-origin redirects', async () => {
@@ -137,42 +110,82 @@ describe('smartfetch/network', () => {
     });
   });
 
-  test('allows redirects to explicitly allowed origins', async () => {
-    const fetchMock = mock(async (input: string | URL | Request) => {
-      const url = typeof input === 'string' ? input : input.toString();
-
-      if (url === 'https://docs.example.com/start') {
-        return new Response('', {
-          status: 302,
-          headers: { location: 'https://cdn.example.com/asset' },
-        });
-      }
-
-      if (url === 'https://cdn.example.com/asset') {
-        return new Response('ok', {
-          status: 200,
-          headers: { 'content-type': 'text/plain' },
-        });
-      }
-
-      throw new Error(`Unexpected fetch URL: ${url}`);
-    });
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
-
+  test('does not treat other 3xx statuses as redirects', async () => {
+    globalThis.fetch = mock(
+      async () => new Response('not a redirect', { status: 300 }),
+    ) as typeof fetch;
     const result = await fetchWithRedirects(
-      'https://docs.example.com/start',
+      'https://example.com/a',
       new AbortController().signal,
-      undefined,
-      'GET',
-      new Set(['https://docs.example.com', 'https://cdn.example.com']),
     );
-
     expect('blockedRedirect' in result).toBe(false);
-    if ('blockedRedirect' in result) {
-      throw new Error('Expected redirect to be allowed');
-    }
+    if (!('blockedRedirect' in result))
+      expect(result.response.status).toBe(300);
+  });
 
-    expect(result.finalUrl).toBe('https://cdn.example.com/asset');
+  test('cancels a failed HTTPS response and attempts HTTP fallback only once', async () => {
+    const urls: string[] = [];
+    const primary = new Response('error', { status: 404 });
+    globalThis.fetch = mock(async (url: string | URL | Request) => {
+      urls.push(String(url));
+      if (String(url).startsWith('https:')) return primary;
+      throw new Error('HTTP fallback failed');
+    }) as typeof fetch;
+    await expect(
+      fetchWithUpgradeFallback(
+        normalizeUrl('http://example.com/a'),
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow('HTTP fallback failed');
+    expect(urls).toEqual(['https://example.com/a', 'http://example.com/a']);
+    expect(primary.bodyUsed).toBe(true);
+  });
+
+  test('reports the primary blocked redirect when HTTP fallback also blocks', async () => {
+    globalThis.fetch = mock(
+      async (url: string | URL | Request) =>
+        new Response('', {
+          status: 302,
+          headers: {
+            location: String(url).startsWith('https:')
+              ? 'https://other.example.com/landing'
+              : 'http://else.example.com/landing',
+          },
+        }),
+    ) as typeof fetch;
+    const { result } = await fetchWithUpgradeFallback(
+      normalizeUrl('http://example.com/a'),
+      new AbortController().signal,
+    );
+    expect('blockedRedirect' in result && result.redirectUrl).toBe(
+      'https://other.example.com/landing',
+    );
+  });
+
+  test('accepts llms text even when its URL contains login', async () => {
+    globalThis.fetch = mock(
+      async () =>
+        new Response('# Docs about logging in', {
+          headers: { 'content-type': 'text/plain' },
+        }),
+    ) as typeof fetch;
+    const result = await probeLlmsText(
+      new URL('https://login.example.com/'),
+      new AbortController().signal,
+    );
+    expect('text' in result && result.text).toBe('# Docs about logging in');
+  });
+
+  test('limits multibyte filenames to 255 UTF-8 bytes', () => {
+    const headers = new Headers({
+      'content-disposition': `attachment; filename="${'é'.repeat(180)}.pdf"`,
+    });
+    const filename = extractHeaderMetadata(
+      headers,
+      'https://example.com/x',
+    ).filename;
+    expect(Buffer.byteLength(filename || '')).toBeLessThanOrEqual(255);
+    expect(filename?.endsWith('.pdf')).toBe(true);
   });
 
   test('builds conditional headers from etag and last-modified without binary branching', () => {

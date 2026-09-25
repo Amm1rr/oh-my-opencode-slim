@@ -68,43 +68,28 @@ export function buildPermissionPatterns(
   return [...patterns];
 }
 
-export function buildAllowedOrigins(patterns: string[]) {
-  const origins = new Set<string>();
-  for (const pattern of patterns) {
-    try {
-      origins.add(new URL(pattern).origin);
-    } catch {
-      // ignore invalid patterns
-    }
-  }
-  return origins;
-}
-
-function isPermittedRedirect(
-  from: string,
-  to: string,
-  allowedOrigins?: Set<string>,
-) {
+function isPermittedRedirect(from: string, to: string) {
   try {
     const a = new URL(from);
     const b = new URL(to);
-    if (a.protocol !== b.protocol) return false;
-    if (a.port !== b.port) return false;
-    if (b.username || b.password) return false;
-    if (allowedOrigins) return allowedOrigins.has(b.origin);
-    return a.origin === b.origin;
+    return a.origin === b.origin && !b.username && !b.password;
   } catch {
     return false;
   }
 }
 
+function mimeOf(contentType: string) {
+  return contentType.split(';')[0]?.trim().toLowerCase() || '';
+}
+
 export function isBinaryContentType(contentType: string) {
-  const mime = contentType.split(';')[0]?.trim().toLowerCase() || '';
-  return BINARY_PREFIXES.some((prefix) => mime.startsWith(prefix));
+  return BINARY_PREFIXES.some((prefix) =>
+    mimeOf(contentType).startsWith(prefix),
+  );
 }
 
 export function getBinaryKind(contentType: string): BinaryFetch['binaryKind'] {
-  const mime = contentType.split(';')[0]?.trim().toLowerCase() || '';
+  const mime = mimeOf(contentType);
   if (mime.startsWith('image/')) return 'image';
   if (mime.startsWith('audio/')) return 'audio';
   if (mime.startsWith('video/')) return 'video';
@@ -205,7 +190,10 @@ export async function readBodyLimited(
     if (!value) continue;
     if (total + value.byteLength > maxBytes) {
       const allowed = maxBytes - total;
-      if (allowed > 0) chunks.push(value.slice(0, allowed));
+      if (allowed > 0) {
+        chunks.push(value.slice(0, allowed));
+        total += allowed;
+      }
       truncated = true;
       try {
         await reader.cancel();
@@ -218,23 +206,21 @@ export async function readBodyLimited(
     total += value.byteLength;
   }
 
-  const merged = new Uint8Array(
-    chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0),
-  );
-  let offset = 0;
-  for (const chunk of chunks) {
-    merged.set(chunk, offset);
-    offset += chunk.byteLength;
+  return { data: Buffer.concat(chunks, total), truncated };
+}
+
+async function discard(response: Response) {
+  try {
+    await response.body?.cancel();
+  } catch {
+    // A failed cancellation must not mask the fetch result.
   }
-  return { data: merged, truncated };
 }
 
 export async function fetchWithRedirects(
   url: string,
   signal: AbortSignal,
   extraHeaders?: Record<string, string>,
-  method: 'GET' | 'HEAD' = 'GET',
-  allowedOrigins?: Set<string>,
 ): Promise<FetchWithRedirectsResult> {
   const redirects = [];
   let current = url;
@@ -243,7 +229,6 @@ export async function fetchWithRedirects(
     const response = await fetch(current, {
       redirect: 'manual',
       signal,
-      method,
       headers: {
         'User-Agent': 'opencode-smartfetch/1.0',
         Accept: ACCEPT_HEADER,
@@ -252,21 +237,18 @@ export async function fetchWithRedirects(
       },
     });
 
-    if (response.status >= 300 && response.status < 400) {
+    if ([301, 302, 303, 307, 308].includes(response.status)) {
       const location = response.headers.get('location');
       if (!location) {
+        await discard(response);
         throw new Error(
           `Redirect response missing location header: ${response.status}`,
         );
       }
       const next = new URL(location, current).toString();
       redirects.push({ from: current, to: next, status: response.status });
-      if (!isPermittedRedirect(current, next, allowedOrigins)) {
-        try {
-          await response.body?.cancel();
-        } catch {
-          // ignore cancel failures
-        }
+      if (!isPermittedRedirect(current, next)) {
+        await discard(response);
         return {
           blockedRedirect: true,
           redirectUrl: next,
@@ -274,11 +256,7 @@ export async function fetchWithRedirects(
           redirectChain: redirects,
         };
       }
-      try {
-        await response.body?.cancel();
-      } catch {
-        // ignore cancel failures
-      }
+      await discard(response);
       current = next;
       continue;
     }
@@ -293,53 +271,44 @@ export async function fetchWithUpgradeFallback(
   normalized: ReturnType<typeof normalizeUrl>,
   signal: AbortSignal,
   extraHeaders?: Record<string, string>,
-  method: 'GET' | 'HEAD' = 'GET',
-  allowedOrigins?: Set<string>,
 ) {
+  let primary: FetchWithRedirectsResult;
   try {
-    const result = await fetchWithRedirects(
-      normalized.url,
-      signal,
-      extraHeaders,
-      method,
-      allowedOrigins,
-    );
-    if (normalized.fallbackUrl && 'blockedRedirect' in result) {
-      const fallbackResult = await fetchWithRedirects(
-        normalized.fallbackUrl,
-        signal,
-        extraHeaders,
-        method,
-        allowedOrigins,
-      );
-      return { result: fallbackResult, upgradedToHttps: false };
-    }
-    if (
-      normalized.fallbackUrl &&
-      !('blockedRedirect' in result) &&
-      result.response.status !== 304 &&
-      !result.response.ok
-    ) {
-      const fallbackResult = await fetchWithRedirects(
-        normalized.fallbackUrl,
-        signal,
-        extraHeaders,
-        method,
-        allowedOrigins,
-      );
-      return { result: fallbackResult, upgradedToHttps: false };
-    }
-    return { result, upgradedToHttps: normalized.upgradedToHttps };
+    primary = await fetchWithRedirects(normalized.url, signal, extraHeaders);
   } catch (error) {
-    if (!normalized.fallbackUrl) throw error;
+    if (!normalized.fallbackUrl || signal.aborted) throw error;
     const result = await fetchWithRedirects(
       normalized.fallbackUrl,
       signal,
       extraHeaders,
-      method,
-      allowedOrigins,
     );
     return { result, upgradedToHttps: false };
+  }
+  if (
+    !normalized.fallbackUrl ||
+    (!('blockedRedirect' in primary) &&
+      (primary.response.ok || primary.response.status === 304))
+  ) {
+    return { result: primary, upgradedToHttps: normalized.upgradedToHttps };
+  }
+  if (!('blockedRedirect' in primary)) await discard(primary.response);
+  try {
+    const result = await fetchWithRedirects(
+      normalized.fallbackUrl,
+      signal,
+      extraHeaders,
+    );
+    if (
+      'blockedRedirect' in primary &&
+      ('blockedRedirect' in result || !result.response.ok)
+    ) {
+      if (!('blockedRedirect' in result)) await discard(result.response);
+      return { result: primary, upgradedToHttps: normalized.upgradedToHttps };
+    }
+    return { result, upgradedToHttps: false };
+  } catch (error) {
+    if (!('blockedRedirect' in primary) || signal.aborted) throw error;
+    return { result: primary, upgradedToHttps: normalized.upgradedToHttps };
   }
 }
 
@@ -356,7 +325,7 @@ function parseCharset(contentType: string) {
 }
 
 export function isHtmlLikeContentType(contentType: string) {
-  const mime = contentType.split(';')[0]?.trim().toLowerCase() || '';
+  const mime = mimeOf(contentType);
   return mime === 'text/html' || mime === 'application/xhtml+xml';
 }
 
@@ -428,8 +397,7 @@ export function looksLikeTextBody(data: Uint8Array) {
 }
 
 export function isGenericBinaryMime(contentType: string) {
-  const mime = contentType.split(';')[0]?.trim().toLowerCase() || '';
-  return mime === 'application/octet-stream';
+  return mimeOf(contentType) === 'application/octet-stream';
 }
 
 function parseFilenameFromContentDisposition(value: string | null) {
@@ -459,11 +427,22 @@ function inferFilenameFromUrl(url: string) {
 }
 
 function truncateFilename(name: string, maxLength = 180) {
-  if (name.length <= maxLength) return name;
+  if (name.length <= maxLength && Buffer.byteLength(name) <= 255) return name;
   const parsed = path.parse(name);
-  const ext = parsed.ext || '';
-  const baseLimit = Math.max(1, maxLength - ext.length);
-  return `${parsed.name.slice(0, baseLimit)}${ext}`;
+  const ext = Buffer.byteLength(parsed.ext) <= 255 ? parsed.ext : '';
+  let base = '';
+  let bytes = Buffer.byteLength(ext);
+  for (const char of ext ? parsed.name : name) {
+    const size = Buffer.byteLength(char);
+    if (
+      base.length + char.length > maxLength - ext.length ||
+      bytes + size > 255
+    )
+      break;
+    base += char;
+    bytes += size;
+  }
+  return `${base}${ext}`;
 }
 
 function sanitizeFilename(name: string) {
@@ -515,33 +494,22 @@ export async function probeLlmsText(
   if (fallbackOrigin && !origins.includes(fallbackOrigin)) {
     origins.push(fallbackOrigin);
   }
-  const allowedOrigins = new Set(origins);
   let lastError: string | undefined;
   for (const candidate of origins.flatMap((origin) => [
     `${origin}/llms-full.txt`,
     `${origin}/llms.txt`,
   ])) {
     try {
-      const result = await fetchWithRedirects(
-        candidate,
-        signal,
-        {
-          Accept: 'text/plain, text/markdown;q=0.9, */*;q=0.1',
-        },
-        'GET',
-        allowedOrigins,
-      );
+      const result = await fetchWithRedirects(candidate, signal, {
+        Accept: 'text/plain, text/markdown;q=0.9, */*;q=0.1',
+      });
       if ('blockedRedirect' in result) {
         lastError = `llms.txt probe blocked by cross-host redirect: ${result.redirectUrl}`;
         continue;
       }
       const { response, finalUrl, redirectChain } = result;
       if (!response.ok) {
-        try {
-          await response.body?.cancel();
-        } catch {
-          // ignore cancel failures
-        }
+        await discard(response);
         continue;
       }
       const headers = extractHeaderMetadata(response.headers, finalUrl);
@@ -560,9 +528,9 @@ export async function probeLlmsText(
         contentType.includes('text/html') ||
         contentType.includes('application/xhtml+xml');
       const looksLikeHtmlBody = /^\s*(<!doctype html|<html\b)/i.test(text);
-      const looksLikeLoginWall =
-        /<title>\s*(log in|sign in|login)\b/i.test(text) ||
-        /\blog[ -]?in\b/i.test(finalUrl);
+      const looksLikeLoginWall = /<title>\s*(log in|sign in|login)\b/i.test(
+        text,
+      );
       if (!looksLikeLlmsPath) {
         lastError = `llms.txt probe resolved to non-llms path: ${finalUrl}`;
         continue;
