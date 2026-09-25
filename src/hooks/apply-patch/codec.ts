@@ -68,6 +68,9 @@ function parseChunks(lines: string[], index: number) {
     if (!lines[at].startsWith('@@')) {
       unexpectedPatchLine('in update body', lines[at]);
     }
+    if (chunks[chunks.length - 1]?.is_end_of_file) {
+      throw new Error('Invalid patch format: chunk follows End of File');
+    }
 
     const context = parseChangeContext(lines[at]);
     at += 1;
@@ -90,6 +93,9 @@ function parseChunks(lines: string[], index: number) {
       }
 
       if (line.startsWith(' ')) {
+        if (line.trim() === '*** End Patch') {
+          throw new Error('Invalid patch format: End Patch in hunk context');
+        }
         old_lines.push(line.slice(1));
         new_lines.push(line.slice(1));
         at += 1;

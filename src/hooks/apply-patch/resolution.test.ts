@@ -99,16 +99,12 @@ describe('apply-patch/resolution', () => {
     );
   });
 
-  test('resolveUpdate resolves EOF updates', () => {
-    expect(
+  test('T1 blocks an EOF match when native would use an earlier occurrence', () => {
+    expect(() =>
       resolveUpdate('sample.txt', 'beta\nalpha\nbeta', [
-        {
-          old_lines: ['beta'],
-          new_lines: ['omega'],
-          is_end_of_file: true,
-        },
-      ]).nextText,
-    ).toBe('beta\nalpha\nomega');
+        { old_lines: ['beta'], new_lines: ['omega'], is_end_of_file: true },
+      ]),
+    ).toThrow('ambiguous');
   });
 
   test('resolveUpdate preserves CRLF while rebuilding content', () => {

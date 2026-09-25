@@ -68,29 +68,36 @@ PATCH`);
     ]);
   });
 
-  test('parsePatch preserves End Patch text when it is hunk context', () => {
-    const markerPadding = '  ';
-    const parsed = parsePatch(`*** Begin Patch${markerPadding}
-*** Update File: sample.txt
-@@ marker
+  test('U4 rejects End Patch as context before another hunk', () => {
+    expect(() =>
+      parsePatch(`*** Begin Patch
+*** Update File: doc.md
+@@
+ x
  *** End Patch
- keep
-*** End Patch${markerPadding}`);
+-y
++Y
+*** Update File: b.txt
+@@
+-b
++B
+*** End Patch`),
+    ).toThrow('End Patch');
+  });
 
-    expect(parsed.hunks).toEqual([
-      {
-        type: 'update',
-        path: 'sample.txt',
-        chunks: [
-          {
-            old_lines: ['*** End Patch', 'keep'],
-            new_lines: ['*** End Patch', 'keep'],
-            change_context: 'marker',
-            is_end_of_file: undefined,
-          },
-        ],
-      },
-    ]);
+  test('T2 rejects a chunk after an EOF-marked chunk', () => {
+    expect(() =>
+      parsePatch(`*** Begin Patch
+*** Update File: a.txt
+@@
+-c
++C
+*** End of File
+@@
++Z
+*** End of File
+*** End Patch`),
+    ).toThrow('End of File');
   });
 
   test.each([

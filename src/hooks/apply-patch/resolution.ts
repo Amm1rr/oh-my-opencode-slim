@@ -123,6 +123,12 @@ export function locateChunk(
   );
 
   if (match) {
+    if (
+      chunk.is_end_of_file &&
+      seekMatch(lines, old_lines, start)?.index !== match.index
+    ) {
+      throw new Error(`EOF match is ambiguous in ${file}`);
+    }
     return buildResolvedChunk(
       lines,
       chunk,

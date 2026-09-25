@@ -381,6 +381,21 @@ garbage
     );
   });
 
+  test.each(['a.txt', './a.txt'])(
+    'T3/T3b blocks Move to the same resolved path: %s',
+    async (destination) => {
+      const root = await createTempDir();
+      await writeFixture(root, 'a.txt', 'x\n');
+      await expect(
+        rewritePatchText(
+          root,
+          `*** Begin Patch\n*** Update File: a.txt\n*** Move to: ${destination}\n@@\n-x\n+y\n*** End Patch`,
+        ),
+      ).rejects.toThrow('Move destination is the source');
+      expect(await readText(root, 'a.txt')).toBe('x\n');
+    },
+  );
+
   test.each([
     ['missing', 'missing.txt', undefined, '*** Delete File: missing.txt'],
     [

@@ -356,10 +356,16 @@ export async function simulatePatch(
       continue;
     }
 
-    const current = await getPreparedFileState(filePath, 'update');
     const movePath = hunk.move_path
       ? path.resolve(root, hunk.move_path)
       : undefined;
+    if (movePath === filePath) {
+      throw new ApplyPatchError(
+        'validation',
+        `Move destination is the source: ${filePath}`,
+      );
+    }
+    const current = await getPreparedFileState(filePath, 'update');
     if (movePath && movePath !== filePath) {
       await assertPreparedPathMissing(movePath, 'move');
     }
