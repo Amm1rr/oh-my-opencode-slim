@@ -71,9 +71,6 @@ export type CachedFetch = {
   decodedCharset?: string;
   decodeFallback?: boolean;
   decodeWarning?: string;
-  secondaryModelInputTruncated?: boolean;
-  secondaryModelInputChars?: number;
-  secondaryModelSourceChars?: number;
 };
 
 export type BinaryFetch = {

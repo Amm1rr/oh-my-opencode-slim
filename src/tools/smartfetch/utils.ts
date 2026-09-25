@@ -6,9 +6,9 @@ import { parseFrontmatter } from '../../utils/frontmatter';
 import { type JsdomModule, loadJSDOM } from '../../utils/jsdom';
 import type { CachedFetch, ExtractedContent } from './types';
 
-export { escapeHtml, parseFrontmatter };
-
 const CSS_TREE_WARN_PREFIX = '[csstree-match]';
+const BLOCK_TAGS =
+  /^(?:ARTICLE|ASIDE|BLOCKQUOTE|DIV|DL|DT|DD|FIGCAPTION|FIGURE|FOOTER|FORM|H[1-6]|HEADER|HR|LI|MAIN|NAV|OL|P|PRE|SECTION|TABLE|TBODY|TD|TH|THEAD|TR|UL)$/;
 
 /**
  * Suppresses css-tree lexer warnings ([csstree-match] prefix) emitted
@@ -103,41 +103,6 @@ function extractStructuredText(root: Element | null) {
   if (!root) return '';
   const chunks: string[] = [];
   const ignoredTags = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE']);
-  const blockTags = new Set([
-    'ARTICLE',
-    'ASIDE',
-    'BLOCKQUOTE',
-    'DIV',
-    'DL',
-    'DT',
-    'DD',
-    'FIGCAPTION',
-    'FIGURE',
-    'FOOTER',
-    'FORM',
-    'H1',
-    'H2',
-    'H3',
-    'H4',
-    'H5',
-    'H6',
-    'HEADER',
-    'HR',
-    'LI',
-    'MAIN',
-    'NAV',
-    'OL',
-    'P',
-    'PRE',
-    'SECTION',
-    'TABLE',
-    'TBODY',
-    'TD',
-    'TH',
-    'THEAD',
-    'TR',
-    'UL',
-  ]);
   const isText = (node: Node) => node.nodeType === node.TEXT_NODE;
   const isElement = (node: Node) => node.nodeType === node.ELEMENT_NODE;
   const pushText = (value: string) => {
@@ -182,7 +147,7 @@ function extractStructuredText(root: Element | null) {
       pushBreak(2);
       return;
     }
-    const isBlock = blockTags.has(tag);
+    const isBlock = BLOCK_TAGS.test(tag);
     if (isBlock) pushBreak(tag === 'LI' ? 1 : 2);
     if (tag === 'LI') chunks.push('- ');
     for (const child of element.childNodes) visit(child);

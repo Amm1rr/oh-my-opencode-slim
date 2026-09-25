@@ -20,10 +20,8 @@ export function normalizeUrl(input: string): {
   url: string;
   upgradedToHttps: boolean;
   fallbackUrl: string | undefined;
-  originalUrl: string;
 } {
   const parsed = new URL(input);
-  const originalUrl = parsed.toString();
   let upgradedToHttps = false;
   let fallbackUrl: string | undefined;
   if (parsed.protocol === 'http:') {
@@ -33,14 +31,14 @@ export function normalizeUrl(input: string): {
   }
   // Fragments never reach the server (RFC 3986 §3.5); strip them from the
   // URLs actually fetched so the same document requested with different
-  // anchors issues a single request. originalUrl keeps the fragment.
+  // anchors issues a single request. The caller retains the requested URL.
   parsed.hash = '';
   if (fallbackUrl) {
     const fallback = new URL(fallbackUrl);
     fallback.hash = '';
     fallbackUrl = fallback.toString();
   }
-  return { url: parsed.toString(), upgradedToHttps, fallbackUrl, originalUrl };
+  return { url: parsed.toString(), upgradedToHttps, fallbackUrl };
 }
 
 export function isDocsLikeUrl(url: URL): boolean {
@@ -114,9 +112,8 @@ export function getBinaryKind(contentType: string): BinaryFetch['binaryKind'] {
   return 'binary';
 }
 
-function acceptHeader(_format: 'text' | 'markdown' | 'html') {
-  return 'text/html;q=1.0, application/xhtml+xml;q=0.9, text/markdown;q=0.8, text/plain;q=0.8, */*;q=0.1';
-}
+const ACCEPT_HEADER =
+  'text/html;q=1.0, application/xhtml+xml;q=0.9, text/markdown;q=0.8, text/plain;q=0.8, */*;q=0.1';
 
 function inferCharsetFromHtml(text: string) {
   const metaCharset = text.match(
@@ -162,7 +159,7 @@ function tryDecodeWithCharset(data: Uint8Array, charset: string) {
 }
 
 function detectBestEffortCharset(data: Uint8Array) {
-  for (const charset of ['utf-8', 'windows-1252', 'iso-8859-1']) {
+  for (const charset of ['utf-8', 'windows-1252']) {
     const decoded = tryDecodeWithCharset(data, charset);
     if (decoded && isLikelyDecodedText(decoded)) {
       return { charset, text: decoded };
@@ -234,8 +231,6 @@ export async function readBodyLimited(
 
 export async function fetchWithRedirects(
   url: string,
-  _timeoutMs: number,
-  format: 'text' | 'markdown' | 'html',
   signal: AbortSignal,
   extraHeaders?: Record<string, string>,
   method: 'GET' | 'HEAD' = 'GET',
@@ -251,7 +246,7 @@ export async function fetchWithRedirects(
       method,
       headers: {
         'User-Agent': 'opencode-smartfetch/1.0',
-        Accept: acceptHeader(format),
+        Accept: ACCEPT_HEADER,
         'Accept-Language': DEFAULT_ACCEPT_LANGUAGE,
         ...extraHeaders,
       },
@@ -296,8 +291,6 @@ export async function fetchWithRedirects(
 
 export async function fetchWithUpgradeFallback(
   normalized: ReturnType<typeof normalizeUrl>,
-  timeoutMs: number,
-  format: 'text' | 'markdown' | 'html',
   signal: AbortSignal,
   extraHeaders?: Record<string, string>,
   method: 'GET' | 'HEAD' = 'GET',
@@ -306,8 +299,6 @@ export async function fetchWithUpgradeFallback(
   try {
     const result = await fetchWithRedirects(
       normalized.url,
-      timeoutMs,
-      format,
       signal,
       extraHeaders,
       method,
@@ -316,8 +307,6 @@ export async function fetchWithUpgradeFallback(
     if (normalized.fallbackUrl && 'blockedRedirect' in result) {
       const fallbackResult = await fetchWithRedirects(
         normalized.fallbackUrl,
-        timeoutMs,
-        format,
         signal,
         extraHeaders,
         method,
@@ -333,8 +322,6 @@ export async function fetchWithUpgradeFallback(
     ) {
       const fallbackResult = await fetchWithRedirects(
         normalized.fallbackUrl,
-        timeoutMs,
-        format,
         signal,
         extraHeaders,
         method,
@@ -347,8 +334,6 @@ export async function fetchWithUpgradeFallback(
     if (!normalized.fallbackUrl) throw error;
     const result = await fetchWithRedirects(
       normalized.fallbackUrl,
-      timeoutMs,
-      format,
       signal,
       extraHeaders,
       method,
@@ -523,7 +508,6 @@ export function buildConditionalHeaders(cached: FetchResult | undefined) {
 
 export async function probeLlmsText(
   url: URL,
-  timeoutMs: number,
   signal: AbortSignal,
   fallbackOrigin?: string,
 ): Promise<LlmsProbeResult> {
@@ -540,8 +524,6 @@ export async function probeLlmsText(
     try {
       const result = await fetchWithRedirects(
         candidate,
-        timeoutMs,
-        'markdown',
         signal,
         {
           Accept: 'text/plain, text/markdown;q=0.9, */*;q=0.1',

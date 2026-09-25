@@ -54,35 +54,22 @@ export function resolveSecondaryModels(
 ): SecondaryModel[] {
   const models: SecondaryModel[] = [];
   const seen = new Set<string>();
-  const addModel = (model: SecondaryModel) => {
+  const refs: Array<{ id: string | undefined; variant?: string }> = [
+    ...(input.webfetchModels ?? []),
+    ...[input.smallModel, input.explorerModel, input.librarianModel].map(
+      (id) => ({ id }),
+    ),
+  ];
+  for (const ref of refs) {
+    const parsed = parseModelRef(ref.id);
+    if (!parsed) continue;
+    const model: SecondaryModel =
+      'variant' in ref ? { ...parsed, variant: ref.variant } : parsed;
     const key = `${model.providerID}/${model.modelID}${model.variant ? `#${model.variant}` : ''}`;
-    if (seen.has(key)) return;
+    if (seen.has(key)) continue;
     seen.add(key);
     models.push(model);
-  };
-
-  // Dedicated webfetch model(s) take highest priority, in order
-  if (input.webfetchModels) {
-    for (const ref of input.webfetchModels) {
-      const parsedModel = parseModelRef(ref.id);
-      if (!parsedModel) continue;
-      addModel({ ...parsedModel, variant: ref.variant });
-    }
   }
-
-  const parsedSmall = parseModelRef(input.smallModel);
-  if (parsedSmall) addModel(parsedSmall);
-
-  const parsedExplorer = input.explorerModel
-    ? parseModelRef(input.explorerModel)
-    : undefined;
-  if (parsedExplorer) addModel(parsedExplorer);
-
-  const parsedLibrarian = input.librarianModel
-    ? parseModelRef(input.librarianModel)
-    : undefined;
-  if (parsedLibrarian) addModel(parsedLibrarian);
-
   return models;
 }
 

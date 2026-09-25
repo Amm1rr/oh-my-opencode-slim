@@ -22,11 +22,10 @@ describe('smartfetch/network', () => {
     mock.restore();
   });
 
-  test('normalizeUrl strips the fragment from fetch URLs only', () => {
+  test('normalizeUrl strips the fragment from fetch URLs', () => {
     const normalized = normalizeUrl('https://example.com/docs#sec1');
 
     expect(normalized.url).toBe('https://example.com/docs');
-    expect(normalized.originalUrl).toBe('https://example.com/docs#sec1');
     expect(normalized.fallbackUrl).toBeUndefined();
     expect(normalized.upgradedToHttps).toBe(false);
   });
@@ -35,7 +34,6 @@ describe('smartfetch/network', () => {
     const normalized = normalizeUrl('http://example.com/docs#sec1');
 
     expect(normalized.url).toBe('https://example.com/docs');
-    expect(normalized.originalUrl).toBe('http://example.com/docs#sec1');
     expect(normalized.fallbackUrl).toBe('http://example.com/docs');
     expect(normalized.upgradedToHttps).toBe(true);
   });
@@ -87,8 +85,6 @@ describe('smartfetch/network', () => {
 
     const result = await fetchWithRedirects(
       'https://docs.example.com/start',
-      1_000,
-      'markdown',
       new AbortController().signal,
     );
 
@@ -124,8 +120,6 @@ describe('smartfetch/network', () => {
 
     const result = await fetchWithRedirects(
       'https://docs.example.com/start',
-      1_000,
-      'markdown',
       new AbortController().signal,
     );
 
@@ -167,8 +161,6 @@ describe('smartfetch/network', () => {
 
     const result = await fetchWithRedirects(
       'https://docs.example.com/start',
-      1_000,
-      'markdown',
       new AbortController().signal,
       undefined,
       'GET',

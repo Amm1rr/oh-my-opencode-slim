@@ -50,7 +50,6 @@ import {
   buildRedirectResultMessage,
   cleanFetchedText,
   detectQualitySignals,
-  escapeHtml,
   extractFromHtml,
   extractHeadingsFromMarkdown,
   frontmatter,
@@ -59,7 +58,6 @@ import {
   pickContent,
   renderMessageForFormat,
   trimBlankRuns,
-  withTruncationMarker,
   wordCount,
 } from './utils';
 
@@ -185,8 +183,7 @@ export function createWebfetchTool(
             const llms = await runWithScopedTimeout(
               controller.signal,
               probeTimeoutMs,
-              (probeSignal) =>
-                probeLlmsText(url, timeoutMs, probeSignal, fallbackOrigin),
+              (probeSignal) => probeLlmsText(url, probeSignal, fallbackOrigin),
             );
             if (llms && 'text' in llms) {
               const llmsHeaders = llms.headers || {};
@@ -262,8 +259,6 @@ export function createWebfetchTool(
           if (!fetchResult) {
             const { result, upgradedToHttps } = await fetchWithUpgradeFallback(
               normalized,
-              timeoutMs,
-              args.format,
               controller.signal,
               buildConditionalHeaders(staleFetchResult),
               'GET',
@@ -814,19 +809,9 @@ export function createWebfetchTool(
               secondary_model: `${secondaryRun.model.providerID}/${secondaryRun.model.modelID}${secondaryRun.model.variant ? `#${secondaryRun.model.variant}` : ''}`,
             })
           : '';
-        const secondaryRaw =
-          secondaryRun.text || 'No response from secondary model.';
-        const secondaryContent =
-          args.format === 'html'
-            ? withTruncationMarker(
-                `<pre>${escapeHtml(secondaryRaw)}</pre>`,
-                'html',
-                false,
-              )
-            : withTruncationMarker(secondaryRaw, args.format, false);
         return joinRenderedContent(
           metadataWithSecondary,
-          secondaryContent,
+          renderMessageForFormat(secondaryRun.text, args.format),
           args.format,
         );
       } finally {
