@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { fitUtf8 } from './binary';
 import {
   BINARY_PREFIXES,
   DEFAULT_ACCEPT_LANGUAGE,
@@ -378,19 +379,7 @@ function truncateFilename(name: string, maxLength = 180) {
   if (name.length <= maxLength && Buffer.byteLength(name) <= 255) return name;
   const parsed = path.parse(name);
   const ext = Buffer.byteLength(parsed.ext) <= 255 ? parsed.ext : '';
-  let base = '';
-  let bytes = Buffer.byteLength(ext);
-  for (const char of ext ? parsed.name : name) {
-    const size = Buffer.byteLength(char);
-    if (
-      base.length + char.length > maxLength - ext.length ||
-      bytes + size > 255
-    )
-      break;
-    base += char;
-    bytes += size;
-  }
-  return `${base}${ext}`;
+  return `${fitUtf8(ext ? parsed.name : name, 255 - Buffer.byteLength(ext), maxLength - ext.length)}${ext}`;
 }
 
 function sanitizeFilename(name: string) {

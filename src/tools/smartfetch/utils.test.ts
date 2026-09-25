@@ -30,6 +30,22 @@ const CSS_PARSING_ERROR_HTML = `<!DOCTYPE html><html><head>
 </head><body><article><h1>Hello</h1><p>World</p></article></body></html>`;
 
 describe('smartfetch/utils', () => {
+  test('extracts article content without boilerplate or joined inline words', async () => {
+    const html = `<html><body><nav>NAVTOKENR3</nav><article><h1>Main heading</h1><p><b>line break</b> <script>1</script>C# F#</p><p>${'Lorem ipsum dolor sit amet, consectetur adipiscing elit. '.repeat(12)}</p></article><footer>FOOTERTOKENR3</footer></body></html>`;
+    const result = await extractFromHtml(
+      html,
+      'https://example.com/article',
+      true,
+    );
+    expect(result.extractedMain).toBe(true);
+    expect(result.text).toContain('line break C# F#');
+    for (const content of [result.html, result.text, result.markdown]) {
+      expect(content).toContain('Lorem ipsum');
+      expect(content).not.toContain('NAVTOKENR3');
+      expect(content).not.toContain('FOOTERTOKENR3');
+    }
+  });
+
   test('bounds fourteen 1 MiB markdown and heading generators below one second', () => {
     const mib = 1024 * 1024;
     const PL = '"Permanent link")';

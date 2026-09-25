@@ -1,4 +1,8 @@
 import { afterEach, describe, expect, mock, test } from 'bun:test';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { fitUtf8, saveBinary } from './binary';
 import {
   decodeBody,
   extractHeaderMetadata,
@@ -262,15 +266,31 @@ describe('smartfetch/network', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  test('limits multibyte filenames to 255 UTF-8 bytes', () => {
-    const headers = new Headers({
-      'content-disposition': `attachment; filename="${'é'.repeat(180)}.pdf"`,
-    });
-    const filename = extractHeaderMetadata(
-      headers,
-      'https://example.com/x',
-    ).filename;
-    expect(Buffer.byteLength(filename || '')).toBeLessThanOrEqual(255);
-    expect(filename?.endsWith('.pdf')).toBe(true);
+  const raw = `${'é'.repeat(180)}.pdf`;
+  const latinName = extractHeaderMetadata(
+    new Headers({ 'content-disposition': `attachment; filename="${raw}"` }),
+    'https://example.com/x',
+  ).filename;
+  test('retains the PDF extension when sanitizing a multibyte filename', () => {
+    expect(latinName).toEndWith('.pdf');
+  });
+
+  test('keeps byte-limited multibyte names unique across binary saves', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'smartfetch-r3-'));
+    try {
+      for (const name of [latinName ?? '', fitUtf8('界'.repeat(100), 255)]) {
+        const save = () =>
+          saveBinary(dir, Uint8Array.of(0), 'application/pdf', name);
+        const files = [await save(), await save(), await save()];
+        expect(path.basename(files[0])).toBe(name);
+        expect(path.basename(files[1])).toEndWith('-1.pdf');
+        const withinLimit = files.every(
+          (file) => Buffer.byteLength(path.basename(file)) <= 255,
+        );
+        expect([new Set(files).size, withinLimit]).toEqual([3, true]);
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
