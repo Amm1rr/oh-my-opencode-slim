@@ -60,8 +60,11 @@ describe('smartfetch/utils', () => {
 
   test('suppresses css-tree warnings during html extraction', async () => {
     const originalWarn = console.warn;
+    const originalError = console.error;
     const warnCalls: unknown[][] = [];
+    const errorCalls: unknown[][] = [];
     console.warn = (...args: unknown[]) => warnCalls.push(args);
+    console.error = (...args: unknown[]) => errorCalls.push(args);
     try {
       const result = await extractFromHtml(
         CSS_TREE_WARNING_HTML,
@@ -73,10 +76,12 @@ describe('smartfetch/utils', () => {
         String(args[0]).startsWith('[csstree-match]'),
       );
       expect(cssTreeWarnings).toEqual([]);
+      expect(errorCalls).toEqual([]);
       expect(result.text).toContain('Hello');
       expect(result.text).toContain('World');
     } finally {
       console.warn = originalWarn;
+      console.error = originalError;
     }
   });
 
@@ -111,38 +116,20 @@ describe('smartfetch/utils', () => {
     }
   });
 
-  test('suppresses jsdom css-parsing errors during html extraction', async () => {
+  test('suppresses jsdom css-parsing errors on both extraction paths', async () => {
     const originalError = console.error;
     const errorCalls: unknown[][] = [];
     console.error = (...args: unknown[]) => errorCalls.push(args);
     try {
-      const result = await extractFromHtml(
-        CSS_PARSING_ERROR_HTML,
-        'https://example.com/',
-        false,
-      );
-
+      for (const extractMain of [false, true]) {
+        const result = await extractFromHtml(
+          CSS_PARSING_ERROR_HTML,
+          'https://example.com/',
+          extractMain,
+        );
+        expect(result.text).toContain('Hello');
+      }
       expect(errorCalls).toEqual([]);
-      expect(result.text).toContain('Hello');
-      expect(result.text).toContain('World');
-    } finally {
-      console.error = originalError;
-    }
-  });
-
-  test('suppresses css-parsing errors on the extractMain path too', async () => {
-    const originalError = console.error;
-    const errorCalls: unknown[][] = [];
-    console.error = (...args: unknown[]) => errorCalls.push(args);
-    try {
-      const result = await extractFromHtml(
-        CSS_PARSING_ERROR_HTML,
-        'https://example.com/',
-        true,
-      );
-
-      expect(errorCalls).toEqual([]);
-      expect(result.text).toContain('Hello');
     } finally {
       console.error = originalError;
     }
@@ -174,21 +161,11 @@ describe('smartfetch/utils', () => {
     }
   });
 
-  test('clean css produces no console.error noise', async () => {
-    const originalError = console.error;
-    const errorCalls: unknown[][] = [];
-    console.error = (...args: unknown[]) => errorCalls.push(args);
-    try {
-      const result = await extractFromHtml(
-        CSS_TREE_WARNING_HTML,
-        'https://example.com/',
-        false,
-      );
-
-      expect(errorCalls).toEqual([]);
-      expect(result.text).toContain('Hello');
-    } finally {
-      console.error = originalError;
-    }
+  test('skips Readability for documents with over 15k elements', async () => {
+    const html = `<html><body><article><h1>Large page</h1><p>Content</p>${'<span>x</span>'.repeat(15_001)}</article></body></html>`;
+    const result = await extractFromHtml(html, 'https://example.com/', true);
+    expect(result.extractedMain).toBe(false);
+    expect(result.html).toBe(html);
+    expect(result.text).toContain('Content');
   });
 });

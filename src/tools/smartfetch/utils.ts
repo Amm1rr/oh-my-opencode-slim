@@ -311,34 +311,40 @@ export async function extractFromHtml(
     .filter(Boolean)
     .slice(0, 12);
 
+  let fallbackDocument = document;
   if (extractMain) {
-    const readerDom = createDom();
-    const article = new Readability(readerDom.window.document).parse();
-    if (article?.content?.trim()) {
-      const articleContainer = readerDom.window.document.createElement('div');
-      articleContainer.innerHTML = article.content;
-      const articleText = extractStructuredText(articleContainer);
-      const articleMarkdown = trimBlankRuns(turndown.turndown(article.content));
-      return {
-        title: article.title || title,
-        rawContent: html,
-        html: article.content,
-        text: articleText,
-        markdown: articleMarkdown,
-        extractedMain: true,
-        canonicalUrl,
-        headings,
-      };
+    // Readability mutates its document. Check the size before invoking it so
+    // very large pages fall back to the original document instead of blocking.
+    if (document.getElementsByTagName('*').length <= 15_000) {
+      const article = new Readability<Element>(document, {
+        serializer: (node) => node as Element,
+      }).parse();
+      const articleContent = article?.content;
+      const articleHtml = articleContent?.innerHTML;
+      if (articleContent && articleHtml?.trim()) {
+        return {
+          title: article?.title || title,
+          rawContent: html,
+          html: articleHtml,
+          text: extractStructuredText(articleContent),
+          markdown: trimBlankRuns(turndown.turndown(articleHtml)),
+          extractedMain: true,
+          canonicalUrl,
+          headings,
+        };
+      }
+      // A failed Readability attempt may have changed the DOM; restore it.
+      fallbackDocument = createDom().window.document;
     }
   }
 
-  const bodyHtml = document.body?.innerHTML || html;
-  const bodyText = extractStructuredText(document.body);
+  const bodyHtml = fallbackDocument.body?.innerHTML || html;
+  const bodyText = extractStructuredText(fallbackDocument.body);
   const markdown = trimBlankRuns(turndown.turndown(bodyHtml));
   return {
     title,
     rawContent: html,
-    html: bodyHtml,
+    html,
     text: bodyText,
     markdown,
     extractedMain: false,
@@ -380,7 +386,7 @@ export function detectQualitySignals(
   >,
 ) {
   const signals = new Set<string>();
-  const text = `${fetchResult.text}\n${fetchResult.markdown}`.toLowerCase();
+  const text = `${fetchResult.text}\n${fetchResult.markdown}`;
 
   if (fetchResult.wordCount > 0 && fetchResult.wordCount < 60) {
     signals.add('very_short_content');
@@ -414,32 +420,22 @@ export function pickContent(
   fetchResult: CachedFetch,
   format: 'text' | 'markdown' | 'html',
 ) {
+  let content: string;
   if (format === 'html') {
     if (fetchResult.sourceKind === 'html') {
-      const htmlContent = fetchResult.extractedMain
+      content = fetchResult.extractedMain
         ? fetchResult.html
         : fetchResult.rawContent;
-      return withTruncationMarker(htmlContent, format, fetchResult.truncated);
-    }
-    return withTruncationMarker(
-      renderMessageForFormat(
+    } else {
+      content = renderMessageForFormat(
         fetchResult.text || fetchResult.rawContent,
         format,
-      ),
-      format,
-      fetchResult.truncated,
-    );
+      );
+    }
+  } else if (format === 'text') {
+    content = cleanFetchedText(fetchResult.text);
+  } else {
+    content = cleanFetchedMarkdown(fetchResult.markdown);
   }
-  if (format === 'text') {
-    return withTruncationMarker(
-      cleanFetchedText(fetchResult.text),
-      format,
-      fetchResult.truncated,
-    );
-  }
-  return withTruncationMarker(
-    cleanFetchedMarkdown(fetchResult.markdown),
-    format,
-    fetchResult.truncated,
-  );
+  return withTruncationMarker(content, format, fetchResult.truncated);
 }
