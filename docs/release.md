@@ -190,15 +190,25 @@ If you have not manually edited the version, use npm's version command instead:
 npm version patch
 ```
 
-That creates the version commit and `v<version>` tag automatically.
+That creates the version commit and annotated `v<version>` tag automatically.
+The package's `version` lifecycle hook runs after npm updates `package.json` but
+before npm creates the commit and tag. It force-regenerates
+`src/generated/build-info.ts` with the new package version and stages it, so the
+version commit and tag both point to the commit containing the generated stamp.
+The hook does not amend or otherwise rewrite the commit after tagging.
 
-The committed stamp in `src/generated/build-info.ts` must be regenerated
-with the version commit; the `postversion` hook in `package.json` automates
-this (it runs the generator with `--force` to take a fresh timestamp). If you
-bumped the version manually, run `bun run gen:build-info` (the version change
-triggers the rewrite) and include the file in the version commit. Ordinary
-`bun run build` runs leave the committed stamp untouched, so building never
-dirties the git tree.
+For the automatic patch release chain, `bun run release:patch` runs
+`npm version patch`, pushes the current branch and its annotated version tag
+with `git push --follow-tags`, then publishes to npm. Review the pending release
+changes and ensure the working tree is clean before running it; this command
+performs both the push and npm publish. The `release:minor`, `release:major`,
+`release:beta`, and `release:beta:next` scripts follow the same sequence with
+their respective npm version and publish tags.
+
+If you bumped the version manually, run `bun run gen:build-info` (the version
+change triggers the rewrite) and include the generated file in the version
+commit. Ordinary `bun run build` runs leave the committed stamp untouched, so
+building never dirties the git tree.
 
 ## 6. Verify before tagging or publishing
 

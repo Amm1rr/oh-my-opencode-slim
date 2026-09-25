@@ -80,7 +80,7 @@
     "check:ci": "biome check .",
     "dev": "bun run build && opencode",
     "prepublishOnly": "bun run build",
-    "postversion": "bun scripts/gen-build-info.ts --force && git add src/generated/build-info.ts && git commit --amend --no-edit",
+    "version": "bun scripts/gen-build-info.ts --force && git add src/generated/build-info.ts",
     "release:patch": "npm version patch && git push --follow-tags && npm publish",
     "release:minor": "npm version minor && git push --follow-tags && npm publish",
     "release:major": "npm version major && git push --follow-tags && npm publish",
