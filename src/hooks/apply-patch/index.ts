@@ -17,19 +17,16 @@ interface ToolExecuteBeforeOutput {
 }
 
 function replacePatchArgs(
-  output: ToolExecuteBeforeOutput,
   args: NonNullable<ToolExecuteBeforeOutput['args']>,
   patchText: string,
 ): boolean {
-  const nextArgs = { ...args, patchText };
-
   try {
-    output.args = nextArgs;
+    args.patchText = patchText;
   } catch {
     return false;
   }
 
-  return output.args?.patchText === patchText;
+  return args.patchText === patchText;
 }
 
 export function createApplyPatchHook(ctx: PluginInput) {
@@ -54,7 +51,7 @@ export function createApplyPatchHook(ctx: PluginInput) {
         const result = await rewritePatch(root, patchText, worktree);
 
         if (result.changed) {
-          if (replacePatchArgs(output, args, result.patchText)) {
+          if (replacePatchArgs(args, result.patchText)) {
             log('apply-patch hook rewrite');
           } else {
             log('apply-patch hook skipped', {

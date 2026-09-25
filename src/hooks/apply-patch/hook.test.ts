@@ -6,11 +6,11 @@ import { parsePatch } from './codec';
 import { createApplyPatchHook } from './index';
 import { applyPatch, createTempDir, writeFixture } from './test-helpers';
 
-function createHook() {
+function createHook(root = '/tmp/hook-root') {
   return createApplyPatchHook({
     client: {} as never,
-    directory: '/tmp/hook-root',
-    worktree: '/tmp/hook-root',
+    directory: root,
+    worktree: root,
   } as never);
 }
 
@@ -21,12 +21,9 @@ async function runHook(root: string, patchText: string, worktree?: string) {
         directory: root,
         worktree,
       } as never)
-    : createHook();
+    : createHook(root);
   const output = { args: { patchText } };
-  await hook['tool.execute.before'](
-    { tool: 'apply_patch', directory: root },
-    output,
-  );
+  await hook['tool.execute.before']({ tool: 'apply_patch' }, output);
   return output.args.patchText;
 }
 
@@ -44,7 +41,7 @@ describe('apply-patch/hook', () => {
   test('blocks an unrecoverable patch as verification before native execution', async () => {
     const root = await createTempDir('apply-patch-hook-');
     await writeFixture(root, 'sample.txt', 'alpha\nbeta\ngamma\n');
-    const hook = createHook();
+    const hook = createHook(root);
     const patchText = `*** Begin Patch
 *** Update File: sample.txt
 @@
@@ -54,10 +51,7 @@ describe('apply-patch/hook', () => {
     const output = { args: { patchText } };
 
     await expect(
-      hook['tool.execute.before'](
-        { tool: 'apply_patch', directory: root },
-        output,
-      ),
+      hook['tool.execute.before']({ tool: 'apply_patch' }, output),
     ).rejects.toThrow(
       'apply_patch verification failed: Failed to find expected lines',
     );
@@ -113,10 +107,32 @@ describe('apply-patch/hook', () => {
     );
   });
 
-  test('rewrites by replacing readonly args instead of mutating them', async () => {
+  test('rewrites by mutating the original args without replacing it', async () => {
     const root = await createTempDir('apply-patch-hook-');
     await writeFixture(root, 'sample.txt', 'prefix\nstale-value\nsuffix\n');
-    const hook = createHook();
+    const hook = createHook(root);
+    const patchText = `*** Begin Patch
+*** Update File: sample.txt
+@@
+ prefix
+-old-value
++new-value
+ suffix
+*** End Patch`;
+    const args = { patchText };
+    const output = { args };
+
+    await hook['tool.execute.before']({ tool: 'apply_patch' }, output);
+
+    expect(output.args).toBe(args);
+    expect(args.patchText).toContain('-stale-value');
+    expect(args.patchText).toContain('+new-value');
+  });
+
+  test('fails open without replacing frozen args', async () => {
+    const root = await createTempDir('apply-patch-hook-');
+    await writeFixture(root, 'sample.txt', 'prefix\nstale-value\nsuffix\n');
+    const hook = createHook(root);
     const patchText = `*** Begin Patch
 *** Update File: sample.txt
 @@
@@ -128,51 +144,18 @@ describe('apply-patch/hook', () => {
     const args = Object.freeze({ patchText });
     const output = { args };
 
-    await hook['tool.execute.before'](
-      { tool: 'apply_patch', directory: root },
-      output,
-    );
-
-    expect(output.args).not.toBe(args);
-    expect(output.args.patchText).toContain('-stale-value');
-    expect(output.args.patchText).toContain('+new-value');
-  });
-
-  test('fails open when output args cannot be replaced', async () => {
-    const root = await createTempDir('apply-patch-hook-');
-    await writeFixture(root, 'sample.txt', 'prefix\nstale-value\nsuffix\n');
-    const hook = createHook();
-    const patchText = `*** Begin Patch
-*** Update File: sample.txt
-@@
- prefix
--old-value
-+new-value
- suffix
-*** End Patch`;
-    const args = Object.freeze({ patchText });
-    const output = {} as { args?: typeof args };
-    Object.defineProperty(output, 'args', {
-      configurable: false,
-      enumerable: true,
-      get: () => args,
-    });
-
     await expect(
-      hook['tool.execute.before'](
-        { tool: 'apply_patch', directory: root },
-        output,
-      ),
+      hook['tool.execute.before']({ tool: 'apply_patch' }, output),
     ).resolves.toBeUndefined();
 
     expect(output.args).toBe(args);
-    expect(output.args?.patchText).toBe(patchText);
+    expect(args.patchText).toBe(patchText);
   });
 
   test('blocks a malformed @@ at runtime before native execution', async () => {
     const root = await createTempDir('apply-patch-hook-');
     await writeFixture(root, 'sample.txt', 'alpha\nbeta\n');
-    const hook = createHook();
+    const hook = createHook(root);
     const patchText = `*** Begin Patch
 *** Update File: sample.txt
 @@
@@ -184,10 +167,7 @@ garbage
     const output = { args: { patchText } };
 
     await expect(
-      hook['tool.execute.before'](
-        { tool: 'apply_patch', directory: root },
-        output,
-      ),
+      hook['tool.execute.before']({ tool: 'apply_patch' }, output),
     ).rejects.toThrow(
       'apply_patch validation failed: Invalid patch format: unexpected line in patch chunk: garbage',
     );
@@ -200,7 +180,7 @@ garbage
     const lockedDir = path.join(root, 'locked');
     await mkdir(lockedDir, { recursive: true });
     await chmod(lockedDir, 0o000);
-    const hook = createHook();
+    const hook = createHook(root);
     const patchText = `*** Begin Patch
 *** Add File: locked/child.txt
 +fresh
@@ -209,10 +189,7 @@ garbage
 
     try {
       await expect(
-        hook['tool.execute.before'](
-          { tool: 'apply_patch', directory: root },
-          output,
-        ),
+        hook['tool.execute.before']({ tool: 'apply_patch' }, output),
       ).rejects.toThrow('apply_patch internal error:');
 
       expect(output.args.patchText).toBe(patchText);
@@ -228,7 +205,7 @@ garbage
       'sample.txt',
       'top\nanchor-insert\nafter-anchor\nend\n',
     );
-    const hook = createHook();
+    const hook = createHook(root);
     const patchText = `*** Begin Patch
 *** Update File: sample.txt
 @@ anchor-insert
@@ -236,10 +213,7 @@ garbage
 *** End Patch`;
     const output = { args: { patchText } };
 
-    await hook['tool.execute.before'](
-      { tool: 'apply_patch', directory: root },
-      output,
-    );
+    await hook['tool.execute.before']({ tool: 'apply_patch' }, output);
 
     await applyPatch(root, output.args.patchText as string);
     expect(await readFile(path.join(root, 'sample.txt'), 'utf-8')).toBe(
@@ -254,7 +228,7 @@ garbage
       'sample.txt',
       'top\nprefix\nstale-value\nsuffix\n',
     );
-    const hook = createHook();
+    const hook = createHook(root);
     const patchText = `*** Begin Patch
 *** Add File: added.txt
 +fresh
@@ -267,10 +241,7 @@ garbage
 *** End Patch`;
     const output = { args: { patchText } };
 
-    await hook['tool.execute.before'](
-      { tool: 'apply_patch', directory: root },
-      output,
-    );
+    await hook['tool.execute.before']({ tool: 'apply_patch' }, output);
 
     const rewritten = parsePatch(output.args.patchText as string);
     expect(rewritten.hunks[0]).toEqual({
@@ -317,10 +288,7 @@ garbage
     const output = { args: { patchText } };
 
     await expect(
-      hook['tool.execute.before'](
-        { tool: 'apply_patch', directory: root },
-        output,
-      ),
+      hook['tool.execute.before']({ tool: 'apply_patch' }, output),
     ).resolves.toBeUndefined();
 
     expect(parsePatch(output.args.patchText as string).hunks[0]).toMatchObject({
@@ -335,7 +303,7 @@ garbage
     const outsideDir = await createTempDir('apply-patch-hook-outside-');
     await writeFixture(root, 'sample.txt', 'prefix\nstale-value\nsuffix\n');
     await writeFixture(outsideDir, 'outside.txt', 'legacy\n');
-    const hook = createHook();
+    const hook = createHook(root);
     const outsideAdded = path.join(path.dirname(root), 'outside-added.txt');
     const patchText = `*** Begin Patch
 *** Add File: ../outside-added.txt
@@ -351,10 +319,7 @@ garbage
     const output = { args: { patchText } };
 
     await expect(
-      hook['tool.execute.before'](
-        { tool: 'apply_patch', directory: root },
-        output,
-      ),
+      hook['tool.execute.before']({ tool: 'apply_patch' }, output),
     ).resolves.toBeUndefined();
 
     expect(output.args.patchText).toBe(patchText);
@@ -376,7 +341,7 @@ garbage
   test('does not alter an exact patch', async () => {
     const root = await createTempDir('apply-patch-hook-');
     await writeFixture(root, 'sample.txt', 'alpha\nbeta\n');
-    const hook = createHook();
+    const hook = createHook(root);
     const patchText = `*** Begin Patch
 *** Update File: sample.txt
 @@
@@ -386,10 +351,7 @@ garbage
 *** End Patch`;
     const output = { args: { patchText } };
 
-    await hook['tool.execute.before'](
-      { tool: 'apply_patch', directory: root },
-      output,
-    );
+    await hook['tool.execute.before']({ tool: 'apply_patch' }, output);
 
     expect(output.args.patchText).toBe(patchText);
   });
