@@ -509,9 +509,6 @@ export function createWebfetchTool(
           );
         }
 
-        if (!secondaryModels.length) {
-          return render(textMeta, baseContent);
-        }
         let secondaryRun:
           | Awaited<ReturnType<typeof runSecondaryModelWithFallback>>
           | undefined;

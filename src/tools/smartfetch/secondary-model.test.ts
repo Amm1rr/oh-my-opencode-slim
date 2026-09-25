@@ -80,42 +80,42 @@ describe('smartfetch/secondary-model', () => {
     mock.restore();
   });
 
-  test('falls back when the first model returns empty text', async () => {
-    mockV2Client = createV2ClientMock([
-      { text: '   ' },
-      { text: 'Useful answer' },
-    ]);
-
-    const result = await runSecondaryModelWithFallback(
-      testInput,
-      models,
-      'Summarize the page',
-      'This is enough fetched content to clear the short-content guard.',
-    );
-
-    expect(result.text).toBe('Useful answer');
-    expect(result.model).toEqual(models[1]);
-    expect(mockV2Session.prompt).toHaveBeenCalledTimes(2);
-    expect(mockV2Session.delete).toHaveBeenCalledTimes(2);
+  test('falls back when the first model returns empty text or throws', async () => {
+    for (const [first, answer] of [
+      [{ text: '   ' }, 'Useful answer'],
+      [{ error: new Error('primary failed') }, 'Recovered answer'],
+    ] as const) {
+      mockV2Client = createV2ClientMock([first, { text: answer }]);
+      const result = await runSecondaryModelWithFallback(
+        testInput,
+        models,
+        'Extract the answer',
+        'This is enough fetched content to clear the short-content guard.',
+      );
+      expect(result.text).toBe(answer);
+      expect(result.model).toEqual(models[1]);
+      expect(mockV2Session.prompt).toHaveBeenCalledTimes(2);
+      expect(mockV2Session.delete).toHaveBeenCalledTimes(2);
+    }
   });
 
-  test('falls back when the first model throws', async () => {
-    mockV2Client = createV2ClientMock([
-      { error: new Error('primary failed') },
-      { text: 'Recovered answer' },
-    ]);
-
-    const result = await runSecondaryModelWithFallback(
-      testInput,
-      models,
-      'Extract the answer',
-      'This is enough fetched content to clear the short-content guard.',
+  test('reports the upstream error when session creation returns no id', async () => {
+    mockV2Client = createV2ClientMock([]);
+    mockV2Session.create = mock(async () => ({
+      data: {},
+      error: { message: 'unavailable' },
+    }));
+    await expect(
+      runSecondaryModelWithFallback(
+        testInput,
+        [models[0]],
+        'Summarize',
+        'This is enough fetched content to clear the short-content guard.',
+      ),
+    ).rejects.toThrow(
+      'Secondary model session did not return an id: {"message":"unavailable"}',
     );
-
-    expect(result.text).toBe('Recovered answer');
-    expect(result.model).toEqual(models[1]);
-    expect(mockV2Session.prompt).toHaveBeenCalledTimes(2);
-    expect(mockV2Session.delete).toHaveBeenCalledTimes(2);
+    expect(mockV2Session.prompt).not.toHaveBeenCalled();
   });
 
   test('retries session delete on transient failure', async () => {
@@ -349,8 +349,8 @@ describe('smartfetch/secondary-model', () => {
     }
   });
 
-  test('passes parentID to session.create when parentSessionID is provided', async () => {
-    mockV2Client = createV2ClientMock([{ text: 'Answer' }]);
+  test('adds parentID only when parentSessionID is provided', async () => {
+    mockV2Client = createV2ClientMock([{ text: 'Answer' }, { text: 'Answer' }]);
 
     const result = await runSecondaryModelWithFallback(
       testInput,
@@ -369,20 +369,14 @@ describe('smartfetch/secondary-model', () => {
         }),
       }),
     );
-  });
-
-  test('omits parentID from session.create when parentSessionID is undefined', async () => {
-    mockV2Client = createV2ClientMock([{ text: 'Answer' }]);
-
-    const result = await runSecondaryModelWithFallback(
+    await runSecondaryModelWithFallback(
       testInput,
       [models[0]],
       'Summarize',
       'This is enough fetched content to clear the short-content guard.',
     );
-
-    expect(result.text).toBe('Answer');
-    expect(mockV2Session.create).toHaveBeenCalledWith(
+    expect(mockV2Session.create).toHaveBeenNthCalledWith(
+      2,
       expect.objectContaining({
         body: { title: 'smartfetch-secondary' },
       }),

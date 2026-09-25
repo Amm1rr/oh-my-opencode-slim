@@ -91,6 +91,23 @@ function buildPrompt(content: string, prompt: string) {
   ].join('\n');
 }
 
+function prepareInput(content: string, prompt: string) {
+  const sourceChars = content.length;
+  const truncatedContent = content.slice(0, MAX_MODEL_CONTENT_CHARS);
+  const inputChars = truncatedContent.length;
+  const inputTruncated = inputChars < sourceChars;
+  const effectivePrompt = inputTruncated
+    ? `${prompt}\n\nNote: only the first ${inputChars} characters of a longer fetched document were provided.`
+    : prompt;
+  return {
+    truncatedContent,
+    effectivePrompt,
+    inputTruncated,
+    inputChars,
+    sourceChars,
+  };
+}
+
 export function decideSecondaryModelUse(
   fetchResult: CachedFetch,
   prompt: string | undefined,
@@ -112,13 +129,6 @@ export function decideSecondaryModelUse(
   return { use: true, reason: 'prompt_present' as const };
 }
 
-function isUsableSecondaryText(text: string) {
-  const trimmed = text.trim();
-  if (!trimmed) return false;
-  if (/^no response from secondary model\.?$/i.test(trimmed)) return false;
-  return true;
-}
-
 const SESSION_DELETE_RETRIES = 3;
 const SESSION_DELETE_RETRY_DELAY_MS = 500;
 const SECONDARY_MODEL_TIMEOUT_MS = 30_000;
@@ -132,6 +142,23 @@ export const _testConfig = {
   deleteRetryDelayMs: SESSION_DELETE_RETRY_DELAY_MS,
   secondaryModelTimeoutMs: SECONDARY_MODEL_TIMEOUT_MS,
 };
+
+async function raceTimeout<T>(operation: Promise<T>, onTimeout?: () => void) {
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_, reject) => {
+        timeoutHandle = setTimeout(() => {
+          onTimeout?.();
+          reject(new Error('Secondary model timed out'));
+        }, _testConfig.secondaryModelTimeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+  }
+}
 
 /**
  * Delete a temporary secondary-model session with retry.
@@ -177,17 +204,6 @@ export type V2GenerateText = (
   model?: { id: string; providerID: string; variant?: string },
 ) => Promise<{ text: string }>;
 
-function readV2GenerateText(input: PluginInput): V2GenerateText | undefined {
-  const channel = (
-    input as {
-      experimental_v2?: { generateText?: unknown };
-    }
-  ).experimental_v2?.generateText;
-  return typeof channel === 'function'
-    ? (channel as V2GenerateText)
-    : undefined;
-}
-
 /**
  * v2 path: one-shot `ctx.generate.text`, no temporary session.
  *
@@ -205,13 +221,10 @@ async function runSecondaryModelViaGenerateText(
   prompt: string,
   content: string,
 ) {
-  const sourceChars = content.length;
-  const truncatedContent = content.slice(0, MAX_MODEL_CONTENT_CHARS);
-  const inputChars = truncatedContent.length;
-  const inputTruncated = inputChars < sourceChars;
-  const effectivePrompt = inputTruncated
-    ? `${prompt}\n\nNote: only the first ${inputChars} characters of a longer fetched document were provided.`
-    : prompt;
+  const { truncatedContent, effectivePrompt, ...inputStats } = prepareInput(
+    content,
+    prompt,
+  );
 
   const { variant, ...modelOnly } = model;
   const modelRef = {
@@ -220,25 +233,10 @@ async function runSecondaryModelViaGenerateText(
     ...(variant ? { variant } : {}),
   };
 
-  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-  try {
-    const result = await Promise.race([
-      generateText(buildPrompt(truncatedContent, effectivePrompt), modelRef),
-      new Promise<never>((_, reject) => {
-        timeoutHandle = setTimeout(() => {
-          reject(new Error('Secondary model timed out'));
-        }, _testConfig.secondaryModelTimeoutMs);
-      }),
-    ]);
-    return {
-      text: result.text.trim(),
-      inputTruncated,
-      inputChars,
-      sourceChars,
-    };
-  } finally {
-    if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
-  }
+  const result = await raceTimeout(
+    generateText(buildPrompt(truncatedContent, effectivePrompt), modelRef),
+  );
+  return { text: result.text.trim(), ...inputStats };
 }
 
 async function runSecondaryModel(
@@ -248,10 +246,12 @@ async function runSecondaryModel(
   content: string,
   parentSessionID?: string,
 ) {
-  const generateText = readV2GenerateText(input);
-  if (generateText) {
+  const generateText = (
+    input as { experimental_v2?: { generateText?: unknown } }
+  ).experimental_v2?.generateText;
+  if (typeof generateText === 'function') {
     return runSecondaryModelViaGenerateText(
-      generateText,
+      generateText as V2GenerateText,
       model,
       prompt,
       content,
@@ -267,7 +267,6 @@ async function runSecondaryModel(
   }
   let sessionId: string | undefined;
   let promptPromise: Promise<unknown> | undefined;
-  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
   let promptTimedOut = false;
   try {
     const sessionResponse = await client.session.create({
@@ -291,13 +290,10 @@ async function runSecondaryModel(
       );
     }
 
-    const sourceChars = content.length;
-    const truncatedContent = content.slice(0, MAX_MODEL_CONTENT_CHARS);
-    const inputChars = truncatedContent.length;
-    const inputTruncated = inputChars < sourceChars;
-    const effectivePrompt = inputTruncated
-      ? `${prompt}\n\nNote: only the first ${inputChars} characters of a longer fetched document were provided.`
-      : prompt;
+    const { truncatedContent, effectivePrompt, ...inputStats } = prepareInput(
+      content,
+      prompt,
+    );
     const toolIDsResponse = await client.tool.ids({
       query: { directory },
     });
@@ -327,19 +323,13 @@ async function runSecondaryModel(
         ],
       },
     });
-    const result = await Promise.race([
-      promptPromise,
-      new Promise<never>((_, reject) => {
-        timeoutHandle = setTimeout(() => {
-          promptTimedOut = true;
-          pendingSecondaryModelCleanups.set(
-            client,
-            (pendingSecondaryModelCleanups.get(client) ?? 0) + 1,
-          );
-          reject(new Error('Secondary model timed out'));
-        }, _testConfig.secondaryModelTimeoutMs);
-      }),
-    ]);
+    const result = await raceTimeout(promptPromise, () => {
+      promptTimedOut = true;
+      pendingSecondaryModelCleanups.set(
+        client,
+        (pendingSecondaryModelCleanups.get(client) ?? 0) + 1,
+      );
+    });
 
     const parts =
       (result as { data?: { parts?: Array<{ type?: string; text?: string }> } })
@@ -349,12 +339,7 @@ async function runSecondaryModel(
       .join('')
       .trim();
 
-    return {
-      text,
-      inputTruncated,
-      inputChars,
-      sourceChars,
-    };
+    return { text, ...inputStats };
   } catch (error) {
     if (promptTimedOut && sessionId) {
       try {
@@ -366,7 +351,6 @@ async function runSecondaryModel(
     }
     throw error;
   } finally {
-    if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
     const cleanupSessionId = sessionId;
     if (promptTimedOut && promptPromise && cleanupSessionId) {
       void promptPromise
@@ -401,7 +385,10 @@ export async function runSecondaryModelWithFallback(
         content,
         parentSessionID,
       );
-      if (!isUsableSecondaryText(result.text)) {
+      if (
+        !result.text.trim() ||
+        /^no response from secondary model\.?$/i.test(result.text.trim())
+      ) {
         lastError = new Error('Secondary model returned no usable text');
         continue;
       }
