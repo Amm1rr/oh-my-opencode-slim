@@ -545,10 +545,17 @@ describe('processImageAttachments image routing', () => {
   it('git check-ignore treats images/ as ignored under .opencode', () => {
     const workDir = path.join(TEST_DIR, 'gitignore-check-ignore');
     mkdirSync(workDir, { recursive: true });
+    const gitEnv = {
+      ...process.env,
+      GIT_CONFIG_GLOBAL: os.devNull,
+      GIT_CONFIG_NOSYSTEM: '1',
+      XDG_CONFIG_HOME: path.join(workDir, 'empty-git-config'),
+    };
 
     const init = spawnSync('git', ['init'], {
       cwd: workDir,
       encoding: 'utf8',
+      env: gitEnv,
     });
     if (init.status !== 0) {
       throw new Error(
@@ -584,14 +591,14 @@ describe('processImageAttachments image routing', () => {
     const ignored = spawnSync(
       'git',
       ['check-ignore', '-q', path.relative(workDir, nestedImage)],
-      { cwd: workDir, encoding: 'utf8' },
+      { cwd: workDir, encoding: 'utf8', env: gitEnv },
     );
     expect(ignored.status).toBe(0);
 
     const configIgnored = spawnSync(
       'git',
       ['check-ignore', '-q', path.relative(workDir, configPath)],
-      { cwd: workDir, encoding: 'utf8' },
+      { cwd: workDir, encoding: 'utf8', env: gitEnv },
     );
     // config must NOT be ignored (exit 1 = not ignored)
     expect(configIgnored.status).toBe(1);

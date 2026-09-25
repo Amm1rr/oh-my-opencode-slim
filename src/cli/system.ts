@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { statSync } from 'node:fs';
-import { crossSpawn } from '../utils/compat';
+
+const VERSION_COMMAND_TIMEOUT_MS = 2000;
 
 let cachedOpenCodePath: string | null = null;
 
@@ -62,6 +63,7 @@ function canExecute(
       // Required on Windows to execute .cmd/.bat shims produced by npm/pnpm/yarn
       // (Node's CVE-2024-27980 patch blocks them without a shell).
       shell: isWindows && !/\.exe$/i.test(command),
+      timeout: VERSION_COMMAND_TIMEOUT_MS,
     });
     return result.status === 0;
   } catch {
@@ -209,12 +211,11 @@ export async function isOpenCodeInstalled(
 
 export async function isTmuxInstalled(): Promise<boolean> {
   try {
-    const proc = crossSpawn(['tmux', '-V'], {
-      stdout: 'pipe',
-      stderr: 'pipe',
+    const result = spawnSync('tmux', ['-V'], {
+      stdio: 'ignore',
+      timeout: VERSION_COMMAND_TIMEOUT_MS,
     });
-    await proc.exited;
-    return proc.exitCode === 0;
+    return result.status === 0;
   } catch {
     return false;
   }
@@ -223,14 +224,15 @@ export async function isTmuxInstalled(): Promise<boolean> {
 export async function getOpenCodeVersion(): Promise<string | null> {
   const opencodePath = resolveOpenCodePath();
   try {
-    const proc = crossSpawn([opencodePath, '--version'], {
-      stdout: 'pipe',
-      stderr: 'pipe',
+    const isWindows = process.platform === 'win32';
+    const result = spawnSync(opencodePath, ['--version'], {
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      shell: isWindows && !/\.exe$/i.test(opencodePath),
+      timeout: VERSION_COMMAND_TIMEOUT_MS,
     });
-    const outputPromise = proc.stdout();
-    await proc.exited;
-    if (proc.exitCode === 0) {
-      return (await outputPromise).trim();
+    if (result.status === 0) {
+      return result.stdout.trim();
     }
   } catch {
     // Failed
