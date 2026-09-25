@@ -40,10 +40,3 @@ export function buildCacheKey(url: string, options: CacheOptions) {
     saveBinary: options.save_binary,
   });
 }
-
-export function cacheFetchResult(
-  fetchResult: FetchResult,
-  options: CacheOptions,
-) {
-  CACHE.set(buildCacheKey(fetchResult.requestedUrl, options), fetchResult);
-}

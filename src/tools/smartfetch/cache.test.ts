@@ -96,7 +96,6 @@ describe('smartfetch/cache', () => {
 
 function makeCached(overrides: Partial<CachedFetch>): CachedFetch {
   return {
-    requestedUrl: 'https://example.com/',
     finalUrl: 'https://example.com/',
     statusCode: 200,
     contentType: 'text/plain',
@@ -117,7 +116,6 @@ function makeCached(overrides: Partial<CachedFetch>): CachedFetch {
 
 function makeBinary(data?: Uint8Array): BinaryFetch {
   return {
-    requestedUrl: 'https://example.com/file',
     finalUrl: 'https://example.com/file',
     statusCode: 200,
     contentType: 'application/pdf',

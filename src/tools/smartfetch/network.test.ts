@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, mock, test } from 'bun:test';
 import {
-  buildConditionalHeaders,
   decodeBody,
   extractHeaderMetadata,
   fetchWithRedirects,
@@ -239,32 +238,5 @@ describe('smartfetch/network', () => {
     ).filename;
     expect(Buffer.byteLength(filename || '')).toBeLessThanOrEqual(255);
     expect(filename?.endsWith('.pdf')).toBe(true);
-  });
-
-  test('builds conditional headers from etag and last-modified without binary branching', () => {
-    expect(buildConditionalHeaders(undefined)).toBeUndefined();
-
-    expect(
-      buildConditionalHeaders({
-        requestedUrl: 'https://example.com/file',
-        finalUrl: 'https://example.com/file',
-        statusCode: 200,
-        contentType: 'application/pdf',
-        charset: undefined,
-        etag: '"abc"',
-        lastModified: 'Wed, 01 Jan 2025 00:00:00 GMT',
-        contentLength: 42,
-        filename: 'file.pdf',
-        canonicalUrl: 'https://example.com/file',
-        redirectChain: [],
-        upgradedToHttps: false,
-        truncated: false,
-        binary: true,
-        binaryKind: 'pdf',
-      }),
-    ).toEqual({
-      'If-None-Match': '"abc"',
-      'If-Modified-Since': 'Wed, 01 Jan 2025 00:00:00 GMT',
-    });
   });
 });

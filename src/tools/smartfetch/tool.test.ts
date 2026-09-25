@@ -26,6 +26,55 @@ describe('smartfetch/tool', () => {
     mock.restore();
   });
 
+  test('rejects a pre-aborted request after permission without network I/O', async () => {
+    const controller = new AbortController();
+    controller.abort(new Error('pre-aborted'));
+    const fetchMock = mock(async () => new Response('unreachable'));
+    globalThis.fetch = fetchMock as typeof fetch;
+    const ctx = { ...createExecutionContext(), abort: controller.signal };
+    const webfetch = createWebfetchTool({ client: {} } as any);
+    await expect(
+      webfetch.execute(
+        {
+          url: 'https://example.com/page',
+          format: 'text',
+          extract_main: false,
+          prefer_llms_txt: 'never',
+          include_metadata: true,
+          save_binary: false,
+        },
+        ctx,
+      ),
+    ).rejects.toThrow('pre-aborted');
+    expect(ctx.ask).toHaveBeenCalledTimes(1);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test('does not revalidate cached responses or accept 304 as content', async () => {
+    const fetchMock = mock(
+      async (_url: string | URL | Request, init?: RequestInit) => {
+        expect(new Headers(init?.headers).has('If-None-Match')).toBe(false);
+        return new Response(null, { status: 304 });
+      },
+    );
+    globalThis.fetch = fetchMock as typeof fetch;
+    const webfetch = createWebfetchTool({ client: {} } as any);
+    await expect(
+      webfetch.execute(
+        {
+          url: 'https://example.com/page',
+          format: 'text',
+          extract_main: false,
+          prefer_llms_txt: 'never',
+          include_metadata: true,
+          save_binary: false,
+        },
+        createExecutionContext(),
+      ),
+    ).rejects.toThrow('Request failed with status code: 304');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   test('returns a required llms.txt message when prefer_llms_txt is always and no llms.txt is available', async () => {
     const fetchMock = mock(async (input: string | URL | Request) => {
       const url = typeof input === 'string' ? input : input.toString();

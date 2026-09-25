@@ -7,7 +7,7 @@
 
 ## Design Patterns and Decisions
 
-- **One orchestration entrypoint:** `createWebfetchTool` in `tool.ts` owns permission prompts, cache lookup/revalidation, llms.txt preference logic, binary-vs-text branching, metadata emission, and optional secondary-model summarization.
+- **One orchestration entrypoint:** `createWebfetchTool` in `tool.ts` owns permission prompts, cache lookup, llms.txt preference logic, binary-vs-text branching, metadata emission, and optional secondary-model summarization.
 - **Transport/policy split from rendering:** `network.ts` focuses on URL normalization, same-origin credential-free redirects, charset/body decoding, header extraction, and llms.txt probing, while `utils.ts` focuses on turning fetched content into cleaned text/markdown/html plus frontmatter and user-facing messages.
 - **Cache keyed by fetch shape:** `cache.ts` keys fetches by URL plus behavior-affecting options (`extract_main`, `prefer_llms_txt`, `save_binary`), while render format is derived from the cached fetch result so text/markdown/html do not force redundant network requests.
 - **Graceful degradation:** missing/invalid `llms.txt`, blocked redirects, metadata-only binary responses, and secondary-model failures all return a usable result instead of throwing away the fetched content.
@@ -19,7 +19,7 @@
 
 2. If `prefer_llms_txt` applies, `probeLlmsText` tries `/llms-full.txt` then `/llms.txt`, following only permitted redirects and rejecting HTML/login-wall responses (`network.ts`).
 
-3. When the tool falls back to the page itself, `fetchWithUpgradeFallback` handles HTTPS upgrade fallback, redirect enforcement, conditional headers for revalidation, binary detection, and bounded body reads (`network.ts`, `tool.ts`).
+3. When the tool falls back to the page itself, `fetchWithUpgradeFallback` handles HTTPS upgrade fallback and redirect enforcement; the tool then detects binaries and reads bodies within limits. Stale entries are refetched without conditional revalidation (`network.ts`, `tool.ts`).
 
 4. Text/HTML payloads are decoded and normalized through `extractFromHtml`, `cleanFetchedMarkdown`, `extractHeadingsFromMarkdown`, `frontmatter`, and `joinRenderedContent`; binary payloads optionally persist via `saveBinary` and return a metadata message (`utils.ts`, `binary.ts`, `tool.ts`).
 

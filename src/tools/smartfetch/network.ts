@@ -10,7 +10,6 @@ import {
 import type {
   BinaryFetch,
   DecodedBody,
-  FetchResult,
   FetchWithRedirectsResult,
   LlmsProbeResult,
 } from './types';
@@ -427,16 +426,6 @@ export function extractHeaderMetadata(headers: Headers, finalUrl: string) {
     contentLength: parseContentLength(headers),
     filename: filename ? sanitizeFilename(filename) : undefined,
   };
-}
-
-export function buildConditionalHeaders(cached: FetchResult | undefined) {
-  if (!cached || (!cached.etag && !cached.lastModified)) {
-    return undefined;
-  }
-  const headers: Record<string, string> = {};
-  if (cached.etag) headers['If-None-Match'] = cached.etag;
-  if (cached.lastModified) headers['If-Modified-Since'] = cached.lastModified;
-  return Object.keys(headers).length ? headers : undefined;
 }
 
 export async function probeLlmsText(
