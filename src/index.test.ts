@@ -11,6 +11,7 @@ import { readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { stateFilePath } from './companion/manager';
+import { RuntimeConfig } from './config/runtime';
 import * as wakeHooks from './hooks';
 import { isTaggedPart, stripTaggedContent } from './hooks/cache-safe-injection';
 import {
@@ -1757,6 +1758,9 @@ describe('background task admission model resolution', () => {
 describe('plugin config model inheritance', () => {
   let originalEnv: typeof process.env;
   const configDirs: string[] = [];
+  // Directory of the most recent loadConfiguredPlugin() call, for tests
+  // that need the RuntimeConfig singleton the plugin initialized.
+  let lastConfigDir: string | undefined;
 
   beforeEach(() => {
     originalEnv = { ...process.env };
@@ -1776,6 +1780,7 @@ describe('plugin config model inheritance', () => {
   async function loadConfiguredPlugin(config: Record<string, unknown>) {
     const configDir = await mkdtemp('/tmp/oh-my-opencode-inheritance-');
     configDirs.push(configDir);
+    lastConfigDir = configDir;
     await Bun.write(
       `${configDir}/oh-my-opencode-slim.json`,
       JSON.stringify(config),
@@ -1963,6 +1968,128 @@ describe('plugin config model inheritance', () => {
       >;
       expect(agents.fixer?.model).toBeUndefined();
       expect(agents.fixer?.temperature).toBe(0.4);
+    } finally {
+      await hooks.dispose?.();
+    }
+  });
+
+  test('combined inherit + chain keeps the final config on the session model', async () => {
+    // Array model + inheritModelFrom: the chain head must not be pinned as
+    // the launch model by the array-resolution pass — the agent follows the
+    // session model and keeps the array purely as the fallback chain.
+    const hooks = await loadConfiguredPlugin({
+      agents: {
+        fixer: {
+          model: ['chain/primary', 'chain/backup'],
+          inheritModelFrom: 'session',
+        },
+      },
+    });
+    const hostConfig: Record<string, unknown> = {
+      agent: {
+        orchestrator: { model: 'host/orchestrator' },
+        fixer: { model: 'host/stale-fixer', temperature: 0.3 },
+      },
+    };
+
+    try {
+      await hooks.config?.(hostConfig);
+
+      const agents = hostConfig.agent as Record<
+        string,
+        Record<string, unknown>
+      >;
+      expect(agents.fixer?.model).toBeUndefined();
+      expect(agents.fixer?.temperature).toBe(0.3);
+    } finally {
+      await hooks.dispose?.();
+    }
+  });
+
+  test('combined inherit + chain clears the chain head inline variant from the final config', async () => {
+    // Greptile review repro: the array pass stamps the chain head model AND
+    // its inline variant into the host entry; inheritance clears the model
+    // and must take the stale variant with it — the followed session model
+    // must not run with a fallback model's variant.
+    const hooks = await loadConfiguredPlugin({
+      agents: {
+        fixer: {
+          model: [{ id: 'chain/primary', variant: 'high' }, 'chain/backup'],
+          inheritModelFrom: 'session',
+        },
+      },
+    });
+    const hostConfig: Record<string, unknown> = {
+      agent: {
+        orchestrator: { model: 'host/orchestrator' },
+      },
+    };
+
+    try {
+      await hooks.config?.(hostConfig);
+
+      const agents = hostConfig.agent as Record<
+        string,
+        Record<string, unknown>
+      >;
+      expect(agents.fixer?.model).toBeUndefined();
+      expect(agents.fixer?.variant).toBeUndefined();
+    } finally {
+      await hooks.dispose?.();
+    }
+  });
+
+  test('/model pick on a combined agent does not mark it model-switched', async () => {
+    // A host-persisted /model pick is the combined agent's follow target;
+    // it must not trip everModelSwitched (which disables the fallback
+    // chain for static-chain agents).
+    const hooks = await loadConfiguredPlugin({
+      agents: {
+        fixer: {
+          model: ['chain/primary', 'chain/backup'],
+          inheritModelFrom: 'session',
+        },
+      },
+    });
+    const hostConfig: Record<string, unknown> = {
+      agent: {
+        orchestrator: { model: 'host/orchestrator' },
+        fixer: { model: 'user/live-pick' },
+      },
+    };
+
+    try {
+      await hooks.config?.(hostConfig);
+      const runtime = RuntimeConfig.get(lastConfigDir as string);
+
+      expect(runtime.hasModelSwitched('fixer')).toBe(false);
+    } finally {
+      await hooks.dispose?.();
+    }
+  });
+
+  test('/model pick away from the chain primary still marks static-chain agents', async () => {
+    // Control for the exemption above: without inheritModelFrom, a /model
+    // pick differing from the chain primary keeps disabling the chain.
+    const hooks = await loadConfiguredPlugin({
+      agents: {
+        fixer: {
+          model: ['chain/primary', 'chain/backup'],
+        },
+      },
+    });
+    const hostConfig: Record<string, unknown> = {
+      agent: {
+        orchestrator: { model: 'host/orchestrator' },
+        fixer: { model: 'user/other-pick' },
+      },
+    };
+
+    try {
+      await hooks.config?.(hostConfig);
+      const runtime = RuntimeConfig.get(lastConfigDir as string);
+
+      expect(runtime.hasModelSwitched('fixer')).toBe(true);
     } finally {
       await hooks.dispose?.();
     }

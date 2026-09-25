@@ -432,6 +432,29 @@ export class RuntimeConfig {
   }
 
   /**
+   * The dynamic model source of an agent that combines a fallback model
+   * chain (`model: [...]`) with `inheritModelFrom`, or undefined when the
+   * agent's model is fully static. Combined agents follow the live
+   * session/orchestrator model; the configured chain only serves as the
+   * failure fallback, so a runtime `/model` pick must not disable it.
+   * Reads the plugin-layer override (agents()), never the host layer, so a
+   * host-persisted scalar model cannot mask the configured array.
+   */
+  combinedModelInheritanceSource(
+    name: string,
+  ): 'session' | 'orchestrator' | undefined {
+    const override = this.aliasAwareOverride(this.agents(), name);
+    if (
+      !Array.isArray(override?.model) ||
+      override.model.length === 0 ||
+      override.inheritModelFrom === undefined
+    ) {
+      return undefined;
+    }
+    return override.inheritModelFrom;
+  }
+
+  /**
    * Primary model from the active preset (orchestrator model, else first
    * subagent model). Was getConfigPrimaryModel in src/agents/index.ts.
    */

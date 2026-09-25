@@ -3761,6 +3761,318 @@ describe('ForegroundFallbackManager chain exhaustion', () => {
 });
 
 // ---------------------------------------------------------------------------
+// ForegroundFallbackManager - combined inheritModelFrom + fallback chain
+// ---------------------------------------------------------------------------
+
+// A combined agent (array `model` + `inheritModelFrom`) runs the session's
+// live model, which is typically NOT part of the configured chain. The live
+// model becomes the dynamic chain head; the configured entries back it.
+describe('ForegroundFallbackManager inherit + fallback chain', () => {
+  const LIVE_MODEL = 'test/live-session-model';
+
+  function observe(
+    mgr: ForegroundFallbackManager,
+    sessionID: string,
+    modelID: string,
+    completed = false,
+  ): Promise<void> {
+    const [providerID, id] = modelID.split('/');
+    return mgr.handleEvent({
+      type: 'message.updated',
+      properties: {
+        info: {
+          sessionID,
+          agent: 'oracle',
+          providerID,
+          modelID: id,
+          role: 'assistant',
+          ...(completed ? { time: { created: 1, completed: 2 } } : {}),
+        },
+      },
+    });
+  }
+
+  test('falls back from an out-of-chain live model to the configured chain head', async () => {
+    const { mocks } = createMockClient();
+    const mgr = new ForegroundFallbackManager(
+      { oracle: ['openai/gpt-a', 'openai/gpt-b'] },
+      true,
+      { directory: '/test' } as any,
+    );
+    const sessionID = 'sess-combined-first';
+
+    await observe(mgr, sessionID, LIVE_MODEL);
+    await mgr.handleEvent({
+      type: 'session.error',
+      properties: { sessionID, error: { message: 'rate limit exceeded' } },
+    });
+
+    // The dynamic head (the live session model) is never re-picked; the
+    // first configured entry takes over.
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+    expect(mocks.promptAsync.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({
+        body: expect.objectContaining({
+          model: { providerID: 'openai', modelID: 'gpt-a' },
+        }),
+      }),
+    );
+  });
+
+  test('keeps descending through the configured chain behind the dynamic head', async () => {
+    const { mocks } = createMockClient();
+    const mgr = new ForegroundFallbackManager(
+      { oracle: ['openai/gpt-a', 'openai/gpt-b'] },
+      true,
+      { directory: '/test' } as any,
+    );
+    const sessionID = 'sess-combined-descend';
+
+    const realNowFn = Date.now;
+    let fakeNow = realNowFn();
+    Date.now = () => fakeNow;
+    try {
+      await observe(mgr, sessionID, LIVE_MODEL);
+      const fail = async () => {
+        fakeNow += 6_000;
+        await mgr.handleEvent({
+          type: 'session.error',
+          properties: {
+            sessionID,
+            error: { message: 'rate limit exceeded' },
+          },
+        });
+      };
+
+      await fail(); // live model → gpt-a
+      await observe(mgr, sessionID, 'openai/gpt-a');
+      await fail(); // gpt-a → gpt-b
+
+      expect(mocks.promptAsync).toHaveBeenCalledTimes(2);
+      expect(mocks.promptAsync.mock.calls[1]?.[0]).toEqual(
+        expect.objectContaining({
+          body: expect.objectContaining({
+            model: { providerID: 'openai', modelID: 'gpt-b' },
+          }),
+        }),
+      );
+    } finally {
+      Date.now = realNowFn;
+    }
+  });
+
+  test('in-chain models keep the static chain behavior', async () => {
+    const { mocks } = createMockClient();
+    const mgr = new ForegroundFallbackManager(
+      { oracle: ['openai/gpt-a', 'openai/gpt-b'] },
+      true,
+      { directory: '/test' } as any,
+    );
+    const sessionID = 'sess-combined-inchain';
+
+    await observe(mgr, sessionID, 'openai/gpt-a');
+    await mgr.handleEvent({
+      type: 'session.error',
+      properties: { sessionID, error: { message: 'rate limit exceeded' } },
+    });
+
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+    expect(mocks.promptAsync.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({
+        body: expect.objectContaining({
+          model: { providerID: 'openai', modelID: 'gpt-b' },
+        }),
+      }),
+    );
+  });
+
+  test('an out-of-chain live model does not resurrect a disabled chain', async () => {
+    const { mocks } = createMockClient();
+    const mgr = new ForegroundFallbackManager(
+      { oracle: ['openai/gpt-a'] },
+      true,
+      { directory: '/test' } as any,
+    );
+    mgr.disableChain('oracle');
+    const sessionID = 'sess-combined-disabled';
+
+    await observe(mgr, sessionID, LIVE_MODEL);
+    await mgr.handleEvent({
+      type: 'session.error',
+      properties: { sessionID, error: { message: 'rate limit exceeded' } },
+    });
+
+    expect(mocks.promptAsync).not.toHaveBeenCalled();
+    expect(mocks.abort).not.toHaveBeenCalled();
+  });
+
+  test('exhaustion stays bounded with a dynamic head (no ping-pong re-arm)', async () => {
+    // Combined agent: live session model X + configured chain [gpt-a, gpt-b],
+    // everything failing. The re-arm check must compare against the STATIC
+    // chain head: the dynamic head always equals the observed model, so
+    // comparing against chain[0] would reset the tried set on every error
+    // and re-descend forever (issue #1292).
+    const { mocks } = createMockClient();
+    const mgr = new ForegroundFallbackManager(
+      { oracle: ['openai/gpt-a', 'openai/gpt-b'] },
+      true,
+      { directory: '/test' } as any,
+    );
+    const sessionID = 'sess-combined-bounded';
+
+    const realNowFn = Date.now;
+    let fakeNow = realNowFn();
+    Date.now = () => fakeNow;
+    try {
+      const fail = async (modelID: string) => {
+        fakeNow += 6_000;
+        await observe(mgr, sessionID, modelID);
+        await mgr.handleEvent({
+          type: 'session.error',
+          properties: {
+            sessionID,
+            error: { message: 'rate limit exceeded' },
+          },
+        });
+      };
+
+      // Fail 1: live model → gpt-a.
+      await fail(LIVE_MODEL);
+      expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+
+      // Fail 2: gpt-a → gpt-b.
+      await fail('openai/gpt-a');
+      expect(mocks.promptAsync).toHaveBeenCalledTimes(2);
+
+      // Fail 3: gpt-b → first exhaustion → sticky re-prompt of gpt-b.
+      await fail('openai/gpt-b');
+      expect(mocks.promptAsync).toHaveBeenCalledTimes(3);
+      expect(mocks.abort).toHaveBeenCalledTimes(0);
+
+      // Fail 4: sticky gpt-b fails again → second exhaustion → abort once.
+      await fail('openai/gpt-b');
+      expect(mocks.promptAsync).toHaveBeenCalledTimes(3);
+      expect(mocks.abort).toHaveBeenCalledTimes(1);
+
+      // Fail 5: a new turn re-sends the live session model (out-of-chain).
+      // The dynamic-head bug would re-arm here (observed === chain[0]) and
+      // start a fresh descent; the static-head check must stay terminal.
+      await fail(LIVE_MODEL);
+      expect(mocks.promptAsync).toHaveBeenCalledTimes(3);
+      expect(mocks.abort).toHaveBeenCalledTimes(1);
+
+      // Fail 6: still terminal.
+      await fail(LIVE_MODEL);
+      expect(mocks.promptAsync).toHaveBeenCalledTimes(3);
+      expect(mocks.abort).toHaveBeenCalledTimes(1);
+    } finally {
+      Date.now = realNowFn;
+    }
+  });
+
+  test('re-arm still fires when the session returns to the configured chain head', async () => {
+    const { mocks } = createMockClient();
+    const mgr = new ForegroundFallbackManager(
+      { oracle: ['openai/gpt-a', 'openai/gpt-b'] },
+      true,
+      { directory: '/test' } as any,
+    );
+    const sessionID = 'sess-combined-rearm';
+
+    const realNowFn = Date.now;
+    let fakeNow = realNowFn();
+    Date.now = () => fakeNow;
+    try {
+      const fail = async (modelID: string) => {
+        fakeNow += 6_000;
+        await observe(mgr, sessionID, modelID);
+        await mgr.handleEvent({
+          type: 'session.error',
+          properties: {
+            sessionID,
+            error: { message: 'rate limit exceeded' },
+          },
+        });
+      };
+
+      // Exhaust the chain starting from the live model, ending aborted.
+      await fail(LIVE_MODEL); // → gpt-a
+      await fail('openai/gpt-a'); // → gpt-b
+      await fail('openai/gpt-b'); // sticky gpt-b
+      await fail('openai/gpt-b'); // abort
+      expect(mocks.abort).toHaveBeenCalledTimes(1);
+
+      // The session returns to the CONFIGURED primary (gpt-a): the tried
+      // set resets and a fresh descent from gpt-a is allowed.
+      await fail('openai/gpt-a');
+      expect(mocks.promptAsync).toHaveBeenCalledTimes(4);
+      expect(mocks.promptAsync.mock.calls[3]?.[0]).toEqual(
+        expect.objectContaining({
+          body: expect.objectContaining({
+            model: { providerID: 'openai', modelID: 'gpt-b' },
+          }),
+        }),
+      );
+    } finally {
+      Date.now = realNowFn;
+    }
+  });
+
+  test('a successful response resets the tried set so the next descent starts fresh', async () => {
+    // The combined agent's live model never equals the configured head, so
+    // the re-arm reset cannot clear cross-turn state; without a reset on
+    // success, each new descent would sink one link deeper (turn 2 would
+    // skip gpt-a because turn 1 already tried it, even though the streak
+    // ended with a success on gpt-a).
+    const { mocks } = createMockClient();
+    const mgr = new ForegroundFallbackManager(
+      { oracle: ['openai/gpt-a', 'openai/gpt-b'] },
+      true,
+      { directory: '/test' } as any,
+    );
+    const sessionID = 'sess-combined-success-reset';
+
+    const realNowFn = Date.now;
+    let fakeNow = realNowFn();
+    Date.now = () => fakeNow;
+    try {
+      const fail = async (modelID: string) => {
+        fakeNow += 6_000;
+        await observe(mgr, sessionID, modelID);
+        await mgr.handleEvent({
+          type: 'session.error',
+          properties: {
+            sessionID,
+            error: { message: 'rate limit exceeded' },
+          },
+        });
+      };
+
+      // Turn 1: live model fails → fall back to gpt-a, which then
+      // completes successfully.
+      await fail(LIVE_MODEL);
+      expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+      await observe(mgr, sessionID, 'openai/gpt-a', true);
+
+      // Turn 2: back on the live model, it fails again. gpt-a proved
+      // healthy last turn — the descent must revisit it, not skip to
+      // gpt-b.
+      await fail(LIVE_MODEL);
+      expect(mocks.promptAsync).toHaveBeenCalledTimes(2);
+      expect(mocks.promptAsync.mock.calls[1]?.[0]).toEqual(
+        expect.objectContaining({
+          body: expect.objectContaining({
+            model: { providerID: 'openai', modelID: 'gpt-a' },
+          }),
+        }),
+      );
+    } finally {
+      Date.now = realNowFn;
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // ForegroundFallbackManager - deduplication
 // ---------------------------------------------------------------------------
 

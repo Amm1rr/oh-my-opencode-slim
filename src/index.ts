@@ -1167,7 +1167,14 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           // User explicitly picked a model via /model → disable fallback.
           // Only marks the agent if the model differs from the chain primary.
           // Once marked, stays disabled even if user switches back to chain[0].
-          if (existing && typeof existing.model === 'string') {
+          // Combined inherit+chain agents are exempt: a /model pick is their
+          // follow target, and the configured chain stays armed as the
+          // failure fallback for whatever model they land on.
+          if (
+            existing &&
+            typeof existing.model === 'string' &&
+            runtime.combinedModelInheritanceSource(name) === undefined
+          ) {
             const primary = runtime.modelArrays[name]?.[0]?.id;
             if (primary && existing.model !== primary) {
               runtime.everModelSwitched(name);
@@ -1190,7 +1197,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         }
       }
       const configAgent = opencodeConfig.agent as Record<string, unknown>;
-      applyModelInheritanceToConfig(configAgent, runtime);
 
       // Model resolution for foreground agents: use _modelArray entries
       // to pick the first model for startup-time selection.
@@ -1198,6 +1204,12 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       // Runtime failover on API errors (e.g. rate limits
       // mid-conversation) is handled separately by
       // ForegroundFallbackManager via the event hook.
+      //
+      // Model inheritance (applyModelInheritanceToConfig below) runs AFTER
+      // this pass and the runtime preset pass: for combined
+      // inherit+chain agents it clears/overrides the chain head pinned
+      // here, so the SDK layer keeps following the live session or
+      // orchestrator model.
       if (Object.keys(runtime.modelArrays).length > 0) {
         for (const [agentName, models] of Object.entries(runtime.modelArrays)) {
           if (models.length === 0) continue;
@@ -1299,6 +1311,15 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         }
       }
 
+      // Model inheritance applies after the array-primary and runtime
+      // preset passes: it is the authoritative policy for agents with
+      // `inheritModelFrom`, clearing or replacing whatever model those
+      // passes pinned (`session` clears it so the SDK follows the live
+      // session model; `orchestrator` pins the resolved orchestrator
+      // model). Scalar-model agents keep their explicit model and are
+      // skipped inside.
+      applyModelInheritanceToConfig(configAgent, runtime);
+
       // Capture the resolved model state before optionally removing the
       // orchestrator model from the SDK config, so the TUI keeps showing the
       // configured model rather than a fallback or "default".
@@ -1315,14 +1336,23 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         const entry = configAgent[agentDef.name] as
           | Record<string, unknown>
           | undefined;
+        // Session-following combined agents have no launch model of their
+        // own: entry.model is cleared, the chain head is only a fallback
+        // tail, and agentDef.config.model is deleted by inheritance. Skip
+        // the chain-head probe so they display 'default' like pure
+        // inherit agents instead of a model they do not run.
+        const followsSessionModel =
+          runtime.combinedModelInheritanceSource(agentDef.name) === 'session';
         const resolvedModel =
           typeof entry?.model === 'string'
             ? entry.model
-            : runtime.runtimeChains[agentDef.name]?.[0]
-              ? runtime.runtimeChains[agentDef.name][0]
-              : typeof agentDef.config.model === 'string'
-                ? agentDef.config.model
-                : undefined;
+            : followsSessionModel
+              ? undefined
+              : runtime.runtimeChains[agentDef.name]?.[0]
+                ? runtime.runtimeChains[agentDef.name][0]
+                : typeof agentDef.config.model === 'string'
+                  ? agentDef.config.model
+                  : undefined;
         const resolvedVariant =
           typeof entry?.variant === 'string'
             ? entry.variant
@@ -1369,8 +1399,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       }
 
       // This is the source of truth for admission. It is intentionally
-      // captured only after every host/plugin merge and the final model
-      // inheritance, array-primary, preset, and orchestrator-model passes.
+      // captured only after every host/plugin merge and the final
+      // array-primary, preset, model-inheritance, and orchestrator-model
+      // passes.
       finalHostAgentConfig = configAgent;
 
       // Merge MCP configs
