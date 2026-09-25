@@ -300,6 +300,14 @@ export interface V2Context {
   event: {
     subscribe(): AsyncIterable<Record<string, unknown>>;
   };
+  permission?: {
+    reply(input: {
+      sessionID: string;
+      requestID: string;
+      reply: 'once' | 'always' | 'reject';
+      message?: string;
+    }): Promise<unknown>;
+  };
   /** v2 storage domain (runtime-probed optional, like session.list —
    * hosts without it keep plugin state process-local). Mirrors the
    * upstream StorageDomain subset: `scan` is cursor-paginated via the

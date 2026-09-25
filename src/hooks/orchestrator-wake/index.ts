@@ -171,7 +171,7 @@ export function stoppedJobRecoveryReason(record: {
  * The child parks with no tokens moving and never finishes on its own; the
  * parent's turn already ended, so without this wake nobody ever answers. */
 export const ORCHESTRATOR_CHILD_INPUT_WAKE_TEXT =
-  '<system-reminder>\nA background child task is waiting for input and cannot proceed until you answer. Review the pending request below, then answer it with the task_reply tool (task ID + request ID + your answer) or reject it. Do not respond to this reminder.\n</system-reminder>';
+  '<system-reminder>\nA background child task is waiting for input and cannot proceed until the pending request is handled. Review the pending request below. Use task_reply for permission requests and for question requests only when the host exposes a supported question reply API. On OpenCode v2, form-created question requests are observable but not answerable through the pinned plugin context; answer/cancel them in the host UI if available, otherwise leave the child waiting or cancel the task. Do not respond to this reminder.\n</system-reminder>';
 
 /** Self-contained delta for a child input-wait wake (same rationale as
  * formatStoppedJobDelta: the wake carries the facts inline). Deduplicated
@@ -200,7 +200,7 @@ export const CHILD_INPUT_WAKE_CHUNK = 4;
  * open requests whose inline details were coalesced. Same overflow-marker
  * discipline as the stopped-job recovery queue. */
 export const CHILD_INPUT_OVERFLOW_TEXT =
-  '<child-input-wait-overflow>\nAdditional background child input requests were queued beyond the inline detail limit. Run task_status for the remaining open requests and answer them with task_reply.\n</child-input-wait-overflow>';
+  '<child-input-wait-overflow>\nAdditional background child input requests were queued beyond the inline detail limit. Run task_status for the remaining open requests and follow its request-specific reply guidance.\n</child-input-wait-overflow>';
 
 /** Children-mode variant (v2 degraded mode): watchdog over background
  * children and unreconciled jobs instead of the todo list. */

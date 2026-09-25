@@ -546,7 +546,7 @@ export const BackgroundJobsConfigSchema = z.object({
     .boolean()
     .default(true)
     .describe(
-      'When true, a background child that asks a question or permission request wakes its parent with the ask content so the parent can answer via task_reply. Disable only if you answer child asks out-of-band. Default enabled.',
+      'When true, a background child that asks a question or permission request wakes its parent with the ask content. Permissions can be answered with task_reply when the host exposes permission.reply; OpenCode v2 form questions are observable but not answerable through the pinned plugin context. Default enabled.',
     ),
 });
 

@@ -154,11 +154,44 @@ function sanitizePatterns(value: unknown): string[] {
     .map((entry) => sanitizeText(entry, 160));
 }
 
+function mergeRicherChildInputWait(
+  existing: ChildInputWaitRecord,
+  input: {
+    kind: ChildInputWaitKind;
+    questions?: unknown;
+    permission?: unknown;
+    patterns?: unknown;
+  },
+): ChildInputWaitRecord {
+  if (existing.kind !== input.kind) return existing;
+
+  if (input.kind === 'question') {
+    const questions = sanitizeQuestions(input.questions);
+    if ((existing.questions?.length ?? 0) === 0 && questions.length > 0) {
+      existing.questions = questions;
+    }
+    return existing;
+  }
+
+  const permission = sanitizeText(input.permission, 160);
+  if (!existing.permission && permission) {
+    existing.permission = permission;
+  }
+
+  const patterns = sanitizePatterns(input.patterns);
+  if ((existing.patterns?.length ?? 0) === 0 && patterns.length > 0) {
+    existing.patterns = patterns;
+  }
+
+  return existing;
+}
+
 /**
  * Record a newly opened input wait on a board-tracked running background
  * child. Idempotent per (taskID, requestID): a duplicate ask replays the
- * stored content without re-notifying. Returns the record, or undefined
- * when there is nothing to track (missing/empty request id).
+ * stored content without re-notifying, but may merge richer fields from a
+ * later normalized event. Returns the record, or undefined when there is
+ * nothing to track (missing/empty request id).
  */
 export function noteChildInputWait(input: {
   taskID: string;
@@ -175,7 +208,7 @@ export function noteChildInputWait(input: {
   const store = getStore();
   const key = waitKey(input.taskID, requestID);
   const existing = store.waits.get(key);
-  if (existing) return existing;
+  if (existing) return mergeRicherChildInputWait(existing, input);
   const record: ChildInputWaitRecord = {
     taskID: input.taskID,
     parentSessionID: input.parentSessionID,

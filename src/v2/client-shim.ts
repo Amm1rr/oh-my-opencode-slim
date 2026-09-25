@@ -632,6 +632,25 @@ export function buildPluginInput(
             }
           },
     },
+    ...(typeof ctx.permission?.reply === 'function'
+      ? {
+          permission: {
+            reply: async (args: Record<string, unknown>) =>
+              ctx.permission?.reply({
+                sessionID: sessionIDOf(args),
+                requestID:
+                  typeof args.requestID === 'string' ? args.requestID : '',
+                reply:
+                  args.reply === 'always' || args.reply === 'reject'
+                    ? args.reply
+                    : 'once',
+                ...(typeof args.message === 'string'
+                  ? { message: args.message }
+                  : {}),
+              }),
+          },
+        }
+      : {}),
     app: {
       log: async (args?: Record<string, unknown>) => {
         const body = (args?.body ?? args) as

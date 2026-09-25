@@ -891,7 +891,15 @@ function routeChildInputWait(
     ) {
       return;
     }
-    const isDuplicate = getChildInputWait(sessionID, requestID) !== undefined;
+    const existingWait = getChildInputWait(sessionID, requestID);
+    const existingSnapshot = existingWait
+      ? {
+          questionsLength: existingWait.questions?.length ?? 0,
+          permission: existingWait.permission ?? '',
+          patternsLength: existingWait.patterns?.length ?? 0,
+        }
+      : undefined;
+    const isDuplicate = existingWait !== undefined;
     const record = noteChildInputWait({
       taskID: sessionID,
       parentSessionID: job.parentSessionID,
@@ -907,9 +915,17 @@ function routeChildInputWait(
       // observed by other instances); notify the direct dep here so callers
       // that only hold this hook still see the ask. noteChildInputWait only
       // notifies global subscribers on the FIRST ask per request id, and
-      // this direct call mirrors that: duplicates return the existing record
-      // without notifying.
-      if (!isDuplicate) {
+      // this direct call mirrors that for true duplicates. A raw v2
+      // permission.asked can arrive before its normalized v1-shaped copy;
+      // when the duplicate enriches the stored wait with action/resources,
+      // re-notify so the queued parent wake can replace its stale
+      // "unknown" delta before delivery.
+      const enrichedDuplicate =
+        existingSnapshot !== undefined &&
+        (existingSnapshot.questionsLength < (record.questions?.length ?? 0) ||
+          (!existingSnapshot.permission && !!record.permission) ||
+          existingSnapshot.patternsLength < (record.patterns?.length ?? 0));
+      if (!isDuplicate || enrichedDuplicate) {
         deps.onChildInputWait?.({
           parentSessionID: record.parentSessionID,
           taskID: record.taskID,

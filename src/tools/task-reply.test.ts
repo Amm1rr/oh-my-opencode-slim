@@ -1,11 +1,16 @@
 import { describe, expect, mock, test } from 'bun:test';
+import { createTaskSessionManagerHook } from '../hooks/task-session-manager';
 import {
   getChildInputWait,
   listChildInputWaits,
   noteChildInputWait,
   resetChildInputWaitForTests,
 } from '../hooks/task-session-manager/child-input-wait';
+import { resetUserWaitGateForTests } from '../hooks/task-session-manager/user-wait-gate';
 import { BackgroundJobBoard } from '../utils/background-job-board';
+import { buildPluginInput } from '../v2/client-shim';
+import { mapV2EventToV1 } from '../v2/event-adapter';
+import type { V2Context } from '../v2/types';
 import { createTaskReplyTool } from './task-reply';
 import { createTaskStatusTool } from './task-status';
 
@@ -28,6 +33,60 @@ const statusClient = () =>
   ({
     session: { status: mock(async () => ({ data: {} })) },
   }) as never;
+
+function makeV2Ctx(permissionReply?: (args: never) => Promise<unknown>) {
+  return {
+    app: { name: 'opencode2', version: 'test' },
+    options: {},
+    agent: {
+      transform: async () => ({ dispose() {} }),
+      reload: async () => {},
+      list: async () => [],
+    },
+    tool: {
+      transform: async () => ({ dispose() {} }),
+      hook: async () => ({ dispose() {} }),
+    },
+    command: {
+      transform: async () => ({ dispose() {} }),
+      list: async () => [],
+    },
+    session: { hook: async () => ({ dispose() {} }) },
+    event: { subscribe: (() => ({})) as never },
+    ...(permissionReply ? { permission: { reply: permissionReply } } : {}),
+    location: {
+      directory: '/test',
+      project: { id: 'proj_1', directory: '/test', canonical: '/test' },
+    },
+  } as unknown as V2Context;
+}
+
+function createInputWaitHook(board: BackgroundJobBoard) {
+  return createTaskSessionManagerHook(
+    {
+      client: statusClient(),
+      directory: '/test',
+      worktree: '/test',
+    } as never,
+    {
+      maxSessionsPerAgent: 2,
+      maxRetainedSnapshots: 20,
+      backgroundJobBoard: board,
+      shouldManageSession: (sessionID: string) => sessionID === 'parent-1',
+      idleReconcileDelayMs: 0,
+      runtimeStatusReconcileDelayMs: 0,
+    },
+  );
+}
+
+async function routeMappedV2Event(
+  hook: ReturnType<typeof createInputWaitHook>,
+  event: Record<string, unknown>,
+) {
+  for (const mapped of mapV2EventToV1(event)) {
+    await hook.event({ event: mapped } as never);
+  }
+}
 
 describe('task_status with a waiting child', () => {
   test('surfaces waiting_input with the question and answer guidance', async () => {
@@ -63,6 +122,41 @@ describe('task_status with a waiting child', () => {
     expect(output).toContain('Which browser env should PLAN13 use?');
     expect(output).toContain('Shared staging');
     expect(output).toContain('task_reply');
+  });
+
+  test('v2 question guidance does not promise task_reply can answer forms', async () => {
+    resetChildInputWaitForTests();
+    const board = new BackgroundJobBoard();
+    registerBackgroundChild(board);
+    noteChildInputWait({
+      taskID: 'ses_child1',
+      parentSessionID: 'parent-1',
+      kind: 'question',
+      requestID: 'form_1',
+      questions: [
+        {
+          question: 'Pick environment',
+          header: 'Environment',
+          options: [{ label: 'staging', description: '' }],
+        },
+      ],
+    });
+    const { task_status } = createTaskStatusTool({
+      input: {
+        directory: '/test',
+        hostFlavor: 'v2',
+        client: statusClient(),
+      } as never,
+      backgroundJobBoard: board,
+      now: () => 120_000,
+    });
+
+    const output = await task_status.execute({ task_id: 'ses_child1' }, {
+      sessionID: 'parent-1',
+    } as never);
+
+    expect(output).toContain('OpenCode v2 form request');
+    expect(output).toContain('task_reply cannot answer it');
   });
 
   test('task_status renders child-supplied ask text escaped', async () => {
@@ -243,6 +337,7 @@ describe('task_reply', () => {
 
     expect(reply).toHaveBeenCalledTimes(1);
     expect(reply.mock.calls[0]?.[0]).toMatchObject({
+      sessionID: 'ses_child1',
       requestID: 'per_1',
       reply: 'once',
     });
@@ -512,5 +607,109 @@ describe('task_reply on a v1-shaped host client', () => {
         { sessionID: 'parent-1' } as never,
       ),
     ).rejects.toThrow('no question.reply API');
+  });
+
+  test('v2 unsupported question reply capability reports honestly and keeps the wait', async () => {
+    const board = registerOpenQuestion();
+    const { task_reply } = createTaskReplyTool({
+      input: { directory: '/test', client: { permission: {} } } as never,
+      backgroundJobBoard: board,
+    });
+
+    await expect(
+      task_reply.execute(
+        { task_id: 'ses_child1', request_id: 'que_1', answers: ['Shared'] },
+        { sessionID: 'parent-1' } as never,
+      ),
+    ).rejects.toThrow('no question.reply API');
+    expect(getChildInputWait('ses_child1', 'que_1')).not.toBeUndefined();
+  });
+});
+
+describe('task_reply v2 event transport integration', () => {
+  test('raw permission.asked maps through the hook sidecar and replies via pinned v2 permission.reply', async () => {
+    resetUserWaitGateForTests();
+    resetChildInputWaitForTests();
+    const board = new BackgroundJobBoard();
+    registerBackgroundChild(board);
+    const hook = createInputWaitHook(board);
+    const reply = mock(async () => ({ data: true }));
+    const input = buildPluginInput(makeV2Ctx(reply as never));
+    const { task_reply } = createTaskReplyTool({
+      input: input as never,
+      backgroundJobBoard: board,
+    });
+
+    await routeMappedV2Event(hook, {
+      type: 'permission.asked',
+      data: {
+        id: 'per_1',
+        sessionID: 'ses_child1',
+        action: 'tool.execute',
+        resources: ['bash:*'],
+      },
+    });
+
+    expect(getChildInputWait('ses_child1', 'per_1')).toMatchObject({
+      kind: 'permission',
+      permission: 'tool.execute',
+      patterns: ['bash:*'],
+    });
+
+    await task_reply.execute(
+      { task_id: 'ses_child1', request_id: 'per_1', reply: 'always' },
+      { sessionID: 'parent-1' } as never,
+    );
+
+    expect(reply).toHaveBeenCalledTimes(1);
+    expect(reply.mock.calls[0]?.[0]).toEqual({
+      sessionID: 'ses_child1',
+      requestID: 'per_1',
+      reply: 'always',
+    });
+    expect(getChildInputWait('ses_child1', 'per_1')).toBeUndefined();
+  });
+
+  test('v2 form.created maps to a question wait but unsupported task_reply keeps the wait', async () => {
+    resetUserWaitGateForTests();
+    resetChildInputWaitForTests();
+    const board = new BackgroundJobBoard();
+    registerBackgroundChild(board);
+    const hook = createInputWaitHook(board);
+    const input = buildPluginInput(makeV2Ctx());
+    const { task_reply } = createTaskReplyTool({
+      input: input as never,
+      backgroundJobBoard: board,
+    });
+
+    await routeMappedV2Event(hook, {
+      type: 'form.created',
+      data: {
+        form: {
+          id: 'form_1',
+          sessionID: 'ses_child1',
+          fields: [
+            {
+              key: 'environment',
+              title: 'Pick environment',
+              type: 'select',
+              options: [{ label: 'staging', description: 'Use staging' }],
+            },
+          ],
+        },
+      },
+    });
+
+    expect(getChildInputWait('ses_child1', 'form_1')).toMatchObject({
+      kind: 'question',
+      requestID: 'form_1',
+    });
+    await expect(
+      task_reply.execute(
+        { task_id: 'ses_child1', request_id: 'form_1', answers: ['staging'] },
+        { sessionID: 'parent-1' } as never,
+      ),
+    ).rejects.toThrow('no question.reply API');
+    expect(getChildInputWait('ses_child1', 'form_1')).not.toBeUndefined();
   });
 });

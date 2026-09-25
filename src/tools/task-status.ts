@@ -59,14 +59,20 @@ export function createTaskStatusTool(options: {
         `idle_for_seconds: ${report.idleSeconds}`,
         `possibly_stuck: ${report.possiblyStuck}`,
       ];
+      const waits = listChildInputWaits(job.taskID);
+      const hostFlavor = (options.input as { hostFlavor?: unknown }).hostFlavor;
       // A child parked on an open question/permission moves no tokens and
       // never finishes on its own: surface the block explicitly so the
-      // parent answers it (task_reply) instead of waiting it out.
-      for (const wait of listChildInputWaits(job.taskID)) {
+      // parent handles it instead of waiting it out. On pinned v2 hosts,
+      // questions are Form requests; the plugin context exposes observation
+      // but no supported form-reply API, so do not promise task_reply can
+      // unblock them.
+      for (const wait of waits) {
         details.push(`waiting_input: true (${wait.kind} ${wait.requestID})`);
         details.push(
           `pending_${wait.kind}: ${formatPendingInput(wait.kind, wait.requestID, wait.questions, wait.permission, wait.patterns)}`,
         );
+        details.push(inputWaitGuidance(wait.kind, hostFlavor));
       }
       if (report.uncertain) {
         details.push('status_uncertain: true');
@@ -80,10 +86,10 @@ export function createTaskStatusTool(options: {
           '[guidance]: The task is still running. Work on non-overlapping tasks, or conclude your response now to await the completion event.',
         );
       }
-      if (listChildInputWaits(job.taskID).length > 0) {
+      if (waits.length > 0) {
         details.push('');
         details.push(
-          '[guidance]: The task is waiting for your input and cannot proceed until you answer. Use task_reply with the request ID above to answer or reject it.',
+          '[guidance]: The task is waiting for input and cannot proceed until the pending request is handled. See the request-specific guidance above.',
         );
       }
       return details.join('\n');
@@ -91,6 +97,16 @@ export function createTaskStatusTool(options: {
   });
 
   return { task_status };
+}
+
+function inputWaitGuidance(
+  kind: 'question' | 'permission',
+  hostFlavor: unknown,
+): string {
+  if (kind === 'question' && hostFlavor === 'v2') {
+    return '[guidance]: This is an OpenCode v2 form request. The pinned v2 plugin context can observe it but exposes no supported form-reply API, so task_reply cannot answer it. Answer/cancel it in the host UI if available; otherwise leave the child waiting or cancel the task.';
+  }
+  return '[guidance]: Use task_reply with this request ID to answer or reject this pending request.';
 }
 
 function formatPendingInput(

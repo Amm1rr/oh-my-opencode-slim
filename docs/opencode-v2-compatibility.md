@@ -264,7 +264,11 @@ its probe only ever matters on non-stable host builds.
       synthesis keeps orchestrator-wake suppression/arm scheduling and the
       foreground fallback working on v2 hosts, while the Form and
       permission bridges above feed the companion's waiting-input
-      indicator and the task-session-manager input-wait gate.
+      indicator and the task-session-manager input-wait gate. Form questions
+      are observation-only for plugin code on the pinned v2 host: the promise
+      plugin context exposes `permission.reply`, but not a supported
+      `form.reply`/`question.reply` API, so `task_reply` can answer v2
+      permissions and must honestly reject v2 form-question replies.
    - `generate.text` → one-shot generation channel probed on `ctx.generate`
      and threaded as `experimental_v2.generateText`, powering the webfetch
      secondary-model summaries without a temp session

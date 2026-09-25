@@ -122,6 +122,54 @@ describe('background child input wait surfacing (RED)', () => {
     expect(notified).toHaveLength(1);
   });
 
+  test('raw v2 permission.asked then normalized permission.asked enriches the stored wait and re-notifies once', async () => {
+    resetUserWaitGateForTests();
+    resetChildInputWaitForTests();
+    const board = new BackgroundJobBoard();
+    board.registerLaunch({
+      taskID: 'ses_child1',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+      description: 'implement',
+      background: true,
+    });
+    const notified: unknown[] = [];
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      onChildInputWait: (n) => notified.push(n),
+    });
+
+    await hook.event({
+      event: {
+        type: 'permission.asked',
+        properties: {
+          id: 'per_1',
+          sessionID: 'ses_child1',
+          action: 'tool.execute',
+          resources: ['bash:*'],
+        },
+      },
+    });
+    await hook.event({
+      event: {
+        type: 'permission.asked',
+        properties: {
+          id: 'per_1',
+          sessionID: 'ses_child1',
+          permission: 'tool.execute',
+          patterns: ['bash:*'],
+        },
+      },
+    });
+
+    expect(notified).toHaveLength(2);
+    expect(getChildInputWait('ses_child1', 'per_1')).toMatchObject({
+      kind: 'permission',
+      permission: 'tool.execute',
+      patterns: ['bash:*'],
+    });
+  });
+
   test('a replied question clears: a later ask notifies again', async () => {
     resetUserWaitGateForTests();
     resetChildInputWaitForTests();

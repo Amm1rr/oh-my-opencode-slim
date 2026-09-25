@@ -44,6 +44,16 @@ function makeCtx(overrides?: Partial<V2Context['session']>): V2Context {
   } as never;
 }
 
+function makeCtxWithPermission(options: {
+  session?: Partial<V2Context['session']>;
+  permission?: Partial<NonNullable<V2Context['permission']>>;
+}): V2Context {
+  return {
+    ...makeCtx(options.session),
+    permission: options.permission,
+  } as never;
+}
+
 describe('v2 client shim delegation', () => {
   test('messages maps session.context to v1 {data} with info/parts', async () => {
     const calls: unknown[] = [];
@@ -75,6 +85,43 @@ describe('v2 client shim delegation', () => {
         parts: [{ type: 'text', text: 'hello' }],
       },
     ]);
+  });
+
+  test('exposes pinned v2 permission.reply through the v1-shaped client when supported', async () => {
+    const calls: unknown[] = [];
+    const input = buildPluginInput(
+      makeCtxWithPermission({
+        permission: {
+          reply: async (args) => {
+            calls.push(args);
+            return { data: true };
+          },
+        },
+      }),
+    );
+
+    await (
+      input.client as {
+        permission: { reply: (args: unknown) => Promise<unknown> };
+      }
+    ).permission.reply({
+      path: { id: 'ses_child1' },
+      requestID: 'per_1',
+      reply: 'always',
+    });
+
+    expect(calls).toEqual([
+      { sessionID: 'ses_child1', requestID: 'per_1', reply: 'always' },
+    ]);
+  });
+
+  test('does not invent unsupported v2 question/form reply domains', () => {
+    const input = buildPluginInput(makeCtx());
+
+    expect(
+      (input.client as { question?: unknown; form?: unknown }).question,
+    ).toBeUndefined();
+    expect((input.client as { form?: unknown }).form).toBeUndefined();
   });
 
   test('messages forwards query.limit as a bounded v2 page in ascending order', async () => {

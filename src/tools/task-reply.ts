@@ -55,14 +55,18 @@ function assertHostReplyResult(result: unknown, operation: string): void {
 }
 
 /**
- * Answer (or reject) a background child's pending question/permission.
+ * Answer (or reject) a background child's pending question/permission when
+ * the host exposes a supported reply API.
  *
  * A background child that calls the `question` tool parks with no tokens
  * moving until the host's question.reply/reject API resolves the request —
  * a `task_message` text nudge does NOT unblock it. This tool performs the
  * actual reply through the host client, scoped to the calling parent's own
  * tracked children: the task must resolve under the parent session and
- * have a recorded open ask for the given request id.
+ * have a recorded open ask for the given request id. OpenCode v2 forms are
+ * observable as question waits, but the pinned v2 plugin context exposes no
+ * supported form-reply API, so those waits fail honestly instead of using
+ * undocumented transport.
  */
 export function createTaskReplyTool(options: {
   input: PluginInput;
@@ -71,7 +75,7 @@ export function createTaskReplyTool(options: {
 }): Record<'task_reply', ToolDefinition> {
   const task_reply = tool({
     description:
-      'Answer a tracked background child task waiting on a question or permission request. Resolves the pending request through the host so the child can proceed. Accepts the task ID or parent-scoped alias plus the request ID from the wake or task_status.',
+      'Answer a tracked background child task waiting on a supported question or permission request. Permissions are supported on OpenCode v2 hosts that expose permission.reply; v2 form-created questions are observable but not answerable through the pinned plugin context. Accepts the task ID or parent-scoped alias plus the request ID from the wake or task_status.',
     args: {
       task_id: z
         .string()
@@ -158,7 +162,6 @@ export function createTaskReplyTool(options: {
        */
       async function replyQuestion(
         answers: string[][] | undefined,
-        operation: string,
       ): Promise<unknown> {
         const question = client.question;
         if (answers !== undefined) {
@@ -209,6 +212,7 @@ export function createTaskReplyTool(options: {
         const permission = client.permission;
         if (typeof permission?.reply === 'function') {
           return await permission.reply({
+            sessionID: targetJob.taskID,
             requestID: openWait.requestID,
             directory: options.input.directory,
             reply: response,
@@ -230,7 +234,7 @@ export function createTaskReplyTool(options: {
         if (openWait.kind === 'question') {
           if (!args.answers || args.answers.length === 0) {
             const result = await withTimeout(
-              replyQuestion(undefined, `Question reject ${openWait.requestID}`),
+              replyQuestion(undefined),
               timeoutMs,
               `Question reject timed out after ${timeoutMs}ms`,
             );
@@ -245,10 +249,7 @@ export function createTaskReplyTool(options: {
             return `Rejected pending question ${openWait.requestID} for ${targetJob.alias} (${targetJob.taskID}).`;
           }
           const result = await withTimeout(
-            replyQuestion(
-              args.answers.map((answer) => [answer]),
-              `Question reply ${openWait.requestID}`,
-            ),
+            replyQuestion(args.answers.map((answer) => [answer])),
             timeoutMs,
             `Question reply timed out after ${timeoutMs}ms`,
           );
