@@ -73,6 +73,7 @@ interface ManagerState {
   api: TuiPluginApi;
   directory: string;
   snapshotRef: { snapshot: TuiSnapshot };
+  presetEditBases: Map<string, PresetDefinition>;
 }
 
 /**
@@ -84,7 +85,7 @@ export function openPresetManager(
   directory: string,
   snapshotRef: { snapshot: TuiSnapshot },
 ): void {
-  showPresetList({ api, directory, snapshotRef });
+  showPresetList({ api, directory, snapshotRef, presetEditBases: new Map() });
 }
 
 function showPresetList(state: ManagerState): void {
@@ -345,9 +346,11 @@ function editPreset(state: ManagerState, presetName: string): void {
 
   // Retrieve the editable local delta directly so we do not materialize inherited agents
   const editable = getEditablePreset(state.directory, presetName);
+  state.presetEditBases.set(presetName, structuredClone(editable));
   editPresetWorkingCopy(state, presetName, {
     extends: editable.extends,
     agents: { ...editable.agents },
+    marketplace: editable.marketplace,
   });
 }
 
@@ -424,7 +427,10 @@ function editPresetWorkingCopy(
   state.api.ui.dialog.replace(() =>
     state.api.ui.Dialog({
       size: 'large',
-      onClose: () => state.api.ui.dialog.clear(),
+      onClose: () => {
+        state.presetEditBases.delete(presetName);
+        state.api.ui.dialog.clear();
+      },
       children: state.api.ui.DialogSelect<string>({
         title: `Edit preset: ${presetName}`,
         options,
@@ -473,6 +479,7 @@ function editPresetWorkingCopy(
               break;
             }
             case ACTION_BACK:
+              state.presetEditBases.delete(presetName);
               showPresetList(state);
               break;
             default:
@@ -696,8 +703,24 @@ function savePreset(
   const ok = writePreset(
     state.directory,
     presetName,
-    working.extends ? { extends: working.extends, agents: cleaned } : cleaned,
+    {
+      ...(working.extends ? { extends: working.extends } : {}),
+      agents: cleaned,
+      ...(working.marketplace !== undefined
+        ? { marketplace: working.marketplace }
+        : {}),
+    },
+    state.presetEditBases.has(presetName)
+      ? { mergeChangesFrom: state.presetEditBases.get(presetName) }
+      : {},
   );
+  if (ok) {
+    const committed = getEditablePreset(state.directory, presetName);
+    state.presetEditBases.set(presetName, structuredClone(committed));
+    working.extends = committed.extends;
+    working.agents = structuredClone(committed.agents);
+    working.marketplace = structuredClone(committed.marketplace);
+  }
   if (!silent) {
     state.api.ui.toast({
       variant: ok ? 'success' : 'warning',

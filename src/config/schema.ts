@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { MarketplacePackageIdSchema } from '../marketplace/schemas';
 import {
   AGENT_THEME_COLORS,
   DEFAULT_MAX_RETAINED_SNAPSHOTS,
@@ -341,6 +342,55 @@ export const PresetAgentsSchema = z.record(
 
 export type Preset = z.infer<typeof PresetAgentsSchema>;
 
+const MarketplacePackageIdsSchema = z
+  .array(MarketplacePackageIdSchema)
+  .superRefine((ids, ctx) => {
+    if (new Set(ids).size !== ids.length) {
+      ctx.addIssue({ code: 'custom', message: 'Package IDs must be unique' });
+    }
+  });
+
+export const MarketplaceActivationSchema = z
+  .object({
+    agents: MarketplacePackageIdsSchema.optional(),
+    agents_add: MarketplacePackageIdsSchema.optional().describe(
+      'Package IDs to add to the inherited marketplace agents list after optional agents replacement.',
+    ),
+    agents_remove: MarketplacePackageIdsSchema.optional().describe(
+      'Package IDs to remove after additions; removal wins over addition.',
+    ),
+  })
+  .strict();
+
+export type MarketplaceActivation = z.infer<typeof MarketplaceActivationSchema>;
+
+const MARKETPLACE_ACTIVATION_KEYS = [
+  'agents',
+  'agents_add',
+  'agents_remove',
+] as const;
+
+/**
+ * Flat presets historically allowed an agent named `marketplace`. Treat the
+ * value as activation only when it contains an explicit activation directive;
+ * an empty object remains a valid empty agent override.
+ */
+export function hasMarketplaceActivationDirectives(
+  value: unknown,
+): value is Record<(typeof MARKETPLACE_ACTIVATION_KEYS)[number], unknown> {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    !Array.isArray(value) &&
+    MARKETPLACE_ACTIVATION_KEYS.some((key) => Object.hasOwn(value, key))
+  );
+}
+
+const FlatMarketplaceValueSchema = z.union([
+  MarketplaceActivationSchema,
+  AgentOverrideConfigSchema,
+]);
+
 /**
  * Structured preset syntax. The `agents` wrapper is the preferred syntax for
  * new presets; the loader also accepts the inline form below so adding an
@@ -350,18 +400,26 @@ export const PresetDefinitionSchema = z
   .object({
     extends: z.string().min(1).optional(),
     agents: PresetAgentsSchema,
+    marketplace: MarketplaceActivationSchema.optional(),
   })
   .strict();
 
 const InlinePresetDefinitionSchema = z
   .object({
     extends: z.string().min(1),
+    marketplace: FlatMarketplaceValueSchema.optional(),
+  })
+  .catchall(AgentOverrideConfigSchema);
+
+const FlatPresetSchema = z
+  .object({
+    marketplace: FlatMarketplaceValueSchema.optional(),
   })
   .catchall(AgentOverrideConfigSchema);
 
 /** Raw preset syntax accepted in configuration files. */
 export const PresetSchema = z.xor(
-  [PresetDefinitionSchema, InlinePresetDefinitionSchema, PresetAgentsSchema],
+  [PresetDefinitionSchema, InlinePresetDefinitionSchema, FlatPresetSchema],
   {
     error:
       'Preset syntax is ambiguous: use a non-colliding custom agent name instead of an agents wrapper collision.',
@@ -813,7 +871,12 @@ export const RawPluginConfigSchema = z
             ? presetRecord.agents
             : Object.fromEntries(
                 Object.entries(presetRecord).filter(
-                  ([name]) => name !== 'extends',
+                  ([name, entry]) =>
+                    name !== 'extends' &&
+                    !(
+                      name === 'marketplace' &&
+                      hasMarketplaceActivationDirectives(entry)
+                    ),
                 ),
               );
         rejectOrchestratorPromptOnOrchestrator(

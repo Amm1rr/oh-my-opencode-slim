@@ -10,6 +10,7 @@ import {
 import { z } from 'zod';
 import {
   InterviewConfigSchema,
+  MarketplaceActivationSchema,
   MultiplexerConfigSchema,
   MultiplexerConfigStrictSchema,
   PluginConfigSchema,
@@ -70,6 +71,69 @@ describe('PluginConfigSchema ACP wrapper models', () => {
 });
 
 describe('PluginConfigSchema preset syntax', () => {
+  it('validates marketplace activation replacements and directives', () => {
+    expect(
+      MarketplaceActivationSchema.parse({
+        agents: [' owner/one '],
+        agents_add: ['owner/two'],
+        agents_remove: ['owner/three'],
+      }),
+    ).toEqual({
+      agents: ['owner/one'],
+      agents_add: ['owner/two'],
+      agents_remove: ['owner/three'],
+    });
+    expect(
+      PluginConfigSchema.safeParse({
+        presets: {
+          invalid: {
+            marketplace: { agents_add: ['owner/one', 'owner/one'] },
+          },
+        },
+      }).success,
+    ).toBe(false);
+  });
+
+  it('accepts marketplace activation IDs only in canonical owner/package form', () => {
+    expect(
+      MarketplaceActivationSchema.parse({ agents: [' owner/package '] }),
+    ).toEqual({ agents: ['owner/package'] });
+
+    for (const id of [
+      'owner',
+      'owner/package/extra',
+      'Owner/package',
+      'owner/name with spaces',
+    ]) {
+      expect(
+        MarketplaceActivationSchema.safeParse({ agents: [id] }).success,
+      ).toBe(false);
+    }
+
+    expect(
+      MarketplaceActivationSchema.safeParse({
+        agents: ['owner/package', ' owner/package '],
+      }).success,
+    ).toBe(false);
+  });
+
+  it('does not accept mixed marketplace activation and agent override fields', () => {
+    for (const preset of [
+      {
+        marketplace: { agents_add: ['owner/package'], model: 'provider/model' },
+      },
+      {
+        extends: 'base',
+        marketplace: {
+          agents_remove: ['owner/package'],
+          temperature: 0.5,
+        },
+      },
+    ]) {
+      expect(PresetSchema.safeParse(preset).success).toBe(false);
+    }
+  });
+
   it('accepts legacy custom names that resemble metadata fields', () => {
     const result = PluginConfigSchema.safeParse({
       presets: {

@@ -206,12 +206,14 @@ describe('openPresetManager', () => {
         base: {
           orchestrator: { model: 'anthropic/claude-3.5-haiku' },
           oracle: { model: 'openai/gpt-6-luna' },
+          marketplace: { agents: ['team/base/agent'] },
         },
         child: {
           extends: 'base',
           agents: {
             explorer: { model: 'openai/gpt-5-mini' },
           },
+          marketplace: { agents_add: ['team/toolkit/reviewer'] },
         },
       },
     });
@@ -277,11 +279,16 @@ describe('openPresetManager', () => {
     const persistedChild = (
       persisted.presets as Record<string, Record<string, unknown>>
     )?.child;
+    expect(
+      (persisted.presets as Record<string, Record<string, unknown>>).base
+        .marketplace,
+    ).toEqual({ agents: ['team/base/agent'] });
     expect(persistedChild).toEqual({
       extends: 'base',
       agents: {
         explorer: { model: 'openai/gpt-5-mini' },
       },
+      marketplace: { agents_add: ['team/toolkit/reviewer'] },
     });
   });
 
@@ -423,6 +430,386 @@ describe('openPresetManager', () => {
     expect(persisted.preset).toBe('child');
   });
 
+  test('retains same-preset marketplace and agent updates made while editing', async () => {
+    writeUserConfigFile({
+      presets: {
+        base: { oracle: { model: 'openai/base' } },
+        nextBase: { oracle: { model: 'openai/next' } },
+        active: {
+          orchestrator: { model: 'openai/old' },
+          marketplace: { agents: ['team/a'] },
+        },
+      },
+    });
+
+    const mock = createMockApi();
+    openPresetManager(mock.api, tempDir, snapshotRef);
+    mock.selectOption(mock.getSelectProps(), { value: 'active' });
+    mock.selectOption(mock.getSelectProps(), { value: 'edit' });
+    mock.selectOption(mock.getSelectProps(), { value: 'orchestrator' });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const modelSelect = mock.getSelectProps();
+    expect(modelSelect?.title).toBe('Edit orchestrator — model');
+    const modelOptions = modelSelect?.options as Array<{ value: string }>;
+    const newModel = modelOptions.find(
+      (option) => option.value === 'anthropic/claude-3.5-haiku',
+    );
+    expect(newModel).toBeDefined();
+    if (!newModel) throw new Error('Expected model option');
+    mock.selectOption(modelSelect, newModel);
+
+    // Simulate a marketplace activation and another agent edit committed to
+    // this same preset while the editor is open.
+    const current = readUserConfigFile();
+    const presets = current.presets as Record<string, Record<string, unknown>>;
+    presets.active.marketplace = { agents: ['team/a', 'team/b'] };
+    presets.active.oracle = { model: 'openai/concurrent' };
+    writeUserConfigFile(current);
+
+    const temperature = mock.getPromptProps();
+    if (!temperature) throw new Error('Expected temperature prompt');
+    (temperature.onConfirm as (value: string) => void)('0.7');
+    const optionsPrompt = mock.getPromptProps();
+    if (!optionsPrompt) throw new Error('Expected options prompt');
+    (optionsPrompt.onConfirm as (value: string) => void)('');
+
+    mock.selectOption(mock.getSelectProps(), { value: '__omo_save__' });
+    const saved = readUserConfigFile();
+    const savedPresets = saved.presets as Record<
+      string,
+      Record<string, Record<string, unknown>>
+    >;
+    expect(savedPresets.active.marketplace).toEqual({
+      agents: ['team/a', 'team/b'],
+    });
+    const savedAgents = savedPresets.active.agents;
+    expect(savedAgents.oracle).toEqual({ model: 'openai/concurrent' });
+    expect(savedAgents.orchestrator.model).toBe('anthropic/claude-3.5-haiku');
+
+    // Keep using the same open editor after its successful save. A later
+    // writer changes the model, parent, and activation metadata on disk.
+    const concurrent = readUserConfigFile();
+    const concurrentPresets = concurrent.presets as Record<
+      string,
+      Record<string, unknown>
+    >;
+    const active = concurrentPresets.active as Record<string, unknown>;
+    active.extends = 'nextBase';
+    active.marketplace = { agents: ['team/a', 'team/c'] };
+    const concurrentAgents = active.agents as Record<
+      string,
+      Record<string, unknown>
+    >;
+    concurrentAgents.orchestrator = {
+      ...concurrentAgents.orchestrator,
+      model: 'openai/concurrent-after-save',
+    };
+    writeUserConfigFile(concurrent);
+
+    mock.selectOption(mock.getSelectProps(), { value: '__omo_save__' });
+
+    const savedAgain = readUserConfigFile();
+    const activeAgain = (
+      savedAgain.presets as Record<string, Record<string, unknown>>
+    ).active;
+    expect(activeAgain.extends).toBe('nextBase');
+    expect(activeAgain.marketplace).toEqual({ agents: ['team/a', 'team/c'] });
+    const agentsAgain = activeAgain.agents as Record<
+      string,
+      Record<string, unknown>
+    >;
+    expect(agentsAgain.orchestrator.model).toBe('openai/concurrent-after-save');
+    expect(agentsAgain.oracle).toEqual({ model: 'openai/concurrent' });
+  });
+
+  test('merges two same-preset editors in either save order', async () => {
+    for (const saveParentFirst of [true, false]) {
+      writeUserConfigFile({
+        presets: {
+          base: { oracle: { model: 'openai/base' } },
+          nextBase: { oracle: { model: 'openai/next' } },
+          active: {
+            extends: 'base',
+            agents: { orchestrator: { model: 'openai/old' } },
+          },
+        },
+      });
+
+      const parentEditor = createMockApi();
+      const modelEditor = createMockApi();
+      openPresetManager(parentEditor.api, tempDir, snapshotRef);
+      openPresetManager(modelEditor.api, tempDir, snapshotRef);
+
+      // Prepare one editor with a deliberate parent change.
+      parentEditor.selectOption(parentEditor.getSelectProps(), {
+        value: 'active',
+      });
+      parentEditor.selectOption(parentEditor.getSelectProps(), {
+        value: 'edit',
+      });
+      parentEditor.selectOption(parentEditor.getSelectProps(), {
+        value: '__omo_base_preset__',
+      });
+      parentEditor.selectOption(parentEditor.getSelectProps(), {
+        value: 'nextBase',
+      });
+
+      // Prepare the other editor with only a model change.
+      modelEditor.selectOption(modelEditor.getSelectProps(), {
+        value: 'active',
+      });
+      modelEditor.selectOption(modelEditor.getSelectProps(), { value: 'edit' });
+      modelEditor.selectOption(modelEditor.getSelectProps(), {
+        value: 'orchestrator',
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const modelSelect = modelEditor.getSelectProps();
+      if (!modelSelect) throw new Error('Expected model picker');
+      const modelOption = (
+        modelSelect.options as Array<{ value: string }>
+      ).find((option) => option.value === 'anthropic/claude-3.5-haiku');
+      if (!modelOption) throw new Error('Expected model option');
+      modelEditor.selectOption(modelSelect, modelOption);
+      const temperature = modelEditor.getPromptProps();
+      if (!temperature) throw new Error('Expected temperature prompt');
+      (temperature.onConfirm as (value: string) => void)('0.7');
+      const optionsPrompt = modelEditor.getPromptProps();
+      if (!optionsPrompt) throw new Error('Expected options prompt');
+      (optionsPrompt.onConfirm as (value: string) => void)('');
+
+      const saveParent = () =>
+        parentEditor.selectOption(parentEditor.getSelectProps(), {
+          value: '__omo_save__',
+        });
+      const saveModel = () =>
+        modelEditor.selectOption(modelEditor.getSelectProps(), {
+          value: '__omo_save__',
+        });
+      if (saveParentFirst) {
+        saveParent();
+        saveModel();
+      } else {
+        saveModel();
+        saveParent();
+      }
+
+      const saved = readUserConfigFile();
+      const active = (saved.presets as Record<string, Record<string, unknown>>)
+        .active;
+      expect(active.extends).toBe('nextBase');
+      const agents = active.agents as Record<string, Record<string, unknown>>;
+      expect(agents.orchestrator.model).toBe('anthropic/claude-3.5-haiku');
+      expect(agents.orchestrator.temperature).toBe(0.7);
+    }
+  });
+
+  test('keeps the edit baseline after a parent conflict until it is resolved', () => {
+    writeUserConfigFile({
+      presets: {
+        base: { oracle: { model: 'openai/base' } },
+        nextBase: { oracle: { model: 'openai/next' } },
+        otherBase: { oracle: { model: 'openai/other' } },
+        active: { extends: 'base', agents: {} },
+      },
+    });
+
+    const firstEditor = createMockApi();
+    const secondEditor = createMockApi();
+    openPresetManager(firstEditor.api, tempDir, snapshotRef);
+    openPresetManager(secondEditor.api, tempDir, snapshotRef);
+
+    firstEditor.selectOption(firstEditor.getSelectProps(), { value: 'active' });
+    firstEditor.selectOption(firstEditor.getSelectProps(), { value: 'edit' });
+    firstEditor.selectOption(firstEditor.getSelectProps(), {
+      value: '__omo_base_preset__',
+    });
+    firstEditor.selectOption(firstEditor.getSelectProps(), {
+      value: 'nextBase',
+    });
+
+    secondEditor.selectOption(secondEditor.getSelectProps(), {
+      value: 'active',
+    });
+    secondEditor.selectOption(secondEditor.getSelectProps(), { value: 'edit' });
+    secondEditor.selectOption(secondEditor.getSelectProps(), {
+      value: '__omo_base_preset__',
+    });
+    secondEditor.selectOption(secondEditor.getSelectProps(), {
+      value: 'otherBase',
+    });
+
+    firstEditor.selectOption(firstEditor.getSelectProps(), {
+      value: '__omo_save__',
+    });
+    const savedByFirstEditor = readUserConfigFile();
+
+    secondEditor.selectOption(secondEditor.getSelectProps(), {
+      value: '__omo_save__',
+    });
+    expect(readUserConfigFile()).toEqual(savedByFirstEditor);
+    expect(secondEditor.toasts.at(-1)?.title).toBe('Save failed');
+
+    // Retrying the still-open editor must use its original baseline and
+    // reject the same conflicting parent change again.
+    secondEditor.selectOption(secondEditor.getSelectProps(), {
+      value: '__omo_save__',
+    });
+    expect(readUserConfigFile()).toEqual(savedByFirstEditor);
+    expect(secondEditor.toasts.at(-1)?.title).toBe('Save failed');
+
+    // Explicitly resolve by accepting the parent now on disk.
+    secondEditor.selectOption(secondEditor.getSelectProps(), {
+      value: '__omo_base_preset__',
+    });
+    secondEditor.selectOption(secondEditor.getSelectProps(), {
+      value: 'nextBase',
+    });
+    secondEditor.selectOption(secondEditor.getSelectProps(), {
+      value: '__omo_save__',
+    });
+
+    const resolved = readUserConfigFile();
+    const active = (resolved.presets as Record<string, Record<string, unknown>>)
+      .active;
+    expect(active.extends).toBe('nextBase');
+  });
+
+  test('merges concurrent model and temperature edits to the same agent', async () => {
+    for (const saveModelFirst of [true, false]) {
+      writeUserConfigFile({
+        presets: {
+          active: {
+            orchestrator: { model: 'openai/old', temperature: 0.2 },
+          },
+        },
+      });
+      const modelEditor = createMockApi();
+      const temperatureEditor = createMockApi();
+      for (const mock of [modelEditor, temperatureEditor]) {
+        const client = mock.api.client as unknown as {
+          config: { providers: () => Promise<unknown> };
+        };
+        client.config.providers = async () => ({
+          data: {
+            providers: [
+              {
+                id: 'openai',
+                models: {
+                  old: { name: 'Old' },
+                  new: { name: 'New' },
+                },
+              },
+            ],
+          },
+        });
+      }
+      openPresetManager(modelEditor.api, tempDir, snapshotRef);
+      openPresetManager(temperatureEditor.api, tempDir, snapshotRef);
+
+      const editAgent = async (
+        mock: ReturnType<typeof createMockApi>,
+        model: string,
+        temperature: string,
+      ) => {
+        mock.selectOption(mock.getSelectProps(), { value: 'active' });
+        mock.selectOption(mock.getSelectProps(), { value: 'edit' });
+        mock.selectOption(mock.getSelectProps(), { value: 'orchestrator' });
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        const select = mock.getSelectProps();
+        if (!select) throw new Error('Expected model picker');
+        const option = (select.options as Array<{ value: string }>).find(
+          (item) => item.value === model,
+        );
+        if (!option) throw new Error(`Expected model option ${model}`);
+        mock.selectOption(select, option);
+        const temperaturePrompt = mock.getPromptProps();
+        if (!temperaturePrompt) throw new Error('Expected temperature prompt');
+        (temperaturePrompt.onConfirm as (value: string) => void)(temperature);
+        const optionsPrompt = mock.getPromptProps();
+        if (!optionsPrompt) throw new Error('Expected options prompt');
+        (optionsPrompt.onConfirm as (value: string) => void)('');
+      };
+
+      await editAgent(modelEditor, 'openai/new', '0.2');
+      await editAgent(temperatureEditor, 'openai/old', '0.7');
+
+      const saveModel = () =>
+        modelEditor.selectOption(modelEditor.getSelectProps(), {
+          value: '__omo_save__',
+        });
+      const saveTemperature = () =>
+        temperatureEditor.selectOption(temperatureEditor.getSelectProps(), {
+          value: '__omo_save__',
+        });
+      if (saveModelFirst) {
+        saveModel();
+        saveTemperature();
+      } else {
+        saveTemperature();
+        saveModel();
+      }
+
+      const saved = readUserConfigFile();
+      const active = (saved.presets as Record<string, Record<string, unknown>>)
+        .active;
+      const orchestrator = active.orchestrator as Record<string, unknown>;
+      expect(orchestrator.model).toBe('openai/new');
+      expect(orchestrator.temperature).toBe(0.7);
+    }
+  });
+
+  test('rejects a same-field conflict on retry without changing disk', async () => {
+    writeUserConfigFile({
+      presets: {
+        active: {
+          orchestrator: {
+            model: 'anthropic/claude-3.5-haiku',
+            temperature: 0.2,
+          },
+        },
+      },
+    });
+    const firstEditor = createMockApi();
+    const secondEditor = createMockApi();
+    openPresetManager(firstEditor.api, tempDir, snapshotRef);
+    openPresetManager(secondEditor.api, tempDir, snapshotRef);
+
+    const editTemperature = async (
+      mock: ReturnType<typeof createMockApi>,
+      value: string,
+    ) => {
+      mock.selectOption(mock.getSelectProps(), { value: 'active' });
+      mock.selectOption(mock.getSelectProps(), { value: 'edit' });
+      mock.selectOption(mock.getSelectProps(), { value: 'orchestrator' });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      mock.selectOption(mock.getSelectProps(), {
+        value: 'anthropic/claude-3.5-haiku',
+      });
+      const temperature = mock.getPromptProps();
+      if (!temperature) throw new Error('Expected temperature prompt');
+      (temperature.onConfirm as (value: string) => void)(value);
+      const options = mock.getPromptProps();
+      if (!options) throw new Error('Expected options prompt');
+      (options.onConfirm as (value: string) => void)('');
+    };
+
+    await editTemperature(firstEditor, '0.7');
+    await editTemperature(secondEditor, '0.8');
+    firstEditor.selectOption(firstEditor.getSelectProps(), {
+      value: '__omo_save__',
+    });
+    const savedByFirst = readUserConfigFile();
+
+    for (let retry = 0; retry < 2; retry++) {
+      secondEditor.selectOption(secondEditor.getSelectProps(), {
+        value: '__omo_save__',
+      });
+      expect(readUserConfigFile()).toEqual(savedByFirst);
+      expect(secondEditor.toasts.at(-1)?.title).toBe('Save failed');
+    }
+  });
+
   test('marks project presets as [project - read-only] and limits actions', () => {
     writeUserConfigFile({
       presets: {
@@ -484,6 +871,20 @@ describe('openPresetManager', () => {
     expect(toast.message).toContain(
       'already defined in project config (.opencode)',
     );
+  });
+
+  test('creates a new preset through the explicit create flow', () => {
+    writeUserConfigFile({});
+    const mock = createMockApi();
+    openPresetManager(mock.api, tempDir, snapshotRef);
+
+    const prompt = mock.getPromptProps();
+    if (!prompt) throw new Error('Expected new preset prompt');
+    (prompt.onConfirm as (value: string) => void)('newPreset');
+    expect(mock.getSelectProps()?.title).toBe('Edit preset: newPreset');
+    mock.selectOption(mock.getSelectProps(), { value: '__omo_save__' });
+
+    expect(readUserConfigFile().presets).toEqual({ newPreset: {} });
   });
 
   test('rejects deleting user base preset if a project preset extends it', () => {
