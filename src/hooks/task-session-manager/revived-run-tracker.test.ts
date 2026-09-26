@@ -5,6 +5,7 @@ import {
   createBackgroundJobTerminalGate,
 } from '../../utils/background-job-terminal-gate';
 import { SLIM_INTERNAL_INITIATOR_MARKER } from '../../utils/internal-initiator';
+import * as loggerModule from '../../utils/logger';
 import * as opencodeClient from '../../utils/opencode-client';
 import { createRevivedRunTracker } from './revived-run-tracker';
 
@@ -810,6 +811,124 @@ describe('revived run tracker', () => {
     expect(lease).toBeDefined();
     if (lease) harness.board.releaseLease(lease);
   }
+
+  function captureTransportLogs() {
+    const entries: Array<{ message: string; data: unknown }> = [];
+    const spy = spyOn(loggerModule, 'log').mockImplementation(
+      (message: string, data?: unknown) => {
+        entries.push({ message, data });
+      },
+    );
+    return {
+      entries,
+      restore: () => spy.mockRestore(),
+      matching: (message: string) =>
+        entries.filter(
+          (entry) => entry.message === `[revived-run-tracker] ${message}`,
+        ),
+    };
+  }
+
+  test('transport logs every failed attempt and the single ownership release', async () => {
+    const clock = installCapturedTimers();
+    const capture = captureTransportLogs();
+    try {
+      const released = mock(() => {});
+      const harness = createHarness(
+        () => ({ data: [] }),
+        mock(async () => {
+          throw new Error('transport failed');
+        }),
+        false,
+        {
+          maxNotificationRetries: 3,
+          onOwnershipReleased: released,
+        },
+      );
+      publish(harness);
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        await clock.settle();
+        if (attempt < 3) clock.fire(0);
+      }
+      expect(capture.matching('notification failed')).toHaveLength(3);
+      expect(
+        capture.matching('notification failed').map((entry) => entry.data),
+      ).toEqual([
+        expect.objectContaining({ attempt: 1, timedOut: false }),
+        expect.objectContaining({ attempt: 2, timedOut: false }),
+        expect.objectContaining({ attempt: 3, timedOut: false }),
+      ]);
+      expect(capture.matching('notification ownership released')).toHaveLength(
+        1,
+      );
+      expect(released).toHaveBeenCalledTimes(1);
+      harness.tracker.dispose();
+    } finally {
+      capture.restore();
+    }
+  });
+
+  test('transport logs accepted and timed-out admissions distinctly', async () => {
+    const clock = installCapturedTimers();
+    const capture = captureTransportLogs();
+    try {
+      const success = createHarness(() => ({ data: [] }));
+      publish(success);
+      await clock.settle();
+      expect(capture.matching('notification accepted')).toHaveLength(1);
+      success.tracker.dispose();
+
+      const hung = createHarness(
+        () => ({ data: [] }),
+        mock(() => new Promise(() => {})),
+        false,
+        { maxNotificationRetries: 1 },
+      );
+      publish(hung);
+      await clock.settle();
+      clock.fire(10_000);
+      await clock.settle();
+      expect(capture.matching('notification failed')).toContainEqual({
+        message: '[revived-run-tracker] notification failed',
+        data: expect.objectContaining({ attempt: 1, timedOut: true }),
+      });
+      hung.tracker.dispose();
+    } finally {
+      capture.restore();
+    }
+  });
+
+  test('lease deferral is logged without spending a transport attempt', async () => {
+    const clock = installCapturedTimers();
+    const capture = captureTransportLogs();
+    try {
+      const harness = createHarness(() => ({ data: [] }));
+      const acquire = harness.board.acquireTerminalNotificationLease.bind(
+        harness.board,
+      );
+      let deferred = false;
+      harness.board.acquireTerminalNotificationLease = (...args) => {
+        if (!deferred) {
+          deferred = true;
+          return undefined;
+        }
+        return acquire(...args);
+      };
+      publish(harness);
+      await clock.settle();
+      expect(capture.matching('notification lease deferred')).toHaveLength(1);
+      expect(harness.prompt).not.toHaveBeenCalled();
+      clock.fire(0);
+      await clock.settle();
+      expect(capture.matching('notification accepted')).toContainEqual({
+        message: '[revived-run-tracker] notification accepted',
+        data: expect.objectContaining({ attempt: 1 }),
+      });
+      harness.tracker.dispose();
+    } finally {
+      capture.restore();
+    }
+  });
 
   test.each([0, 1, 3])(
     'hung transport releases before retries with budget %i',

@@ -2972,4 +2972,124 @@ describe('evaluate verdict observability (INFO logs)', () => {
       capture.restore();
     }
   });
+
+  test('logs backstop armed once and not-armed reason once across double idle', async () => {
+    const entries: Array<{ message: string; data: unknown }> = [];
+    const spy = spyOn(loggerModule, 'log').mockImplementation(
+      (message: string, data?: unknown) => {
+        entries.push({ message, data });
+      },
+    );
+    let waiting = false;
+    try {
+      const { scheduler } = createScheduler({
+        hasInputWait: () => waiting,
+      });
+      const idle = { type: 'session.idle', properties: { sessionID: 'p1' } };
+      await scheduler.event({ event: idle });
+      await scheduler.event({ event: idle });
+      expect(
+        entries.filter(
+          (entry) => entry.message === '[orchestrator-wake] backstop armed',
+        ),
+      ).toHaveLength(1);
+
+      waiting = true;
+      await scheduler.event({ event: idle });
+      await scheduler.event({ event: idle });
+      const blocked = entries.filter(
+        (entry) => entry.message === '[orchestrator-wake] backstop not armed',
+      );
+      expect(blocked).toHaveLength(1);
+      expect(blocked[0]?.data).toMatchObject({
+        sessionID: 'p1',
+        reason: 'input-wait',
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('logs the name and trigger of an SDK error with an empty message', async () => {
+    const entries: Array<{ message: string; data: unknown }> = [];
+    const spy = spyOn(loggerModule, 'log').mockImplementation(
+      (message: string, data?: unknown) => {
+        entries.push({ message, data });
+      },
+    );
+    try {
+      const failure = Object.assign(new Error(''), {
+        name: 'Session.SomeError',
+      });
+      const { scheduler } = createScheduler({
+        sessionClient: makeClient({
+          promptAsync: mock(async () => {
+            throw failure;
+          }),
+        }),
+      });
+      await scheduler.event({
+        event: { type: 'session.idle', properties: { sessionID: 'p1' } },
+      });
+      await clock.advance(60_000);
+      expect(entries).toContainEqual({
+        message: '[orchestrator-wake] wake suppressed after SDK error',
+        data: expect.objectContaining({
+          sessionID: 'p1',
+          trigger: 'periodic',
+          error: '{"name":"Session.SomeError"}',
+        }),
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('logs evaluation deferral and a progress-cap halt', async () => {
+    const entries: Array<{ message: string; data: unknown }> = [];
+    const spy = spyOn(loggerModule, 'log').mockImplementation(
+      (message: string, data?: unknown) => {
+        entries.push({ message, data });
+      },
+    );
+    try {
+      const { scheduler } = createScheduler({
+        sessionClient: makeClient({
+          childrenData: [{ id: 'child' }],
+          statusData: { child: { type: 'busy' } },
+        }),
+      });
+      await scheduler.event({
+        event: { type: 'session.idle', properties: { sessionID: 'p1' } },
+      });
+      await clock.advance(60_000);
+      expect(entries).toContainEqual({
+        message: '[orchestrator-wake] evaluate deferred',
+        data: {
+          sessionID: 'p1',
+          trigger: 'periodic',
+          checkpoint: 'initial',
+          reason: 'children-active',
+        },
+      });
+      await scheduler.event({
+        event: { type: 'session.deleted', properties: { sessionID: 'p1' } },
+      });
+      const wake = createScheduler();
+      await wake.scheduler.event({
+        event: { type: 'session.idle', properties: { sessionID: 'p1' } },
+      });
+      await clock.advance(60_000);
+      await clock.advance(60_000);
+      expect(
+        entries.some(
+          (entry) =>
+            entry.message === '[orchestrator-wake] backstop halted' &&
+            (entry.data as { reason?: string }).reason === 'progress-cap',
+        ),
+      ).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });

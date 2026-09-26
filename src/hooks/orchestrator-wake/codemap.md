@@ -30,9 +30,11 @@ fallback), the wake condition is children without a terminal `outcome`
     list+promptAsync (get optional). `resolveWakeMode` maps the configured
     mode to todo/children per flavor and logs one degradation note when v2
     lacks the todo API.
-  - Gates (`canSchedule`): config enabled, capability gate ready, managed
+  - Gates (`scheduleBlocker`): config enabled, capability gate ready, managed
     session, no input wait (`hasInputWait`), no fallback in progress, gate
-    not stopped.
+    not stopped. Reports a reason when blocked, deduplicated per session/reason
+    on repeated idle events. Logs when the backstop is armed or halted and
+    when evaluation aborts/defers at a checkpoint.
   - Reads a host snapshot (todo mode: todos + children + status map +
     session model/archive state; children mode: children list + event-tracked
     parent status + optional model/archive state) and computes a fingerprint; unchanged
@@ -126,7 +128,8 @@ busy (external) / errors / user activity → rearm cap
 ## Error Handling
 
 - SDK failures during evaluation suppress the wake (reservation already
-  committed), clear the expecting-busy marker, and log; the timer re-arms via
+  committed), clear the expecting-busy marker, and log the trigger and
+  serialized error (including the name of empty-message errors); the timer re-arms via
   the finally block unless stopped. Children-mode enumeration failures fall
   back to event tracking instead of suppressing.
 - Archived sessions clear their timer and generation on `session.updated`; v2
