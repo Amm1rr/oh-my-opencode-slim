@@ -89,10 +89,9 @@ export const HOST_REPROBE_INTERVAL_MS = 5_000;
 /**
  * Low-frequency reconcile cadence (FR-7). The TUI event bus exposes no
  * reconnect signal (stage A 1.5), so a bounded periodic pass is the trigger
- * for the server-list difference compensation. The FR-8 leftover sweep is
- * deliberately NOT on this tick: it runs once at startup and once per
- * `unreachable → reachable` transition only, because its discovery path costs
- * one terminal read per candidate and should not repeat every 30s.
+ * for the server-list difference compensation. A sweep owed at startup or
+ * after `unreachable → reachable` drains on this tick, never inline with an
+ * event; completed sweeps do not repeat every 30s.
  */
 export const RECONCILE_INTERVAL_MS = 30_000;
 
@@ -138,6 +137,8 @@ export type FetchLike = (
 export interface TuiPaneWiringOptions {
   /** Project directory this client serves. */
   directory: string;
+  /** Directory of the displayed session, resolved again after route changes. */
+  getDirectory?: () => string;
   /** Session currently displayed; read per event because routes change. */
   getDisplayedSessionId?: () => string | null | undefined;
   /** Host event bus (`api.event`); absent hosts subscribe to nothing. */
@@ -476,6 +477,7 @@ export async function createTuiPaneWiring(
   const onceGate = options.onceGate ?? processOnceGate;
   const env = options.env ?? process.env;
   const directory = options.directory;
+  const getDirectory = options.getDirectory ?? (() => directory);
 
   (options.initLogging ?? initClientLogging)();
 
@@ -520,7 +522,7 @@ export async function createTuiPaneWiring(
   const runProbe = async (): Promise<boolean> => {
     const wasReachable = hostState === 'reachable';
     const reachable = await probeServerReachable(baseUrl, {
-      directory,
+      directory: getDirectory(),
       fetchFn: options.fetchFn,
       timeoutMs: options.probeTimeoutMs,
     });
@@ -633,9 +635,9 @@ export async function createTuiPaneWiring(
 
   /**
    * FR-8 trigger: the leftover sweep runs once at startup and once per
-   * `unreachable → reachable` transition — never on the periodic reconcile
-   * tick. The cmux discovery path reads back one launch argv per terminal, so
-   * repeating it every 30s x N terminals is wasteful; crashes and reconnects
+   * `unreachable → reachable` transition, on the reconcile tick rather than
+   * in the event path. The cmux discovery reads one launch argv per terminal;
+   * repeating it every 30s x N terminals is wasteful. Crashes and reconnects
    * bound the number of runs instead. A failed scan re-arms the owed sweep so
    * a later tick retries (a broken daemon costs at most one scan per tick); a
    * completed scan — including a clean empty one — is never repeated.
@@ -655,16 +657,13 @@ export async function createTuiPaneWiring(
     if (disposed) return;
     const projected = projectSessionEvent(type, raw);
     if (!projected) return;
-    const event = withDirectory(
-      projected,
-      knownDirectories,
-      lifecycle,
-      directory,
-    );
-    if (event.directory === directory) {
-      rememberDirectory(knownDirectories, event.sessionId, directory);
+    const displayedDirectory = getDirectory();
+    const event = withDirectory(projected, knownDirectories, lifecycle);
+    if (event.directory === displayedDirectory) {
+      rememberDirectory(knownDirectories, event.sessionId, displayedDirectory);
     }
     lifecycle.setDisplayedSession(options.getDisplayedSessionId?.() ?? null);
+    lifecycle.setDisplayedDirectory(displayedDirectory);
 
     await ensureReachable();
     if (disposed) return;
@@ -672,10 +671,6 @@ export async function createTuiPaneWiring(
       logHostUnreachable(logger, onceGate, admission.adapter, event.sessionId);
       return;
     }
-    // An event may be the first thing to observe the host coming back: the
-    // owed sweep runs here, before the event itself is handled.
-    await drainDueSweep();
-    if (disposed) return;
     await lifecycle.handleEvent(event);
   };
 
@@ -694,8 +689,8 @@ export async function createTuiPaneWiring(
   }
 
   // FR-7 trigger: the bus has no reconnect signal, so reconcile runs once at
-  // startup and then on a low-frequency cadence (bounded server-list diff
-  // only). Disposal clears the tracked clock, stopping the chain.
+  // startup and then on a low-frequency cadence. Disposal clears the tracked
+  // clock, stopping the chain.
   let reconcileHandle: ClockTimerHandle | null = null;
   const scheduleReconcile = (): void => {
     if (disposed) return;
@@ -709,6 +704,7 @@ export async function createTuiPaneWiring(
     // The route can move while the event stream is quiet; reconcile against
     // the session this client displays *now*, not the last one an event saw.
     lifecycle.setDisplayedSession(options.getDisplayedSessionId?.() ?? null);
+    lifecycle.setDisplayedDirectory(getDirectory());
     await ensureReachable();
     if (disposed) return;
     if (hostState === 'reachable') {
@@ -772,15 +768,13 @@ function withDirectory(
   event: SessionLifecycleEvent,
   knownDirectories: ReadonlyMap<string, string>,
   lifecycle: PaneLifecycle,
-  directory: string,
 ): SessionLifecycleEvent {
   if (event.directory !== undefined) return event;
   if (knownDirectories.has(event.sessionId)) {
     return { ...event, directory: knownDirectories.get(event.sessionId) };
   }
-  if (lifecycle.getPane(event.sessionId) !== undefined) {
-    return { ...event, directory };
-  }
+  const directory = lifecycle.directoryOf(event.sessionId);
+  if (directory !== undefined) return { ...event, directory };
   return event;
 }
 
@@ -990,9 +984,15 @@ function createSessionListReader(
       }
       try {
         const response = await withTimeout(
-          fetchFn(new URL('/session', baseUrl).toString(), {
-            headers: directoryHeaders(directory),
-          }),
+          fetchFn(
+            new URL(
+              `/session/${encodeURIComponent(parentID)}/children`,
+              baseUrl,
+            ).toString(),
+            {
+              headers: directoryHeaders(directory),
+            },
+          ),
           timeoutMs,
         );
         if (response.ok !== true) {
@@ -1007,7 +1007,7 @@ function createSessionListReader(
         }
         const sessions: SessionListEntry[] = [];
         for (const entry of data) {
-          if (!isRecord(entry) || entry.parentID !== parentID) continue;
+          if (!isRecord(entry)) continue;
           if (typeof entry.id !== 'string') continue;
           const subagentType =
             typeof entry.agent === 'string' && entry.agent.length > 0

@@ -141,6 +141,10 @@ describe('TmuxMultiplexer', () => {
     const splitCommand = commandContaining('split-window');
     expect(splitCommand).toContain('%1');
     expect(splitCommand).toContain('/usr/bin/tmux');
+    expect(splitCommand).not.toContain('-e');
+    expect(splitCommand?.at(-1)).toMatch(
+      /^env OPENCODE_DISABLE_TERMINAL_TITLE=1 /,
+    );
   });
 
   test('spawnPane re-resolves the anchor from the environment at spawn time', async () => {

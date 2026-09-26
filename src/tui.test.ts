@@ -18,6 +18,7 @@ import {
   getSidebarReusableTargets,
   isRefreshCurrent,
   makeRouteNavigator,
+  paneWiringOptions,
   readCompactSidebar,
   readConfigInvalid,
   resolveHoverBackground,
@@ -46,6 +47,32 @@ import {
 const ACTIVITY_FRAME_PATTERN = /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/;
 
 describe('TUI multiplexer directory scope', () => {
+  test('returns the pane teardown promise to the TUI host', async () => {
+    const disposers: Array<() => void | Promise<void>> = [];
+    await tuiPlugin.tui(
+      {
+        state: { path: { directory: process.cwd() } },
+        route: { current: { name: 'home' } },
+        lifecycle: {
+          onDispose: (callback: () => void | Promise<void>) => {
+            disposers.push(callback);
+            return () => {};
+          },
+        },
+        renderer: { requestRender: () => {} },
+        slots: { register: () => 'test-slot' },
+        theme: { current: {} },
+      } as Parameters<typeof tuiPlugin.tui>[0],
+      {},
+      { version: 'test' } as Parameters<typeof tuiPlugin.tui>[2],
+    );
+    try {
+      expect(disposers.at(-1)?.()).toBeInstanceOf(Promise);
+    } finally {
+      for (const dispose of disposers) await dispose();
+    }
+  });
+
   test('uses the displayed session directory when launch scope differs', () => {
     expect(
       resolveTuiPaneDirectory({
@@ -74,6 +101,23 @@ describe('TUI multiplexer directory scope', () => {
         },
       }),
     ).toBe('/home/user/project');
+  });
+
+  test('passes route-derived directory and session getters to pane wiring', () => {
+    const api = {
+      route: { current: { name: 'session', params: { sessionID: 'a' } } },
+      state: {
+        path: { directory: '/launch' },
+        session: { get: (id: string) => ({ directory: `/sessions/${id}` }) },
+      },
+    };
+    const options = paneWiringOptions(api);
+    expect(options.directory).toBe('/sessions/a');
+    expect(options.getDirectory()).toBe('/sessions/a');
+    expect(options.getDisplayedSessionId()).toBe('a');
+    api.route.current.params.sessionID = 'b';
+    expect(options.getDirectory()).toBe('/sessions/b');
+    expect(options.getDisplayedSessionId()).toBe('b');
   });
 });
 

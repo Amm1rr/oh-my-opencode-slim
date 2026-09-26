@@ -238,7 +238,7 @@ function decodeDirectoryHeader(
 }
 
 /**
- * Fake fetch surface for `/session/status` and `/session` reads. The wiring
+ * Fake fetch surface for `/session/status` and `/session/{id}/children` reads. The wiring
  * routes directory reads by the pre-encoded `x-opencode-directory` header, so
  * the fake records both the raw header and the decoded directory.
  */
@@ -250,10 +250,17 @@ function fakeFetch(state: FakeClientState): FetchLike {
       state.statusHeaders.push(init?.headers);
       return { ok: true, json: async () => state.statuses };
     }
-    if (path === '/session') {
+    if (path.startsWith('/session/') && path.endsWith('/children')) {
       state.listCalls.push(decodeDirectoryHeader(init?.headers));
       state.listHeaders.push(init?.headers);
-      return { ok: true, json: async () => state.sessions };
+      const parentID = decodeURIComponent(
+        path.slice('/session/'.length, -'/children'.length),
+      );
+      return {
+        ok: true,
+        json: async () =>
+          state.sessions.filter((session) => session.parentID === parentID),
+      };
     }
     return { ok: false };
   };
@@ -374,6 +381,7 @@ async function createHarness(
     isProcessAlive?: (pid: number) => boolean;
     isSessionTerminal?: (childSessionId: string) => Promise<boolean>;
     getDisplayedSessionId?: () => string | null | undefined;
+    getDirectory?: () => string;
   } = {},
 ): Promise<Harness> {
   const state = options.state ?? createClientState();
@@ -404,6 +412,7 @@ async function createHarness(
   const wiring = await createTuiPaneWiring({
     directory: DIRECTORY,
     getDisplayedSessionId: options.getDisplayedSessionId ?? (() => PARENT),
+    getDirectory: options.getDirectory,
     eventBus: bus,
     client: options.client ?? fakeHostClient(state),
     env: options.env ?? { TMUX_PANE: '%1' },
@@ -829,6 +838,59 @@ describe('embedded host fail-closed (D3)', () => {
 });
 
 describe('event handling and dispose', () => {
+  test('uses a new route directory for a created event before the reconcile tick', async () => {
+    let directory = DIRECTORY;
+    let parent = PARENT;
+    const h = await createHarness({
+      getDirectory: () => directory,
+      getDisplayedSessionId: () => parent,
+    });
+    directory = '/session-project-b';
+    parent = 'parent-b';
+    h.bus.emit('session.created', createdEvent('child-b', parent, directory));
+    h.state.statuses['child-b'] = { type: 'busy' };
+    await flush();
+    expect(h.adapters.get('tmux')?.spawns.at(-1)?.directory).toBe(directory);
+    expect(h.adapters.get('tmux')?.spawns.at(-1)?.parentSessionId).toBe(parent);
+    await h.wiring.dispose();
+  });
+  test('a TUI launched in A creates panes for the displayed session in B', async () => {
+    const displayedDirectory = '/session-project-b';
+    const state = createClientState({
+      statuses: { [CHILD]: { type: 'busy' } },
+    });
+    const h = await createHarness({
+      state,
+      getDirectory: () => displayedDirectory,
+    });
+    h.bus.emit(
+      'session.created',
+      createdEvent(CHILD, PARENT, displayedDirectory),
+    );
+    await flush();
+    expect(h.adapters.get('tmux')?.spawns.at(-1)?.directory).toBe(
+      displayedDirectory,
+    );
+    expect(state.statusCalls).toContain(displayedDirectory);
+    await h.wiring.dispose();
+  });
+
+  test('a pane from A still closes after switching the displayed session to B', async () => {
+    let displayedDirectory = DIRECTORY;
+    const h = await createHarness({ getDirectory: () => displayedDirectory });
+    h.bus.emit('session.created', createdEvent());
+    await flush();
+    displayedDirectory = '/session-project-b';
+    h.state.statuses[CHILD] = { type: 'idle' };
+    h.bus.emit('session.idle', idleEvent());
+    await flush();
+    h.clock.advance(40);
+    await flush();
+    expect(h.adapters.get('tmux')?.closes).toEqual([PANE_ID]);
+    expect(h.state.statusCalls.at(-1)).toBe(DIRECTORY);
+    await h.wiring.dispose();
+  });
+
   test('directory-less idle reaches a held pane and closes it on stable idle', async () => {
     const h = await createHarness();
     h.bus.emit('session.created', createdEvent());
@@ -1085,6 +1147,67 @@ describe('default adapter factory', () => {
 });
 
 describe('FR-7 reconcile trigger', () => {
+  test('a reconcile tick reads the current displayed session directory', async () => {
+    let displayedDirectory = DIRECTORY;
+    let displayedSession = PARENT;
+    const state = createClientState();
+    const h = await createHarness({
+      state,
+      getDirectory: () => displayedDirectory,
+      getDisplayedSessionId: () => displayedSession,
+    });
+    await flush();
+    displayedDirectory = '/session-project-b';
+    displayedSession = 'parent-b';
+    state.sessions = [{ id: 'child-b', parentID: displayedSession }];
+    state.statuses['child-b'] = { type: 'busy' };
+    h.clock.advance(30_000);
+    await flush();
+    expect(state.listCalls.at(-1)).toBe(displayedDirectory);
+    expect(state.statusCalls.at(-1)).toBe(displayedDirectory);
+    expect(h.adapters.get('tmux')?.spawns.at(-1)?.directory).toBe(
+      displayedDirectory,
+    );
+    await h.wiring.dispose();
+  });
+
+  test('reconciles using the unpaged parent children route and directory header', async () => {
+    const state = createClientState({
+      sessions: [{ id: CHILD, parentID: PARENT }],
+    });
+    const requests: string[] = [];
+    const fetch = fakeFetch(state);
+    const h = await createHarness({
+      state,
+      fetchFn: (url, init) => {
+        requests.push(new URL(url).pathname);
+        return fetch(url, init);
+      },
+    });
+    await flush();
+    expect(requests).toContain(`/session/${PARENT}/children`);
+    expect(requests).not.toContain('/session');
+    expect(state.listHeaders.at(-1)).toEqual({
+      'x-opencode-directory': '%2Fproject',
+    });
+    await h.wiring.dispose();
+  });
+
+  test('a backfilled idle child receives a directory-less resume event', async () => {
+    const state = createClientState({
+      statuses: {},
+      sessions: [{ id: CHILD, parentID: PARENT }],
+    });
+    const h = await createHarness({ state });
+    await flush();
+    expect(h.adapters.get('tmux')?.spawns).toHaveLength(0);
+    state.statuses[CHILD] = { type: 'busy' };
+    h.bus.emit('session.status', statusEvent());
+    await flush();
+    expect(h.adapters.get('tmux')?.spawns).toHaveLength(1);
+    await h.wiring.dispose();
+  });
+
   test('reconciles once at startup and again on the periodic cadence', async () => {
     const h = await createHarness({ reconcileIntervalMs: 30_000 });
     await flush();
@@ -1148,6 +1271,24 @@ describe('FR-7 reconcile trigger', () => {
     expect(h.adapters.get('tmux')?.spawns).toHaveLength(2);
   });
 
+  test('backfilled idle watch survives directory-cache eviction', async () => {
+    const state = createClientState({
+      statuses: { [CHILD]: { type: 'idle' } },
+      sessions: [{ id: CHILD, parentID: PARENT }],
+    });
+    const h = await createHarness({ state });
+    await flush();
+    for (let i = 0; i < 256; i += 1) {
+      h.bus.emit('session.created', createdEvent(`other-${i}`, 'other-parent'));
+    }
+    await flush();
+    state.statuses[CHILD] = { type: 'busy' };
+    h.bus.emit('session.status', statusEvent(CHILD, 'busy'));
+    await flush();
+    expect(h.adapters.get('tmux')?.spawns).toHaveLength(1);
+    await h.wiring.dispose();
+  });
+
   test('backfill keeps the agent field from the session list (3.4)', async () => {
     const state = createClientState({
       sessions: [{ id: CHILD, parentID: PARENT, agent: 'explorer' }],
@@ -1197,6 +1338,43 @@ describe('FR-7 reconcile trigger', () => {
 });
 
 describe('FR-8 leftover sweep', () => {
+  test('a pending recovery sweep cannot reorder created then deleted into a ghost pane', async () => {
+    let reachable = false;
+    let releaseSweep: () => void = () => {};
+    const sweepAdapter: SweepAdapter = {
+      async listPanesWithTitles() {
+        await new Promise<void>((resolve) => {
+          releaseSweep = resolve;
+        });
+        return [];
+      },
+      async closePane() {
+        return true;
+      },
+    };
+    const state = createClientState();
+    const serve = fakeFetch(state);
+    const h = await createHarness({
+      state,
+      fetchFn: (url, init) =>
+        reachable ? serve(url, init) : Promise.resolve({ ok: false }),
+      sweepAdapter,
+    });
+    await flush();
+    reachable = true;
+    h.clock.advance(5_000);
+    h.bus.emit('session.created', createdEvent());
+    await flush();
+    h.bus.emit('session.deleted', deletedEvent());
+    await flush();
+    releaseSweep();
+    await flush();
+    expect(h.adapters.get('tmux')?.spawns).toHaveLength(1);
+    expect(h.adapters.get('tmux')?.closes).toEqual([PANE_ID]);
+    expect(h.wiring.lifecycle?.getPane(CHILD)).toBeUndefined();
+    await h.wiring.dispose();
+  });
+
   test('startup sweep closes only dead-owner terminal leftovers', async () => {
     const state = createClientState({
       getResults: { ses_gone: 'notfound', ses_alive: 'found' },
@@ -1297,11 +1475,14 @@ describe('FR-8 leftover sweep', () => {
     await flush();
     expect(h.adapters.get('tmux')?.closes).toEqual([]);
 
-    // The host comes back; the next event observes the transition and the
-    // owed sweep runs once.
+    // The event observes recovery, but only the next reconcile tick drains
+    // the owed sweep; the event itself must not wait behind a terminal scan.
     reachable = true;
     h.clock.advance(5_000);
     h.bus.emit('session.created', createdEvent());
+    await flush();
+    expect(h.adapters.get('tmux')?.closes).toEqual([]);
+    h.clock.advance(30_000);
     await flush();
     expect(h.adapters.get('tmux')?.closes).toEqual(['pane-leftover']);
 

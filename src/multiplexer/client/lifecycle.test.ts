@@ -327,7 +327,29 @@ async function activatePane(h: Harness): Promise<void> {
   await h.lifecycle.handleEvent(createdEvent());
 }
 
+function uniquePaneIds(h: Harness): void {
+  const spawn = h.adapter.spawnPane.bind(h.adapter);
+  let next = 0;
+  h.adapter.spawnPane = async (...args) => {
+    const result = await spawn(...args);
+    return result.success ? { ...result, paneId: `pane-${++next}` } : result;
+  };
+}
+
 describe('event filtering and readiness (2.2)', () => {
+  test('a held pane still closes using its own directory after a route switch', async () => {
+    const h = createHarness();
+    await activatePane(h);
+    h.lifecycle.setDisplayedSession('parent-in-b');
+    h.lifecycle.setDisplayedDirectory('/project-b');
+    h.reader.statuses.set(CHILD, 'idle');
+    await h.lifecycle.handleEvent(lifecycleEvent('idle'));
+    h.clock.advance(STABLE_IDLE_MS);
+    await flushAsync();
+    expect(h.reader.calls.at(-1)).toBe(DIRECTORY);
+    expect(h.adapter.closeCalls).toEqual(['pane-1']);
+  });
+
   test('ignores created events from another directory with no pane action', async () => {
     const h = createHarness();
     await h.lifecycle.handleEvent(
@@ -713,6 +735,171 @@ describe('dedup and stable-idle close (2.3)', () => {
     expect(h.lifecycle.getPane(CHILD)).toBeDefined();
   });
 
+  test('retries a failed idle close, then removes the pane', async () => {
+    const h = createHarness();
+    await activatePane(h);
+    h.reader.statuses.set(CHILD, 'idle');
+    h.adapter.closeResult = false;
+    await h.lifecycle.handleEvent(lifecycleEvent('idle'));
+    h.clock.advance(STABLE_IDLE_MS);
+    await flushAsync();
+    expect(h.adapter.closeCalls).toHaveLength(1);
+    expect(h.clock.pendingTimers).toBe(1);
+
+    h.adapter.closeResult = true;
+    h.clock.advance(1000);
+    await flushAsync();
+    expect(h.adapter.closeCalls).toHaveLength(2);
+    expect(h.lifecycle.getPane(CHILD)).toBeUndefined();
+  });
+
+  test('retries a failed terminal close after switching parents', async () => {
+    const h = createHarness();
+    await activatePane(h);
+    h.adapter.closeResult = false;
+    await h.lifecycle.handleEvent(lifecycleEvent('deleted'));
+    h.lifecycle.setDisplayedSession('other-parent');
+    h.adapter.closeResult = true;
+    h.clock.advance(1000);
+    await flushAsync();
+    expect(h.adapter.closeCalls).toHaveLength(2);
+    expect(h.lifecycle.getPane(CHILD)).toBeUndefined();
+  });
+
+  test('a busy edge cannot cancel the retry of a failed deleted close', async () => {
+    const h = createHarness();
+    await activatePane(h);
+    h.adapter.closeResult = false;
+    await h.lifecycle.handleEvent(lifecycleEvent('deleted'));
+    await h.lifecycle.handleEvent(lifecycleEvent('status', { status: 'busy' }));
+    h.adapter.closeResult = true;
+    h.clock.advance(1000);
+    await flushAsync();
+    expect(h.adapter.closeCalls).toHaveLength(2);
+    expect(h.lifecycle.getPane(CHILD)).toBeUndefined();
+  });
+
+  test('retries an unavailable close adapter when it returns', async () => {
+    const h = createHarness();
+    await activatePane(h);
+    h.factory.adapter = null;
+    await h.lifecycle.handleEvent(lifecycleEvent('deleted'));
+    h.factory.adapter = h.adapter;
+    h.clock.advance(1000);
+    await flushAsync();
+    expect(h.adapter.closeCalls).toEqual(['pane-1']);
+    expect(h.lifecycle.getPane(CHILD)).toBeUndefined();
+  });
+
+  test('retries the pre-close read error without closing on unverifiable state', async () => {
+    const h = createHarness();
+    await activatePane(h);
+    await h.lifecycle.handleEvent(lifecycleEvent('idle'));
+    h.reader.error = 'temporary failure';
+    h.clock.advance(STABLE_IDLE_MS);
+    await flushAsync();
+    expect(h.adapter.closeCalls).toHaveLength(0);
+    expect(h.clock.pendingTimers).toBe(1);
+    h.reader.error = undefined;
+    h.reader.statuses.set(CHILD, 'idle');
+    h.clock.advance(1000);
+    await flushAsync();
+    expect(h.adapter.closeCalls).toHaveLength(1);
+    expect(h.lifecycle.getPane(CHILD)).toBeUndefined();
+  });
+
+  test('a busy edge cancels a failed-close retry; repeated failures stop at four attempts', async () => {
+    const h = createHarness();
+    await activatePane(h);
+    h.reader.statuses.set(CHILD, 'idle');
+    h.adapter.closeResult = false;
+    await h.lifecycle.handleEvent(lifecycleEvent('idle'));
+    h.clock.advance(STABLE_IDLE_MS);
+    await flushAsync();
+    await h.lifecycle.handleEvent(lifecycleEvent('status', { status: 'busy' }));
+    h.clock.advance(1000);
+    await flushAsync();
+    expect(h.adapter.closeCalls).toHaveLength(1);
+    expect(h.clock.pendingTimers).toBe(0);
+
+    await h.lifecycle.handleEvent(lifecycleEvent('idle'));
+    h.clock.advance(STABLE_IDLE_MS);
+    await flushAsync();
+    for (let i = 0; i < 3; i += 1) {
+      h.clock.advance(1000);
+      await flushAsync();
+    }
+    expect(h.adapter.closeCalls).toHaveLength(5); // one cancelled, four in the new sequence
+    expect(h.clock.pendingTimers).toBe(0);
+  });
+
+  test('deletion gets a fresh retry budget after three failed idle closes', async () => {
+    const h = createHarness();
+    await activatePane(h);
+    h.adapter.closeResult = false;
+    h.reader.statuses.set(CHILD, 'idle');
+    await h.lifecycle.handleEvent(lifecycleEvent('idle'));
+    h.clock.advance(STABLE_IDLE_MS);
+    await flushAsync();
+    for (let i = 0; i < 2; i += 1) {
+      h.clock.advance(1000);
+      await flushAsync();
+    }
+    expect(h.adapter.closeCalls).toHaveLength(3);
+    await h.lifecycle.handleEvent(lifecycleEvent('deleted'));
+    h.adapter.closeResult = true;
+    h.clock.advance(1000);
+    await flushAsync();
+    expect(h.adapter.closeCalls).toHaveLength(5);
+    expect(h.lifecycle.getPane(CHILD)).toBeUndefined();
+  });
+
+  test('busy during a successful idle close rebuilds once, not after the next close', async () => {
+    const h = createHarness();
+    uniquePaneIds(h);
+    await activatePane(h);
+    h.reader.statuses.set(CHILD, 'idle');
+    await h.lifecycle.handleEvent(lifecycleEvent('idle'));
+    const barrier = createDeferred();
+    h.adapter.closeBarrier = barrier.promise;
+    h.clock.advance(STABLE_IDLE_MS);
+    await flushAsync();
+    h.reader.statuses.set(CHILD, 'busy');
+    await h.lifecycle.handleEvent(lifecycleEvent('status', { status: 'busy' }));
+    barrier.resolve();
+    await flushAsync();
+    expect(h.adapter.spawnCalls).toHaveLength(2);
+    h.reader.statuses.set(CHILD, 'idle');
+    await h.lifecycle.handleEvent(lifecycleEvent('idle'));
+    h.clock.advance(STABLE_IDLE_MS);
+    await flushAsync();
+    expect(h.adapter.spawnCalls).toHaveLength(2);
+    expect(h.lifecycle.getPane(CHILD)).toBeUndefined();
+  });
+
+  test('a failed close after a busy edge does not spuriously rebuild', async () => {
+    const h = createHarness();
+    await activatePane(h);
+    h.reader.statuses.set(CHILD, 'idle');
+    await h.lifecycle.handleEvent(lifecycleEvent('idle'));
+    const barrier = createDeferred();
+    h.adapter.closeBarrier = barrier.promise;
+    h.adapter.closeResult = false;
+    h.clock.advance(STABLE_IDLE_MS);
+    await flushAsync();
+    await h.lifecycle.handleEvent(lifecycleEvent('status', { status: 'busy' }));
+    barrier.resolve();
+    h.adapter.closeBarrier = null;
+    await flushAsync();
+    h.adapter.closeResult = true;
+    h.reader.statuses.set(CHILD, 'idle');
+    await h.lifecycle.handleEvent(lifecycleEvent('idle'));
+    h.clock.advance(STABLE_IDLE_MS);
+    await flushAsync();
+    expect(h.adapter.spawnCalls).toHaveLength(1);
+    expect(h.lifecycle.getPane(CHILD)).toBeUndefined();
+  });
+
   test('closes immediately on a deleted event without waiting for the window', async () => {
     const h = createHarness();
     await activatePane(h);
@@ -741,9 +928,213 @@ describe('dedup and stable-idle close (2.3)', () => {
     expect(h.adapter.closeCalls).toEqual(['pane-1']);
     expect(h.lifecycle.getPane(CHILD)).toBeUndefined();
   });
+
+  test("a deletion during the child's own spawn survives tombstone eviction", async () => {
+    const h = createHarness();
+    h.reader.statuses.set(CHILD, 'busy');
+    const barrier = createDeferred();
+    h.adapter.spawnBarrier = barrier.promise;
+    const pending = h.lifecycle.handleEvent(createdEvent());
+    await flushAsync();
+    expect(h.adapter.spawnCalls).toHaveLength(1);
+    await h.lifecycle.handleEvent(lifecycleEvent('deleted'));
+    for (let i = 0; i < 64; i += 1) {
+      await h.lifecycle.handleEvent(
+        lifecycleEvent('deleted', { sessionId: `other-${i}` }),
+      );
+    }
+    barrier.resolve();
+    await pending;
+    expect(h.adapter.closeCalls).toEqual(['pane-1']);
+    expect(h.lifecycle.getPane(CHILD)).toBeUndefined();
+  });
+
+  test('deletion during spawn is terminal even after the pane closes', async () => {
+    const h = createHarness();
+    h.reader.statuses.set(CHILD, 'busy');
+    const barrier = createDeferred();
+    h.adapter.spawnBarrier = barrier.promise;
+    const pending = h.lifecycle.handleEvent(createdEvent());
+    await flushAsync();
+    await h.lifecycle.handleEvent(lifecycleEvent('deleted'));
+    barrier.resolve();
+    await pending;
+    await h.lifecycle.handleEvent(lifecycleEvent('status', { status: 'busy' }));
+    expect(h.adapter.spawnCalls).toHaveLength(1);
+    expect(h.lifecycle.getPane(CHILD)).toBeUndefined();
+  });
 });
 
 describe('rebuild and reconnect backfill (2.4)', () => {
+  test('a watch retains its original directory after switching away and back', async () => {
+    const h = createHarness();
+    await activatePane(h);
+    h.reader.statuses.set(CHILD, 'idle');
+    await h.lifecycle.handleEvent(lifecycleEvent('idle'));
+    h.clock.advance(STABLE_IDLE_MS);
+    await flushAsync();
+    h.lifecycle.setDisplayedDirectory('/project-b');
+    h.lifecycle.setDisplayedSession('parent-b');
+    h.lifecycle.setDisplayedDirectory(DIRECTORY);
+    h.lifecycle.setDisplayedSession(PARENT);
+    h.reader.statuses.set(CHILD, 'busy');
+    await h.lifecycle.handleEvent(lifecycleEvent('status', { status: 'busy' }));
+    expect(h.adapter.spawnCalls.at(-1)?.directory).toBe(DIRECTORY);
+  });
+
+  test('a readiness timeout becomes a watch and a later busy edge creates the pane', async () => {
+    const h = createHarness();
+    const pending = h.lifecycle.handleEvent(createdEvent());
+    for (let i = 0; i < 2; i += 1) {
+      await flushAsync();
+      h.clock.advance(RETRY_DELAY_MS);
+    }
+    await pending;
+    expect(noPaneReasons(h.logger)).toContain('readiness-timeout');
+    h.reader.statuses.set(CHILD, 'busy');
+    await h.lifecycle.handleEvent(lifecycleEvent('status', { status: 'busy' }));
+    expect(h.adapter.spawnCalls).toHaveLength(1);
+  });
+
+  test('reconnect reads status once for N idle children without readiness probes', async () => {
+    const h = createHarness();
+    h.list.setSessionIds('idle-1', 'idle-2', 'idle-3');
+    await h.lifecycle.onReconnect();
+    expect(h.reader.calls).toEqual([DIRECTORY]);
+    expect(h.adapter.spawnCalls).toHaveLength(0);
+    expect(noPaneReasons(h.logger)).not.toContain('readiness-timeout');
+    expect(h.clock.pendingTimers).toBe(0);
+  });
+
+  test('an idle child found at reconnect spawns immediately on resume', async () => {
+    const tracked: Array<{ sessionId: string; directory: string }> = [];
+    const h = createHarness({
+      ports: {
+        onChildTracked: (sessionId, directory) =>
+          tracked.push({ sessionId, directory }),
+      },
+    });
+    h.list.setSessionIds(CHILD);
+    await h.lifecycle.onReconnect();
+    expect(tracked).toEqual([{ sessionId: CHILD, directory: DIRECTORY }]);
+    expect(h.adapter.spawnCalls).toHaveLength(0);
+    h.reader.statuses.set(CHILD, 'busy');
+    await h.lifecycle.handleEvent(lifecycleEvent('status', { status: 'busy' }));
+    expect(h.adapter.spawnCalls).toHaveLength(1);
+  });
+
+  test('busy backfill does not re-run readiness for each child', async () => {
+    const h = createHarness();
+    h.list.setSessionIds(CHILD, 'child-2');
+    h.reader.statuses.set(CHILD, 'busy');
+    h.reader.statuses.set('child-2', 'retry');
+    await h.lifecycle.onReconnect();
+    expect(h.reader.calls).toEqual([DIRECTORY]);
+    expect(h.adapter.spawnCalls).toHaveLength(2);
+  });
+
+  test('a child going idle before its turn in busy backfill closes after debounce', async () => {
+    const h = createHarness();
+    uniquePaneIds(h);
+    h.list.setSessionIds(CHILD, 'child-2');
+    h.reader.statuses.set(CHILD, 'busy');
+    h.reader.statuses.set('child-2', 'busy');
+    const barrier = createDeferred();
+    h.adapter.spawnBarrier = barrier.promise;
+    const reconnect = h.lifecycle.onReconnect();
+    await flushAsync();
+    h.reader.statuses.set('child-2', 'idle');
+    await h.lifecycle.handleEvent(
+      lifecycleEvent('idle', { sessionId: 'child-2' }),
+    );
+    barrier.resolve();
+    await reconnect;
+    expect(h.adapter.spawnCalls).toHaveLength(2);
+    h.clock.advance(STABLE_IDLE_MS);
+    await flushAsync();
+    expect(h.adapter.closeCalls).toEqual(['pane-2']);
+    expect(h.lifecycle.getPane('child-2')).toBeUndefined();
+    expect(h.lifecycle.getPane(CHILD)).toBeDefined();
+  });
+
+  test('a watched child created during another watched backfill is not duplicated', async () => {
+    const h = createHarness();
+    uniquePaneIds(h);
+    h.list.setSessionIds(CHILD, 'child-2');
+    await h.lifecycle.onReconnect(); // both are idle watches
+    h.reader.statuses.set(CHILD, 'busy');
+    h.reader.statuses.set('child-2', 'busy');
+    const barrier = createDeferred();
+    const spawn = h.adapter.spawnPane.bind(h.adapter);
+    h.adapter.spawnPane = async (...args) => {
+      if (args[0] === CHILD) await barrier.promise;
+      return spawn(...args);
+    };
+    const reconnect = h.lifecycle.onReconnect();
+    await flushAsync();
+    await h.lifecycle.handleEvent(
+      lifecycleEvent('status', { sessionId: 'child-2', status: 'busy' }),
+    );
+    barrier.resolve();
+    await reconnect;
+    expect(
+      h.adapter.spawnCalls.filter((call) => call.sessionId === 'child-2'),
+    ).toHaveLength(1);
+    expect(h.adapter.spawnCalls).toHaveLength(2);
+  });
+
+  test('a stale reconnect snapshot cannot close a pane created during the read', async () => {
+    const h = createHarness();
+    const barrier = createDeferred();
+    h.list.listBarrier = barrier.promise;
+    const reconnect = h.lifecycle.onReconnect();
+    await flushAsync();
+    await activatePane(h);
+    barrier.resolve();
+    await reconnect;
+    expect(h.adapter.closeCalls).toHaveLength(0);
+    expect(h.lifecycle.getPane(CHILD)).toBeDefined();
+  });
+
+  test('a queued backfill child deleted during another spawn never spawns', async () => {
+    const h = createHarness();
+    h.list.setSessionIds(CHILD, 'child-2');
+    h.reader.statuses.set(CHILD, 'busy');
+    h.reader.statuses.set('child-2', 'busy');
+    const barrier = createDeferred();
+    h.adapter.spawnBarrier = barrier.promise;
+    const reconnect = h.lifecycle.onReconnect();
+    await flushAsync();
+    await h.lifecycle.handleEvent(
+      lifecycleEvent('deleted', { sessionId: 'child-2' }),
+    );
+    barrier.resolve();
+    await reconnect;
+    expect(
+      h.adapter.spawnCalls.filter((call) => call.sessionId === 'child-2'),
+    ).toHaveLength(0);
+  });
+
+  test('a deleted held child is never backfilled after an in-flight status read', async () => {
+    const h = createHarness();
+    await activatePane(h);
+    h.reader.statuses.set(CHILD, 'idle');
+    await h.lifecycle.handleEvent(lifecycleEvent('idle'));
+    const barrier = createDeferred();
+    h.reader.readBarrier = barrier.promise;
+    h.clock.advance(STABLE_IDLE_MS);
+    await flushAsync();
+    await h.lifecycle.handleEvent(lifecycleEvent('deleted'));
+    barrier.resolve();
+    h.reader.readBarrier = null;
+    await flushAsync();
+    h.list.setSessionIds(CHILD);
+    h.reader.statuses.set(CHILD, 'busy');
+    await h.lifecycle.onReconnect();
+    expect(h.adapter.spawnCalls).toHaveLength(1);
+    expect(h.lifecycle.getPane(CHILD)).toBeUndefined();
+  });
+
   test('rebuilds with a freshly resolved anchor after the display position moves', async () => {
     const h = createHarness();
     await activatePane(h);
