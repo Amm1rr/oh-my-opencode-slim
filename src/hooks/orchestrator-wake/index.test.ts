@@ -30,8 +30,13 @@ import {
   STOPPED_RECOVERY_WAKE_CHUNK,
 } from './index';
 import {
+  commitWakeReservation,
   getWakeProgress,
+  releaseWakeEvaluation,
   resetOrchestratorWakeGateForTests,
+  retryAfterWakeEvaluation,
+  rollbackWakeReservation,
+  tryBeginWakeEvaluation,
 } from './wake-gate';
 
 type SessionClient = {
@@ -233,6 +238,30 @@ describe('buildOrchestratorWakeFingerprint', () => {
 });
 
 describe('orchestrator wake scheduler', () => {
+  test('only the reservation owner can roll back a failed send without releasing waiters', () => {
+    const sessionID = 'guarded';
+    const owner = tryBeginWakeEvaluation(sessionID);
+    expect(owner).not.toBeNull();
+    if (!owner) return;
+    const waiter = mock(() => {});
+    retryAfterWakeEvaluation(sessionID, waiter);
+    getWakeProgress(sessionID).lastFingerprint = 'same-fingerprint';
+    getWakeProgress(sessionID).unchangedWakeCount = 1;
+    expect(commitWakeReservation(sessionID, owner, 'same-fingerprint')).toBe(
+      true,
+    );
+    expect(
+      commitWakeReservation(sessionID, Symbol('stranger'), 'same-fingerprint'),
+    ).toBe(false);
+    rollbackWakeReservation(sessionID, Symbol('stranger'));
+    expect(getWakeProgress(sessionID).unchangedWakeCount).toBe(2);
+    expect(getWakeProgress(sessionID).stopped).toBe(true);
+    rollbackWakeReservation(sessionID, owner);
+    expect(getWakeProgress(sessionID).unchangedWakeCount).toBe(1);
+    expect(getWakeProgress(sessionID).stopped).toBe(false);
+    releaseWakeEvaluation(sessionID, owner);
+    expect(waiter).not.toHaveBeenCalled();
+  });
   test('immediately wakes an idle parent after a stopped child with an active sibling', async () => {
     const promptAsync = mock(async () => ({}));
     const { scheduler } = createScheduler({
@@ -505,6 +534,42 @@ describe('orchestrator wake scheduler', () => {
     )[1]?.[0];
     expect(secondCall?.body.parts[0]?.text).toContain('task: ses_a');
   });
+
+  test.each(['v1', 'v2'] as const)(
+    '%s failed recovery retries the pending batch on its own timer',
+    async (flavor) => {
+      let fail = true;
+      const promptAsync = mock(async () => {
+        if (fail) throw new Error('temporary refusal');
+        return {};
+      });
+      const { scheduler } = createScheduler({
+        hostFlavor: flavor,
+        sessionClient:
+          flavor === 'v2'
+            ? makeV2Client({
+                promptAsync,
+                listChildren: [{ id: 'done', outcome: 'succeeded' }],
+              })
+            : makeClient({
+                promptAsync,
+                todos: [{ id: 't1', status: 'completed' }],
+              }),
+      });
+      scheduler.triggerStoppedJobRecovery('p1', 'recovery: ses_a', 'ses_a:1');
+      await clock.advance(0);
+      expect(promptAsync).toHaveBeenCalledTimes(1);
+      fail = false;
+      await clock.advance(60_000);
+      expect(promptAsync).toHaveBeenCalledTimes(2);
+      const secondCall = (
+        promptAsync.mock.calls as unknown as Array<
+          [{ body: { parts: Array<{ text: string }> } }]
+        >
+      )[1]?.[0];
+      expect(secondCall?.body.parts[0]?.text).toContain('recovery: ses_a');
+    },
+  );
 
   test('a delivered recovery does not re-fire on the next idle', async () => {
     const promptAsync = mock(async () => ({}));
@@ -1542,6 +1607,34 @@ describe('orchestrator wake scheduler', () => {
     await clock.advance(59_000);
     expect(calls).toBe(2);
   });
+
+  test.each(['v1', 'v2'] as const)(
+    '%s failed wake sends do not consume the progress cap',
+    async (flavor) => {
+      const promptAsync = mock(async () => {
+        throw new Error('transport down');
+      });
+      const { scheduler } = createScheduler({
+        hostFlavor: flavor,
+        sessionClient:
+          flavor === 'v2'
+            ? makeV2Client({
+                promptAsync,
+                listChildren: [{ id: 'child', time: { updated: Date.now() } }],
+              })
+            : makeClient({ promptAsync }),
+      });
+      await scheduler.event({
+        event: { type: 'session.idle', properties: { sessionID: 'p1' } },
+      });
+      for (let i = 0; i < 4; i++) {
+        await clock.advance(60_000);
+        expect(promptAsync).toHaveBeenCalledTimes(i + 1);
+        expect(getWakeProgress('p1').stopped).toBe(false);
+      }
+      expect(getWakeProgress('p1').unchangedWakeCount).toBe(0);
+    },
+  );
 
   test('two hook instances share process-global in-flight and progress', async () => {
     const promptAsync = mock(async () => ({}));

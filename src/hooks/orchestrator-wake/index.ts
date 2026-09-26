@@ -15,8 +15,8 @@
  * condition is "children without a terminal outcome" plus stopped-job
  * recovery, and the wake prompt is delivered with `delivery: 'queue'`
  * (v1 prompt_async queued; v2 steer would hijack an in-flight run). All new
- * behavior is behind the host-flavor/capability probe — the v1 code path is
- * unchanged.
+ * children-mode behavior is behind the host-flavor/capability probe; the
+ * reservation and retry gate is shared with v1.
  */
 import type { PluginInput } from '@opencode-ai/plugin';
 import type { OpencodeClient } from '@opencode-ai/sdk';
@@ -45,6 +45,7 @@ import {
   rearmWakeProgress,
   releaseWakeEvaluation,
   retryAfterWakeEvaluation,
+  rollbackWakeReservation,
   setObservedWakeModel,
   tryBeginWakeEvaluation,
 } from './wake-gate';
@@ -285,6 +286,8 @@ type LocalSessionState = {
   timer: ReturnType<typeof setTimeout> | undefined;
   continuousIdle: boolean;
   archived: boolean;
+  /** Retry a failed forced wake with its original classification. */
+  retryReason?: WakeReason;
 };
 
 /** Why an evaluation is running. 'periodic' is the interval timer;
@@ -933,6 +936,7 @@ export function createOrchestratorWakeScheduler(
 
   function bumpGeneration(state: LocalSessionState): void {
     state.generation = Symbol('wake-generation');
+    state.retryReason = undefined;
   }
 
   function clearLocalSession(sessionID: string): void {
@@ -1076,7 +1080,7 @@ export function createOrchestratorWakeScheduler(
     const timer = setTimeout(() => {
       state.timer = undefined;
       if (state.generation !== generation) return;
-      void evaluate(sessionID, generation);
+      void evaluate(sessionID, generation, state.retryReason ?? 'periodic');
     }, intervalMs);
     timer.unref?.();
     state.timer = timer;
@@ -1903,11 +1907,17 @@ export function createOrchestratorWakeScheduler(
         }
       }
       // Delivered: the wake admission was queued and accepted above.
+      if (state.generation === generation) state.retryReason = undefined;
       return true;
     } catch (error) {
-      // Failed promptAsync already reserved; clear expecting-busy so a later
-      // unrelated busy can rearm normally. Pending deltas stay queued.
+      // Only accepted sends consume the cap. Preserve the reservation's
+      // committed marker so waiters do not immediately retry; the timer
+      // controls cadence. Pending recovery deltas stay queued.
+      rollbackWakeReservation(sessionID, owner);
       clearExpectingWakeBusy(sessionID);
+      if (state.generation === generation && reason !== 'periodic') {
+        state.retryReason = reason;
+      }
       log('[orchestrator-wake] wake suppressed after SDK error', {
         sessionID,
         error: stringifyError(error),

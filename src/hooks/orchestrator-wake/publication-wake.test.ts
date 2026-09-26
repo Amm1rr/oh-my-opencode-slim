@@ -32,7 +32,10 @@ import {
   ORCHESTRATOR_CHILDREN_WAKE_TEXT,
   ORCHESTRATOR_WAKE_TEXT,
 } from './index';
-import { resetOrchestratorWakeGateForTests } from './wake-gate';
+import {
+  getWakeProgress,
+  resetOrchestratorWakeGateForTests,
+} from './wake-gate';
 
 type SessionClient = {
   get?: ReturnType<typeof mock>;
@@ -262,6 +265,89 @@ describe('terminal-publication wake', () => {
     expect(call.body.parts[0]?.text).toBe(
       `${ORCHESTRATOR_WAKE_TEXT}\n<!-- SLIM_INTERNAL_INITIATOR -->`,
     );
+  });
+
+  test.each(['v1', 'v2'] as const)(
+    '%s failed terminal publication retries with its publication reason when no periodic work remains',
+    async (flavor) => {
+      let fail = true;
+      const promptAsync = mock(async () => {
+        if (fail) throw new Error('transport down');
+        return {};
+      });
+      const { scheduler } = createPublicationScheduler({
+        hostFlavor: flavor,
+        sessionClient:
+          flavor === 'v2'
+            ? makeV2Client({
+                promptAsync,
+                listChildren: [terminalChild('child-1')],
+              })
+            : makeV1Client({
+                promptAsync,
+                todos: [{ id: 't1', status: 'completed' }],
+              }),
+      });
+      await scheduler.triggerTerminalPublicationWake('p1', 'child-1', 1);
+      expect(promptAsync).toHaveBeenCalledTimes(1);
+      fail = false;
+      await clock.advance(60_000);
+      expect(promptAsync).toHaveBeenCalledTimes(2);
+      expect(getWakeProgress('p1').stopped).toBe(false);
+    },
+  );
+
+  test('parent busy cancels the failed-publication retry instead of waking an empty v2 parent', async () => {
+    const promptAsync = mock(async () => {
+      throw new Error('transport down');
+    });
+    const { scheduler } = createPublicationScheduler({
+      hostFlavor: 'v2',
+      sessionClient: makeV2Client({
+        promptAsync,
+        listChildren: [terminalChild('child-1')],
+      }),
+    });
+    await scheduler.triggerTerminalPublicationWake('p1', 'child-1', 1);
+    await scheduler.event({
+      event: {
+        type: 'session.status',
+        properties: { sessionID: 'p1', status: { type: 'busy' } },
+      },
+    });
+    await scheduler.event({
+      event: { type: 'session.idle', properties: { sessionID: 'p1' } },
+    });
+    await clock.advance(120_000);
+    expect(promptAsync).toHaveBeenCalledTimes(1);
+  });
+
+  test('P6b: repeated failed publications on an unchanged terminal snapshot keep the backstop alive', async () => {
+    const promptAsync = mock(async () => {
+      throw Object.assign(new Error(''), { name: 'Session.SomeError' });
+    });
+    const { scheduler } = createPublicationScheduler({
+      hostFlavor: 'v2',
+      intervalMs: 120_000,
+      sessionClient: makeV2Client({
+        promptAsync,
+        listChildren: [
+          terminalChild('child-a'),
+          { id: 'child-b', time: { updated: Date.now() - 3_600_000 } },
+        ],
+      }),
+    });
+    await scheduler.event({
+      event: { type: 'session.idle', properties: { sessionID: 'p1' } },
+    });
+    await scheduler.triggerTerminalPublicationWake('p1', 'child-a', 4);
+    await clock.advance(40_000);
+    await scheduler.triggerTerminalPublicationWake('p1', 'child-a', 5);
+    for (let i = 0; i < 5; i++) {
+      await clock.advance(120_000);
+      expect(promptAsync).toHaveBeenCalledTimes(i + 3);
+      expect(getWakeProgress('p1').stopped).toBe(false);
+    }
   });
 
   test('throttle window blocks a second publication wake', async () => {
