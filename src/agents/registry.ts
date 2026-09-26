@@ -251,6 +251,17 @@ function marketplacePermissionCeilings(
   };
 }
 
+function marketplaceReadSafeguards(
+  tools: readonly string[],
+): V2PermissionRule[] {
+  if (!tools.includes('read')) return [];
+  return [
+    { action: 'read', resource: '*.env', effect: 'ask' },
+    { action: 'read', resource: '*.env.*', effect: 'ask' },
+    { action: 'read', resource: '*.env.example', effect: 'allow' },
+  ];
+}
+
 function marketplaceHostRules(
   rules: readonly V2PermissionRule[],
   capabilities: MarketplaceAgentMetadata['capabilities'],
@@ -374,14 +385,14 @@ export function buildResolvedAgentRegistry(
       ...Object.keys(AGENT_ALIASES),
       ...Object.values(AGENT_ALIASES),
       ...definitions.flatMap((definition) => [
-        ...(customOwnerNames.has(definition.name) ? [] : [definition.name]),
-        ...(definition.displayName ? [definition.displayName] : []),
+        ...(customOwnerNames.has(definition.name)
+          ? []
+          : [
+              definition.name,
+              ...(definition.displayName ? [definition.displayName] : []),
+            ]),
       ]),
       ...Object.keys(runtime.acpAgents),
-      ...Object.entries(host.agent ?? {}).flatMap(([name, config]) => [
-        name,
-        ...(typeof config.displayName === 'string' ? [config.displayName] : []),
-      ]),
     ]);
     const mcpNames = new Set([
       ...Object.entries(host.mcp ?? {})
@@ -419,41 +430,61 @@ export function buildResolvedAgentRegistry(
       if (displayName) agent.displayName = displayName;
       return agent;
     });
-    const allReservedIdentities = new Set(
-      [...reservedAgentNames].map((name) =>
-        normalizeAgentName(name).toLowerCase(),
+    const reservedIdentityEntries: Array<{ name: string; owner?: string }> = [
+      ...[...Object.keys(AGENT_ALIASES), ...Object.values(AGENT_ALIASES)].map(
+        (name) => ({ name }),
       ),
+      ...definitions.flatMap((definition) => [
+        {
+          name: definition.name,
+          owner: customOwnerNames.has(definition.name)
+            ? definition.name
+            : undefined,
+        },
+        ...(definition.displayName
+          ? [
+              {
+                name: definition.displayName,
+                owner: definition.name,
+              },
+            ]
+          : []),
+      ]),
+      ...Object.keys(runtime.acpAgents).map((name) => ({ name })),
+      ...Object.entries(host.agent ?? {}).flatMap(([name, config]) => {
+        const matchingOwner = Object.entries(runtime.agents()).find(
+          ([ownerName, ownerConfig]) =>
+            customOwnerNames.has(ownerName) &&
+            typeof ownerConfig.displayName === 'string' &&
+            normalizeAgentName(ownerConfig.displayName).toLowerCase() ===
+              normalizeAgentName(name).toLowerCase(),
+        )?.[0];
+        const owner = matchingOwner ?? name;
+        return [
+          { name, owner },
+          ...(typeof config.displayName === 'string'
+            ? [{ name: config.displayName, owner }]
+            : []),
+        ];
+      }),
+    ];
+    const reservedIdentities = reservedIdentityEntries.map(
+      ({ name, owner }) => ({
+        name: normalizeAgentName(name).toLowerCase(),
+        owner,
+      }),
     );
     const packageIdentities = new Set<string>();
     for (const agent of marketplaceAgents) {
-      const ownerDisplayName = customOwnerNames.has(agent.name)
-        ? runtime.agents()[agent.name]?.displayName
-        : undefined;
-      const reservedIdentities = new Set(allReservedIdentities);
-      if (
-        ownerDisplayName &&
-        !definitions.some(
-          (candidate) =>
-            candidate.name !== agent.name &&
-            [candidate.name, candidate.displayName]
-              .filter((name): name is string => Boolean(name))
-              .some(
-                (name) =>
-                  normalizeAgentName(name).toLowerCase() ===
-                  normalizeAgentName(ownerDisplayName).toLowerCase(),
-              ),
-        )
-      ) {
-        reservedIdentities.delete(
-          normalizeAgentName(ownerDisplayName).toLowerCase(),
-        );
-      }
       const identities = [agent.name, agent.displayName]
         .filter((name): name is string => Boolean(name))
         .map((name) => normalizeAgentName(name).toLowerCase());
       for (const identity of identities) {
         if (
-          reservedIdentities.has(identity) ||
+          reservedIdentities.some(
+            (reserved) =>
+              reserved.name === identity && reserved.owner !== agent.name,
+          ) ||
           packageIdentities.has(identity)
         ) {
           throw new Error(
@@ -849,8 +880,11 @@ export function buildResolvedAgentRegistry(
         rule.effect === 'ask' ||
         rule.effect === 'deny',
     );
+    const marketplaceReadRules = marketplaceReadSafeguards(
+      packageMetadata?.capabilities.tools ?? [],
+    );
     policyMap[name] = compilePermissionPolicy({
-      baselineRules,
+      baselineRules: [...baselineRules, ...marketplaceReadRules],
       hostRules: packageMetadata
         ? marketplaceHostRules(hostRuleSet, packageMetadata.capabilities)
         : hostRuleSet,
@@ -1004,12 +1038,15 @@ export function buildResolvedAgentRegistry(
         (legacyAlias ? nativeRules[legacyAlias] : undefined) ??
         [];
       policyMap[display] = compilePermissionPolicy({
-        baselineRules: adaptPermissions(visiblePermission).filter(
-          (rule): rule is V2PermissionRule =>
-            rule.effect === 'allow' ||
-            rule.effect === 'ask' ||
-            rule.effect === 'deny',
-        ),
+        baselineRules: [
+          ...adaptPermissions(visiblePermission).filter(
+            (rule): rule is V2PermissionRule =>
+              rule.effect === 'allow' ||
+              rule.effect === 'ask' ||
+              rule.effect === 'deny',
+          ),
+          ...marketplaceReadSafeguards(visibleTools),
+        ],
         hostRules: packageMetadata
           ? marketplaceHostRules(visibleRules, packageMetadata.capabilities)
           : visibleRules,

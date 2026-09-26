@@ -28,7 +28,10 @@ import {
   loadPluginConfigFromPath,
   mergePluginConfigs,
 } from './config/loader';
-import { resolvePresetDefinition } from './config/presets';
+import {
+  PresetResolutionError,
+  resolvePresetDefinition,
+} from './config/presets';
 import { RuntimeConfig } from './config/runtime';
 import { getBuildInfo } from './generated/build-info';
 import { HEALTH_CHECK, minimumExpectedToolCount } from './health-check';
@@ -185,9 +188,15 @@ function loadMarketplaceSelectionSnapshot(
     : userConfig;
   const presets = factoryConfig.presets ?? {};
   if (!presets[presetName]) return Object.freeze([]);
-  return Object.freeze([
-    ...(resolvePresetDefinition(presetName, presets).marketplace?.agents ?? []),
-  ]);
+  try {
+    return Object.freeze([
+      ...(resolvePresetDefinition(presetName, presets).marketplace?.agents ??
+        []),
+    ]);
+  } catch (error) {
+    if (error instanceof PresetResolutionError) return Object.freeze([]);
+    throw error;
+  }
 }
 
 // Module-level runtime preset tracking. Survives plugin re-inits triggered

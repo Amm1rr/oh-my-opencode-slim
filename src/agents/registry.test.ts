@@ -829,7 +829,7 @@ describe('finalized existing-agent registry', () => {
           }),
         ),
       ),
-    ).toThrow('collision');
+    ).toThrow('collides with a reserved agent identity');
 
     const displayCollisionRuntime = runtimeFor({
       agents: {
@@ -851,6 +851,75 @@ describe('finalized existing-agent registry', () => {
           marketplaceStore({
             'team/display-collision': marketplacePackage(
               'team/display-collision',
+            ),
+          }),
+        ),
+      ),
+    ).toThrow('collides with a reserved agent identity');
+  });
+
+  test('uses the same host canonical agent as the package owner override', () => {
+    const runtime = runtimeFor({
+      agents: {
+        'market-agent': {
+          model: 'owner/model',
+          displayName: 'OwnerAlias',
+        },
+      },
+    });
+    const registry = build(
+      runtime,
+      {
+        agent: {
+          'market-agent': {
+            model: 'host/model',
+            displayName: 'HostAlias',
+          },
+        },
+        mcp: {},
+      },
+      marketplaceOptions(
+        ['team/owned-package'],
+        marketplaceStore({
+          'team/owned-package': marketplacePackage('team/owned-package', {
+            skills: [],
+            mcps: [],
+          }),
+        }),
+      ),
+    );
+    expect(registry.marketplaceAgentNames).toEqual(['market-agent']);
+    expect(registry.finalAgentConfig['market-agent']).toMatchObject({
+      model: 'host/model',
+      displayName: 'HostAlias',
+    });
+    expect(registry.getSdkAgentProjection().HostAlias).toBeDefined();
+  });
+
+  test('rejects a package display alias colliding with another host agent alias', () => {
+    const runtime = runtimeFor({
+      agents: {
+        'market-agent': {
+          model: 'owner/model',
+          displayName: 'PackageAlias',
+        },
+      },
+    });
+    expect(() =>
+      build(
+        runtime,
+        {
+          agent: {
+            'other-host-agent': { displayName: 'PackageAlias' },
+          },
+          mcp: {},
+        },
+        marketplaceOptions(
+          ['team/host-alias-collision'],
+          marketplaceStore({
+            'team/host-alias-collision': marketplacePackage(
+              'team/host-alias-collision',
+              { skills: [], mcps: [] },
             ),
           }),
         ),
@@ -905,6 +974,95 @@ describe('finalized existing-agent registry', () => {
     expect(policy.decide('execute', '*')).toBe('deny');
     expect(policy.decide('host-mcp_search', '*')).toBe('allow');
     expect(policy.decide('other-mcp_search', '*')).toBe('deny');
+  });
+
+  test('preserves native read resource safeguards without widening host denials', () => {
+    const runtime = runtimeFor({
+      agents: {
+        'market-agent': {
+          model: 'provider/owner',
+          displayName: 'MarketVisible',
+        },
+      },
+    });
+    const registry = build(
+      runtime,
+      { mcp: {} },
+      {
+        ...marketplaceOptions(
+          ['team/read-policy'],
+          marketplaceStore({
+            'team/read-policy': marketplacePackage('team/read-policy', {
+              skills: [],
+              mcps: [],
+              tools: ['read'],
+            }),
+          }),
+        ),
+        nativePermissionsByAgent: {
+          'market-agent': [
+            { action: 'read', resource: 'README.md', effect: 'deny' },
+          ],
+        },
+      },
+    );
+    const sdk = registry.getSdkAgentProjection()['market-agent'] as {
+      permission: Record<string, unknown>;
+    };
+    expect(sdk.permission.read).toBe('allow');
+
+    const policy = registry.nativePolicies['market-agent'];
+    expect(policy.decide('read', 'README.md')).toBe('deny');
+    expect(policy.decide('read', 'docs/README.md')).toBe('allow');
+    expect(policy.decide('read', '.env')).toBe('ask');
+    expect(policy.decide('read', '.env.local')).toBe('ask');
+    expect(policy.decide('read', '.env.example')).toBe('allow');
+    expect(policy.rules).toContainEqual({
+      action: 'read',
+      resource: '*.env',
+      effect: 'ask',
+    });
+    expect(policy.rules).toContainEqual({
+      action: 'read',
+      resource: '*.env.*',
+      effect: 'ask',
+    });
+    expect(policy.rules).toContainEqual({
+      action: 'read',
+      resource: '*.env.example',
+      effect: 'allow',
+    });
+    expect(
+      policy.rules.findLast(
+        (rule) => rule.action === 'read' && rule.resource === 'README.md',
+      )?.effect,
+    ).toBe('deny');
+
+    const visiblePolicy = registry.nativePolicies.MarketVisible;
+    expect(visiblePolicy.decide('read', 'README.md')).toBe('deny');
+    expect(visiblePolicy.decide('read', '.env')).toBe('ask');
+    expect(visiblePolicy.decide('read', '.env.local')).toBe('ask');
+    expect(visiblePolicy.decide('read', '.env.example')).toBe('allow');
+    expect(visiblePolicy.rules).toContainEqual({
+      action: 'read',
+      resource: '*.env',
+      effect: 'ask',
+    });
+    expect(visiblePolicy.rules).toContainEqual({
+      action: 'read',
+      resource: '*.env.*',
+      effect: 'ask',
+    });
+    expect(visiblePolicy.rules).toContainEqual({
+      action: 'read',
+      resource: '*.env.example',
+      effect: 'allow',
+    });
+    expect(
+      visiblePolicy.rules.findLast(
+        (rule) => rule.action === 'read' && rule.resource === 'README.md',
+      )?.effect,
+    ).toBe('deny');
   });
 
   test('clips host wildcard skill and action rules to package capabilities', () => {

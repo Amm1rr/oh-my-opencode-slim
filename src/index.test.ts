@@ -516,6 +516,94 @@ describe('plugin tool registration', () => {
     }
   });
 
+  test('broken selected preset inheritance falls back to baseline agents at startup', async () => {
+    const originalEnv = { ...process.env };
+    const invalidPresetCases = [
+      {
+        selected: 'broken',
+        presets: {
+          broken: {
+            extends: 'missing-parent',
+            marketplace: { agents: ['team/selected'] },
+          },
+        },
+      },
+      {
+        selected: 'first',
+        presets: {
+          first: {
+            extends: 'second',
+            marketplace: { agents: ['team/selected'] },
+          },
+          second: { extends: 'first' },
+        },
+      },
+    ];
+    const packageManifest = {
+      schemaVersion: 2,
+      id: 'team/selected',
+      version: '1.0.0',
+      displayName: 'Selected package',
+      description: 'Must not activate from an invalid preset chain',
+      agentName: 'selected-agent',
+      prompt: 'Package prompt',
+      skills: [],
+      mcps: [],
+      tools: ['read'],
+      author: { name: 'Test author' },
+      tags: [],
+      license: 'MIT',
+      compatibility: { plugin: '>=1.0.0' },
+      model: { source: 'explicit', candidates: ['provider/package'] },
+      routing: {
+        description: 'Package lane',
+        when: 'Package task',
+        keywords: ['package'],
+      },
+    };
+    try {
+      for (const invalidPreset of invalidPresetCases) {
+        const root = await mkdtemp(
+          '/tmp/oh-my-opencode-slim-invalid-marketplace-preset-',
+        );
+        const configDir = path.join(root, 'config');
+        await mkdir(configDir, { recursive: true });
+        process.env = {
+          ...originalEnv,
+          OPENCODE_CONFIG_DIR: configDir,
+          XDG_DATA_HOME: path.join(root, 'data'),
+        };
+        delete process.env.OH_MY_OPENCODE_SLIM_DISABLE;
+        const store = new MarketplaceStore({ pluginVersion: '2.2.25' });
+        store.install({ manifest: packageManifest as never });
+        await Bun.write(
+          path.join(configDir, 'oh-my-opencode-slim.json'),
+          JSON.stringify({
+            preset: invalidPreset.selected,
+            presets: invalidPreset.presets,
+          }),
+        );
+        const hooks = await plugin({
+          client: createPluginClient(async () => ({})),
+          directory: root,
+          worktree: root,
+          serverUrl: new URL('http://127.0.0.1:4096'),
+        } as never);
+        try {
+          const hostConfig = { agent: {} as Record<string, unknown> };
+          await hooks.config?.(hostConfig);
+          expect(hostConfig.agent).toHaveProperty('explorer');
+          expect(hostConfig.agent).not.toHaveProperty('selected-agent');
+        } finally {
+          await hooks.dispose?.();
+          await rm(root, { recursive: true, force: true });
+        }
+      }
+    } finally {
+      process.env = originalEnv;
+    }
+  });
+
   test('disposes generation one timers and fresh generation two supervises launches', async () => {
     const originalEnv = { ...process.env };
     const originalSetTimeout = globalThis.setTimeout;
