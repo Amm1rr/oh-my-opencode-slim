@@ -37,7 +37,7 @@ export function createTuiReusableProjection(input: {
   let ownedParents = new Set<string>();
 
   const unretracted = unretractedParents.get(projectDir);
-  const swept = updateSnapshot(projectDir, (snapshot) => {
+  updateSnapshot(projectDir, (snapshot) => {
     for (const parent of Object.keys(snapshot.reusableByAgent)) {
       const owner = snapshot.reusableOwners[parent];
       if (
@@ -50,7 +50,6 @@ export function createTuiReusableProjection(input: {
       }
     }
   });
-  if (swept) unretractedParents.delete(projectDir);
 
   const project = (): void => {
     if (disposed) return;
@@ -93,6 +92,11 @@ export function createTuiReusableProjection(input: {
     // The optimistic no-op probe also invokes the mutator. Retain the old
     // ownership when the subsequent lock or disk write fails.
     if (!applied) ownedParents = previousOwnedParents;
+    else {
+      // A successful live publish supersedes a failed dispose retraction.
+      const pending = unretractedParents.get(projectDir);
+      for (const parent of nextOwnedParents) pending?.delete(parent);
+    }
   };
 
   const listener = (): void => {

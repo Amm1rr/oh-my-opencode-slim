@@ -282,6 +282,11 @@ describe('tui-reusable-projection', () => {
         parentSessionID: 'parent-old',
         agent: 'fixer',
       });
+      failed.registerLaunch({
+        taskID: 'ses_stale',
+        parentSessionID: 'parent-shared',
+        agent: 'fixer',
+      });
       fs.writeFileSync(
         lockPath,
         JSON.stringify({
@@ -292,6 +297,12 @@ describe('tui-reusable-projection', () => {
       );
       failedProjection.dispose(); // Lock timeout: parent-old remains on disk.
       fs.unlinkSync(lockPath);
+      // A live same-PID instance republishes a pending parent before startup.
+      live.registerLaunch({
+        taskID: 'ses_shared',
+        parentSessionID: 'parent-shared',
+        agent: 'fixer',
+      });
       later.push(
         createTuiReusableProjection({
           board: new BackgroundJobBoard(),
@@ -301,8 +312,9 @@ describe('tui-reusable-projection', () => {
       let sections = readTuiSnapshot(projectDir).reusableByAgent;
       expect(sections['parent-live']).toBeDefined();
       expect(sections['parent-old']).toBeUndefined();
+      expect(sections['parent-shared']?.fixer?.[0]?.taskID).toBe('ses_shared');
 
-      // A successful sweep drains the retry: a live republish must survive.
+      // A live republish retires the pending parent.
       live.registerLaunch({
         taskID: 'ses_back',
         parentSessionID: 'parent-old',
