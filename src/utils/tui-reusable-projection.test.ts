@@ -292,25 +292,70 @@ describe('tui-reusable-projection', () => {
     }
   });
 
-  test('startup drops same-PID sections orphaned by failed disposal', () => {
-    updateSnapshot(projectDir, (snapshot) => {
-      snapshot.reusableByAgent['parent-old'] = {
-        fixer: [{ taskID: 'ses_old', alias: 'fix-1', running: true }],
-      };
-      snapshot.reusableOwners['parent-old'] = process.pid;
-    });
-    const projection = createTuiReusableProjection({
-      board: new BackgroundJobBoard(),
+  test('startup sweeps failed same-PID retractions, never live instances', () => {
+    const live = new BackgroundJobBoard();
+    const liveProjection = createTuiReusableProjection({
+      board: live,
       projectDir,
     });
+    const failed = new BackgroundJobBoard();
+    const failedProjection = createTuiReusableProjection({
+      board: failed,
+      projectDir,
+    });
+    const later: Array<ReturnType<typeof createTuiReusableProjection>> = [];
+    const lockPath = `${getTuiStatePath(projectDir)}.lock`;
     try {
-      expect(
-        readTuiSnapshot(projectDir).reusableByAgent['parent-old'],
-      ).toBeUndefined();
+      live.registerLaunch({
+        taskID: 'ses_live',
+        parentSessionID: 'parent-live',
+        agent: 'fixer',
+      });
+      failed.registerLaunch({
+        taskID: 'ses_old',
+        parentSessionID: 'parent-old',
+        agent: 'fixer',
+      });
+      fs.writeFileSync(
+        lockPath,
+        JSON.stringify({
+          pid: process.pid,
+          token: 'held',
+          createdAt: Date.now(),
+        }),
+      );
+      failedProjection.dispose(); // Lock timeout: parent-old remains on disk.
+      fs.unlinkSync(lockPath);
+      later.push(
+        createTuiReusableProjection({
+          board: new BackgroundJobBoard(),
+          projectDir,
+        }),
+      );
+      let sections = readTuiSnapshot(projectDir).reusableByAgent;
+      expect(sections['parent-live']).toBeDefined();
+      expect(sections['parent-old']).toBeUndefined();
+
+      // A successful sweep drains the retry: a live republish must survive.
+      live.registerLaunch({
+        taskID: 'ses_back',
+        parentSessionID: 'parent-old',
+        agent: 'fixer',
+      });
+      later.push(
+        createTuiReusableProjection({
+          board: new BackgroundJobBoard(),
+          projectDir,
+        }),
+      );
+      sections = readTuiSnapshot(projectDir).reusableByAgent;
+      expect(sections['parent-old']?.fixer?.[0]?.taskID).toBe('ses_back');
     } finally {
-      projection.dispose();
+      if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+      for (const projection of later) projection.dispose();
+      liveProjection.dispose();
     }
-  });
+  }, 5_000);
 
   test('dispose clears only this projection’s still-owned parent sections', () => {
     const board = new BackgroundJobBoard();

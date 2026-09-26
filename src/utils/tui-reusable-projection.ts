@@ -11,14 +11,17 @@ import type { BackgroundJobBoard } from './background-job-board';
  * and attributed, certain running jobs (running entries contain only stable
  * taskID/alias plus a marker). The TUI is a pure reader of this section.
  *
- * Each parent section carries the publishing PID. Startup sweeps dead,
- * ownerless, and same-PID inherited sections (SIGKILL residue lasts until
- * that sweep). Other live processes survive for different parents;
- * concurrent writers to the same parent are last-writer-wins.
+ * Each parent section carries the publishing PID. Startup sweeps dead and
+ * ownerless sections and failed same-process dispose retractions; live
+ * same-PID projections survive. Concurrent writers to the same parent
+ * are last-writer-wins; SIGKILL residue survives until the next startup.
  *
  * Cost: O(all jobs) per mutation. `updateSnapshot` early-outs when stable
  * projection fields do not change, so heartbeats do not write the file.
  */
+
+// Retry parent sections whose removal failed when a projection was disposed.
+const unretractedParents = new Map<string, Set<string>>();
 
 interface ProjectorHandle {
   /** Cancel the projection permanently (host teardown). */
@@ -33,14 +36,13 @@ export function createTuiReusableProjection(input: {
   let disposed = false;
   let ownedParents = new Set<string>();
 
-  // A new board supersedes sections left by an earlier run in this PID.
-  // Sections belonging to other live processes survive startup.
-  updateSnapshot(projectDir, (snapshot) => {
+  const unretracted = unretractedParents.get(projectDir);
+  const swept = updateSnapshot(projectDir, (snapshot) => {
     for (const parent of Object.keys(snapshot.reusableByAgent)) {
       const owner = snapshot.reusableOwners[parent];
       if (
         owner === undefined ||
-        owner === process.pid ||
+        (owner === process.pid && unretracted?.has(parent)) ||
         !isProcessRunning(owner)
       ) {
         delete snapshot.reusableByAgent[parent];
@@ -48,6 +50,7 @@ export function createTuiReusableProjection(input: {
       }
     }
   });
+  if (swept) unretractedParents.delete(projectDir);
 
   const project = (): void => {
     if (disposed) return;
@@ -122,6 +125,10 @@ export function createTuiReusableProjection(input: {
         })
       ) {
         ownedParents.clear();
+      } else {
+        const pending = unretractedParents.get(projectDir) ?? new Set<string>();
+        for (const parent of ownedParents) pending.add(parent);
+        unretractedParents.set(projectDir, pending);
       }
     },
   };
