@@ -3103,6 +3103,55 @@ describe('evaluate verdict observability (INFO logs)', () => {
     }
   });
 
+  test('reports the same blocker once per idle spell and again after an armed spell', async () => {
+    const entries: Array<{ message: string; data: unknown }> = [];
+    const spy = spyOn(loggerModule, 'log').mockImplementation(
+      (message: string, data?: unknown) => {
+        entries.push({ message, data });
+      },
+    );
+    let waiting = true;
+    try {
+      const { scheduler } = createScheduler({ hasInputWait: () => waiting });
+      const idle = { type: 'session.idle', properties: { sessionID: 'p1' } };
+      const status = (type: 'busy' | 'idle') => ({
+        event: {
+          type: 'session.status',
+          properties: { sessionID: 'p1', status: { type } },
+        },
+      });
+      const blocked = () =>
+        entries.filter(
+          (entry) =>
+            entry.message === '[orchestrator-wake] backstop not armed' &&
+            (entry.data as { reason?: string }).reason === 'input-wait',
+        );
+      const armed = () =>
+        entries.filter(
+          (entry) => entry.message === '[orchestrator-wake] backstop armed',
+        );
+
+      await scheduler.event({ event: idle });
+      await scheduler.event({ event: idle });
+      expect(blocked()).toHaveLength(1);
+      await scheduler.event(status('busy'));
+      await scheduler.event(status('idle'));
+      await scheduler.event({ event: idle });
+      expect(blocked()).toHaveLength(2);
+
+      waiting = false;
+      await scheduler.event({ event: idle });
+      await scheduler.event({ event: idle });
+      expect(armed()).toHaveLength(1);
+      waiting = true;
+      await scheduler.event({ event: idle });
+      await scheduler.event({ event: idle });
+      expect(blocked()).toHaveLength(3);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   test('logs the name and trigger of an SDK error with an empty message', async () => {
     const entries: Array<{ message: string; data: unknown }> = [];
     const spy = spyOn(loggerModule, 'log').mockImplementation(

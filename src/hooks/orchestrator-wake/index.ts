@@ -1010,6 +1010,7 @@ export function createOrchestratorWakeScheduler(
       state.continuousIdle = false;
     }
     releaseLocalWakeOwner(sessionID);
+    reportedScheduleBlockers.delete(sessionID);
     if (rearmProgress) rearmWakeProgress(sessionID);
   }
 
@@ -1085,6 +1086,7 @@ export function createOrchestratorWakeScheduler(
     timer.unref?.();
     state.timer = timer;
     log('[orchestrator-wake] backstop armed', { sessionID, intervalMs });
+    reportedScheduleBlockers.delete(sessionID);
   }
 
   function beginContinuousIdle(sessionID: string): void {

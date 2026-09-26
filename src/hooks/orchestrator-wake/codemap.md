@@ -33,8 +33,9 @@ fallback), the wake condition is children without a terminal `outcome`
   - Gates (`scheduleBlocker`): config enabled, capability gate ready, managed
     session, no input wait (`hasInputWait`), no fallback in progress, gate
     not stopped. Reports a reason when blocked, deduplicated per session/reason
-    on repeated idle events. Logs when the backstop is armed or halted and
-    when evaluation aborts/defers at a checkpoint.
+    within one idle spell; ending the spell or arming a timer resets that
+    deduplication so later blocks remain visible. Logs when the backstop is
+    armed or halted and when evaluation aborts/defers at a checkpoint.
   - Reads a host snapshot (todo mode: todos + children + status map +
     session model/archive state; children mode: children list + event-tracked
     parent status + optional model/archive state) and computes a fingerprint; unchanged

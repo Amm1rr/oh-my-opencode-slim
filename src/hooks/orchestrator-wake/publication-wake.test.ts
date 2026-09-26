@@ -335,9 +335,79 @@ describe('terminal-publication wake', () => {
       },
     });
     await scheduler.event({
+      event: {
+        type: 'session.status',
+        properties: { sessionID: 'p1', status: { type: 'idle' } },
+      },
+    });
+    await scheduler.event({
       event: { type: 'session.idle', properties: { sessionID: 'p1' } },
     });
     await clock.advance(120_000);
+    expect(promptAsync).toHaveBeenCalledTimes(1);
+  });
+
+  test('a delivered publication retry clears its reason before the next timer', async () => {
+    let fail = true;
+    const promptAsync = mock(async () => {
+      if (fail) throw new Error('temporary transport failure');
+      return {};
+    });
+    const { scheduler } = createPublicationScheduler({
+      hostFlavor: 'v2',
+      sessionClient: makeV2Client({
+        promptAsync,
+        listChildren: [terminalChild('child-1')],
+      }),
+    });
+    await scheduler.triggerTerminalPublicationWake('p1', 'child-1', 1);
+    fail = false;
+    await clock.advance(60_000);
+    expect(promptAsync).toHaveBeenCalledTimes(2);
+    await clock.advance(60_000);
+    expect(promptAsync).toHaveBeenCalledTimes(2);
+  });
+
+  test('late failure after busy cannot stamp a retry reason on the new generation', async () => {
+    let rejectFirst: ((error: Error) => void) | undefined;
+    const promptAsync = mock(
+      () =>
+        new Promise<unknown>((_resolve, reject) => {
+          rejectFirst = reject;
+        }),
+    );
+    const { scheduler } = createPublicationScheduler({
+      hostFlavor: 'v2',
+      sessionClient: makeV2Client({
+        promptAsync,
+        listChildren: [terminalChild('child-1')],
+      }),
+    });
+    const publication = scheduler.triggerTerminalPublicationWake(
+      'p1',
+      'child-1',
+      1,
+    );
+    await clock.advance(0);
+    expect(promptAsync).toHaveBeenCalledTimes(1);
+    await scheduler.event({
+      event: {
+        type: 'session.status',
+        properties: { sessionID: 'p1', status: { type: 'busy' } },
+      },
+    });
+    rejectFirst?.(new Error('late rejection'));
+    await publication;
+    await scheduler.event({
+      event: {
+        type: 'session.status',
+        properties: { sessionID: 'p1', status: { type: 'idle' } },
+      },
+    });
+    await scheduler.event({
+      event: { type: 'session.idle', properties: { sessionID: 'p1' } },
+    });
+    await clock.advance(60_000);
     expect(promptAsync).toHaveBeenCalledTimes(1);
   });
 
