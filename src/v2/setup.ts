@@ -1945,6 +1945,18 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
             nativeAgentSnapshot.permissions,
           );
         finalizedRegistry = registry;
+        // Deferred agent finalization is the first point where marketplace
+        // agents are known. Latch capability failures for the readiness barrier.
+        if (
+          registry.marketplaceAgentNames.length &&
+          typeof ctx.session.update !== 'function'
+        ) {
+          permissionSnapshotFailure = new Error(
+            'Marketplace agents require ctx.session.update to enforce child permission ceilings',
+          );
+          resolvePermissionSnapshotReady();
+          return;
+        }
         resolvedAgents = registry.getSdkAgentProjection() as Record<
           string,
           Record<string, unknown>

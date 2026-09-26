@@ -24,6 +24,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { readdirSync as readDirSync, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import * as path from 'node:path';
+import { MarketplaceStore } from '../marketplace/store';
 import { flushLoggerForTesting } from '../utils/logger';
 import { createV2Setup } from './setup';
 import type { V2Context } from './types';
@@ -815,6 +816,256 @@ describe('createV2Setup e2e', () => {
     }
   }, 20_000);
 
+  test('marketplace agent projection and child session receive the same narrowed native policy', async () => {
+    const store = new MarketplaceStore({
+      pluginVersion: '2.2.25',
+    });
+    store.install({
+      manifest: {
+        schemaVersion: 2,
+        id: 'team/v2-marketplace',
+        version: '1.0.0',
+        displayName: 'V2 marketplace agent',
+        description: 'Marketplace child policy fixture',
+        agentName: 'v2-marketplace-agent',
+        prompt: 'Use only the package-authorized capabilities.',
+        skills: [],
+        mcps: ['package-mcp'],
+        tools: ['read'],
+        author: { name: 'Test' },
+        tags: [],
+        license: 'MIT',
+        compatibility: { plugin: '>=2.0.0' },
+        model: {
+          source: 'explicit',
+          candidates: ['provider/package', 'provider/fallback'],
+        },
+        routing: {
+          description: 'Marketplace test lane',
+          when: 'Testing marketplace routing.',
+          keywords: ['marketplace'],
+        },
+      } as never,
+    });
+    await Bun.write(
+      path.join(projectDir, '.opencode', 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        companion: { enabled: false },
+        preset: 'marketplace-test',
+        presets: {
+          'marketplace-test': {
+            marketplace: { agents: ['team/v2-marketplace'] },
+          },
+        },
+      }),
+    );
+
+    const { ctx, calls, events } = makeMockV2Context(projectDir);
+    const setupCtx = ctx as unknown as {
+      mcp: {
+        transform: (callback: (draft: unknown) => void) => Promise<{
+          dispose: () => void;
+        }>;
+      };
+      agent: {
+        transform: (callback: (draft: unknown) => void) => Promise<{
+          dispose: () => void;
+        }>;
+      };
+      session: {
+        update: (input: {
+          sessionID: string;
+          permissions: Array<Record<string, unknown>>;
+        }) => Promise<void>;
+      };
+    };
+    const childUpdates: Array<{
+      sessionID: string;
+      permissions: Array<Record<string, unknown>>;
+    }> = [];
+    let packageAgent: Record<string, unknown> | undefined;
+    setupCtx.mcp.transform = async (callback) => {
+      callback({
+        list: () => [
+          ['package-mcp', { type: 'local' }],
+          ['host-only-mcp', { type: 'local' }],
+        ],
+        get: (name: string) =>
+          name === 'package-mcp' || name === 'host-only-mcp'
+            ? { type: 'local' }
+            : undefined,
+        set: (name: string, config: Record<string, unknown>) => {
+          calls.mcpSets.push({ name, config });
+        },
+        update: () => {},
+        remove: () => {},
+      });
+      return { dispose: () => {} };
+    };
+    setupCtx.agent.transform = async (callback) => {
+      callback({
+        list: () => [],
+        get: () => undefined,
+        default: () => {},
+        update: (
+          name: string,
+          project: (agent: Record<string, unknown>) => void,
+        ) => {
+          const agent: Record<string, unknown> = {};
+          project(agent);
+          if (name === 'v2-marketplace-agent') packageAgent = agent;
+        },
+        remove: () => {},
+      });
+      return { dispose: () => {} };
+    };
+    setupCtx.session.update = async (input) => {
+      childUpdates.push(input);
+    };
+
+    const cleanup = await createV2Setup()(ctx);
+    try {
+      expect(packageAgent).toBeDefined();
+      expect(packageAgent?.model).toMatchObject({
+        providerID: 'provider',
+        id: 'package',
+      });
+      const packageRules = packageAgent?.permissions as Array<
+        Record<string, unknown>
+      >;
+      expect(packageRules).toContainEqual(
+        expect.objectContaining({ action: 'read', effect: 'allow' }),
+      );
+      expect(packageRules).toContainEqual(
+        expect.objectContaining({
+          action: 'skill',
+          resource: '*',
+          effect: 'deny',
+        }),
+      );
+      expect(packageRules).toContainEqual(
+        expect.objectContaining({ action: 'package-mcp_*', effect: 'allow' }),
+      );
+      expect(packageRules).toContainEqual(
+        expect.objectContaining({ action: '*', resource: '*', effect: 'deny' }),
+      );
+      expect(
+        packageRules.some(
+          (rule) => rule.action === 'bash' && rule.effect === 'allow',
+        ),
+      ).toBe(false);
+      expect(
+        packageRules.some(
+          (rule) =>
+            rule.action === 'host-only-mcp_*' && rule.effect === 'allow',
+        ),
+      ).toBe(false);
+
+      events.push({
+        type: 'session.created',
+        data: {
+          sessionID: 'ses_marketplace_child',
+          parentID: 'ses_marketplace_parent',
+          agent: 'v2-marketplace-agent',
+        },
+      });
+      const deadline = Date.now() + 2_000;
+      while (childUpdates.length === 0 && Date.now() < deadline) {
+        await Bun.sleep(10);
+      }
+      expect(childUpdates).toHaveLength(1);
+      expect(childUpdates[0]?.permissions).toEqual(packageRules);
+      expect(childUpdates[0]?.permissions).toContainEqual(
+        expect.objectContaining({ action: '*', resource: '*', effect: 'deny' }),
+      );
+    } finally {
+      await cleanup();
+    }
+  }, 20_000);
+
+  test('marketplace activation fails and unwinds when child session.update is unavailable', async () => {
+    const store = new MarketplaceStore({ pluginVersion: '2.2.25' });
+    store.install({
+      manifest: {
+        schemaVersion: 2,
+        id: 'team/no-child-update',
+        version: '1.0.0',
+        displayName: 'No child update',
+        description: 'Requires child policy enforcement',
+        agentName: 'no-child-update-agent',
+        prompt: 'Use only admitted capabilities.',
+        skills: [],
+        mcps: [],
+        tools: ['read'],
+        author: { name: 'Test' },
+        tags: [],
+        license: 'MIT',
+        compatibility: { plugin: '>=2.0.0' },
+        model: { source: 'explicit', candidates: ['provider/package'] },
+        routing: {
+          description: 'Marketplace test lane',
+          when: 'Testing host capability failure.',
+          keywords: ['marketplace'],
+        },
+      } as never,
+    });
+    await Bun.write(
+      path.join(projectDir, '.opencode', 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        companion: { enabled: false },
+        preset: 'marketplace-test',
+        presets: {
+          'marketplace-test': {
+            marketplace: { agents: ['team/no-child-update'] },
+          },
+        },
+      }),
+    );
+    const { ctx, calls } = makeMockV2Context(projectDir);
+    const setupCtx = ctx as unknown as {
+      mcp: {
+        transform: (callback: (draft: unknown) => void) => Promise<{
+          dispose: () => void;
+        }>;
+      };
+      agent: {
+        transform: (callback: (draft: unknown) => void) => Promise<{
+          dispose: () => void;
+        }>;
+      };
+    };
+    setupCtx.mcp.transform = async (callback) => {
+      callback({
+        list: () => [],
+        get: () => undefined,
+        set: () => {},
+        update: () => {},
+        remove: () => {},
+      });
+      return {
+        dispose: () => calls.disposed.push('marketplace-mcp-transform'),
+      };
+    };
+    setupCtx.agent.transform = async (callback) => {
+      callback({
+        list: () => [],
+        get: () => undefined,
+        default: () => {},
+        update: () => {},
+        remove: () => {},
+      });
+      return {
+        dispose: () => calls.disposed.push('marketplace-agent-transform'),
+      };
+    };
+
+    await expect(createV2Setup()(ctx)).rejects.toThrow(
+      'Marketplace agents require ctx.session.update',
+    );
+    expect(calls.disposed).toContain('marketplace-agent-transform');
+    expect(calls.disposed).toContain('marketplace-mcp-transform');
+  }, 20_000);
+
   test('batch-deferred MCP and agent transforms finalize before managed prompts', async () => {
     const { ctx, calls, events } = makeMockV2Context(projectDir);
     const mcp = ctx.mcp as unknown as {
@@ -930,6 +1181,23 @@ describe('createV2Setup e2e', () => {
     } finally {
       await cleanup();
     }
+  }, 20_000);
+
+  test('missing MCP draft callback cannot become an invented empty snapshot', async () => {
+    const { ctx, calls } = makeMockV2Context(projectDir);
+    const mcp = ctx.mcp as unknown as {
+      transform: (callback: (draft: unknown) => void) => Promise<{
+        dispose: () => void;
+      }>;
+    };
+    mcp.transform = async () => ({
+      dispose: () => calls.disposed.push('mcp.transform'),
+    });
+
+    await expect(createV2Setup()(ctx)).rejects.toThrow(
+      'Unable to snapshot configured MCP namespaces',
+    );
+    expect(calls.disposed).toContain('mcp.transform');
   }, 20_000);
 
   test('missing MCP transform fails startup and unwinds earlier resources', async () => {

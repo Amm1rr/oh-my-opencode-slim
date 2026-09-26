@@ -23,6 +23,12 @@ import {
   DEFAULT_MAX_SESSION_METADATA_ENTRIES,
   TOAST_DURATION_MS,
 } from './config/constants';
+import {
+  findPluginConfigPaths,
+  loadPluginConfigFromPath,
+  mergePluginConfigs,
+} from './config/loader';
+import { resolvePresetDefinition } from './config/presets';
 import { RuntimeConfig } from './config/runtime';
 import { getBuildInfo } from './generated/build-info';
 import { HEALTH_CHECK, minimumExpectedToolCount } from './health-check';
@@ -65,6 +71,8 @@ import {
   type MessageWithParts,
 } from './hooks/types';
 import { createInterviewManager } from './interview';
+import { discoverPreflightSkills } from './marketplace/preflight';
+import { MarketplaceStore } from './marketplace/store';
 import { createBuiltinMcps } from './mcp';
 import {
   ast_grep_replace,
@@ -159,6 +167,28 @@ async function appLog(
 // Debounce: only show image-skipped toast once per 60 seconds per project
 const lastImageSkippedToastByDir = new Map<string, number>();
 const IMAGE_SKIPPED_DEBOUNCE_MS = 60_000;
+
+function loadMarketplaceSelectionSnapshot(
+  directory: string,
+  presetName: string | undefined,
+): readonly string[] {
+  if (!presetName) return Object.freeze([]);
+  const paths = findPluginConfigPaths(directory);
+  const userConfig = paths.userConfigPath
+    ? (loadPluginConfigFromPath(paths.userConfigPath, { silent: true }) ?? {})
+    : {};
+  const projectConfig = paths.projectConfigPath
+    ? loadPluginConfigFromPath(paths.projectConfigPath, { silent: true })
+    : null;
+  const factoryConfig = projectConfig
+    ? mergePluginConfigs(userConfig, projectConfig)
+    : userConfig;
+  const presets = factoryConfig.presets ?? {};
+  if (!presets[presetName]) return Object.freeze([]);
+  return Object.freeze([
+    ...(resolvePresetDefinition(presetName, presets).marketplace?.agents ?? []),
+  ]);
+}
 
 // Module-level runtime preset tracking. Survives plugin re-inits triggered
 // by client.config.update() → Instance.dispose(). When the plugin function
@@ -347,6 +377,8 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
 
   let chatHeadersHook: ReturnType<typeof createChatHeadersHook>;
   let foregroundFallback: ForegroundFallbackManager;
+  let foregroundFallbackChains: Record<string, string[]> = {};
+  let selectedMarketplacePackageIds: readonly string[] = [];
   let deepworkCommandHook: ReturnType<typeof createDeepworkCommandHook>;
   let reflectCommandHook: ReturnType<typeof createReflectCommandHook>;
   let loopCommandHook: ReturnType<typeof createLoopCommandHook>;
@@ -493,6 +525,11 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     }
 
     runtime = RuntimeConfig.get(ctx.directory);
+    const activePresetName = runtime.getRuntimePreset() ?? config.preset;
+    selectedMarketplacePackageIds = loadMarketplaceSelectionSnapshot(
+      ctx.directory,
+      activePresetName,
+    );
     rewriteDisplayNameMentions = createDisplayNameMentionRewriter(runtime);
     // Host flavor marker ('v2' on OpenCode v2 hosts, set by the v2 client
     // shim; absent on v1). Threads the native delegation vocabulary into
@@ -716,8 +753,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         '[foreground-fallback] automatic fallback disabled on v2 hosts (no atomic per-turn model switch)',
       );
     }
+    foregroundFallbackChains = runtime.runtimeChains;
     foregroundFallback = new ForegroundFallbackManager(
-      runtime.runtimeChains,
+      foregroundFallbackChains,
       fallbackEnabled,
       ctx,
       runtime.fallback.maxRetries,
@@ -1233,10 +1271,27 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           hostFlavor,
           pluginMcps: mcps,
           nativePermissionsByAgent,
+          marketplace: {
+            selectedPackageIds: selectedMarketplacePackageIds,
+            store: new MarketplaceStore({
+              pluginVersion: getBuildInfo().version,
+            }),
+            pluginVersion: getBuildInfo().version,
+            availableSkillNames: selectedMarketplacePackageIds.length
+              ? discoverPreflightSkills(runtime, ctx.directory)
+              : [],
+          },
           onHostModelSelected: (agentName) => {
             runtime.everModelSwitched(agentName);
           },
         });
+        for (const [name, candidates] of Object.entries(
+          resolvedAgentRegistry.modelCandidates,
+        )) {
+          if (candidates.length > 1) {
+            foregroundFallbackChains[name] = candidates.map(({ id }) => id);
+          }
+        }
         for (const [agentName, models] of Object.entries(runtime.modelArrays)) {
           if (
             models.length > 0 &&
@@ -1904,16 +1959,27 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         const orchestratorDef = agentDefs.find(
           (a) => a.name === 'orchestrator',
         );
+        const finalizedOrchestratorName =
+          resolvedAgentRegistry?.identities.orchestrator ?? 'orchestrator';
+        const finalizedOrchestrator =
+          (resolvedAgentRegistry?.finalAgentConfig[finalizedOrchestratorName] as
+            | Record<string, unknown>
+            | undefined) ??
+          (resolvedAgentRegistry?.finalAgentConfig.orchestrator as
+            | Record<string, unknown>
+            | undefined);
         const orchestratorPrompt =
-          typeof orchestratorDef?.config?.prompt === 'string'
-            ? orchestratorDef.config.prompt
-            : buildOrchestratorPrompt(
-                runtime.disabledAgents,
-                undefined,
-                true,
-                true,
-                hostFlavor,
-              );
+          typeof finalizedOrchestrator?.prompt === 'string'
+            ? finalizedOrchestrator.prompt
+            : typeof orchestratorDef?.config?.prompt === 'string'
+              ? orchestratorDef.config.prompt
+              : buildOrchestratorPrompt(
+                  runtime.disabledAgents,
+                  undefined,
+                  true,
+                  true,
+                  hostFlavor,
+                );
         // Dedup by the EFFECTIVE prompt, not by default-prompt markers:
         // a custom replacement without `<Role>` previously slipped past
         // the marker check and was appended twice (P + host + P).

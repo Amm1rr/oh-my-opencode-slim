@@ -22,6 +22,7 @@ import { PHASE_REMINDER_METADATA_KEY } from './hooks/phase-reminder';
 import { BACKGROUND_JOB_BOARD_METADATA_KEY } from './hooks/task-session-manager';
 import type { MessageWithParts } from './hooks/types';
 import pluginModuleDefault, { OhMyOpenCodeLite as plugin } from './index';
+import { MarketplaceStore } from './marketplace/store';
 import { readTuiSnapshot, snapshotSectionsEqual } from './tui-state';
 import { BackgroundJobCoordinator } from './utils/background-job-coordinator';
 import { BackgroundJobBoard } from './utils/background-job-fixture';
@@ -31,15 +32,19 @@ import * as loggerModule from './utils/logger';
 function createPluginClient(
   noop: () => Promise<unknown>,
   abort?: (input: { path: { id: string } }) => Promise<unknown>,
+  sessionOverrides: Record<string, unknown> = {},
 ) {
-  const session = new Proxy(abort ? { abort } : {}, {
-    get(target, property) {
-      if (property in target) {
-        return target[property as keyof typeof target];
-      }
-      return noop;
+  const session = new Proxy(
+    { ...sessionOverrides, ...(abort ? { abort } : {}) },
+    {
+      get(target, property) {
+        if (property in target) {
+          return target[property as keyof typeof target];
+        }
+        return noop;
+      },
     },
-  }) as Record<string, unknown>;
+  ) as Record<string, unknown>;
   return new Proxy(
     { app: { log: noop }, session },
     {
@@ -254,6 +259,261 @@ describe('plugin tool registration', () => {
     expect(hooks.dispose).toBeFunction();
     await hooks.dispose?.();
     await hooks.dispose?.();
+  });
+
+  test('activates only marketplace packages selected by the resolved preset at first host finalization', async () => {
+    const originalEnv = { ...process.env };
+    const root = await mkdtemp(
+      '/tmp/oh-my-opencode-slim-marketplace-finalize-',
+    );
+    const configDir = path.join(root, 'config');
+    const dataDir = path.join(root, 'data');
+    await mkdir(configDir, { recursive: true });
+    process.env = {
+      ...originalEnv,
+      OPENCODE_CONFIG_DIR: configDir,
+      XDG_DATA_HOME: dataDir,
+    };
+    delete process.env.OH_MY_OPENCODE_SLIM_DISABLE;
+    const packageManifest = (id: string, agentName: string) => ({
+      schemaVersion: 2,
+      id,
+      version: '1.0.0',
+      displayName: agentName,
+      description: 'Selected package agent',
+      agentName,
+      prompt: 'Package prompt',
+      skills: [],
+      mcps: [],
+      tools: ['read'],
+      author: { name: 'Test author' },
+      tags: [],
+      license: 'MIT',
+      compatibility: { plugin: '>=1.0.0' },
+      model: {
+        source: 'explicit',
+        candidates: ['provider/package', 'provider/package-fallback'],
+      },
+      routing: {
+        description: 'Package lane',
+        when: 'Package task',
+        keywords: ['package'],
+      },
+    });
+    const store = new MarketplaceStore({ pluginVersion: '2.2.25' });
+    store.install({
+      manifest: packageManifest('team/selected', 'selected-agent') as never,
+    });
+    store.install({
+      manifest: packageManifest('team/unselected', 'unselected-agent') as never,
+    });
+    await Bun.write(
+      path.join(configDir, 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        preset: 'active',
+        agents: {
+          'selected-agent': {
+            displayName: 'SelectedVisible',
+            model: 'owner/selected',
+          },
+        },
+        presets: {
+          active: { marketplace: { agents: ['team/selected'] } },
+        },
+      }),
+    );
+    const fallbackPrompts: unknown[] = [];
+    const hooks = await plugin({
+      client: createPluginClient(async () => ({}), undefined, {
+        messages: async () => ({
+          data: [
+            {
+              info: { role: 'user' },
+              parts: [{ type: 'text', text: 'Please use the package agent.' }],
+            },
+          ],
+        }),
+        promptAsync: async (input: unknown) => {
+          fallbackPrompts.push(input);
+          return {};
+        },
+      }),
+      directory: root,
+      worktree: root,
+      serverUrl: new URL('http://127.0.0.1:4096'),
+    } as never);
+    await Bun.write(
+      path.join(configDir, 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        preset: 'changed',
+        agents: { changed_baseline: { model: 'provider/changed' } },
+        presets: {
+          changed: { marketplace: { agents: ['team/unselected'] } },
+        },
+      }),
+    );
+    const hostConfig = {
+      agent: {
+        orchestrator: { displayName: 'Lead' },
+        Lead: { prompt: 'Visible host orchestrator prompt' },
+        SelectedVisible: {
+          model: 'provider/host-selected',
+          variant: 'host-variant',
+        },
+      },
+    };
+    try {
+      await hooks.config?.(hostConfig);
+      expect(hostConfig.agent).toHaveProperty('selected-agent');
+      expect(hostConfig.agent).not.toHaveProperty('unselected-agent');
+      expect(hostConfig.agent).not.toHaveProperty('changed_baseline');
+      const visiblePrompt = (
+        hostConfig.agent as Record<string, { prompt?: string }>
+      ).Lead?.prompt;
+      expect(visiblePrompt).toContain('Visible host orchestrator prompt');
+      expect(visiblePrompt).toContain('@SelectedVisible');
+      expect(visiblePrompt).not.toContain('@unselected-agent');
+      expect(visiblePrompt?.match(/<Marketplace agents>/g)).toHaveLength(1);
+      await hooks['chat.message']?.(
+        {
+          sessionID: 'marketplace-system-transform',
+          agent: 'orchestrator',
+          model: { providerID: 'provider', modelID: 'main' },
+        } as never,
+        {} as never,
+      );
+      const system = [
+        [
+          'You are powered by the model named provider/main.',
+          '<env>',
+          '  Working directory: /tmp',
+          '</env>',
+        ].join('\n'),
+      ];
+      await hooks['experimental.chat.system.transform']?.(
+        { sessionID: 'marketplace-system-transform' } as never,
+        { system } as never,
+      );
+      expect(system.join('\n')).toContain('Visible host orchestrator prompt');
+      expect(system.join('\n')).toContain('@SelectedVisible');
+      expect(system.join('\n')).not.toContain('@unselected-agent');
+      await hooks.event?.({
+        event: {
+          type: 'message.updated',
+          properties: {
+            info: {
+              sessionID: 'marketplace-fallback',
+              providerID: 'provider',
+              modelID: 'host-selected',
+              role: 'assistant',
+              agent: 'SelectedVisible',
+            },
+          },
+        },
+      } as never);
+      await hooks.event?.({
+        event: {
+          type: 'session.error',
+          properties: {
+            sessionID: 'marketplace-fallback',
+            error: { message: 'rate limit exceeded' },
+          },
+        },
+      } as never);
+      expect(fallbackPrompts).toHaveLength(1);
+      expect(JSON.stringify(fallbackPrompts[0])).toContain(
+        '"modelID":"package"',
+      );
+      await hooks.event?.({
+        event: {
+          type: 'message.updated',
+          properties: {
+            info: {
+              sessionID: 'marketplace-fallback',
+              providerID: 'provider',
+              modelID: 'package',
+              role: 'assistant',
+              agent: 'SelectedVisible',
+            },
+          },
+        },
+      } as never);
+      await hooks.event?.({
+        event: {
+          type: 'session.error',
+          properties: {
+            sessionID: 'marketplace-fallback',
+            error: { message: 'rate limit exceeded again' },
+          },
+        },
+      } as never);
+      expect(fallbackPrompts).toHaveLength(2);
+      expect(JSON.stringify(fallbackPrompts[1])).toContain('package-fallback');
+    } finally {
+      await hooks.dispose?.();
+      process.env = originalEnv;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('v1 config hook rejects selected packages with MCPs absent from an MCP-less host config', async () => {
+    const originalEnv = { ...process.env };
+    const root = await mkdtemp('/tmp/oh-my-opencode-slim-marketplace-mcp-');
+    const configDir = path.join(root, 'config');
+    await mkdir(configDir, { recursive: true });
+    process.env = {
+      ...originalEnv,
+      OPENCODE_CONFIG_DIR: configDir,
+      XDG_DATA_HOME: path.join(root, 'data'),
+    };
+    delete process.env.OH_MY_OPENCODE_SLIM_DISABLE;
+    const store = new MarketplaceStore({ pluginVersion: '2.2.25' });
+    store.install({
+      manifest: {
+        schemaVersion: 2,
+        id: 'team/requires-mcp',
+        version: '1.0.0',
+        displayName: 'Requires MCP',
+        description: 'MCP requirement fixture',
+        agentName: 'requires-mcp-agent',
+        prompt: 'Use the required MCP.',
+        skills: [],
+        mcps: ['missing-mcp'],
+        tools: ['read'],
+        author: { name: 'Test author' },
+        tags: [],
+        license: 'MIT',
+        compatibility: { plugin: '>=1.0.0' },
+        model: { source: 'explicit', candidates: ['provider/package'] },
+        routing: {
+          description: 'MCP fixture',
+          when: 'An MCP test is needed.',
+          keywords: ['mcp'],
+        },
+      } as never,
+    });
+    await Bun.write(
+      path.join(configDir, 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        preset: 'active',
+        presets: { active: { marketplace: { agents: ['team/requires-mcp'] } } },
+      }),
+    );
+    const hooks = await plugin({
+      client: createPluginClient(async () => ({})),
+      directory: root,
+      worktree: root,
+      serverUrl: new URL('http://127.0.0.1:4096'),
+    } as never);
+    try {
+      await expect(hooks.config?.({ agent: {} })).rejects.toThrow(
+        'missing-required-dependency',
+      );
+    } finally {
+      await hooks.dispose?.();
+      process.env = originalEnv;
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   test('disposes generation one timers and fresh generation two supervises launches', async () => {
