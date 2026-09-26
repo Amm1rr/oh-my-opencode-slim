@@ -127,7 +127,7 @@ type ReportedTerminalRun = {
   terminalState?: string;
 };
 
-/** A corrective notice queued for the parent's next eligible request. */
+/** A corrective notice delivered on the parent's next eligible request. */
 type ReopenCorrection = {
   taskID: string;
   generation: number;
@@ -178,73 +178,39 @@ function rememberReportedTerminalRun(
 }
 
 /**
- * Move reported runs whose job reopened to running into the pending
- * correction queue. A job that left the board prunes its entry. Called at
- * injection time so the queue reflects the board the parent is about to
- * see, without a separate event seam on the board store.
+ * Deliver corrections for reported runs that reopened to running. Retire
+ * delivered runs and prune runs whose job left the board or was superseded by
+ * a newer generation. Called at injection time to reflect the current board
+ * without a separate event seam on the board store.
  */
-function queueReopenCorrections(
+function deliverReopenCorrections(
   state: InjectionState,
   parentSessionID: string,
+  messages: unknown[],
+  baseInfo: MessageWithParts['info'],
 ): void {
   const reported = state.reportedTerminalRunsByParent?.get(parentSessionID);
   if (!reported || reported.size === 0) return;
-  for (const [key, run] of [...reported.entries()]) {
+  for (const [key, run] of reported) {
     const record = state.backgroundJobBoard.get(run.taskID);
-    if (!record) {
-      reported.delete(key);
-      continue;
-    }
-    if (record.state !== 'running' || record.generation !== run.generation) {
+    if (record?.generation === run.generation && record.state !== 'running') {
       continue;
     }
     reported.delete(key);
+    if (!record || record.generation !== run.generation) continue;
+
     const correction: ReopenCorrection = {
       taskID: run.taskID,
       generation: run.generation,
       alias: record.alias,
       priorTerminalState: run.terminalState ?? 'completed',
     };
-    let pending = state.pendingReopenCorrections?.get(parentSessionID);
-    if (!pending) {
-      pending = new Map<string, ReopenCorrection>();
-      if (state.pendingReopenCorrections) {
-        state.pendingReopenCorrections.set(parentSessionID, pending);
-      } else {
-        state.pendingReopenCorrections = new Map([[parentSessionID, pending]]);
-      }
-    }
-    pending.set(key, correction);
     log('[task-session-manager] queued reopen corrective notice', {
       parentSessionID,
       taskID: run.taskID,
       generation: run.generation,
       priorTerminalState: correction.priorTerminalState,
     });
-  }
-  if (reported.size === 0) {
-    state.reportedTerminalRunsByParent?.delete(parentSessionID);
-  }
-}
-
-/**
- * Append the pending corrective notices as trailing volatile messages
- * (cache-safe tail zone via `appendTrailingVolatileMessage`, tagged with
- * the board metadata key). Each notice is delivered exactly once: delivery
- * retires its queue entry, and injected messages are transform-time only,
- * so nothing persists into later requests.
- */
-function deliverPendingReopenCorrections(
-  state: InjectionState,
-  parentSessionID: string,
-  messages: unknown[],
-  baseInfo: MessageWithParts['info'],
-): void {
-  queueReopenCorrections(state, parentSessionID);
-  const pending = state.pendingReopenCorrections?.get(parentSessionID);
-  if (!pending || pending.size === 0) return;
-  for (const [key, correction] of [...pending.entries()]) {
-    pending.delete(key);
     appendTrailingVolatileMessage(
       messages,
       {
@@ -258,19 +224,20 @@ function deliverPendingReopenCorrections(
       },
     );
   }
-  state.pendingReopenCorrections?.delete(parentSessionID);
+  if (reported.size === 0) {
+    state.reportedTerminalRunsByParent?.delete(parentSessionID);
+  }
 }
 
 /**
  * Prune reopen-correction bookkeeping for a parent session (session end).
- * Orphaned pending corrections must never surface in a recreated session.
+ * Reported runs must never surface in a recreated session.
  */
 export function pruneReopenCorrectionState(
   state: InjectionState,
   parentSessionID: string,
 ): void {
   state.reportedTerminalRunsByParent?.delete(parentSessionID);
-  state.pendingReopenCorrections?.delete(parentSessionID);
 }
 
 const HOST_MESSAGE_OCCURRENCE_PREFIX = 'host-message:';
@@ -308,17 +275,11 @@ export interface InjectionState {
    * detect a reconciled job REOPENING to running (typically a child session
    * resumed by its own background-shell notification): the parent's
    * conversation still carries the earlier terminal report, so the reopen
-   * needs a corrective trailing notice. Optional for states built before
-   * the field existed.
+   * needs a corrective trailing notice. Delivered runs and superseded
+   * generations are retired on the next eligible request. Optional for
+   * states built before the field existed.
    */
   reportedTerminalRunsByParent?: Map<string, Map<string, ReportedTerminalRun>>;
-  /**
-   * Corrective reopen notices queued for the parent's next eligible
-   * request, keyed `${taskID}:${generation}`. Each is delivered at most
-   * once (delivery retires the entry); orphaned entries are pruned when
-   * the parent session ends (`pruneReopenCorrectionState`).
-   */
-  pendingReopenCorrections?: Map<string, Map<string, ReopenCorrection>>;
   metadataKey: string;
   shouldManageSession: (sessionID: string) => boolean;
   taskContextTracker: {
@@ -1400,10 +1361,9 @@ function injectLatestBoard(state: InjectionState, messages: unknown[]): void {
   if (trigger.info.agent && trigger.info.agent !== 'orchestrator') return;
   if (!sessionID || !state.shouldManageSession(sessionID)) return;
 
-  // Corrective notices for reconciled jobs that reopened to running ride
-  // at the very end of the payload regardless of the board placement
-  // below (cache-safe trailing volatile zone).
-  deliverPendingReopenCorrections(state, sessionID, messages, trigger.info);
+  // Corrective notices are appended in the volatile tail zone before board
+  // placement. With an assistant anchor the board follows the notice.
+  deliverReopenCorrections(state, sessionID, messages, trigger.info);
 
   if (!anchor) return;
 
@@ -1843,12 +1803,7 @@ function injectCheckpointBoard(
   // Delivered on internal-initiator turns too — a publication wake makes
   // the parent run on an internal trigger, and the correction is exactly
   // what that turn needs (the fresh snapshot is what internal turns lack).
-  deliverPendingReopenCorrections(
-    state,
-    sessionID,
-    messages,
-    replayBaseMessage.info,
-  );
+  deliverReopenCorrections(state, sessionID, messages, replayBaseMessage.info);
 }
 
 function findLastMessageAnchorKey(
