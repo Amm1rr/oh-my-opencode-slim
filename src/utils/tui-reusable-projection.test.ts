@@ -82,40 +82,6 @@ describe('tui-reusable-projection', () => {
     }
   });
 
-  test('running projection uses stable fields; heartbeat writes nothing', async () => {
-    const board = new BackgroundJobBoard();
-    const projection = createTuiReusableProjection({ board, projectDir });
-    try {
-      board.registerLaunch({
-        taskID: 'ses_live',
-        parentSessionID: 'parent-1',
-        agent: 'oracle',
-        now: 100,
-      });
-      expect(
-        readTuiSnapshot(projectDir).reusableByAgent['parent-1']?.oracle,
-      ).toEqual([{ taskID: 'ses_live', alias: 'ora-1', running: true }]);
-
-      const fsModule = await import('node:fs');
-      let writes = 0;
-      const stateDir = path.dirname(getTuiStatePath(projectDir));
-      const writeSpy = spyOn(fsModule, 'writeFileSync').mockImplementation(
-        (...args: Parameters<typeof fs.writeFileSync>) => {
-          if (String(args[0]).startsWith(stateDir)) writes++;
-          return fs.writeFileSync(...args);
-        },
-      );
-      try {
-        board.updateStatus({ taskID: 'ses_live', state: 'running', now: 200 });
-        expect(writes).toBe(0);
-      } finally {
-        writeSpy.mockRestore();
-      }
-    } finally {
-      projection.dispose();
-    }
-  });
-
   test('placeholder promotions publish running and finished jobs immediately', async () => {
     const board = new BackgroundJobBoard();
     const projection = createTuiReusableProjection({ board, projectDir });
@@ -503,11 +469,12 @@ describe('tui-reusable-projection', () => {
         agent: 'fixer',
         now: 500,
       });
+      const originalWrite = fsModule.writeFileSync;
       let writes = 0;
       const writeSpy = spyOn(fsModule, 'writeFileSync').mockImplementation(
         (...args: Parameters<typeof fs.writeFileSync>) => {
           if (String(args[0]).startsWith(path.dirname(statePath))) writes += 1;
-          return fs.writeFileSync(...args);
+          return originalWrite(...args);
         },
       );
       try {

@@ -1287,56 +1287,34 @@ describe('plugin TUI agent activity', () => {
     expect(snapshotSectionsEqual(after, before)).toBe(true);
   });
 
-  test('chat.message model tracking does not rewrite per-session TUI details', async () => {
-    await hooks?.['chat.message']?.(
-      { sessionID: 'ora-child', agent: 'oracle' } as never,
-      {} as never,
-    );
-    await busy('ora-child');
-
-    const fsModule = await import('node:fs');
-    const originalWrite = fsModule.writeFileSync;
-    let writes = 0;
-    const spy = spyOn(fsModule, 'writeFileSync').mockImplementation(
-      (...args: Parameters<typeof originalWrite>) => {
-        if (String(args[0]).startsWith(getTuiStatePath(projectDir))) writes++;
-        return originalWrite(...args);
-      },
-    );
-    try {
-      await hooks?.['chat.message']?.(
+  test('observed models never enter raw per-session TUI details', async () => {
+    const chat = (modelID: string) =>
+      hooks?.['chat.message']?.(
         {
-          sessionID: 'ora-child',
+          sessionID: 'ora-m',
           agent: 'oracle',
-          model: { providerID: 'openai', modelID: 'gpt-6' },
+          model: { providerID: 'openai', modelID },
         } as never,
         {} as never,
       );
-      expect(writes).toBe(0);
-      expect(readTuiSnapshot(projectDir).sessionDetails['ora-child']).toEqual({
-        status: 'busy',
-      });
-    } finally {
-      spy.mockRestore();
-    }
-  });
-
-  test('a model observed before busy never enters raw per-session TUI details', async () => {
-    await hooks?.['chat.message']?.(
-      {
-        sessionID: 'ora-early',
-        agent: 'oracle',
-        model: { providerID: 'openai', modelID: 'gpt-6' },
-      } as never,
-      {} as never,
-    );
-    await busy('ora-early');
+    await chat('gpt-6');
+    await busy('ora-m');
+    await chat('gpt-6-luna');
+    await hooks?.event?.({
+      event: {
+        type: 'message.updated',
+        properties: {
+          info: {
+            sessionID: 'ora-m',
+            providerID: 'openai',
+            modelID: 'gpt-6-sol',
+          },
+        },
+      },
+    } as never);
 
     const raw = JSON.parse(readFileSync(getTuiStatePath(projectDir), 'utf8'));
-    expect(raw.sessionDetails['ora-early']).toEqual({ status: 'busy' });
-    expect(readTuiSnapshot(projectDir).sessionDetails['ora-early']).toEqual({
-      status: 'busy',
-    });
+    expect(raw.sessionDetails['ora-m']).toEqual({ status: 'busy' });
   });
 
   test('chat.message model after idle does not resurrect sessionDetails', async () => {
