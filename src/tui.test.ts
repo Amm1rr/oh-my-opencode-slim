@@ -1651,6 +1651,70 @@ describe('clickable sidebar sessions', () => {
     }
   });
 
+  test('sidebar heading never highlights on hover but still toggles on click', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-sidebar-nohover-'));
+    const projectDir = path.join(root, 'project');
+    fs.mkdirSync(path.join(projectDir, '.opencode'), { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDir, '.opencode', 'oh-my-opencode-slim.json'),
+      '{invalid',
+    );
+    const restoreDataHome = withIsolatedDataHome(root);
+    let setup: Awaited<ReturnType<typeof testRender>> | undefined;
+    let mounted: Awaited<ReturnType<typeof mountClickableSidebar>> | undefined;
+
+    try {
+      recordTuiAgentModels(
+        { agentModels: { explorer: 'openai/gpt-6-luna-fast' } },
+        projectDir,
+      );
+      mounted = await mountClickableSidebar({
+        projectDir,
+        sessionID: 'conv-1',
+      });
+      setup = await testRender(
+        () => mounted?.slotPlugin?.slots.sidebar_content() as never,
+        { width: 52, height: 14 },
+      );
+
+      await setup.renderOnce();
+      const frame = setup.captureCharFrame().split('\n');
+      const header = frame.findIndex((line) => line.includes('OMO-Slim'));
+      expect(header).toBeGreaterThan(-1);
+      const headerCol = Math.max(frame[header].indexOf('OMO-Slim'), 0);
+      const agentRow = frame.findIndex((line) => line.includes('explorer'));
+      expect(agentRow).toBeGreaterThan(-1);
+
+      const bgOf = (row: number) =>
+        setup
+          ?.captureSpans()
+          .lines[row]?.spans.map((span) => [
+            span.bg.r,
+            span.bg.g,
+            span.bg.b,
+            span.bg.a,
+          ]);
+      // Park the pointer away from the header so the baseline is unhovered.
+      await setup.mockMouse.moveTo(2, agentRow);
+      await setup.renderOnce();
+      const beforeHover = bgOf(header);
+      await setup.mockMouse.moveTo(headerCol + 2, header);
+      await setup.renderOnce();
+      expect(bgOf(header)).toEqual(beforeHover);
+
+      // Activation is intact: clicking still collapses the sidebar.
+      await setup.mockMouse.click(2, header);
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain('OMO-Slim');
+      expect(setup.captureCharFrame()).not.toContain('explorer');
+    } finally {
+      setup?.renderer.destroy();
+      for (const dispose of mounted?.disposers ?? []) dispose();
+      restoreDataHome();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test('places the session disclosure after the agent name in both layouts', async () => {
     for (const compactSidebar of [true, false]) {
       const root = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-sidebar-row-'));

@@ -825,6 +825,8 @@ function decorateInteractiveRow(
     hoverBackground: unknown;
     onActivate?: () => void;
     hasSelectedText?: () => boolean;
+    /** Skip hover painting (e.g. static headers) while keeping activation. */
+    paintHover?: boolean;
   },
 ): JSX.Element {
   const row = node as unknown as HoverRowRenderable;
@@ -844,13 +846,15 @@ function decorateInteractiveRow(
     }
   };
 
-  setProp(node as never, 'onMouseOver', () => {
-    applyHover(true);
-  });
-  setProp(node as never, 'onMouseOut', (event?: { x?: number; y?: number }) => {
-    if (isPointerInsideRow(row, event)) return;
-    applyHover(false);
-  });
+  if (opts.paintHover !== false) {
+    setProp(node as never, 'onMouseOver', () => {
+      applyHover(true);
+    });
+    setProp(node as never, 'onMouseOut', (event?: { x?: number; y?: number }) => {
+      if (isPointerInsideRow(row, event)) return;
+      applyHover(false);
+    });
+  }
   if (opts.onActivate) {
     setProp(node as never, 'onMouseUp', (event?: { button?: number }) => {
       if (!shouldActivateRow(event, opts.hasSelectedText)) return;
@@ -1202,6 +1206,7 @@ function renderSidebar(
     hoverBackground,
     onActivate: interaction?.toggleOpen,
     hasSelectedText: interaction?.hasSelectedText,
+    paintHover: false,
   });
   return box(
     {
