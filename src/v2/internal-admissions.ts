@@ -28,6 +28,8 @@ import { randomUUID } from 'node:crypto';
  */
 
 const MAX_TRACKED_ADMISSIONS = 4096;
+/** Stable prefix on client-chosen ids for v2 session.synthetic admissions. */
+export const INTERNAL_SYNTHETIC_MESSAGE_PREFIX = 'msg_omos_';
 
 /** Internal-initiator admissions by `sessionID:messageID`. Intentionally
  * NOT cleared on session.deleted / plugin dispose: the map is bounded
@@ -77,7 +79,7 @@ export function isInternalAdmission(
  * sessions raises SyntheticConflictError, while one within the same session
  * silently drops the new admission. IDs must survive process restarts. */
 export function createInternalSyntheticMessageID(): string {
-  return `msg_omos_${randomUUID()}`;
+  return `${INTERNAL_SYNTHETIC_MESSAGE_PREFIX}${randomUUID()}`;
 }
 
 export function __resetInternalAdmissionsForTesting(): void {

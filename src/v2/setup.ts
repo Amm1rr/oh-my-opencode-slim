@@ -47,6 +47,7 @@ import {
 import { subagentArgsToV1, toolNameToV1, v1ArgsToSubagent } from './delegation';
 import { mapV2EventToV1 } from './event-adapter';
 import {
+  INTERNAL_SYNTHETIC_MESSAGE_PREFIX,
   isInternalAdmission,
   recordInternalAdmission,
 } from './internal-admissions';
@@ -372,6 +373,33 @@ export function createSessionContextHandler(
         }
         if (message.agent === undefined && knownAgent) {
           message.agent = knownAgent;
+        }
+        // session.synthetic bypasses session.prompt and the host turns its
+        // text into a flagless user part. Restore the v1 internal marker by
+        // the client-chosen id (not the bounded admission registry or the
+        // envelope metadata, which foreground fallback can also carry).
+        if (message.id?.startsWith(INTERNAL_SYNTHETIC_MESSAGE_PREFIX)) {
+          const index = message.content.findIndex(
+            (part) => part.type === 'text',
+          );
+          if (index >= 0) {
+            const part = message.content[index];
+            if (
+              part &&
+              (part.synthetic !== true ||
+                !isRecord(part.metadata) ||
+                part.metadata[INTERNAL_INITIATOR_METADATA_KEY] !== true)
+            ) {
+              message.content[index] = {
+                ...part,
+                synthetic: true,
+                metadata: {
+                  ...(isRecord(part.metadata) ? part.metadata : {}),
+                  [INTERNAL_INITIATOR_METADATA_KEY]: true,
+                },
+              };
+            }
+          }
         }
       }
       // CacheHint tagging (v2-only): parts injected through

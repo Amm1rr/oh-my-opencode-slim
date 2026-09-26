@@ -1,15 +1,30 @@
 import { describe, expect, mock, test } from 'bun:test';
 import * as fs from 'node:fs/promises';
-import { appendTaggedSyntheticPart } from '../hooks/cache-safe-injection';
+import {
+  appendTaggedSyntheticPart,
+  isTaggedPart,
+} from '../hooks/cache-safe-injection';
+import {
+  assistantTurn,
+  createPipeline,
+  internalInitiatorTurn,
+  SESSION_ID,
+  userTurn,
+} from '../hooks/cache-safety-harness.test';
 import { createJsonErrorRecoveryHook } from '../hooks/json-error-recovery/hook';
 import {
   createPhaseReminderHook,
   PHASE_REMINDER_METADATA_KEY,
 } from '../hooks/phase-reminder';
+import { BACKGROUND_JOB_BOARD_METADATA_KEY } from '../hooks/task-session-manager/board-injection';
 import {
   createToolLoopGuardHook,
   LOOP_GUARD_WARNING,
 } from '../hooks/tool-loop-guard/hook';
+import {
+  INTERNAL_INITIATOR_METADATA_KEY,
+  SLIM_INTERNAL_INITIATOR_MARKER,
+} from '../utils/internal-initiator';
 import { createV2InterviewBridge, markerText } from './interview-bridge';
 import { createSessionSubmit } from './session-submit';
 import {
@@ -648,6 +663,98 @@ describe('context bridge: transcript user-message identity enrichment', () => {
 
     expect(user.sessionID).toBeUndefined();
     expect(user.agent).toBeUndefined();
+  });
+
+  test('v2 synthetic wake is internal: no new phase reminder or job board (T4)', async () => {
+    const pipeline = createPipeline();
+    pipeline.board.registerLaunch({
+      taskID: 'ses_child',
+      parentSessionID: SESSION_ID,
+      agent: 'librarian',
+      description: 'running job',
+      background: true,
+    });
+    const wake = {
+      id: 'msg_omos_wake',
+      role: 'user',
+      content: [
+        {
+          type: 'text',
+          text: `wake\n${SLIM_INTERNAL_INITIATOR_MARKER}`,
+          metadata: { source: 'host' },
+        },
+      ],
+    };
+    const event = makeEvent(
+      [
+        { id: 'u1', role: 'user', content: [{ type: 'text', text: 'start' }] },
+        {
+          id: 'a1',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'working' }],
+        },
+        wake,
+      ],
+      { sessionID: SESSION_ID },
+    );
+    const handler = createSessionContextHandler({
+      interviewHandleContext: async () => {},
+      messagesTransform: async (_input, output) => pipeline.run(output),
+    });
+
+    await handler(event);
+
+    expect(event.messages.at(-1)).toBe(wake);
+    expect(wake.content[0]).toMatchObject({
+      synthetic: true,
+      metadata: { source: 'host', [INTERNAL_INITIATOR_METADATA_KEY]: true },
+    });
+    expect(
+      wake.content.some(
+        (part) =>
+          isTaggedPart(part, PHASE_REMINDER_METADATA_KEY) ||
+          isTaggedPart(part, BACKGROUND_JOB_BOARD_METADATA_KEY),
+      ),
+    ).toBe(false);
+  });
+
+  test('v1 flagged wake likewise gets no fresh phase reminder or job board (T5)', async () => {
+    const pipeline = createPipeline();
+    pipeline.board.registerLaunch({
+      taskID: 'ses_child',
+      parentSessionID: SESSION_ID,
+      agent: 'librarian',
+      description: 'running job',
+      background: true,
+    });
+    const wake = internalInitiatorTurn('wake', 'continue');
+    const output: { messages: unknown[] } = {
+      messages: [userTurn('u1', 'start'), assistantTurn('a1', 'working'), wake],
+    };
+    await pipeline.run(output);
+    expect(output.messages.at(-1)).toBe(wake);
+    expect(
+      wake.parts.some(
+        (part) =>
+          isTaggedPart(part, PHASE_REMINDER_METADATA_KEY) ||
+          isTaggedPart(part, BACKGROUND_JOB_BOARD_METADATA_KEY),
+      ),
+    ).toBe(false);
+  });
+
+  test('ordinary ids remain external even with message-level internal metadata', async () => {
+    const message = {
+      id: 'msg_regular',
+      role: 'user',
+      metadata: { [INTERNAL_INITIATOR_METADATA_KEY]: true },
+      content: [{ type: 'text', text: 'user prompt' }],
+    };
+    const handler = createSessionContextHandler({
+      interviewHandleContext: async () => {},
+      messagesTransform: async () => {},
+    });
+    await handler(makeEvent([message]));
+    expect(message.content).toEqual([{ type: 'text', text: 'user prompt' }]);
   });
 
   test('end-to-end: a recognized agent now performs the phase-reminder injection it previously skipped', async () => {
