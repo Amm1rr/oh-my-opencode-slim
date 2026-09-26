@@ -2,9 +2,8 @@
  * v2 compaction hook bridge (`ctx.session.hook("compaction")`).
  *
  * Coverage:
- * - tagged synthetic parts are stripped from the compaction event's
- *   message list while untagged content (user text, command markers,
- *   untagged synthetic parts) passes through unchanged
+ * - phase reminders are stripped, but job boards and untagged content
+ *   survive to bridge running-job state into the summary
  * - read-only guarantees: `system` is never modified and `result` is
  *   never set (host-owned; open host bug — the compaction system prompt
  *   may be absent, so the bridge must not add or rewrite one)
@@ -39,13 +38,17 @@ function makeCompactionEvent(
 }
 
 describe('createSessionCompactionBridge', () => {
-  test('strips tagged synthetic parts and preserves untagged content', async () => {
+  test('strips phase reminders but keeps job boards and untagged content', async () => {
     const userText = { type: 'text', text: 'real user text' };
     const commandPart = {
       type: 'text',
       text: 'DEEPWORK EXPANDED',
       synthetic: true,
     };
+    const board = createTaggedSyntheticPart({
+      text: 'BOARD',
+      metadataKey: BACKGROUND_JOB_BOARD_METADATA_KEY,
+    });
     const user = {
       id: 'msg_1',
       role: 'user',
@@ -55,23 +58,18 @@ describe('createSessionCompactionBridge', () => {
           text: 'PHASE REMINDER',
           metadataKey: PHASE_REMINDER_METADATA_KEY,
         }),
-        createTaggedSyntheticPart({
-          text: 'BOARD',
-          metadataKey: BACKGROUND_JOB_BOARD_METADATA_KEY,
-        }),
+        board,
         commandPart,
       ],
     };
+    const assistantBoard = createTaggedSyntheticPart({
+      text: 'BOARD 2',
+      metadataKey: BACKGROUND_JOB_BOARD_METADATA_KEY,
+    });
     const assistant = {
       id: 'msg_2',
       role: 'assistant',
-      content: [
-        { type: 'text', text: 'assistant text' },
-        createTaggedSyntheticPart({
-          text: 'BOARD 2',
-          metadataKey: BACKGROUND_JOB_BOARD_METADATA_KEY,
-        }),
-      ],
+      content: [{ type: 'text', text: 'assistant text' }, assistantBoard],
     };
     const event = makeCompactionEvent([user, assistant]);
 
@@ -83,15 +81,18 @@ describe('createSessionCompactionBridge', () => {
     expect(event.messages[1]).toBe(assistant);
     // Untagged parts survive with their original object identity
     // (user text AND the untagged synthetic command part).
-    expect(user.content).toEqual([userText, commandPart]);
+    expect(user.content).toEqual([userText, board, commandPart]);
     expect(user.content[0]).toBe(userText);
-    expect(user.content[1]).toBe(commandPart);
+    expect(user.content[1]).toBe(board);
+    expect(user.content[2]).toBe(commandPart);
     expect(assistant.content).toEqual([
       { type: 'text', text: 'assistant text' },
+      assistantBoard,
     ]);
+    expect(assistant.content[1]).toBe(assistantBoard);
   });
 
-  test('drops messages that consist solely of tagged parts (trailing volatile board)', async () => {
+  test('keeps a board-only trailing message but drops a reminder-only message', async () => {
     const real = {
       id: 'msg_1',
       role: 'user',
@@ -107,12 +108,23 @@ describe('createSessionCompactionBridge', () => {
         }),
       ],
     };
-    const event = makeCompactionEvent([real, volatile]);
+    const reminder = {
+      id: 'msg_3',
+      role: 'user',
+      content: [
+        createTaggedSyntheticPart({
+          text: 'phase',
+          metadataKey: PHASE_REMINDER_METADATA_KEY,
+        }),
+      ],
+    };
+    const event = makeCompactionEvent([real, volatile, reminder]);
 
     await createSessionCompactionBridge()(event);
 
-    expect(event.messages).toHaveLength(1);
+    expect(event.messages).toHaveLength(2);
     expect(event.messages[0]).toBe(real);
+    expect(event.messages[1]).toBe(volatile);
     expect(real.content).toEqual([{ type: 'text', text: 'hi' }]);
   });
 
@@ -354,7 +366,7 @@ describe('createV2Setup compaction hook', () => {
     20_000,
   );
 
-  test('registers the compaction hook; the registered callback strips tagged parts', async () => {
+  test('registers the compaction hook; the registered callback keeps the board', async () => {
     const { ctx, hooks, getCompactionCb, getContextCb } = makeCtx();
     const cleanup = await createV2Setup()(ctx);
 
@@ -379,7 +391,13 @@ describe('createV2Setup compaction hook', () => {
       };
       const event = makeCompactionEvent([message]);
       await cb(event);
-      expect(message.content).toEqual([{ type: 'text', text: 'user text' }]);
+      expect(message.content).toEqual([
+        { type: 'text', text: 'user text' },
+        createTaggedSyntheticPart({
+          text: 'BOARD',
+          metadataKey: BACKGROUND_JOB_BOARD_METADATA_KEY,
+        }),
+      ]);
 
       await flushLoggerForTesting();
       expect(readPluginLog()).toContain(

@@ -425,8 +425,8 @@ currently break this plugin:
   `options` object — the plugin is unaffected: its context bridge
   mutates only system/messages, and cache hints ride
   `ContentPart.cache`. Adoption status: the **compaction hook is
-  adopted** — the plugin strips its tagged synthetic parts from the
-  compaction input (phase reminders and job boards). On v1, the
+  adopted** — the plugin strips phase reminders from the compaction input,
+  preserving job boards so the summary can report running jobs. On v1, the
   `experimental.session.compacting` hook instead marks the next message
   transform for that session; it strips only phase reminders after the
   transform, leaving the job board untouched. The v2 adapter does not forward

@@ -30,7 +30,6 @@ import {
 } from '../hooks/chat-headers';
 import type { ForegroundFallbackManager } from '../hooks/foreground-fallback';
 import { PHASE_REMINDER_METADATA_KEY } from '../hooks/phase-reminder';
-import { BACKGROUND_JOB_BOARD_METADATA_KEY } from '../hooks/task-session-manager/board-injection';
 import { OhMyOpenCodeLite } from '../index';
 import type { McpConfig } from '../mcp/types';
 import {
@@ -594,17 +593,13 @@ export function createChatHeadersBridge(
 
 /**
  * Metadata keys whose tagged synthetic parts the compaction bridge
- * strips: the plugin's content injections (phase reminders use
- * PHASE_REMINDER_METADATA_KEY, background
- * job boards carry BACKGROUND_JOB_BOARD_METADATA_KEY). Imported from
- * their owning modules so the strip set cannot drift from the injection
- * set. Untagged synthetic parts (e.g. command-marker expansions) are
- * deliberately NOT in this list — they are conversation content, not
- * plugin bookkeeping.
+ * strips: phase reminders are regenerated on the next turn. Background
+ * job boards must survive to tell the summary which jobs are running;
+ * internal wakes do not receive fresh boards. Untagged synthetic parts
+ * (e.g. command-marker expansions) are also conversation content.
  */
 const COMPACTION_STRIP_METADATA_KEYS: readonly string[] = [
   PHASE_REMINDER_METADATA_KEY,
-  BACKGROUND_JOB_BOARD_METADATA_KEY,
 ];
 
 /**
@@ -612,13 +607,11 @@ const COMPACTION_STRIP_METADATA_KEYS: readonly string[] = [
  *
  * The host's session summarizer fires `compaction` with the request's
  * message list; without this bridge the summary would bake the plugin's
- * volatile injected content (background job boards, phase reminders)
- * into the compacted transcript permanently. The callback strips ONLY
- * tagged synthetic parts, reusing `stripTaggedContent` from
+ * phase reminders into the compacted transcript permanently. The callback
+ * strips ONLY tagged phase reminders, reusing `stripTaggedContent` from
  * cache-safe-injection (the same helper every injection strips with) —
- * user text, command markers, untagged synthetic parts, and message
- * order are untouched; messages consisting solely of tagged parts (the
- * volatile trailing-message shape) are dropped.
+ * user text, command markers, job boards, untagged synthetic parts, and
+ * message order are untouched; reminder-only messages are dropped.
  *
  * Deliberately read-only on the rest of the event: `system` is never
  * rewritten (open host bug: the compaction system prompt may be absent —
