@@ -1336,19 +1336,27 @@ describe('v2 client shim foreground-fallback integration', () => {
             'The previous model request failed and is being retried.',
           ),
         ],
-        model: { providerID: 'anthropic', modelID: 'claude-fallback' },
+        model: {
+          providerID: 'anthropic',
+          modelID: 'claude-fallback',
+          variant: 'high',
+        },
         agent: 'orchestrator',
       },
     });
 
-    // v2 semantics: switchModel first (v1 {providerID, modelID} → v2
-    // {id, providerID}), then a non-blocking steer prompt carrying both the
+    // v2 semantics: switchModel first (v1 {providerID, modelID, variant} →
+    // v2 {id, providerID, variant}), then a non-blocking steer prompt carrying both the
     // original user text and the synthetic reminder.
     expect(seq[0]).toMatchObject({
       m: 'switchModel',
       i: {
         sessionID: 'ses_1',
-        model: { id: 'claude-fallback', providerID: 'anthropic' },
+        model: {
+          id: 'claude-fallback',
+          providerID: 'anthropic',
+          variant: 'high',
+        },
       },
     });
     expect(seq[1]).toMatchObject({

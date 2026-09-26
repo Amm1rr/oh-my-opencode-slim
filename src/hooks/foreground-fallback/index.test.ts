@@ -2178,13 +2178,14 @@ describe('ForegroundFallbackManager session.error', () => {
   test('v2 host promptBody requests a required model switch', async () => {
     const { mocks } = createMockClient();
     const mgr = new ForegroundFallbackManager(
-      makeChains(),
-      true,
       {
-        directory: '/test',
-        hostFlavor: 'v2',
-      } as any,
-      0,
+        orchestrator: [
+          'anthropic/claude-opus-4-5',
+          { id: 'openai/gpt-4o', variant: 'high' },
+        ],
+      },
+      true,
+      { directory: '/test', hostFlavor: 'v2' } as any,
     );
 
     await mgr.handleEvent({
@@ -2195,6 +2196,7 @@ describe('ForegroundFallbackManager session.error', () => {
           providerID: 'anthropic',
           modelID: 'claude-opus-4-5',
           role: 'assistant',
+          agent: 'orchestrator',
         },
       },
     });
@@ -2208,6 +2210,9 @@ describe('ForegroundFallbackManager session.error', () => {
 
     const call = mocks.promptAsync.mock.calls[0] as [Record<string, unknown>];
     expect(call[0].modelSwitch).toBe('required');
+    expect(
+      (call[0].body as { model: { variant?: string } }).model.variant,
+    ).toBe('high');
   });
 
   test('switched:false result (v2 switch failure) skips the switch claim', async () => {

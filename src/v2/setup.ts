@@ -799,8 +799,8 @@ const PERMISSION_RULES_UNAVAILABLE_WARNING =
   '[v2][permission-rules] child permission bridge disabled: native agent ' +
   'snapshot and ctx.session.update are required';
 const PERMISSION_IDENTITY_UNAVAILABLE_WARNING =
-  '[v2][permission-rules] child identity unavailable; prompt continues under ' +
-  'host permissions until session.created is observed';
+  '[v2][permission-rules] child identity unavailable; its permission policy ' +
+  'cannot be verified';
 const PERMISSION_RULES_OPERATION_TIMEOUT_MS = 5_000;
 const MAX_PENDING_PERMISSION_UPDATES = 128;
 let permissionRulesUnavailableWarned = false;
@@ -831,6 +831,10 @@ export interface V2PermissionRulesOptions {
    * whose agent is not in this set was not spawned by the plugin's task
    * pipeline and must never have its session rules replaced. */
   pluginAgents: ReadonlySet<string>;
+  /** Marketplace child policies are a security ceiling: prompt admission
+   * must not proceed until the session identity is known and its rules have
+   * been installed. Baseline configured agents retain fail-soft behavior. */
+  requireKnownIdentity?: boolean;
   /** Injectable degradation sink (tests observe the one-time warning
    * without mocking the logger). */
   onUnavailable?: () => void;
@@ -891,7 +895,8 @@ export function createPermissionRulesBridge(
    * was available, and apply rules for newly recognized managed children. */
   refreshPluginAgents(): Promise<void> | undefined;
   /** Cache-first prompt barrier. Unknown identities degrade if lookup is
-   * unavailable; known managed identities fail closed on update failures. */
+   * unavailable; known managed identities fail closed on update failures.
+   * Marketplace setups also require identity and policy resolution. */
   ensurePromptPermission(sessionID: string): Promise<void>;
   dispose(): Promise<void>;
 } {
@@ -961,6 +966,13 @@ export function createPermissionRulesBridge(
     if (permissionIdentityUnavailableWarned) return;
     permissionIdentityUnavailableWarned = true;
     log(PERMISSION_IDENTITY_UNAVAILABLE_WARNING);
+  }
+
+  function rejectUnknownIdentity(): never {
+    warnUnknownIdentity();
+    throw new Error(
+      'child session identity is unknown; prompt blocked until its permission policy is installed',
+    );
   }
 
   async function applyChildSessionRules(
@@ -1170,12 +1182,14 @@ export function createPermissionRulesBridge(
 
     const getSession = session?.get;
     if (typeof getSession !== 'function') {
+      if (options.requireKnownIdentity) rejectUnknownIdentity();
       warnUnknownIdentity();
       return;
     }
     let pendingLookup = pendingIdentityLookups.get(sessionID);
     if (!pendingLookup) {
       if (pendingIdentityLookups.size >= MAX_PENDING_PERMISSION_UPDATES) {
+        if (options.requireKnownIdentity) rejectUnknownIdentity();
         warnUnknownIdentity();
         return;
       }
@@ -1199,6 +1213,7 @@ export function createPermissionRulesBridge(
             (!Object.hasOwn(record, 'parentID') &&
               typeof record.agent !== 'string')
           ) {
+            if (options.requireKnownIdentity) rejectUnknownIdentity();
             warnUnknownIdentity();
             return;
           }
@@ -1206,6 +1221,7 @@ export function createPermissionRulesBridge(
           cacheIdentity(sessionID, identity, lookup);
         } catch (err) {
           if (!lookup.invalidated) {
+            if (options.requireKnownIdentity) rejectUnknownIdentity();
             warnUnknownIdentity();
             log(
               '[v2][permission-rules] session identity lookup failed',
@@ -1225,6 +1241,7 @@ export function createPermissionRulesBridge(
     if (current?.state === 'managed') {
       await enforceKnownIdentity(sessionID, current);
     } else if (current?.state === 'unknown' || current === null || !current) {
+      if (options.requireKnownIdentity) rejectUnknownIdentity();
       warnUnknownIdentity();
     }
   }
@@ -1908,6 +1925,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
         | undefined;
       let permissionRulesBridgeEnabled = false;
       const pluginAgents = new Set<string>();
+      let marketplaceAgentsRequirePromptPolicy = false;
       let permissionRulesBridge:
         | ReturnType<typeof createPermissionRulesBridge>
         | undefined;
@@ -1945,6 +1963,8 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
             nativeAgentSnapshot.permissions,
           );
         finalizedRegistry = registry;
+        marketplaceAgentsRequirePromptPolicy =
+          registry.marketplaceAgentNames.length > 0;
         // Deferred agent finalization is the first point where marketplace
         // agents are known. Latch capability failures for the readiness barrier.
         if (
@@ -2439,6 +2459,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
                 return finalizedRegistry?.nativePolicies[agent]?.rules;
               },
               pluginAgents,
+              requireKnownIdentity: marketplaceAgentsRequirePromptPolicy,
             });
             const permissionBridge = permissionRulesBridge;
             disposers.push(() => permissionBridge.dispose());

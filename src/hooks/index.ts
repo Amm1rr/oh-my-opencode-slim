@@ -4,7 +4,10 @@ export { createAutoUpdateCheckerHook } from './auto-update-checker';
 export { createCacheMonitorHook } from './cache-monitor';
 export { createChatHeadersHook } from './chat-headers';
 export { createDeepworkCommandHook } from './deepwork';
-export { ForegroundFallbackManager } from './foreground-fallback';
+export {
+  ForegroundFallbackManager,
+  type ForegroundFallbackModel,
+} from './foreground-fallback';
 export { createJsonErrorRecoveryHook } from './json-error-recovery/hook';
 export { createLoopCommandHook } from './loop-command';
 export {

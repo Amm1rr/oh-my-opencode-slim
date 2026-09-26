@@ -348,6 +348,11 @@ describe('createV2Setup e2e', () => {
     expect(calls.hooks).toContain('tool:execute.before');
     expect(calls.hooks).toContain('tool:execute.after');
     expect(calls.contextHookCb).toBeFunction();
+    expect(calls.promptHookCb).toBeFunction();
+    await calls.promptHookCb?.({
+      sessionID: 'ses_baseline_unknown',
+      messageID: 'msg_baseline',
+    });
 
     await cleanup();
     expect(calls.disposed.length).toBeGreaterThan(0);
@@ -978,6 +983,15 @@ describe('createV2Setup e2e', () => {
       expect(childUpdates[0]?.permissions).toContainEqual(
         expect.objectContaining({ action: '*', resource: '*', effect: 'deny' }),
       );
+      // session.update being present is not sufficient for marketplace
+      // admission: an unobserved child must be identified and have its policy
+      // installed before the downstream prompt bridge can proceed.
+      await expect(
+        calls.promptHookCb?.({
+          sessionID: 'ses_marketplace_unknown',
+          messageID: 'msg_unknown',
+        }),
+      ).rejects.toThrow(/identity is unknown; prompt blocked/i);
     } finally {
       await cleanup();
     }
