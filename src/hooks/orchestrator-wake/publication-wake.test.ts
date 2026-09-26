@@ -270,30 +270,49 @@ describe('terminal-publication wake', () => {
   test.each(['v1', 'v2'] as const)(
     '%s failed terminal publication retries with its publication reason when no periodic work remains',
     async (flavor) => {
-      let fail = true;
-      const promptAsync = mock(async () => {
-        if (fail) throw new Error('transport down');
-        return {};
-      });
-      const { scheduler } = createPublicationScheduler({
-        hostFlavor: flavor,
-        sessionClient:
-          flavor === 'v2'
-            ? makeV2Client({
-                promptAsync,
-                listChildren: [terminalChild('child-1')],
-              })
-            : makeV1Client({
-                promptAsync,
-                todos: [{ id: 't1', status: 'completed' }],
-              }),
-      });
-      await scheduler.triggerTerminalPublicationWake('p1', 'child-1', 1);
-      expect(promptAsync).toHaveBeenCalledTimes(1);
-      fail = false;
-      await clock.advance(60_000);
-      expect(promptAsync).toHaveBeenCalledTimes(2);
-      expect(getWakeProgress('p1').stopped).toBe(false);
+      const triggers: string[] = [];
+      const spy = spyOn(loggerModule, 'log').mockImplementation(
+        (message: string, data?: unknown) => {
+          const details = data as
+            | { trigger?: string; checkpoint?: string }
+            | undefined;
+          if (
+            message === '[orchestrator-wake] evaluate verdict' &&
+            details?.checkpoint === 'initial'
+          ) {
+            triggers.push(details.trigger ?? 'missing');
+          }
+        },
+      );
+      try {
+        let fail = true;
+        const promptAsync = mock(async () => {
+          if (fail) throw new Error('transport down');
+          return {};
+        });
+        const { scheduler } = createPublicationScheduler({
+          hostFlavor: flavor,
+          sessionClient:
+            flavor === 'v2'
+              ? makeV2Client({
+                  promptAsync,
+                  listChildren: [terminalChild('child-1')],
+                })
+              : makeV1Client({
+                  promptAsync,
+                  todos: [{ id: 't1', status: 'completed' }],
+                }),
+        });
+        await scheduler.triggerTerminalPublicationWake('p1', 'child-1', 1);
+        expect(promptAsync).toHaveBeenCalledTimes(1);
+        fail = false;
+        await clock.advance(60_000);
+        expect(promptAsync).toHaveBeenCalledTimes(2);
+        expect(getWakeProgress('p1').stopped).toBe(false);
+        expect(triggers).toEqual(['publication', 'publication']);
+      } finally {
+        spy.mockRestore();
+      }
     },
   );
 
