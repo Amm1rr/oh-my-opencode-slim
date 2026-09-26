@@ -356,6 +356,11 @@ export function createRevivedRunTracker(options: {
         // Waiting for an older publication's transport does not spend this
         // publication's send budget: no transport attempt has started.
         notification.attempts -= 1;
+        log('[revived-run-tracker] notification lease deferred', {
+          taskID: run.taskID,
+          generation: run.generation,
+          parentSessionID: run.parentSessionID,
+        });
         scheduleNotificationRetry(run, record, notification);
         return;
       }
@@ -414,6 +419,14 @@ export function createRevivedRunTracker(options: {
         // settles after its local timeout or while another attempt sends.
         () => {
           if (!isCurrentNotification(run, record, notification)) return;
+          if (!notification.sent) {
+            log('[revived-run-tracker] notification accepted', {
+              taskID: run.taskID,
+              generation: run.generation,
+              parentSessionID: run.parentSessionID,
+              attempt: notification.attempts,
+            });
+          }
           notification.sent = true;
           if (notification.retryTimer) {
             clearTimeout(notification.retryTimer);
@@ -421,7 +434,15 @@ export function createRevivedRunTracker(options: {
           }
         },
       );
-    } catch {
+    } catch (error) {
+      log('[revived-run-tracker] notification failed', {
+        taskID: run.taskID,
+        generation: run.generation,
+        parentSessionID: run.parentSessionID,
+        attempt: notification.attempts,
+        timedOut: error instanceof NotificationTransportTimeoutError,
+        error: stringifyError(error),
+      });
       scheduleNotificationRetry(run, record, notification);
     } finally {
       if (lease) options.backgroundJobBoard.releaseLease(lease);
@@ -450,6 +471,12 @@ export function createRevivedRunTracker(options: {
       // reach this branch).
       if (notification.ownershipReleased) return;
       notification.ownershipReleased = true;
+      log('[revived-run-tracker] notification ownership released', {
+        taskID: run.taskID,
+        generation: run.generation,
+        parentSessionID: run.parentSessionID,
+        attempts: notification.attempts,
+      });
       options.onOwnershipReleased?.(
         run.parentSessionID,
         run.taskID,

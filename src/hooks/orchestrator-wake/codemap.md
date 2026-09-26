@@ -30,9 +30,12 @@ fallback), the wake condition is children without a terminal `outcome`
     list+promptAsync (get optional). `resolveWakeMode` maps the configured
     mode to todo/children per flavor and logs one degradation note when v2
     lacks the todo API.
-  - Gates (`canSchedule`): config enabled, capability gate ready, managed
+  - Gates (`scheduleBlocker`): config enabled, capability gate ready, managed
     session, no input wait (`hasInputWait`), no fallback in progress, gate
-    not stopped.
+    not stopped. Reports a reason when blocked, deduplicated per session/reason
+    within one idle spell; ending the spell or arming a timer resets that
+    deduplication so later blocks remain visible. Logs when the backstop is
+    armed or halted and when evaluation aborts/defers at a checkpoint.
   - Reads a host snapshot (todo mode: todos + children + status map +
     session model/archive state; children mode: children list + event-tracked
     parent status + optional model/archive state) and computes a fingerprint; unchanged
@@ -50,8 +53,10 @@ fallback), the wake condition is children without a terminal `outcome`
     suppresses or restores the local session timer/generation.
   - Wakes via `promptAsync` with a static `<system-reminder>` text
     (`ORCHESTRATOR_WAKE_TEXT`, `ORCHESTRATOR_CHILDREN_WAKE_TEXT`, or
-    `ORCHESTRATOR_STOPPED_JOB_WAKE_TEXT`), reserving the wake before prompt
-    so a failed call cannot storm retries. v2 children mode passes
+    `ORCHESTRATOR_STOPPED_JOB_WAKE_TEXT`), reserving before the send and
+    rolling back cap accounting on failed delivery without waking waiters.
+    Retries follow the interval timer; failed publication/recovery retains its
+    reason until delivery or a generation change. v2 children mode passes
     `delivery: 'queue'` (v1 call shape unchanged).
   - `triggerStoppedJobRecovery`: immediate recovery wake for jobs that stopped
     without a native terminal result (separate from the periodic TODO wake;
@@ -66,6 +71,8 @@ fallback), the wake condition is children without a terminal `outcome`
     single in-flight evaluation per session with waiter re-queueing.
   - `commitWakeReservation`: marks a committed wake and sets `expectingWakeBusy`
     so the next busy preserves (not rearms) the no-progress cap.
+  - `rollbackWakeReservation`: owner-guarded failed-send accounting rollback;
+    leaves the committed marker intact to avoid immediate waiter retries.
   - `noteHostProgress` / `rearmWakeProgress`: fingerprint-unchanged counting
     and external-activity resets.
   - `getObservedWakeModel` / `setObservedWakeModel`: last-seen model for
@@ -89,6 +96,7 @@ evaluate() (one-flight via gate)
     ├─ recheck archive state immediately before promptAsync
     ├─ commitWakeReservation
     └─ promptAsync(internal wake reminder; v2 children mode: delivery 'queue')
+       └─ on failure, roll back cap and retry on timer with original reason
     ↓
 busy (wake-initiated) → endIdleSpell(rearm=false)   [cap survives]
 busy (external) / errors / user activity → rearm cap
@@ -125,9 +133,10 @@ busy (external) / errors / user activity → rearm cap
 
 ## Error Handling
 
-- SDK failures during evaluation suppress the wake (reservation already
-  committed), clear the expecting-busy marker, and log; the timer re-arms via
-  the finally block unless stopped. Children-mode enumeration failures fall
+- SDK failures during evaluation roll back the failed reservation's cap
+  accounting, clear the expecting-busy marker, and log the trigger and
+  serialized error (including the name of empty-message errors); the timer
+  re-arms via the finally block. Children-mode enumeration failures fall
   back to event tracking instead of suppressing.
 - Archived sessions clear their timer and generation on `session.updated`; v2
   hosts without `session.get()` rely on that observed archive state.

@@ -154,6 +154,22 @@ export function commitWakeReservation(
   return true;
 }
 
+/** A failed send did not make progress. Only its current in-flight owner may
+ * undo the cap accounting; keep wakeCommitted so release cannot start a
+ * waiter storm (the session timer controls the next attempt). */
+export function rollbackWakeReservation(
+  sessionID: string,
+  owner: symbol,
+): void {
+  const store = getStore();
+  const flight = store.inFlight.get(sessionID);
+  if (flight?.owner !== owner || !flight.wakeCommitted) return;
+  const progress = store.progress.get(sessionID);
+  if (!progress) return;
+  progress.unchangedWakeCount = Math.max(0, progress.unchangedWakeCount - 1);
+  progress.stopped = false;
+}
+
 /** Host fingerprint changed: reset the two-wake no-progress cap. */
 export function noteHostProgress(sessionID: string, fingerprint: string): void {
   const progress = getWakeProgress(sessionID);

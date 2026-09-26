@@ -30,8 +30,13 @@ import {
   STOPPED_RECOVERY_WAKE_CHUNK,
 } from './index';
 import {
+  commitWakeReservation,
   getWakeProgress,
+  releaseWakeEvaluation,
   resetOrchestratorWakeGateForTests,
+  retryAfterWakeEvaluation,
+  rollbackWakeReservation,
+  tryBeginWakeEvaluation,
 } from './wake-gate';
 
 type SessionClient = {
@@ -233,6 +238,30 @@ describe('buildOrchestratorWakeFingerprint', () => {
 });
 
 describe('orchestrator wake scheduler', () => {
+  test('only the reservation owner can roll back a failed send without releasing waiters', () => {
+    const sessionID = 'guarded';
+    const owner = tryBeginWakeEvaluation(sessionID);
+    expect(owner).not.toBeNull();
+    if (!owner) return;
+    const waiter = mock(() => {});
+    retryAfterWakeEvaluation(sessionID, waiter);
+    getWakeProgress(sessionID).lastFingerprint = 'same-fingerprint';
+    getWakeProgress(sessionID).unchangedWakeCount = 1;
+    expect(commitWakeReservation(sessionID, owner, 'same-fingerprint')).toBe(
+      true,
+    );
+    expect(
+      commitWakeReservation(sessionID, Symbol('stranger'), 'same-fingerprint'),
+    ).toBe(false);
+    rollbackWakeReservation(sessionID, Symbol('stranger'));
+    expect(getWakeProgress(sessionID).unchangedWakeCount).toBe(2);
+    expect(getWakeProgress(sessionID).stopped).toBe(true);
+    rollbackWakeReservation(sessionID, owner);
+    expect(getWakeProgress(sessionID).unchangedWakeCount).toBe(1);
+    expect(getWakeProgress(sessionID).stopped).toBe(false);
+    releaseWakeEvaluation(sessionID, owner);
+    expect(waiter).not.toHaveBeenCalled();
+  });
   test('immediately wakes an idle parent after a stopped child with an active sibling', async () => {
     const promptAsync = mock(async () => ({}));
     const { scheduler } = createScheduler({
@@ -505,6 +534,42 @@ describe('orchestrator wake scheduler', () => {
     )[1]?.[0];
     expect(secondCall?.body.parts[0]?.text).toContain('task: ses_a');
   });
+
+  test.each(['v1', 'v2'] as const)(
+    '%s failed recovery retries the pending batch on its own timer',
+    async (flavor) => {
+      let fail = true;
+      const promptAsync = mock(async () => {
+        if (fail) throw new Error('temporary refusal');
+        return {};
+      });
+      const { scheduler } = createScheduler({
+        hostFlavor: flavor,
+        sessionClient:
+          flavor === 'v2'
+            ? makeV2Client({
+                promptAsync,
+                listChildren: [{ id: 'done', outcome: 'succeeded' }],
+              })
+            : makeClient({
+                promptAsync,
+                todos: [{ id: 't1', status: 'completed' }],
+              }),
+      });
+      scheduler.triggerStoppedJobRecovery('p1', 'recovery: ses_a', 'ses_a:1');
+      await clock.advance(0);
+      expect(promptAsync).toHaveBeenCalledTimes(1);
+      fail = false;
+      await clock.advance(60_000);
+      expect(promptAsync).toHaveBeenCalledTimes(2);
+      const secondCall = (
+        promptAsync.mock.calls as unknown as Array<
+          [{ body: { parts: Array<{ text: string }> } }]
+        >
+      )[1]?.[0];
+      expect(secondCall?.body.parts[0]?.text).toContain('recovery: ses_a');
+    },
+  );
 
   test('a delivered recovery does not re-fire on the next idle', async () => {
     const promptAsync = mock(async () => ({}));
@@ -1542,6 +1607,34 @@ describe('orchestrator wake scheduler', () => {
     await clock.advance(59_000);
     expect(calls).toBe(2);
   });
+
+  test.each(['v1', 'v2'] as const)(
+    '%s failed wake sends do not consume the progress cap',
+    async (flavor) => {
+      const promptAsync = mock(async () => {
+        throw new Error('transport down');
+      });
+      const { scheduler } = createScheduler({
+        hostFlavor: flavor,
+        sessionClient:
+          flavor === 'v2'
+            ? makeV2Client({
+                promptAsync,
+                listChildren: [{ id: 'child', time: { updated: Date.now() } }],
+              })
+            : makeClient({ promptAsync }),
+      });
+      await scheduler.event({
+        event: { type: 'session.idle', properties: { sessionID: 'p1' } },
+      });
+      for (let i = 0; i < 4; i++) {
+        await clock.advance(60_000);
+        expect(promptAsync).toHaveBeenCalledTimes(i + 1);
+        expect(getWakeProgress('p1').stopped).toBe(false);
+      }
+      expect(getWakeProgress('p1').unchangedWakeCount).toBe(0);
+    },
+  );
 
   test('two hook instances share process-global in-flight and progress', async () => {
     const promptAsync = mock(async () => ({}));
@@ -2970,6 +3063,242 @@ describe('evaluate verdict observability (INFO logs)', () => {
       });
     } finally {
       capture.restore();
+    }
+  });
+
+  test('logs backstop armed once and not-armed reason once across double idle', async () => {
+    const entries: Array<{ message: string; data: unknown }> = [];
+    const spy = spyOn(loggerModule, 'log').mockImplementation(
+      (message: string, data?: unknown) => {
+        entries.push({ message, data });
+      },
+    );
+    let waiting = false;
+    try {
+      const { scheduler } = createScheduler({
+        hasInputWait: () => waiting,
+      });
+      const idle = { type: 'session.idle', properties: { sessionID: 'p1' } };
+      await scheduler.event({ event: idle });
+      await scheduler.event({ event: idle });
+      expect(
+        entries.filter(
+          (entry) => entry.message === '[orchestrator-wake] backstop armed',
+        ),
+      ).toHaveLength(1);
+
+      waiting = true;
+      await scheduler.event({ event: idle });
+      await scheduler.event({ event: idle });
+      const blocked = entries.filter(
+        (entry) => entry.message === '[orchestrator-wake] backstop not armed',
+      );
+      expect(blocked).toHaveLength(1);
+      expect(blocked[0]?.data).toMatchObject({
+        sessionID: 'p1',
+        reason: 'input-wait',
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('reports the same blocker once per idle spell and again after an armed spell', async () => {
+    const entries: Array<{ message: string; data: unknown }> = [];
+    const spy = spyOn(loggerModule, 'log').mockImplementation(
+      (message: string, data?: unknown) => {
+        entries.push({ message, data });
+      },
+    );
+    let waiting = true;
+    try {
+      const { scheduler } = createScheduler({ hasInputWait: () => waiting });
+      const idle = { type: 'session.idle', properties: { sessionID: 'p1' } };
+      const status = (type: 'busy' | 'idle') => ({
+        event: {
+          type: 'session.status',
+          properties: { sessionID: 'p1', status: { type } },
+        },
+      });
+      const blocked = () =>
+        entries.filter(
+          (entry) =>
+            entry.message === '[orchestrator-wake] backstop not armed' &&
+            (entry.data as { reason?: string }).reason === 'input-wait',
+        );
+      const armed = () =>
+        entries.filter(
+          (entry) => entry.message === '[orchestrator-wake] backstop armed',
+        );
+
+      await scheduler.event({ event: idle });
+      await scheduler.event({ event: idle });
+      expect(blocked()).toHaveLength(1);
+      await scheduler.event(status('busy'));
+      await scheduler.event(status('idle'));
+      await scheduler.event({ event: idle });
+      expect(blocked()).toHaveLength(2);
+
+      waiting = false;
+      await scheduler.event({ event: idle });
+      await scheduler.event({ event: idle });
+      expect(armed()).toHaveLength(1);
+      waiting = true;
+      await scheduler.event({ event: idle });
+      await scheduler.event({ event: idle });
+      expect(blocked()).toHaveLength(3);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('logs the name and trigger of an SDK error with an empty message', async () => {
+    const entries: Array<{ message: string; data: unknown }> = [];
+    const spy = spyOn(loggerModule, 'log').mockImplementation(
+      (message: string, data?: unknown) => {
+        entries.push({ message, data });
+      },
+    );
+    try {
+      const failure = Object.assign(new Error(''), {
+        name: 'Session.SomeError',
+      });
+      const { scheduler } = createScheduler({
+        sessionClient: makeClient({
+          promptAsync: mock(async () => {
+            throw failure;
+          }),
+        }),
+      });
+      await scheduler.event({
+        event: { type: 'session.idle', properties: { sessionID: 'p1' } },
+      });
+      await clock.advance(60_000);
+      expect(entries).toContainEqual({
+        message: '[orchestrator-wake] wake suppressed after SDK error',
+        data: expect.objectContaining({
+          sessionID: 'p1',
+          trigger: 'periodic',
+          error: '{"name":"Session.SomeError"}',
+        }),
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('logs evaluation deferral and a progress-cap halt', async () => {
+    const entries: Array<{ message: string; data: unknown }> = [];
+    const spy = spyOn(loggerModule, 'log').mockImplementation(
+      (message: string, data?: unknown) => {
+        entries.push({ message, data });
+      },
+    );
+    try {
+      const { scheduler } = createScheduler({
+        sessionClient: makeClient({
+          childrenData: [{ id: 'child' }],
+          statusData: { child: { type: 'busy' } },
+        }),
+      });
+      await scheduler.event({
+        event: { type: 'session.idle', properties: { sessionID: 'p1' } },
+      });
+      await clock.advance(60_000);
+      expect(entries).toContainEqual({
+        message: '[orchestrator-wake] evaluate deferred',
+        data: {
+          sessionID: 'p1',
+          trigger: 'periodic',
+          checkpoint: 'initial',
+          reason: 'children-active',
+        },
+      });
+      await scheduler.event({
+        event: { type: 'session.deleted', properties: { sessionID: 'p1' } },
+      });
+      const wake = createScheduler();
+      await wake.scheduler.event({
+        event: { type: 'session.idle', properties: { sessionID: 'p1' } },
+      });
+      await clock.advance(60_000);
+      await clock.advance(60_000);
+      expect(
+        entries.some(
+          (entry) =>
+            entry.message === '[orchestrator-wake] backstop halted' &&
+            (entry.data as { reason?: string }).reason === 'progress-cap',
+        ),
+      ).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test.each([
+    { checkpoint: 'initial', blockedAt: 4 },
+    { checkpoint: 'recheck', blockedAt: 5 },
+    { checkpoint: 'selection', blockedAt: 6 },
+  ])(
+    'logs an input-wait abort at the $checkpoint checkpoint',
+    async ({ checkpoint, blockedAt }) => {
+      const entries: Array<{ message: string; data: unknown }> = [];
+      const spy = spyOn(loggerModule, 'log').mockImplementation(
+        (message: string, data?: unknown) => {
+          entries.push({ message, data });
+        },
+      );
+      let checks = 0;
+      try {
+        const { scheduler } = createScheduler({
+          hasInputWait: () => ++checks >= blockedAt,
+          resolveSelection: async () => ({ provenance: 'unknown' }),
+        });
+        await scheduler.event({
+          event: { type: 'session.idle', properties: { sessionID: 'p1' } },
+        });
+        await clock.advance(60_000);
+        expect(entries).toContainEqual({
+          message: '[orchestrator-wake] evaluate aborted',
+          data: {
+            sessionID: 'p1',
+            trigger: 'periodic',
+            checkpoint,
+            reason: 'input-wait',
+          },
+        });
+      } finally {
+        spy.mockRestore();
+      }
+    },
+  );
+
+  test('reports when an active child deferral cannot rearm its backstop', async () => {
+    const entries: Array<{ message: string; data: unknown }> = [];
+    const spy = spyOn(loggerModule, 'log').mockImplementation(
+      (message: string, data?: unknown) => {
+        entries.push({ message, data });
+      },
+    );
+    let checks = 0;
+    try {
+      const { scheduler } = createScheduler({
+        hasInputWait: () => ++checks >= 5,
+        sessionClient: makeClient({
+          childrenData: [{ id: 'child' }],
+          statusData: { child: { type: 'busy' } },
+        }),
+      });
+      await scheduler.event({
+        event: { type: 'session.idle', properties: { sessionID: 'p1' } },
+      });
+      await clock.advance(60_000);
+      expect(entries).toContainEqual({
+        message: '[orchestrator-wake] backstop not armed',
+        data: { sessionID: 'p1', reason: 'input-wait' },
+      });
+    } finally {
+      spy.mockRestore();
     }
   });
 });

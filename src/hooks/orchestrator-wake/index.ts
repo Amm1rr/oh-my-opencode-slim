@@ -15,8 +15,8 @@
  * condition is "children without a terminal outcome" plus stopped-job
  * recovery, and the wake prompt is delivered with `delivery: 'queue'`
  * (v1 prompt_async queued; v2 steer would hijack an in-flight run). All new
- * behavior is behind the host-flavor/capability probe — the v1 code path is
- * unchanged.
+ * children-mode behavior is behind the host-flavor/capability probe; the
+ * reservation and retry gate is shared with v1.
  */
 import type { PluginInput } from '@opencode-ai/plugin';
 import type { OpencodeClient } from '@opencode-ai/sdk';
@@ -24,6 +24,7 @@ import {
   createInternalAgentTextPart,
   isInternalInitiatorPart,
 } from '../../utils';
+import { stringifyError } from '../../utils/child-transcript';
 import { isRecord as isObjectRecord } from '../../utils/guards';
 import { log } from '../../utils/logger';
 import type { SessionSelection } from '../../utils/session-selection';
@@ -44,6 +45,7 @@ import {
   rearmWakeProgress,
   releaseWakeEvaluation,
   retryAfterWakeEvaluation,
+  rollbackWakeReservation,
   setObservedWakeModel,
   tryBeginWakeEvaluation,
 } from './wake-gate';
@@ -284,6 +286,8 @@ type LocalSessionState = {
   timer: ReturnType<typeof setTimeout> | undefined;
   continuousIdle: boolean;
   archived: boolean;
+  /** Retry a failed forced wake with its original classification. */
+  retryReason?: WakeReason;
 };
 
 /** Why an evaluation is running. 'periodic' is the interval timer;
@@ -684,6 +688,8 @@ export function createOrchestratorWakeScheduler(
 
   /** Local timer/generation state only; progress lives in the process gate. */
   const localSessions = new Map<string, LocalSessionState>();
+  /** Bound repeated idle diagnostics (v2 delivers both idle event shapes). */
+  const reportedScheduleBlockers = new Map<string, Set<string>>();
   /** Reservations this hook owns and must release when it is disposed. */
   const localWakeOwners = new Map<string, symbol>();
   type PendingStoppedRecovery = {
@@ -930,6 +936,7 @@ export function createOrchestratorWakeScheduler(
 
   function bumpGeneration(state: LocalSessionState): void {
     state.generation = Symbol('wake-generation');
+    state.retryReason = undefined;
   }
 
   function clearLocalSession(sessionID: string): void {
@@ -954,6 +961,7 @@ export function createOrchestratorWakeScheduler(
     pendingStoppedRecoveries.delete(sessionID);
     lastPublicationWakeAt.delete(sessionID);
     pendingChildInputWakes.delete(sessionID);
+    reportedScheduleBlockers.delete(sessionID);
   }
 
   function suppressArchivedSession(sessionID: string): void {
@@ -1002,6 +1010,7 @@ export function createOrchestratorWakeScheduler(
       state.continuousIdle = false;
     }
     releaseLocalWakeOwner(sessionID);
+    reportedScheduleBlockers.delete(sessionID);
     if (rearmProgress) rearmWakeProgress(sessionID);
   }
 
@@ -1018,16 +1027,17 @@ export function createOrchestratorWakeScheduler(
     );
   }
 
-  function canSchedule(
+  function scheduleBlocker(
     sessionID: string,
     scheduleOptions?: { ignoreProgressCap?: boolean },
-  ): boolean {
-    if (!enabled) return false;
-    if (!capabilities.ready) return false;
-    if (!canObserveSelection(sessionID)) return false;
-    if (localSessions.get(sessionID)?.archived) return false;
-    if (options.hasInputWait(sessionID)) return false;
-    if (options.isFallbackInProgress?.(sessionID)) return false;
+  ): string | undefined {
+    if (!enabled) return 'disabled';
+    if (!capabilities.ready) return 'host-apis-unavailable';
+    if (!canObserveSelection(sessionID)) return 'unmanaged';
+    if (localSessions.get(sessionID)?.archived) return 'archived';
+    if (options.hasInputWait(sessionID)) return 'input-wait';
+    if (options.isFallbackInProgress?.(sessionID))
+      return 'fallback-in-progress';
     // The no-progress cap normally blocks re-entry after two unchanged
     // wakes. A terminal-publication wake deliberately bypasses ONLY this
     // clause: the in-evaluation fingerprint comparison is the authoritative
@@ -1038,12 +1048,31 @@ export function createOrchestratorWakeScheduler(
       !scheduleOptions?.ignoreProgressCap &&
       getWakeProgress(sessionID).stopped
     )
-      return false;
-    return true;
+      return 'progress-cap';
+    return undefined;
+  }
+
+  function reportScheduleBlocker(sessionID: string, reason: string): void {
+    let reasons = reportedScheduleBlockers.get(sessionID);
+    if (!reasons) {
+      reasons = new Set();
+      reportedScheduleBlockers.set(sessionID, reasons);
+      if (reportedScheduleBlockers.size > MAX_EVENT_TRACKED_SESSIONS) {
+        const oldest = reportedScheduleBlockers.keys().next().value;
+        if (oldest !== undefined) reportedScheduleBlockers.delete(oldest);
+      }
+    }
+    if (reasons.has(reason)) return;
+    reasons.add(reason);
+    log('[orchestrator-wake] backstop not armed', { sessionID, reason });
   }
 
   function schedule(sessionID: string): void {
-    if (!canSchedule(sessionID)) return;
+    const blocker = scheduleBlocker(sessionID);
+    if (blocker) {
+      reportScheduleBlocker(sessionID, blocker);
+      return;
+    }
     const state = touchLocal(sessionID);
     if (!state.continuousIdle || state.timer !== undefined) return;
     if (getWakeProgress(sessionID).stopped) return;
@@ -1052,10 +1081,12 @@ export function createOrchestratorWakeScheduler(
     const timer = setTimeout(() => {
       state.timer = undefined;
       if (state.generation !== generation) return;
-      void evaluate(sessionID, generation);
+      void evaluate(sessionID, generation, state.retryReason ?? 'periodic');
     }, intervalMs);
     timer.unref?.();
     state.timer = timer;
+    log('[orchestrator-wake] backstop armed', { sessionID, intervalMs });
+    reportedScheduleBlockers.delete(sessionID);
   }
 
   function beginContinuousIdle(sessionID: string): void {
@@ -1070,7 +1101,11 @@ export function createOrchestratorWakeScheduler(
       }
       return;
     }
-    if (!canSchedule(sessionID)) return;
+    const blocker = scheduleBlocker(sessionID);
+    if (blocker) {
+      reportScheduleBlocker(sessionID, blocker);
+      return;
+    }
     const idleState = touchLocal(sessionID);
     if (idleState.continuousIdle && idleState.timer !== undefined) return;
     idleState.continuousIdle = true;
@@ -1445,7 +1480,17 @@ export function createOrchestratorWakeScheduler(
   function applySnapshotVerdict(
     sessionID: string,
     verdict: SnapshotVerdict,
+    checkpoint: 'initial' | 'recheck',
+    trigger: WakeReason,
   ): boolean {
+    if (verdict !== 'wake') {
+      log(
+        verdict === 'children-active'
+          ? '[orchestrator-wake] evaluate deferred'
+          : '[orchestrator-wake] evaluate aborted',
+        { sessionID, trigger, checkpoint, reason: verdict },
+      );
+    }
     if (verdict === 'parent-active') {
       endIdleSpell(sessionID, true);
       return false;
@@ -1481,7 +1526,14 @@ export function createOrchestratorWakeScheduler(
     if (!state || state.generation !== generation) return false;
     if (!state.continuousIdle) return false;
     if (state.archived) return false;
-    if (!canSchedule(sessionID, scheduleOptions)) {
+    const startBlocker = scheduleBlocker(sessionID, scheduleOptions);
+    if (startBlocker) {
+      log('[orchestrator-wake] evaluate aborted', {
+        sessionID,
+        trigger: reason,
+        checkpoint: 'start',
+        reason: startBlocker,
+      });
       suppress(sessionID);
       return false;
     }
@@ -1511,7 +1563,14 @@ export function createOrchestratorWakeScheduler(
       if (!state.continuousIdle) return false;
       if (applyArchiveState(sessionID, state, snapshot.archiveState))
         return false;
-      if (!canSchedule(sessionID, scheduleOptions)) {
+      const initialBlocker = scheduleBlocker(sessionID, scheduleOptions);
+      if (initialBlocker) {
+        log('[orchestrator-wake] evaluate aborted', {
+          sessionID,
+          trigger: reason,
+          checkpoint: 'initial',
+          reason: initialBlocker,
+        });
         suppress(sessionID);
         return false;
       }
@@ -1526,6 +1585,8 @@ export function createOrchestratorWakeScheduler(
             'initial',
             reason,
           ),
+          'initial',
+          reason,
         )
       ) {
         return false;
@@ -1540,6 +1601,12 @@ export function createOrchestratorWakeScheduler(
         (progress.lastFingerprint === fingerprint &&
           progress.unchangedWakeCount >= ORCHESTRATOR_WAKE_UNCHANGED_CAP)
       ) {
+        log('[orchestrator-wake] evaluate aborted', {
+          sessionID,
+          trigger: reason,
+          checkpoint: 'initial',
+          reason: 'progress-cap',
+        });
         progress.stopped = true;
         state.continuousIdle = false;
         return false;
@@ -1554,7 +1621,14 @@ export function createOrchestratorWakeScheduler(
       if (!state.continuousIdle) return false;
       if (applyArchiveState(sessionID, state, latest.archiveState))
         return false;
-      if (!canSchedule(sessionID, scheduleOptions)) {
+      const recheckBlocker = scheduleBlocker(sessionID, scheduleOptions);
+      if (recheckBlocker) {
+        log('[orchestrator-wake] evaluate aborted', {
+          sessionID,
+          trigger: reason,
+          checkpoint: 'recheck',
+          reason: recheckBlocker,
+        });
         suppress(sessionID);
         return false;
       }
@@ -1568,6 +1642,8 @@ export function createOrchestratorWakeScheduler(
             'recheck',
             reason,
           ),
+          'recheck',
+          reason,
         )
       ) {
         return false;
@@ -1581,6 +1657,12 @@ export function createOrchestratorWakeScheduler(
         latestProgress.stopped ||
         latestProgress.unchangedWakeCount >= ORCHESTRATOR_WAKE_UNCHANGED_CAP
       ) {
+        log('[orchestrator-wake] evaluate aborted', {
+          sessionID,
+          trigger: reason,
+          checkpoint: 'recheck',
+          reason: 'progress-cap',
+        });
         latestProgress.stopped = true;
         state.continuousIdle = false;
         return false;
@@ -1637,7 +1719,14 @@ export function createOrchestratorWakeScheduler(
       // must not ride in on stale orchestrator metadata.
       if (state.generation !== generation) return false;
       if (!state.continuousIdle) return false;
-      if (!canSchedule(sessionID, scheduleOptions)) {
+      const selectionBlocker = scheduleBlocker(sessionID, scheduleOptions);
+      if (selectionBlocker) {
+        log('[orchestrator-wake] evaluate aborted', {
+          sessionID,
+          trigger: reason,
+          checkpoint: 'selection',
+          reason: selectionBlocker,
+        });
         suppress(sessionID);
         return false;
       }
@@ -1820,14 +1909,21 @@ export function createOrchestratorWakeScheduler(
         }
       }
       // Delivered: the wake admission was queued and accepted above.
+      if (state.generation === generation) state.retryReason = undefined;
       return true;
     } catch (error) {
-      // Failed promptAsync already reserved; clear expecting-busy so a later
-      // unrelated busy can rearm normally. Pending deltas stay queued.
+      // Only accepted sends consume the cap. Preserve the reservation's
+      // committed marker so waiters do not immediately retry; the timer
+      // controls cadence. Pending recovery deltas stay queued.
+      rollbackWakeReservation(sessionID, owner);
       clearExpectingWakeBusy(sessionID);
+      if (state.generation === generation && reason !== 'periodic') {
+        state.retryReason = reason;
+      }
       log('[orchestrator-wake] wake suppressed after SDK error', {
         sessionID,
-        error: error instanceof Error ? error.message : String(error),
+        error: stringifyError(error),
+        trigger: reason,
       });
       return false;
     } finally {
@@ -1838,6 +1934,15 @@ export function createOrchestratorWakeScheduler(
       }
 
       const current = localSessions.get(sessionID);
+      if (
+        current?.generation === generation &&
+        getWakeProgress(sessionID).stopped
+      ) {
+        log('[orchestrator-wake] backstop halted', {
+          sessionID,
+          reason: 'progress-cap',
+        });
+      }
       if (
         current &&
         current.generation === generation &&
@@ -1948,7 +2053,7 @@ export function createOrchestratorWakeScheduler(
       return;
     }
     rearmWakeProgress(sessionID);
-    if (!canSchedule(sessionID)) return;
+    if (scheduleBlocker(sessionID)) return;
     const state = touchLocal(sessionID);
     clearTimer(state);
     bumpGeneration(state);
@@ -2037,7 +2142,7 @@ export function createOrchestratorWakeScheduler(
       return;
     }
     if (
-      !canSchedule(sessionID, {
+      scheduleBlocker(sessionID, {
         // The fingerprint comparison inside evaluate is the authoritative
         // no-progress test for this path (see the docstring above).
         ignoreProgressCap: true,
@@ -2113,7 +2218,7 @@ export function createOrchestratorWakeScheduler(
       return;
     }
     rearmWakeProgress(sessionID);
-    if (!canSchedule(sessionID)) return;
+    if (scheduleBlocker(sessionID)) return;
     const state = touchLocal(sessionID);
     clearTimer(state);
     bumpGeneration(state);
@@ -2147,6 +2252,7 @@ export function createOrchestratorWakeScheduler(
       pendingStoppedRecoveries.clear();
       lastPublicationWakeAt.clear();
       pendingChildInputWakes.clear();
+      reportedScheduleBlockers.clear();
       lastStatusBySession.clear();
       childSessions.clear();
       childEvidence.clear();
