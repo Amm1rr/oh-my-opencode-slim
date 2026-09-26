@@ -285,9 +285,7 @@ function appendMarketplaceRouting(
       const runtimeName = definition?.displayName
         ? normalizeAgentName(definition.displayName)
         : entry.runtimeName;
-      return entry.routingInput.block
-        .split(`@${entry.runtimeName}`)
-        .join(`@${runtimeName}`);
+      return `- @${runtimeName}`;
     });
   if (routes.length === 0) return;
   const target = config[agentName];
@@ -673,9 +671,8 @@ export function buildResolvedAgentRegistry(
         entry.variant = roleVariant;
       }
       if (typeof entry.model !== 'string') {
-        throw new Error(
-          `Marketplace agent '${name}' requires a finalized '${roleName}' model`,
-        );
+        delete entry.model;
+        delete entry.variant;
       }
     }
     finalAgentConfig[name] = entry;

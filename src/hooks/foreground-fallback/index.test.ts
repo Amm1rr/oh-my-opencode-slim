@@ -1202,6 +1202,49 @@ describe('ForegroundFallbackManager session.error', () => {
     expect(call[0].body.model.modelID).toBe('gpt-4o');
   });
 
+  test('applies the selected fallback candidate variant to replay', async () => {
+    mgr = new ForegroundFallbackManager(
+      {
+        orchestrator: [
+          'anthropic/primary',
+          { id: 'openai/fallback', variant: 'fallback-high' },
+        ],
+      },
+      true,
+      { directory: '/test' } as any,
+    );
+    await mgr.handleEvent({
+      type: 'message.updated',
+      properties: {
+        info: {
+          sessionID: 'variant-session',
+          providerID: 'anthropic',
+          modelID: 'primary',
+          role: 'assistant',
+          agent: 'orchestrator',
+        },
+      },
+    });
+    await mgr.handleEvent({
+      type: 'session.error',
+      properties: {
+        sessionID: 'variant-session',
+        error: { message: 'Rate limit exceeded' },
+      },
+    });
+
+    const call = mocks.promptAsync.mock.calls[0]?.[0] as {
+      body: {
+        model: { providerID: string; modelID: string; variant?: string };
+      };
+    };
+    expect(call.body.model).toEqual({
+      providerID: 'openai',
+      modelID: 'fallback',
+      variant: 'fallback-high',
+    });
+  });
+
   test('triggers fallback on content-policy moderation session.error', async () => {
     // End-to-end regression: a cyber_policy rejection (HTTP 400
     // invalid_request in production) must advance the fallback chain to the

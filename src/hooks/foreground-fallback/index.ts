@@ -521,6 +521,8 @@ function getProcessFallbacksInProgress(): Set<string> {
 // Manager
 // ---------------------------------------------------------------------------
 
+export type ForegroundFallbackModel = string | { id: string; variant?: string };
+
 /**
  * Manages runtime model fallback for foreground agent sessions.
  *
@@ -774,7 +776,7 @@ export class ForegroundFallbackManager {
      * e.g. { orchestrator: ['anthropic/claude-opus-4-5', 'openai/gpt-4o'] }
      * The first model that hasn't been tried yet is selected on each fallback.
      */
-    private chains: Record<string, string[]>,
+    private chains: Record<string, ForegroundFallbackModel[]>,
     private readonly enabled: boolean,
     private readonly input: PluginInput,
     /** Retryable errors absorbed (errors 1..maxRetries) before the fallback
@@ -1111,7 +1113,7 @@ export class ForegroundFallbackManager {
     },
     switchModel: (
       sessionID: string,
-      model: { providerID: string; id: string },
+      model: { providerID: string; id: string; variant?: string },
     ) => Promise<unknown>,
   ): Promise<void> {
     let picked: string | undefined;
@@ -1178,6 +1180,9 @@ export class ForegroundFallbackManager {
       switchRequest = switchModel(sessionID, {
         providerID: ref.providerID,
         id: ref.modelID,
+        ...(this.variantFor(agentName, nextModel)
+          ? { variant: this.variantFor(agentName, nextModel) }
+          : {}),
       });
       await withTimeout(
         switchRequest,
@@ -1978,6 +1983,13 @@ export class ForegroundFallbackManager {
         error,
         entryEpoch,
       );
+        sessionID,
+        nextModel,
+        currentModel,
+        true,
+        error,
+        entryEpoch,
+      );
     } catch (err) {
       this.pendingReplay.delete(sessionID);
       log('[foreground-fallback] fallback attempt failed', {
@@ -2487,7 +2499,7 @@ export class ForegroundFallbackManager {
     currentModel: string | undefined,
   ): string[] {
     if (agentName) {
-      const chain = this.chains[agentName];
+      const chain = this.chains[agentName]?.map(modelId);
       if (chain) {
         // Dynamic head: when the session runs a model outside the
         // configured chain (session-inherited or /model-picked), that model
@@ -2512,7 +2524,8 @@ export class ForegroundFallbackManager {
     // Agent unknown: try to infer from the current model.
     if (currentModel) {
       for (const chain of Object.values(this.chains)) {
-        if (chain.includes(currentModel)) return chain;
+        const ids = chain.map(modelId);
+        if (ids.includes(currentModel)) return ids;
       }
     }
 
@@ -2521,7 +2534,8 @@ export class ForegroundFallbackManager {
     const all: string[] = [];
     const seen = new Set<string>();
     for (const chain of Object.values(this.chains)) {
-      for (const m of chain) {
+      for (const entry of chain) {
+        const m = modelId(entry);
         if (!seen.has(m)) {
           seen.add(m);
           all.push(m);
@@ -2530,4 +2544,19 @@ export class ForegroundFallbackManager {
     }
     return all;
   }
+
+  private variantFor(
+    agentName: string | undefined,
+    model: string,
+  ): string | undefined {
+    if (!agentName) return undefined;
+    const matching = this.chains[agentName]?.find(
+      (entry) => modelId(entry) === model,
+    );
+    return typeof matching === 'string' ? undefined : matching?.variant;
+  }
+}
+
+function modelId(model: ForegroundFallbackModel): string {
+  return typeof model === 'string' ? model : model.id;
 }

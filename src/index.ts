@@ -51,6 +51,7 @@ import {
   createTaskSessionManagerHook,
   createToolLoopGuardHook,
   ForegroundFallbackManager,
+  type ForegroundFallbackModel,
   formatChildInputWaitDelta,
   formatStoppedJobDelta,
   SessionLifecycle,
@@ -386,7 +387,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
 
   let chatHeadersHook: ReturnType<typeof createChatHeadersHook>;
   let foregroundFallback: ForegroundFallbackManager;
-  let foregroundFallbackChains: Record<string, string[]> = {};
+  let foregroundFallbackChains: Record<string, ForegroundFallbackModel[]> = {};
   let selectedMarketplacePackageIds: readonly string[] = [];
   let deepworkCommandHook: ReturnType<typeof createDeepworkCommandHook>;
   let reflectCommandHook: ReturnType<typeof createReflectCommandHook>;
@@ -1298,7 +1299,12 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           resolvedAgentRegistry.modelCandidates,
         )) {
           if (candidates.length > 1) {
-            foregroundFallbackChains[name] = candidates.map(({ id }) => id);
+            foregroundFallbackChains[name] = candidates.map(
+              ({ id, variant }) => ({
+                id,
+                ...(variant ? { variant } : {}),
+              }),
+            );
           }
         }
         for (const [agentName, models] of Object.entries(runtime.modelArrays)) {
