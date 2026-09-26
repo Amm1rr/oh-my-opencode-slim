@@ -1202,6 +1202,48 @@ describe('finalized existing-agent registry', () => {
     });
   });
 
+  test('intersects host action globs with package tool ceilings', () => {
+    const runtime = runtimeFor({
+      agents: { 'market-agent': { displayName: 'MarketVisible' } },
+    });
+    const registry = build(
+      runtime,
+      { mcp: { 'host-mcp': { type: 'local' } } },
+      {
+        ...marketplaceOptions(
+          ['team/read-only'],
+          marketplaceStore({
+            'team/read-only': marketplacePackage('team/read-only', {
+              skills: [],
+              mcps: [],
+              tools: ['read'],
+            }),
+          }),
+        ),
+        nativePermissionsByAgent: {
+          'market-agent': [{ action: 'rea?', resource: '*', effect: 'ask' }],
+        },
+      },
+    );
+
+    for (const name of ['market-agent', 'MarketVisible']) {
+      const policy = registry.nativePolicies[name];
+      expect(policy.decide('read', 'README.md')).toBe('ask');
+      expect(policy.decide('write', 'README.md')).toBe('deny');
+      expect(policy.decide('reab', 'README.md')).toBe('deny');
+      expect(policy.rules).toContainEqual({
+        action: 'read',
+        resource: '*',
+        effect: 'ask',
+      });
+      expect(policy.rules).not.toContainEqual({
+        action: 'rea?',
+        resource: '*',
+        effect: 'ask',
+      });
+    }
+  });
+
   test('preserves scalar skill denial in canonical and visible projections', () => {
     const runtime = runtimeFor({
       agents: { 'market-agent': { displayName: 'MarketVisible' } },

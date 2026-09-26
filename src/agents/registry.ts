@@ -264,30 +264,12 @@ function marketplaceReadSafeguards(
 
 function marketplaceHostRules(
   rules: readonly V2PermissionRule[],
-  capabilities: MarketplaceAgentMetadata['capabilities'],
 ): V2PermissionRule[] {
-  const allowedActions = new Set(
-    capabilities.tools.flatMap((tool) =>
-      tool === 'bash' ? ['execute', 'bash'] : [tool],
-    ),
-  );
-  const allowedNamespaces = capabilities.mcps.map(
-    (name) => `${name.replace(/[^a-zA-Z0-9_-]/g, '_')}_`,
-  );
+  // Keep ask patterns intact so the native policy compiler can intersect
+  // their actual glob semantics with the package's exact capability ceiling.
   return rules.filter((rule) => {
     if (rule.effect === 'deny') return true;
-    if (rule.effect !== 'ask') return false;
-    if (rule.action === '*') return true;
-    if (rule.action === 'skill') {
-      // Keep the original host pattern. The native permission ceiling
-      // intersects it with admitted skill IDs without approximating glob
-      // semantics here.
-      return true;
-    }
-    return (
-      allowedActions.has(rule.action) ||
-      allowedNamespaces.some((prefix) => rule.action.startsWith(prefix))
-    );
+    return rule.effect === 'ask';
   });
 }
 
@@ -821,8 +803,11 @@ export function buildResolvedAgentRegistry(
         packageMetadata.capabilities.mcps,
         runtime.agents()[name]?.mcps,
       );
+      const displayHostName = definition.displayName
+        ? normalizeAgentName(definition.displayName)
+        : name;
       const hostMcps =
-        hostEntries[name]?.mcps ?? hostEntries[identities[name] ?? name]?.mcps;
+        hostEntries[name]?.mcps ?? hostEntries[displayHostName]?.mcps;
       if (Array.isArray(hostMcps)) {
         packageMcps = narrowCapabilities(packageMcps, hostMcps as string[]);
       }
@@ -896,7 +881,7 @@ export function buildResolvedAgentRegistry(
         ...ownerReadRule,
       ],
       hostRules: packageMetadata
-        ? marketplaceHostRules(hostRuleSet, packageMetadata.capabilities)
+        ? marketplaceHostRules(hostRuleSet)
         : hostRuleSet,
       ...(packageMetadata
         ? {
@@ -1084,7 +1069,7 @@ export function buildResolvedAgentRegistry(
           ...visibleOwnerReadRule,
         ],
         hostRules: packageMetadata
-          ? marketplaceHostRules(visibleRules, packageMetadata.capabilities)
+          ? marketplaceHostRules(visibleRules)
           : visibleRules,
         ...(packageMetadata
           ? {
