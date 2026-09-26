@@ -233,6 +233,10 @@ describe('reopen corrective notice', () => {
       'shape-2',
     );
     reconcileInjectedTerminalJobs(state, SESSION);
+    // A request while gen2 is still reconciled must keep its live entry.
+    await injectBackgroundJobBoard(state, {}, {
+      messages: [structuredClone(userMsg('msg_u2', 'continue', BASE_TIME + 1))],
+    } as never);
     board.markRunningFromLiveSession('child-1', Date.now() + 60_000);
 
     const request = {
