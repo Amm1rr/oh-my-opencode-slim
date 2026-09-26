@@ -1,15 +1,31 @@
 import { describe, expect, mock, test } from 'bun:test';
 import * as fs from 'node:fs/promises';
-import { appendTaggedSyntheticPart } from '../hooks/cache-safe-injection';
+import {
+  appendTaggedSyntheticPart,
+  appendTrailingVolatileMessage,
+  isTaggedPart,
+} from '../hooks/cache-safe-injection';
+import {
+  assistantTurn,
+  createPipeline,
+  internalInitiatorTurn,
+  SESSION_ID,
+  userTurn,
+} from '../hooks/cache-safety-harness.test';
 import { createJsonErrorRecoveryHook } from '../hooks/json-error-recovery/hook';
 import {
   createPhaseReminderHook,
   PHASE_REMINDER_METADATA_KEY,
 } from '../hooks/phase-reminder';
+import { BACKGROUND_JOB_BOARD_METADATA_KEY } from '../hooks/task-session-manager/board-injection';
 import {
   createToolLoopGuardHook,
   LOOP_GUARD_WARNING,
 } from '../hooks/tool-loop-guard/hook';
+import {
+  INTERNAL_INITIATOR_METADATA_KEY,
+  SLIM_INTERNAL_INITIATOR_MARKER,
+} from '../utils/internal-initiator';
 import { createV2InterviewBridge, markerText } from './interview-bridge';
 import { createSessionSubmit } from './session-submit';
 import {
@@ -648,6 +664,98 @@ describe('context bridge: transcript user-message identity enrichment', () => {
 
     expect(user.sessionID).toBeUndefined();
     expect(user.agent).toBeUndefined();
+  });
+
+  test('v2 synthetic wake is internal: no new phase reminder or job board (T4)', async () => {
+    const pipeline = createPipeline();
+    pipeline.board.registerLaunch({
+      taskID: 'ses_child',
+      parentSessionID: SESSION_ID,
+      agent: 'librarian',
+      description: 'running job',
+      background: true,
+    });
+    const wake = {
+      id: 'msg_omos_wake',
+      role: 'user',
+      content: [
+        {
+          type: 'text',
+          text: `wake\n${SLIM_INTERNAL_INITIATOR_MARKER}`,
+          metadata: { source: 'host' },
+        },
+      ],
+    };
+    const event = makeEvent(
+      [
+        { id: 'u1', role: 'user', content: [{ type: 'text', text: 'start' }] },
+        {
+          id: 'a1',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'working' }],
+        },
+        wake,
+      ],
+      { sessionID: SESSION_ID },
+    );
+    const handler = createSessionContextHandler({
+      interviewHandleContext: async () => {},
+      messagesTransform: async (_input, output) => pipeline.run(output),
+    });
+
+    await handler(event);
+
+    expect(event.messages.at(-1)).toBe(wake);
+    expect(wake.content[0]).toMatchObject({
+      synthetic: true,
+      metadata: { source: 'host', [INTERNAL_INITIATOR_METADATA_KEY]: true },
+    });
+    expect(
+      wake.content.some(
+        (part) =>
+          isTaggedPart(part, PHASE_REMINDER_METADATA_KEY) ||
+          isTaggedPart(part, BACKGROUND_JOB_BOARD_METADATA_KEY),
+      ),
+    ).toBe(false);
+  });
+
+  test('v1 flagged wake likewise gets no fresh phase reminder or job board (T5)', async () => {
+    const pipeline = createPipeline();
+    pipeline.board.registerLaunch({
+      taskID: 'ses_child',
+      parentSessionID: SESSION_ID,
+      agent: 'librarian',
+      description: 'running job',
+      background: true,
+    });
+    const wake = internalInitiatorTurn('wake', 'continue');
+    const output: { messages: unknown[] } = {
+      messages: [userTurn('u1', 'start'), assistantTurn('a1', 'working'), wake],
+    };
+    await pipeline.run(output);
+    expect(output.messages.at(-1)).toBe(wake);
+    expect(
+      wake.parts.some(
+        (part) =>
+          isTaggedPart(part, PHASE_REMINDER_METADATA_KEY) ||
+          isTaggedPart(part, BACKGROUND_JOB_BOARD_METADATA_KEY),
+      ),
+    ).toBe(false);
+  });
+
+  test('ordinary ids remain external even with message-level internal metadata', async () => {
+    const message = {
+      id: 'msg_regular',
+      role: 'user',
+      metadata: { [INTERNAL_INITIATOR_METADATA_KEY]: true },
+      content: [{ type: 'text', text: 'user prompt' }],
+    };
+    const handler = createSessionContextHandler({
+      interviewHandleContext: async () => {},
+      messagesTransform: async () => {},
+    });
+    await handler(makeEvent([message]));
+    expect(message.content).toEqual([{ type: 'text', text: 'user prompt' }]);
   });
 
   test('end-to-end: a recognized agent now performs the phase-reminder injection it previously skipped', async () => {
@@ -1607,7 +1715,7 @@ describe('createSessionPromptBridge (native session.prompt hook)', () => {
   });
 });
 
-describe('context handler: native prompt mode + CacheHint', () => {
+describe('context handler: v2 single cache breakpoint', () => {
   test('observeContextAgent runs and the per-request emulation is skipped', async () => {
     const observed: string[] = [];
     const handler = createSessionContextHandler({
@@ -1622,159 +1730,308 @@ describe('context handler: native prompt mode + CacheHint', () => {
     expect(observed).toEqual(['ses_cmd']);
   });
 
-  test('v2-injected parts carry cache:{type:"ephemeral"} via the bridge', async () => {
-    const message = {
-      id: 'u',
-      role: 'user',
-      content: [{ type: 'text', text: 'hi' }],
-    };
-    const event = makeEvent([message]);
-    const handler = createSessionContextHandler({
-      interviewHandleContext: async () => {},
-      messagesTransform: async (_input, output) => {
-        const target = output.messages.at(-1);
-        if (!target) throw new Error('no message');
-        appendTaggedSyntheticPart(target, {
-          text: 'INJECTED REMINDER',
-          metadataKey: 'omos_test_tag',
-        });
-      },
-      syntheticPartCacheHint: { type: 'ephemeral' },
-    });
-
-    await handler(event);
-
-    const injected = message.content.at(-1) as Record<string, unknown>;
-    expect(injected.cache).toEqual({ type: 'ephemeral' });
-  });
-
-  test('without the hint dep injected parts stay byte-identical to v1', async () => {
-    const message = {
-      id: 'u',
-      role: 'user',
-      content: [{ type: 'text', text: 'hi' }],
-    };
-    const event = makeEvent([message]);
-    const handler = createSessionContextHandler({
-      interviewHandleContext: async () => {},
-      messagesTransform: async (_input, output) => {
-        const target = output.messages.at(-1);
-        if (!target) throw new Error('no message');
-        appendTaggedSyntheticPart(target, {
-          text: 'INJECTED REMINDER',
-          metadataKey: 'omos_test_tag',
-        });
-      },
-    });
-
-    await handler(event);
-
-    const injected = message.content.at(-1) as Record<string, unknown>;
-    expect(injected.cache).toBeUndefined();
-    expect(injected).toEqual({
-      type: 'text',
-      synthetic: true,
-      text: 'INJECTED REMINDER',
-      metadata: { omos_test_tag: true },
-    });
-  });
-
-  test('hint scoping restores the default after the transform', async () => {
-    // Outside the bridged transform, injection must not carry the hint —
-    // proves the set/restore wrapper cannot leak into v1-path calls.
-    const probe: Array<Record<string, unknown>> = [];
-    const handler = createSessionContextHandler({
-      interviewHandleContext: async () => {},
-      messagesTransform: async (_input, output) => {
-        const target = output.messages.at(-1);
-        if (!target) throw new Error('no message');
-        appendTaggedSyntheticPart(target, {
-          text: 'inside',
-          metadataKey: 'omos_test_tag',
-        });
-      },
-      syntheticPartCacheHint: { type: 'ephemeral' },
-    });
-    await handler(makeEvent([{ id: 'u', role: 'user', content: [] }]));
-    appendTaggedSyntheticPart(
-      {
-        info: { role: 'user' },
-        get parts() {
-          return probe;
-        },
-        set parts(value) {
-          probe.push(...(value as Array<Record<string, unknown>>));
-        },
-      } as never,
-      { text: 'outside', metadataKey: 'omos_test_tag' },
+  const partsWithCache = (event: V2SessionContextEvent) =>
+    event.messages.flatMap((message) =>
+      message.content
+        .filter((part) => part.cache !== undefined)
+        .map((part) => ({ id: message.id, part })),
     );
-    const outside = { ...probe.at(-1) } as Record<string, unknown>;
-    expect(outside.cache).toBeUndefined();
+
+  test('T1: tagged injections never individually spend cache breakpoints', async () => {
+    const event = makeEvent([
+      { id: 'u1', role: 'user', content: [{ type: 'text', text: 'first' }] },
+      { id: 'u2', role: 'user', content: [{ type: 'text', text: 'last' }] },
+      {
+        id: 'tool',
+        role: 'tool',
+        content: [{ type: 'tool-result', text: 'ok' }],
+      },
+    ]);
+    await createSessionContextHandler({
+      interviewHandleContext: async () => {},
+      messagesTransform: async (_input, output) => {
+        for (const message of output.messages.slice(0, 2)) {
+          appendTaggedSyntheticPart(message as never, {
+            text: 'reminder',
+            metadataKey: PHASE_REMINDER_METADATA_KEY,
+          });
+        }
+      },
+    })(event);
+    expect(
+      event.messages.flatMap((message) =>
+        message.content.filter((part) =>
+          isTaggedPart(part, PHASE_REMINDER_METADATA_KEY),
+        ),
+      ),
+    ).toHaveLength(2);
+    expect(
+      partsWithCache(event).filter(({ part }) =>
+        isTaggedPart(part, PHASE_REMINDER_METADATA_KEY),
+      ),
+    ).toHaveLength(0);
+    expect(partsWithCache(event)).toEqual([
+      {
+        id: 'tool',
+        part: { type: 'tool-result', text: 'ok', cache: { type: 'ephemeral' } },
+      },
+    ]);
   });
 
-  test('interleaved transforms for two sessions keep their cache-hint scopes (P2 race)', async () => {
-    // Greptile P2 scenario: the v2 host serves different sessions'
-    // requests concurrently (per-session serialization only), so two
-    // context-hook invocations can overlap across the awaited messages
-    // transform. Session A's restore must not clear the scoped default
-    // session B's still-running transform injects with.
-    const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
-    const gates: Record<string, Array<() => void>> = {
-      ses_a: [],
-      ses_b: [],
+  test('T2: volatile board tail leaves exactly one mark on copied tool result', async () => {
+    const toolPart = { type: 'tool-result', text: 'stable result' };
+    const lastToolPart = { type: 'tool-result', text: 'last result' };
+    const event = makeEvent([
+      { id: 'u', role: 'user', content: [{ type: 'text', text: 'hi' }] },
+      { id: 'tool', role: 'tool', content: [toolPart, lastToolPart] },
+    ]);
+    await createSessionContextHandler({
+      interviewHandleContext: async () => {},
+      messagesTransform: async (_input, output) => {
+        appendTaggedSyntheticPart(output.messages[0] as never, {
+          text: 'reminder',
+          metadataKey: PHASE_REMINDER_METADATA_KEY,
+        });
+        appendTrailingVolatileMessage(
+          output.messages,
+          { id: 'board', role: 'user' },
+          { text: 'volatile', metadataKey: BACKGROUND_JOB_BOARD_METADATA_KEY },
+        );
+      },
+    })(event);
+    expect(event.messages.at(-1)?.id).toBe('board');
+    expect(partsWithCache(event)).toEqual([
+      { id: 'tool', part: { ...lastToolPart, cache: { type: 'ephemeral' } } },
+    ]);
+    expect(event.messages[1]?.content[0]).toBe(toolPart);
+    expect(event.messages[1]?.content[1]).not.toBe(lastToolPart);
+    expect(toolPart).toEqual({ type: 'tool-result', text: 'stable result' });
+    expect(lastToolPart).toEqual({ type: 'tool-result', text: 'last result' });
+  });
+
+  test('preserves an existing hint and the selected part identity', async () => {
+    const toolPart = {
+      type: 'tool-result',
+      text: 'cached result',
+      cache: { type: 'ephemeral', ttlSeconds: 3600 },
     };
-    const makeGatedTransform = (session: string) => {
-      return async (
-        _input: unknown,
-        output: {
-          messages: Array<{ info: { role: string }; parts: unknown[] }>;
+    const event = makeEvent([
+      { id: 'u', role: 'user', content: [{ type: 'text', text: 'hi' }] },
+      { id: 'tool', role: 'tool', content: [toolPart] },
+    ]);
+    await createSessionContextHandler({
+      interviewHandleContext: async () => {},
+      messagesTransform: async (_input, output) => {
+        appendTaggedSyntheticPart(output.messages[0] as never, {
+          text: 'reminder',
+          metadataKey: PHASE_REMINDER_METADATA_KEY,
+        });
+      },
+    })(event);
+    expect(partsWithCache(event)).toEqual([{ id: 'tool', part: toolPart }]);
+    expect(event.messages[1]?.content[0]).toBe(toolPart);
+  });
+
+  test('a foreign hint elsewhere does not suppress the last-part mark', async () => {
+    const foreignPart = {
+      type: 'text',
+      text: 'user',
+      cache: { type: 'ephemeral', ttlSeconds: 3600 },
+    };
+    const event = makeEvent([
+      { id: 'u', role: 'user', content: [foreignPart] },
+      {
+        id: 'tool',
+        role: 'tool',
+        content: [{ type: 'tool-result', text: 'ok' }],
+      },
+    ]);
+    await createSessionContextHandler({
+      interviewHandleContext: async () => {},
+      messagesTransform: async (_input, output) => {
+        appendTaggedSyntheticPart(output.messages[0] as never, {
+          text: 'reminder',
+          metadataKey: PHASE_REMINDER_METADATA_KEY,
+        });
+      },
+    })(event);
+    expect(partsWithCache(event)).toEqual([
+      { id: 'u', part: foreignPart },
+      {
+        id: 'tool',
+        part: { type: 'tool-result', text: 'ok', cache: { type: 'ephemeral' } },
+      },
+    ]);
+    expect(event.messages[0]?.content[0]).toBe(foreignPart);
+  });
+
+  test('inline board on a user turn owns the single cache mark', async () => {
+    const event = makeEvent([
+      { id: 'u', role: 'user', content: [{ type: 'text', text: 'hi' }] },
+    ]);
+    await createSessionContextHandler({
+      interviewHandleContext: async () => {},
+      messagesTransform: async (_input, output) => {
+        appendTaggedSyntheticPart(output.messages[0] as never, {
+          text: 'reminder',
+          metadataKey: PHASE_REMINDER_METADATA_KEY,
+        });
+        appendTaggedSyntheticPart(output.messages[0] as never, {
+          text: 'inline board',
+          metadataKey: BACKGROUND_JOB_BOARD_METADATA_KEY,
+        });
+      },
+    })(event);
+    const board = event.messages[0]?.content.at(-1);
+    expect(isTaggedPart(board, BACKGROUND_JOB_BOARD_METADATA_KEY)).toBe(true);
+    expect(partsWithCache(event)).toEqual([{ id: 'u', part: board }]);
+    expect(board?.cache).toEqual({ type: 'ephemeral' });
+  });
+
+  test('T3: user queue marks exactly its last part, not the trailing board', async () => {
+    const userPart = { type: 'text', text: 'new user request' };
+    const event = makeEvent([{ id: 'u', role: 'user', content: [userPart] }]);
+    await createSessionContextHandler({
+      interviewHandleContext: async () => {},
+      messagesTransform: async (_input, output) => {
+        appendTrailingVolatileMessage(
+          output.messages,
+          { id: 'board', role: 'user' },
+          { text: 'volatile', metadataKey: BACKGROUND_JOB_BOARD_METADATA_KEY },
+        );
+      },
+    })(event);
+    expect(partsWithCache(event)).toEqual([
+      { id: 'u', part: { ...userPart, cache: { type: 'ephemeral' } } },
+    ]);
+    expect('cache' in userPart).toBe(false);
+  });
+
+  test('T6: four-slot host policy leaves the deepest breakpoint readable next request', async () => {
+    // Port of v2 cache-policy.ts: existing inline hints consume the 4 slots
+    // first; auto then tries the last tool, first/last system, and the last
+    // message (last text part, or last non-text part). OpenRouter uses only
+    // the manual hints with its default policy.
+    const hostMarks = (
+      event: V2SessionContextEvent,
+      route: 'anthropic-messages' | 'openrouter',
+    ) => {
+      const messages = structuredClone(event.messages);
+      const existing = messages.flatMap((message) =>
+        message.content.filter((part) => part.cache !== undefined),
+      ).length;
+      let remaining = Math.max(0, 4 - existing);
+      if (route === 'anthropic-messages') {
+        if (remaining > 0) remaining -= 1; // one tool definition
+        for (const index of [0, event.system.length - 1]) {
+          if (index >= 0 && remaining > 0) remaining -= 1;
+        }
+        const last = messages.at(-1);
+        if (last && remaining > 0) {
+          const index = last.content.findLastIndex(
+            (part) => part.type === 'text',
+          );
+          const target = index >= 0 ? index : last.content.length - 1;
+          const part = last.content[target];
+          if (part && !part.cache) {
+            last.content[target] = { ...part, cache: { type: 'ephemeral' } };
+          }
+        }
+      }
+      const marked = messages.flatMap((message) =>
+        message.content
+          .filter((part) => part.cache !== undefined)
+          .map((part) => ({ id: message.id, part })),
+      );
+      return { messages, deepest: marked.at(-1) };
+    };
+    const prefixThrough = (
+      messages: V2SessionContextEvent['messages'],
+      id: string,
+      target: Record<string, unknown>,
+    ) => {
+      const parts: string[] = [];
+      for (const message of messages) {
+        for (const part of message.content) {
+          const { cache: _cache, ...uncached } = part;
+          parts.push(JSON.stringify(uncached));
+          if (message.id === id && part === target) return parts.join('');
+        }
+      }
+      throw new Error('breakpoint not found');
+    };
+    const history = (count: number) =>
+      Array.from({ length: count }, (_, index) => [
+        {
+          id: `u${index}`,
+          role: 'user',
+          content: [{ type: 'text', text: `request ${index}` }],
         },
-      ) => {
-        const target = output.messages.at(-1);
-        if (!target) throw new Error('no message');
-        await new Promise<void>((resolve) => {
-          gates[session].push(resolve);
-        });
-        appendTaggedSyntheticPart(target, {
-          text: `INJECTED ${session}`,
-          metadataKey: 'omos_test_tag',
-        });
-      };
-    };
-    const makeSessionEvent = (session: string) =>
-      makeEvent([{ id: 'u', role: 'user', content: [] }], {
-        sessionID: session,
+        {
+          id: `a${index}`,
+          role: 'assistant',
+          content: [{ type: 'text', text: `calling ${index}` }],
+        },
+        {
+          id: `tool${index}`,
+          role: 'tool',
+          content: [{ type: 'tool-result', text: `result ${index}` }],
+        },
+      ]).flat();
+    const handler = createSessionContextHandler({
+      interviewHandleContext: async () => {},
+      messagesTransform: async (_input, output) => {
+        for (const message of output.messages) {
+          if (message.info.role !== 'user') continue;
+          appendTaggedSyntheticPart(message as never, {
+            text: 'deterministic reminder',
+            metadataKey: PHASE_REMINDER_METADATA_KEY,
+          });
+        }
+        appendTrailingVolatileMessage(
+          output.messages,
+          { id: 'volatile', role: 'user' },
+          {
+            text: 'changing board',
+            metadataKey: BACKGROUND_JOB_BOARD_METADATA_KEY,
+          },
+        );
+      },
+    });
+    for (const count of [5, 8, 12]) {
+      const current = makeEvent(history(count), {
+        system: [
+          { type: 'text', text: 'base' },
+          { type: 'text', text: 'project' },
+        ],
       });
-    const makeHandler = (session: string) =>
-      createSessionContextHandler({
-        interviewHandleContext: async () => {},
-        messagesTransform: makeGatedTransform(session),
-        syntheticPartCacheHint: { type: 'ephemeral' },
-      });
+      const next = makeEvent(history(count + 1), { system: current.system });
+      await handler(current);
+      await handler(next);
+      for (const route of ['anthropic-messages', 'openrouter'] as const) {
+        const { messages, deepest } = hostMarks(current, route);
+        expect(deepest?.id).toBe(`tool${count - 1}`);
+        if (!deepest?.id) throw new Error('missing breakpoint');
+        const currentPrefix = prefixThrough(messages, deepest.id, deepest.part);
+        const nextPart = next.messages
+          .find((message) => message.id === deepest.id)
+          ?.content.find((part) => part.type === 'tool-result');
+        if (!nextPart) throw new Error('missing next tool result');
+        expect(prefixThrough(next.messages, deepest.id, nextPart)).toBe(
+          currentPrefix,
+        );
+      }
+    }
+  });
 
-    const eventA = makeSessionEvent('ses_a');
-    const eventB = makeSessionEvent('ses_b');
-    const pendingA = makeHandler('ses_a')(eventA);
-    await tick(); // A reaches its transform and parks on its gate
-    const pendingB = makeHandler('ses_b')(eventB);
-    await tick(); // B enters its transform scope and parks (A still set)
-
-    // Release A: it injects and restores its hint scope while B is parked.
-    for (const resolve of gates.ses_a ?? []) resolve();
-    await pendingA;
-    // Only now release B: its part must still carry the v2 cache hint.
-    for (const resolve of gates.ses_b ?? []) resolve();
-    await pendingB;
-
-    const injectedA = eventA.messages[0]?.content.at(-1) as Record<
-      string,
-      unknown
-    >;
-    const injectedB = eventB.messages[0]?.content.at(-1) as Record<
-      string,
-      unknown
-    >;
-    expect(injectedA.cache).toEqual({ type: 'ephemeral' });
-    expect(injectedB.cache).toEqual({ type: 'ephemeral' });
+  test('without tagged injections, v2 does not place a manual mark', async () => {
+    const event = makeEvent([
+      { id: 'u', role: 'user', content: [{ type: 'text', text: 'hi' }] },
+    ]);
+    await createSessionContextHandler({
+      interviewHandleContext: async () => {},
+      messagesTransform: async () => {},
+    })(event);
+    expect(partsWithCache(event)).toEqual([]);
   });
 });

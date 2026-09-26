@@ -166,16 +166,12 @@ its probe only ever matters on non-stable host builds.
     - a single `ctx.session.hook("context")` handles the system/messages
       transforms (SystemPart[]/Message.content shape conversion),
       `chat.message` agent tracking, and interview + generic command marker
-      dispatch — mutating only the trailing message so earlier content stays
-      byte-identical (provider prompt-cache prefix reuse). While the
-      bridged messages transform runs, parts injected through
-      `cache-safe-injection` carry a v2 `ContentPart.cache`
-      `{type: "ephemeral"}` hint (CacheHint tagging) so providers that
-      honor manual breakpoints cap the injected zone's cache contribution;
-      the hint is scoped per request (an `AsyncLocalStorage` scope around
-      the bridged transform) so concurrent sessions' transforms cannot
-      interleave their set/restore, and the v1 pipeline never enters the
-      scope, so v1 payload bytes never change.
+      dispatch — keeping earlier prompt content stable for provider cache
+      prefix reuse. After the
+      bridged transform, if plugin-tagged parts exist, the v2 bridge copies
+      the last part of the last non-board-only message and gives it one
+      `ContentPart.cache` `{type: "ephemeral"}` hint. The shared injection
+      helper adds no hints; the v1 pipeline remains unchanged.
     - a native `ctx.session.hook("prompt")` registration (capability-
       guarded): the v2 prompt hook fires **once per admitted input** with
       the eventual inbox User `messageID`, giving the v1 `chat.message`
@@ -401,11 +397,11 @@ currently break this plugin:
   skip. The v2 context bridge stamps the context event's `sessionID` and
   the session's known agent (from the event, falling back to the
   session-prompt bridge's learned state) onto transcript user messages
-  before the bridged messages transform runs — metadata-only envelope
-  enrichment, strictly absence-gated (host-provided values never
-  overwritten), parts/content bytes untouched, idempotent across
-  context events. This also makes the CacheHint-tagged injected parts
-  observable on live v2 hosts.
+  before the bridged messages transform runs — strictly absence-gated
+  envelope enrichment (host-provided identity wins). For `msg_omos_`
+  synthetic wakes, the bridge also replaces the first text part with a
+  copy restoring its internal flag and metadata. Both are idempotent;
+  the provider-bound text bytes remain unchanged.
 - **Runtime status reconciliation is capability-gated.** v2 has no
   equivalent of the v1 live session-status map (`client.session.status`
   is not a function on v2 hosts; `session.status` is not exposed to
@@ -423,10 +419,10 @@ currently break this plugin:
   `tabs.focus` opens the tab if needed). The `SessionContext` request
   shape carries `generation` and `providerOptions` in a single
   `options` object — the plugin is unaffected: its context bridge
-  mutates only system/messages, and cache hints ride
+  mutates only system/messages; its single cache hint rides
   `ContentPart.cache`. Adoption status: the **compaction hook is
-  adopted** — the plugin strips its tagged synthetic parts from the
-  compaction input (phase reminders and job boards). On v1, the
+  adopted** — the plugin strips phase reminders from the compaction input,
+  preserving job boards so the summary can report running jobs. On v1, the
   `experimental.session.compacting` hook instead marks the next message
   transform for that session; it strips only phase reminders after the
   transform, leaving the job board untouched. The v2 adapter does not forward
@@ -954,11 +950,9 @@ again; the earlier report is superseded") in the cache-safe tail zone.
   mutated, earlier content stays byte-identical, and the v1 enforcement
   suite (`src/hooks/cache-safety.property.test.ts` and friends) covers the
   shared transform code the v2 context hook invokes. The one v2-only
-  addition is CacheHint tagging: parts injected through
-  `cache-safe-injection` while the v2 context bridge runs carry
-  `cache: {type: "ephemeral"}` (v2 `ContentPart.cache`). The hint is
-  applied via a per-request scoped default (AsyncLocalStorage — the v2
-  host serves different sessions' requests concurrently, so the scope
-  must be isolated per bridged transform) inside the v2 bridge only — v1
-  callers never set it, so the v1 payload (and its snapshots) stay
-  byte-identical.
+  addition is one manual `cache: {type: "ephemeral"}` breakpoint per
+  transformed request with plugin-tagged content. The bridge copies the
+  last part of the last non-board-only message after the transform;
+  injected parts receive no cache hint from their shared v1 helpers.
+  This leaves room in the host's four-breakpoint budget for tools and
+  system prefixes, while v1 payloads (and snapshots) stay byte-identical.
