@@ -1,3 +1,4 @@
+import { DEFAULT_AGENT_MCPS } from '../config/agent-mcps.js';
 import { normalizeAgentName } from '../utils/agent-variant.js';
 import { satisfiesPluginCompatibility } from './compatibility.js';
 import { MarketplaceCompatibilityError } from './errors.js';
@@ -122,7 +123,6 @@ function ambiguousMcpNamespaces(
   const names = [...available].sort();
   for (const name of required) {
     const own = namespace(name);
-    if (!available.has(name)) continue;
     for (const other of names) {
       const otherNamespace = namespace(other);
       if (
@@ -295,7 +295,13 @@ export function resolveMarketplaceActivation(
       );
       continue;
     }
-    const ambiguous = ambiguousMcpNamespaces(manifest.mcps, mcps);
+    const effectiveMcps = [
+      ...(manifest.extends
+        ? (DEFAULT_AGENT_MCPS[manifest.extends.builtin] ?? [])
+        : []),
+      ...manifest.mcps,
+    ].filter((name) => mcps.has(name));
+    const ambiguous = ambiguousMcpNamespaces(effectiveMcps, mcps);
     if (ambiguous.length) {
       diagnostics.push(
         diagnostic(

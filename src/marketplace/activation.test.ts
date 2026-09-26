@@ -303,6 +303,43 @@ describe('marketplace activation planning', () => {
     expect(result.diagnostics[0]?.code).toBe('ambiguous-mcp-namespace');
   });
 
+  test('ignores implicit extension MCP namespaces absent from enabled inventory', () => {
+    const { result } = fixture(
+      ['team/librarian'],
+      [
+        stored('team/librarian', 'library-agent', {
+          extends: { builtin: 'librarian', promptMode: 'append' },
+        }),
+      ],
+      new Map(),
+      { mcps: ['context7_extra'] },
+    );
+
+    expect(result.agents.map((agent) => agent.packageId)).toEqual([
+      'team/librarian',
+    ]);
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  test('rejects overlapping available implicit extension MCP namespaces', () => {
+    const { result } = fixture(
+      ['team/librarian'],
+      [
+        stored('team/librarian', 'library-agent', {
+          extends: { builtin: 'librarian', promptMode: 'append' },
+        }),
+      ],
+      new Map(),
+      { mcps: ['context7', 'context7_extra'] },
+    );
+
+    expect(result.agents).toEqual([]);
+    expect(result.diagnostics[0]?.code).toBe('ambiguous-mcp-namespace');
+    expect(result.diagnostics[0]?.message).toContain(
+      'context7 and context7_extra',
+    );
+  });
+
   test('returns an empty plan for no selected IDs without reading store data', () => {
     const { result, calls } = fixture([]);
     expect(result).toEqual({ agents: [], diagnostics: [] });

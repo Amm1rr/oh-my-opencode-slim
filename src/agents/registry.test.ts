@@ -1244,6 +1244,57 @@ describe('finalized existing-agent registry', () => {
     }
   });
 
+  test('keeps host allow exceptions inside marketplace capability ceilings', () => {
+    const runtime = runtimeFor({
+      agents: { 'market-agent': { displayName: 'MarketVisible' } },
+    });
+    const hostRules = [
+      { action: 'read', resource: '*', effect: 'deny' as const },
+      { action: 'read', resource: 'README.md', effect: 'allow' as const },
+      { action: 'bash', resource: '*', effect: 'allow' as const },
+      { action: 'skill', resource: 'review-b', effect: 'allow' as const },
+    ];
+    const registry = build(
+      runtime,
+      { mcp: { 'host-mcp': { type: 'local' } } },
+      {
+        ...marketplaceOptions(
+          ['team/read-exception'],
+          marketplaceStore({
+            'team/read-exception': marketplacePackage('team/read-exception', {
+              tools: ['read'],
+              skills: ['review-a'],
+              mcps: [],
+            }),
+          }),
+        ),
+        nativePermissionsByAgent: { 'market-agent': hostRules },
+      },
+    );
+
+    for (const name of ['market-agent', 'MarketVisible']) {
+      const policy = registry.nativePolicies[name];
+      expect(policy.decide('read', 'README.md')).toBe('allow');
+      expect(policy.decide('read', '.env')).toBe('deny');
+      expect(policy.decide('bash', '*')).toBe('deny');
+      expect(policy.decide('skill', 'review-b')).toBe('deny');
+      const readDenyIndex = policy.rules.findLastIndex(
+        (rule) =>
+          rule.action === 'read' &&
+          rule.resource === '*' &&
+          rule.effect === 'deny',
+      );
+      const readAllowIndex = policy.rules.findLastIndex(
+        (rule) =>
+          rule.action === 'read' &&
+          rule.resource === 'README.md' &&
+          rule.effect === 'allow',
+      );
+      expect(readDenyIndex).toBeGreaterThanOrEqual(0);
+      expect(readAllowIndex).toBeGreaterThan(readDenyIndex);
+    }
+  });
+
   test('preserves scalar skill denial in canonical and visible projections', () => {
     const runtime = runtimeFor({
       agents: { 'market-agent': { displayName: 'MarketVisible' } },
@@ -1491,18 +1542,28 @@ describe('finalized existing-agent registry', () => {
         },
       }),
     ).toThrow("requires a finalized 'fixer' model");
-    expect(() =>
-      buildResolvedAgentRegistry(runtime, {
-        hostSnapshot: { mcp: { 'host-mcp': { type: 'local' } } },
-        definitions,
-        marketplace: {
-          selectedPackageIds: ['team/orchestrator'],
-          store: marketplaceStore(packages),
-          pluginVersion: '3.2.0',
-          availableSkillNames: ['skill-a', 'review-a'],
+    const followsOrchestrator = buildResolvedAgentRegistry(runtime, {
+      hostSnapshot: {
+        agent: {
+          orchestrator: { displayName: 'Lead' },
+          Lead: { variant: 'stale-host-variant' },
         },
-      }),
-    ).toThrow('requires a finalized orchestrator model');
+        mcp: { 'host-mcp': { type: 'local' } },
+      },
+      definitions,
+      marketplace: {
+        selectedPackageIds: ['team/orchestrator'],
+        store: marketplaceStore(packages),
+        pluginVersion: '3.2.0',
+        availableSkillNames: ['skill-a', 'review-a'],
+      },
+    });
+    expect(
+      followsOrchestrator.finalAgentConfig['orchestrator-agent'],
+    ).not.toHaveProperty('model');
+    expect(
+      followsOrchestrator.finalAgentConfig['orchestrator-agent'],
+    ).not.toHaveProperty('variant');
     expect(() =>
       buildResolvedAgentRegistry(runtime, {
         hostSnapshot: { mcp: { 'host-mcp': { type: 'local' } } },
@@ -1515,5 +1576,39 @@ describe('finalized existing-agent registry', () => {
         },
       }),
     ).toThrow("requires a finalized 'fixer' model");
+  });
+
+  test('uses a configured orchestrator candidate as a valid model fallback', () => {
+    const runtime = runtimeFor({
+      agents: { orchestrator: { model: ['provider/orchestrator-fallback'] } },
+    });
+    const definitions = createAgents(runtime);
+    const orchestrator = definitions.find(
+      (definition) => definition.name === 'orchestrator',
+    );
+    if (!orchestrator) throw new Error('Missing orchestrator test role');
+    delete orchestrator.config.model;
+    const registry = buildResolvedAgentRegistry(runtime, {
+      hostSnapshot: { mcp: { 'host-mcp': { type: 'local' } } },
+      definitions,
+      marketplace: {
+        selectedPackageIds: ['team/orchestrator-fallback'],
+        store: marketplaceStore({
+          'team/orchestrator-fallback': marketplacePackage(
+            'team/orchestrator-fallback',
+            {
+              agentName: 'orchestrator-agent',
+              model: { source: 'orchestrator' },
+            },
+          ),
+        }),
+        pluginVersion: '3.2.0',
+        availableSkillNames: ['skill-a', 'review-a'],
+      },
+    });
+
+    expect(registry.finalAgentConfig['orchestrator-agent']).toMatchObject({
+      model: 'provider/orchestrator-fallback',
+    });
   });
 });

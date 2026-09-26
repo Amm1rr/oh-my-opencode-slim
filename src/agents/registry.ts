@@ -265,12 +265,9 @@ function marketplaceReadSafeguards(
 function marketplaceHostRules(
   rules: readonly V2PermissionRule[],
 ): V2PermissionRule[] {
-  // Keep ask patterns intact so the native policy compiler can intersect
-  // their actual glob semantics with the package's exact capability ceiling.
-  return rules.filter((rule) => {
-    if (rule.effect === 'deny') return true;
-    return rule.effect === 'ask';
-  });
+  // Keep host exceptions intact; the native policy compiler intersects both
+  // axes with the package ceiling before applying them.
+  return [...rules];
 }
 
 function appendMarketplaceRouting(
@@ -632,9 +629,8 @@ export function buildResolvedAgentRegistry(
         entry.variant = candidateMap.orchestrator[0].variant;
       }
       if (typeof entry.model !== 'string') {
-        throw new Error(
-          `Marketplace agent '${name}' requires a finalized orchestrator model`,
-        );
+        delete entry.model;
+        delete entry.variant;
       }
     } else if (packageMetadata?.modelPolicy.source === 'builtin') {
       if (!packageMetadata.extension) {
@@ -856,11 +852,14 @@ export function buildResolvedAgentRegistry(
         rule.effect === 'ask' ||
         rule.effect === 'deny',
     );
+    const finalizedPackageMetadata = packageMetadata
+      ? (marketplaceMetadata.get(name) ?? packageMetadata)
+      : undefined;
     const marketplaceReadRules = marketplaceReadSafeguards(
-      packageMetadata?.capabilities.tools ?? [],
+      finalizedPackageMetadata?.capabilities.tools ?? [],
     );
     const ownerReadRule: V2PermissionRule[] =
-      packageMetadata &&
+      finalizedPackageMetadata &&
       Object.hasOwn(sourcePermission, 'read') &&
       permissionEffect(sourcePermission, 'read') !== 'allow'
         ? [
@@ -880,21 +879,15 @@ export function buildResolvedAgentRegistry(
         ...marketplaceReadRules,
         ...ownerReadRule,
       ],
-      hostRules: packageMetadata
+      hostRules: finalizedPackageMetadata
         ? marketplaceHostRules(hostRuleSet)
         : hostRuleSet,
-      ...(packageMetadata
+      ...(finalizedPackageMetadata
         ? {
             ceilings: marketplacePermissionCeilings(
-              packageMetadata.capabilities.tools,
-              narrowCapabilities(
-                packageMetadata.capabilities.skills,
-                runtime.agents()[name]?.skills,
-              ),
-              narrowCapabilities(
-                packageMetadata.capabilities.mcps,
-                runtime.agents()[name]?.mcps,
-              ),
+              finalizedPackageMetadata.capabilities.tools,
+              finalizedPackageMetadata.capabilities.skills,
+              finalizedPackageMetadata.capabilities.mcps,
             ),
           }
         : {}),
