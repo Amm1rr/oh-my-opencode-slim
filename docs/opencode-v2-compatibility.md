@@ -423,7 +423,7 @@ currently break this plugin:
   `tabs.focus` opens the tab if needed). The `SessionContext` request
   shape carries `generation` and `providerOptions` in a single
   `options` object — the plugin is unaffected: its context bridge
-  mutates only system/messages, and cache hints ride
+  mutates only system/messages; its single cache hint rides
   `ContentPart.cache`. Adoption status: the **compaction hook is
   adopted** — the plugin strips phase reminders from the compaction input,
   preserving job boards so the summary can report running jobs. On v1, the
@@ -954,11 +954,9 @@ again; the earlier report is superseded") in the cache-safe tail zone.
   mutated, earlier content stays byte-identical, and the v1 enforcement
   suite (`src/hooks/cache-safety.property.test.ts` and friends) covers the
   shared transform code the v2 context hook invokes. The one v2-only
-  addition is CacheHint tagging: parts injected through
-  `cache-safe-injection` while the v2 context bridge runs carry
-  `cache: {type: "ephemeral"}` (v2 `ContentPart.cache`). The hint is
-  applied via a per-request scoped default (AsyncLocalStorage — the v2
-  host serves different sessions' requests concurrently, so the scope
-  must be isolated per bridged transform) inside the v2 bridge only — v1
-  callers never set it, so the v1 payload (and its snapshots) stay
-  byte-identical.
+  addition is one manual `cache: {type: "ephemeral"}` breakpoint per
+  transformed request with plugin-tagged content. The bridge copies the
+  last part of the last non-board-only message after the transform;
+  injected parts receive no cache hint from their shared v1 helpers.
+  This leaves room in the host's four-breakpoint budget for tools and
+  system prefixes, while v1 payloads (and snapshots) stay byte-identical.

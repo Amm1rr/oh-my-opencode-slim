@@ -18,9 +18,8 @@ import { loadPluginConfig } from '../config/loader';
 import { InterviewConfigSchema } from '../config/schema';
 import { getBuildInfo } from '../generated/build-info';
 import {
-  runWithSyntheticPartCacheHintScope,
-  type SyntheticPartCacheHint,
-  setDefaultSyntheticPartCacheHint,
+  isTaggedPart,
+  isVolatileTaggedMessage,
   stripTaggedContent,
 } from '../hooks/cache-safe-injection';
 import {
@@ -30,6 +29,7 @@ import {
 } from '../hooks/chat-headers';
 import type { ForegroundFallbackManager } from '../hooks/foreground-fallback';
 import { PHASE_REMINDER_METADATA_KEY } from '../hooks/phase-reminder';
+import { BACKGROUND_JOB_BOARD_METADATA_KEY } from '../hooks/task-session-manager/board-injection';
 import { OhMyOpenCodeLite } from '../index';
 import type { McpConfig } from '../mcp/types';
 import {
@@ -261,10 +261,6 @@ export interface V2SessionContextHandlerDeps {
       messages: Array<{ info: { role: string }; parts: unknown[] }>;
     },
   ) => Promise<void>;
-  /** CacheHint stamped on parts injected while the bridged messages
-   * transform runs (v2 ContentPart.cache; v1 bytes never change — see
-   * cache-safe-injection). */
-  syntheticPartCacheHint?: SyntheticPartCacheHint;
 }
 
 /** Build the single `ctx.session.hook("context")` handler: interview marker
@@ -358,10 +354,10 @@ export function createSessionContextHandler(
       // bridged v1 injection gates (phase-reminder, background-job-board)
       // key on user-message info.sessionID /
       // info.agent — without this stamp every injection skips on v2.
-      // Metadata-only (envelope fields; parts/content bytes untouched)
-      // and strictly absence-gated: host-provided values always win.
-      // Idempotent across context events — a message stamped once never
-      // qualifies for stamping again.
+      // Identity is envelope-only and strictly absence-gated: host-provided
+      // values win. Synthetic wakes additionally need their first text part
+      // re-flagged because the host discards its internal part metadata.
+      // Both enrichments are idempotent across context events.
       const knownAgent =
         typeof event.agent === 'string' && event.agent
           ? event.agent
@@ -402,38 +398,49 @@ export function createSessionContextHandler(
           }
         }
       }
-      // CacheHint tagging (v2-only): parts injected through
-      // cache-safe-injection while the bridged transform runs carry an
-      // ephemeral cache hint (v2 ContentPart.cache), so providers cap the
-      // injected zone's cache contribution. Scoped set/restore inside an
-      // isolated AsyncLocalStorage hint scope — the v2 host serves
-      // different sessions' requests concurrently, so a shared module
-      // default could be restored by one session's transform while
-      // another's is still injecting. The v1 pipeline never executes
-      // inside this wrapper, so v1 payload bytes never change (pinned by
-      // the v1 snapshot/property suites).
-      const messagesTransform = deps.messagesTransform;
-      await runWithSyntheticPartCacheHintScope(async () => {
-        const restoreCacheHint = deps.syntheticPartCacheHint
-          ? setDefaultSyntheticPartCacheHint(deps.syntheticPartCacheHint)
-          : undefined;
-        try {
-          const v1messages = event.messages.map((m) => ({
-            info: m,
-            parts: m.content,
-          }));
-          await messagesTransform({}, { messages: v1messages });
-          event.messages = v1messages.map((m) => {
-            const info = m.info as { content?: unknown };
-            info.content = m.parts;
-            return m.info;
-          }) as V2SessionContextEvent['messages'];
-        } catch (err) {
-          log('[v2] messages transform bridge failed', String(err));
-        } finally {
-          restoreCacheHint?.();
+      try {
+        const v1messages = event.messages.map((m) => ({
+          info: m,
+          parts: m.content,
+        }));
+        await deps.messagesTransform({}, { messages: v1messages });
+        event.messages = v1messages.map((m) => {
+          const info = m.info as { content?: unknown };
+          info.content = m.parts;
+          return m.info;
+        }) as V2SessionContextEvent['messages'];
+
+        // One manual breakpoint, after the shared transform: never spend
+        // the host's four slots on historical reminders or a volatile board
+        // message. Keep all v1 injected parts byte-identical, and copy only
+        // the v2 target part (the host may reuse its original object).
+        const hasInjection = event.messages.some((message) =>
+          message.content.some(
+            (part) =>
+              isTaggedPart(part, PHASE_REMINDER_METADATA_KEY) ||
+              isTaggedPart(part, BACKGROUND_JOB_BOARD_METADATA_KEY),
+          ),
+        );
+        if (hasInjection) {
+          const target = event.messages.findLast(
+            (message) =>
+              message.content.length > 0 &&
+              !isVolatileTaggedMessage(
+                { info: message, parts: message.content },
+                BACKGROUND_JOB_BOARD_METADATA_KEY,
+              ),
+          );
+          if (target) {
+            const index = target.content.length - 1;
+            target.content[index] = {
+              ...target.content[index],
+              cache: { type: 'ephemeral' },
+            };
+          }
         }
-      });
+      } catch (err) {
+        log('[v2] messages transform bridge failed', String(err));
+      }
     }
   };
 }
@@ -1730,9 +1737,6 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
           promptBridge?.agentForSession(sessionID),
         systemTransform,
         messagesTransform,
-        // v2 ContentPart cache hint for parts injected by the bridged
-        // transforms (v1 bytes never change — see the handler).
-        syntheticPartCacheHint: { type: 'ephemeral' },
       });
       const reg = await ctx.session.hook('context', handler);
       disposers.push(() => reg.dispose());
