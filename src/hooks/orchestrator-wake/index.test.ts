@@ -3092,4 +3092,71 @@ describe('evaluate verdict observability (INFO logs)', () => {
       spy.mockRestore();
     }
   });
+
+  test.each([
+    { checkpoint: 'initial', blockedAt: 4 },
+    { checkpoint: 'recheck', blockedAt: 5 },
+    { checkpoint: 'selection', blockedAt: 6 },
+  ])(
+    'logs an input-wait abort at the $checkpoint checkpoint',
+    async ({ checkpoint, blockedAt }) => {
+      const entries: Array<{ message: string; data: unknown }> = [];
+      const spy = spyOn(loggerModule, 'log').mockImplementation(
+        (message: string, data?: unknown) => {
+          entries.push({ message, data });
+        },
+      );
+      let checks = 0;
+      try {
+        const { scheduler } = createScheduler({
+          hasInputWait: () => ++checks >= blockedAt,
+          resolveSelection: async () => ({ provenance: 'unknown' }),
+        });
+        await scheduler.event({
+          event: { type: 'session.idle', properties: { sessionID: 'p1' } },
+        });
+        await clock.advance(60_000);
+        expect(entries).toContainEqual({
+          message: '[orchestrator-wake] evaluate aborted',
+          data: {
+            sessionID: 'p1',
+            trigger: 'periodic',
+            checkpoint,
+            reason: 'input-wait',
+          },
+        });
+      } finally {
+        spy.mockRestore();
+      }
+    },
+  );
+
+  test('reports when an active child deferral cannot rearm its backstop', async () => {
+    const entries: Array<{ message: string; data: unknown }> = [];
+    const spy = spyOn(loggerModule, 'log').mockImplementation(
+      (message: string, data?: unknown) => {
+        entries.push({ message, data });
+      },
+    );
+    let checks = 0;
+    try {
+      const { scheduler } = createScheduler({
+        hasInputWait: () => ++checks >= 5,
+        sessionClient: makeClient({
+          childrenData: [{ id: 'child' }],
+          statusData: { child: { type: 'busy' } },
+        }),
+      });
+      await scheduler.event({
+        event: { type: 'session.idle', properties: { sessionID: 'p1' } },
+      });
+      await clock.advance(60_000);
+      expect(entries).toContainEqual({
+        message: '[orchestrator-wake] backstop not armed',
+        data: { sessionID: 'p1', reason: 'input-wait' },
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });
