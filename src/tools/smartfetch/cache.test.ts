@@ -1,8 +1,15 @@
 import { describe, expect, test } from 'bun:test';
-import { buildCacheKey, CACHE, calculateCacheSize } from './cache';
+import {
+  buildCacheKey,
+  CACHE,
+  calculateCacheSize,
+  conditionalHeaders,
+  lookup,
+} from './cache';
 import type { BinaryFetch, CachedFetch } from './types';
 
 const cacheOptions = {
+  format: 'markdown' as const,
   extract_main: true,
   prefer_llms_txt: 'auto' as const,
   save_binary: false,
@@ -40,6 +47,32 @@ describe('smartfetch/cache', () => {
     expect(page1).not.toBe(page2);
   });
 
+  test('a stale cache lookup retains the entry but reports it as not fresh', async () => {
+    CACHE.set(
+      'expired-entry',
+      makeCached({
+        text: 'body',
+        etag: '"abc"',
+        lastModified: 'Tue, 01 Jan 2030 00:00:00 GMT',
+      }),
+      { ttl: 1 },
+    );
+    try {
+      await Bun.sleep(12);
+      const { entry, fresh } = lookup('expired-entry');
+      expect(fresh).toBe(false);
+      expect(entry?.etag).toBe('"abc"');
+      if (!entry) throw new Error('stale entry missing');
+      expect(conditionalHeaders(entry)).toEqual({
+        'If-None-Match': '"abc"',
+        'If-Modified-Since': 'Tue, 01 Jan 2030 00:00:00 GMT',
+      });
+      expect(conditionalHeaders(makeCached({}))).toEqual({});
+    } finally {
+      CACHE.clear();
+    }
+  });
+
   test('option changes still produce distinct cache keys', () => {
     const url = 'https://example.com/docs#sec1';
     const base = buildCacheKey(url, cacheOptions);
@@ -47,10 +80,20 @@ describe('smartfetch/cache', () => {
       { ...cacheOptions, extract_main: false },
       { ...cacheOptions, prefer_llms_txt: 'always' as const },
       { ...cacheOptions, save_binary: true },
+      { ...cacheOptions, format: 'html' as const },
     ]) {
       expect(buildCacheKey(url, variant)).not.toBe(base);
     }
     expect(JSON.parse(base)).toMatchObject({ saveBinary: false });
+  });
+
+  test('llms.txt cache key omits format and differs from every page key', () => {
+    const url = 'https://docs.example.com/page';
+    const llms = buildCacheKey(url, { ...cacheOptions, format: undefined });
+    expect(Object.hasOwn(JSON.parse(llms), 'format')).toBe(false);
+    for (const format of ['markdown', 'text', 'html'] as const) {
+      expect(buildCacheKey(url, { ...cacheOptions, format })).not.toBe(llms);
+    }
   });
 
   test('llms.txt-shaped result is charged once for its content', () => {

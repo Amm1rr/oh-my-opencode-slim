@@ -20,7 +20,7 @@ the tool is registered under the same `webfetch` name to override the default.
 | `extract_main` | boolean | `true` | Extract main content from HTML using Mozilla Readability for pages with at most 15,000 elements; larger pages skip Readability. When disabled, returns the unextracted page. |
 | `prefer_llms_txt` | `"auto"` \| `"always"` \| `"never"` | `"auto"` | Prefer `/llms.txt` or `/llms-full.txt` over the page itself. `"auto"` probes only for docs-like domains (readthedocs, gitbook, netlify, vercel, etc.). |
 | `include_metadata` | boolean | `true` | Include YAML frontmatter with fetch metadata (status code, content type, charset, redirect chain, cache info, etc.). |
-| `save_binary` | boolean | `false` | Save binary payloads (images, PDFs, audio, video) to disk under the system temp dir. When disabled, binary content reports metadata-only. |
+| `save_binary` | boolean | `false` | Save binary payloads (images, PDFs, audio, video) to disk under the system temp dir. When disabled, supported small images can be attached inline for direct-routed multimodal models; other binaries return metadata and a disk-save hint. |
 
 ## Output
 
@@ -66,13 +66,25 @@ Binary responses (images, PDFs, audio, video) return metadata about the file:
 - Filename (from `Content-Disposition` or URL path)
 - Binary kind (`image`, `audio`, `video`, `pdf`, `binary`)
 
-Two modes:
+Three modes:
 
 1. **Metadata-only** — content exceeds the download limit (2 MiB without
    `save_binary`, 10 MiB with it). Reports size and type without the body.
 2. **Saved to disk** — when `save_binary=true`, the binary is written to
    `<tmpdir>/opencode-smartfetch/<filename>` and the response includes the
    filesystem path.
+3. **Inline image** — when `save_binary=false`, image routing is `direct`, and
+   the current model explicitly supports image input, PNG/JPEG/GIF/WebP bytes
+   can be attached as a data URL. When the server sends no type or a generic
+   `application/octet-stream`, image signatures also determine the binary type
+   before text heuristics (including the extension used when saving to disk).
+   The base64 payload (excluding the data URL prefix) must fit in 1 MiB
+   (at most 786,432 raw bytes).
+   The decision is made per call, even for cached bytes. If any condition fails,
+   no image is attached or saved automatically; frontmatter reports
+   `inline_image_skipped` (e.g. `model_capability_unknown` for older/v2-shaped
+   contexts or `exceeds_inline_limit`) and retains the retry-with-`save_binary=true`
+   hint. An explicit `save_binary=true` always keeps the existing disk behavior.
 
 ### Blocked redirects
 
@@ -110,12 +122,18 @@ returns the raw fetched content as a graceful fallback.
 ## Caching
 
 Fetches are cached in memory with an LRU cache (50 MiB max, 15-minute TTL).
-The cache key includes the URL plus behavior-affecting options (`extract_main`,
-`prefer_llms_txt`, `save_binary`), so changing these re-fetches the URL.
+Page cache keys include the URL and request/representation options (`format`,
+`extract_main`, `prefer_llms_txt`, `save_binary`); changing format re-fetches
+the page with its preferred `Accept`. llms.txt keeps its own text `Accept` and
+shares one format-independent cache entry, probed again when stale. If no llms.txt
+exists, changing format re-probes before fetching the page.
 
-Expired cache entries are fetched anew; conditional `ETag`/`Last-Modified`
-revalidation and `304` cache refresh are not used. The llms.txt probe validates
-the response before caching it; cached responses are not validated again.
+Expired entries are revalidated with `ETag`/`Last-Modified` when available.
+On `304` at the same final URL, the cached body is reused and its TTL refreshed;
+frontmatter reports `cache_hit: true` and `revalidated: true`. If a redirect
+changes the final URL, a fresh unconditional fetch retrieves the new resource.
+Network errors never serve stale content. Expired llms.txt content is probed
+again without conditionals; the probe validates responses before caching them.
 
 ## llms.txt Probing
 
@@ -144,6 +162,12 @@ For URLs entered as `http://`, `webfetch` first tries `https://` and falls
 back to `http://` if the HTTPS attempt fails (connection error, blocked
 redirect, or non-2xx status).
 
+If a page request returns HTTP 403 with `cf-mitigated: challenge`, `webfetch`
+closes the response and retries once from the original URL using OpenCode's
+`opencode` user agent (without pretending to be a browser). Other headers are
+preserved. A persistent challenge still reports HTTP 403; the llms.txt probe
+does not use this retry.
+
 ## Binary Detection
 
 Content type detection follows this flow:
@@ -151,9 +175,9 @@ Content type detection follows this flow:
 1. Explicit binary MIME types (`image/*`, `audio/*`, `video/*`,
    `application/pdf`, `application/zip`, `application/octet-stream`) are
    treated as binary.
-2. `application/octet-stream` and known text types are re-examined — the
-   first 2 KiB is scanned for null bytes and non-printable characters to
-   distinguish text from binary.
+2. Missing or generic (`application/octet-stream`) MIME types are checked for
+   PNG/JPEG/GIF/WebP magic bytes before text heuristics. Otherwise generic
+   binary and known text types use the first 2 KiB to distinguish text from binary.
 3. Content declared as text/plain that looks like HTML is upgraded to
    `text/html` for better content extraction.
 
@@ -273,7 +297,7 @@ these modules:
 | `tool.ts` | Entry point — permission prompts, cache lookup, llms.txt preference logic, binary-vs-text branching, metadata emission, secondary-model integration |
 | `network.ts` | URL normalization, redirect policy, charset/body decoding, header extraction, llms.txt probing, HTTP fetch with HTTPS upgrade fallback |
 | `utils.ts` | HTML extraction (Mozilla Readability + Turndown), heading cleanup, markdown/text cleaning, frontmatter generation, quality signal detection |
-| `cache.ts` | LRU cache keyed by URL + behavioral options; entries expire by TTL without conditional revalidation, canonical aliases or cache-time llms invalidation |
+| `cache.ts` | LRU cache keyed by URL + request options (format omitted for llms.txt); stale entries retain validators for conditional page revalidation, while stale llms.txt is probed anew |
 | `binary.ts` | Binary content persistence to disk, MIME-to-extension mapping, safe filename allocation |
 | `secondary-model.ts` | Dedicated webfetch/`small_model` config resolution, temporary session creation, content truncation, model fallback chain |
 | `constants.ts` | Timeouts, size limits, docs domain heuristics, binary MIME prefixes, tool description |

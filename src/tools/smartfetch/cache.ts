@@ -2,6 +2,8 @@ import { LRUCache } from 'lru-cache';
 import type { FetchResult } from './types';
 
 type CacheOptions = {
+  /** llms.txt uses its own Accept header, so its cache entry omits format. */
+  format?: 'text' | 'markdown' | 'html';
   extract_main: boolean;
   prefer_llms_txt: 'auto' | 'always' | 'never';
   save_binary: boolean;
@@ -28,6 +30,23 @@ export const CACHE = new LRUCache<string, FetchResult>({
   sizeCalculation: calculateCacheSize,
 });
 
+export function lookup(key: string) {
+  const status: LRUCache.Status<string, FetchResult> = {};
+  const entry = CACHE.get(key, {
+    allowStale: true,
+    noDeleteOnStaleGet: true,
+    status,
+  });
+  return { entry, fresh: status.get === 'hit' };
+}
+
+export function conditionalHeaders(entry: FetchResult): Record<string, string> {
+  return {
+    ...(entry.etag ? { 'If-None-Match': entry.etag } : {}),
+    ...(entry.lastModified ? { 'If-Modified-Since': entry.lastModified } : {}),
+  };
+}
+
 export function buildCacheKey(url: string, options: CacheOptions) {
   const parsed = new URL(url);
   // Fragments never reach the server (RFC 3986 §3.5); #sec1 and #sec2 are
@@ -35,6 +54,7 @@ export function buildCacheKey(url: string, options: CacheOptions) {
   parsed.hash = '';
   return JSON.stringify({
     url: parsed.toString(),
+    format: options.format,
     extractMain: options.extract_main,
     preferLlmsTxt: options.prefer_llms_txt,
     saveBinary: options.save_binary,

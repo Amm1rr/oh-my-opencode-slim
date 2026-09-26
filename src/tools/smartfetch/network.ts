@@ -2,11 +2,13 @@ import path from 'node:path';
 import { fitUtf8 } from './binary';
 import {
   BINARY_PREFIXES,
+  CHALLENGE_RETRY_USER_AGENT,
   DEFAULT_ACCEPT_LANGUAGE,
   DOCS_HOST_PREFIXES,
   DOCS_HOST_SUFFIXES,
   MAX_REDIRECTS,
   MAX_RESPONSE_BYTES,
+  USER_AGENT,
 } from './constants';
 import type {
   BinaryFetch,
@@ -99,6 +101,12 @@ export function getBinaryKind(contentType: string): BinaryFetch['binaryKind'] {
 
 const ACCEPT_HEADER =
   'text/html;q=1.0, application/xhtml+xml;q=0.9, text/markdown;q=0.8, text/plain;q=0.8, */*;q=0.1';
+export const ACCEPT_BY_FORMAT = {
+  markdown:
+    'text/markdown, text/html;q=0.9, application/xhtml+xml;q=0.8, text/plain;q=0.7, */*;q=0.1',
+  text: 'text/plain, text/markdown;q=0.9, text/html;q=0.8, application/xhtml+xml;q=0.7, */*;q=0.1',
+  html: ACCEPT_HEADER,
+} as const;
 
 function inferCharsetFromHtml(text: string) {
   const metaCharset = text.match(
@@ -193,7 +201,7 @@ export async function fetchWithRedirects(
       redirect: 'manual',
       signal,
       headers: {
-        'User-Agent': 'opencode-smartfetch/1.0',
+        'User-Agent': USER_AGENT,
         Accept: ACCEPT_HEADER,
         'Accept-Language': DEFAULT_ACCEPT_LANGUAGE,
         ...extraHeaders,
@@ -234,28 +242,65 @@ export async function fetchWithRedirects(
   throw new Error(`Too many redirects (exceeded ${MAX_REDIRECTS})`);
 }
 
+export function isCloudflareChallenge(response: Response) {
+  return (
+    response.status === 403 &&
+    response.headers.get('cf-mitigated') === 'challenge'
+  );
+}
+
+async function fetchWithChallengeRetry(
+  url: string,
+  signal: AbortSignal,
+  requestHeaders?: Record<string, string>,
+): Promise<FetchWithRedirectsResult> {
+  const first = await fetchWithRedirects(url, signal, requestHeaders);
+  if ('blockedRedirect' in first || !isCloudflareChallenge(first.response)) {
+    return first;
+  }
+  await discard(first.response);
+  return fetchWithRedirects(url, signal, {
+    ...requestHeaders,
+    'User-Agent': CHALLENGE_RETRY_USER_AGENT,
+  });
+}
+
 export async function fetchWithUpgradeFallback(
   normalized: ReturnType<typeof normalizeUrl>,
   signal: AbortSignal,
+  requestHeaders?: Record<string, string>,
 ) {
   let primary: FetchWithRedirectsResult;
   try {
-    primary = await fetchWithRedirects(normalized.url, signal);
+    primary = await fetchWithChallengeRetry(
+      normalized.url,
+      signal,
+      requestHeaders,
+    );
   } catch (error) {
     if (!normalized.fallbackUrl || signal.aborted) throw error;
-    const result = await fetchWithRedirects(normalized.fallbackUrl, signal);
+    const result = await fetchWithChallengeRetry(
+      normalized.fallbackUrl,
+      signal,
+      requestHeaders,
+    );
     return { result, upgradedToHttps: false };
   }
   if (
     !normalized.fallbackUrl ||
     (!('blockedRedirect' in primary) &&
+      // A 304 from HTTPS is authoritative; never fall back to HTTP for it.
       (primary.response.ok || primary.response.status === 304))
   ) {
     return { result: primary, upgradedToHttps: normalized.upgradedToHttps };
   }
   if (!('blockedRedirect' in primary)) await discard(primary.response);
   try {
-    const result = await fetchWithRedirects(normalized.fallbackUrl, signal);
+    const result = await fetchWithChallengeRetry(
+      normalized.fallbackUrl,
+      signal,
+      requestHeaders,
+    );
     if (
       'blockedRedirect' in primary &&
       ('blockedRedirect' in result || !result.response.ok)
