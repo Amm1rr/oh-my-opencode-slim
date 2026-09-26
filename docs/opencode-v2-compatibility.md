@@ -166,16 +166,12 @@ its probe only ever matters on non-stable host builds.
     - a single `ctx.session.hook("context")` handles the system/messages
       transforms (SystemPart[]/Message.content shape conversion),
       `chat.message` agent tracking, and interview + generic command marker
-      dispatch — mutating only the trailing message so earlier content stays
-      byte-identical (provider prompt-cache prefix reuse). While the
-      bridged messages transform runs, parts injected through
-      `cache-safe-injection` carry a v2 `ContentPart.cache`
-      `{type: "ephemeral"}` hint (CacheHint tagging) so providers that
-      honor manual breakpoints cap the injected zone's cache contribution;
-      the hint is scoped per request (an `AsyncLocalStorage` scope around
-      the bridged transform) so concurrent sessions' transforms cannot
-      interleave their set/restore, and the v1 pipeline never enters the
-      scope, so v1 payload bytes never change.
+      dispatch — keeping earlier prompt content stable for provider cache
+      prefix reuse. After the
+      bridged transform, if plugin-tagged parts exist, the v2 bridge copies
+      the last part of the last non-board-only message and gives it one
+      `ContentPart.cache` `{type: "ephemeral"}` hint. The shared injection
+      helper adds no hints; the v1 pipeline remains unchanged.
     - a native `ctx.session.hook("prompt")` registration (capability-
       guarded): the v2 prompt hook fires **once per admitted input** with
       the eventual inbox User `messageID`, giving the v1 `chat.message`
@@ -401,11 +397,11 @@ currently break this plugin:
   skip. The v2 context bridge stamps the context event's `sessionID` and
   the session's known agent (from the event, falling back to the
   session-prompt bridge's learned state) onto transcript user messages
-  before the bridged messages transform runs — metadata-only envelope
-  enrichment, strictly absence-gated (host-provided values never
-  overwritten), parts/content bytes untouched, idempotent across
-  context events. This also makes the CacheHint-tagged injected parts
-  observable on live v2 hosts.
+  before the bridged messages transform runs — strictly absence-gated
+  envelope enrichment (host-provided identity wins). For `msg_omos_`
+  synthetic wakes, the bridge also replaces the first text part with a
+  copy restoring its internal flag and metadata. Both are idempotent;
+  the provider-bound text bytes remain unchanged.
 - **Runtime status reconciliation is capability-gated.** v2 has no
   equivalent of the v1 live session-status map (`client.session.status`
   is not a function on v2 hosts; `session.status` is not exposed to

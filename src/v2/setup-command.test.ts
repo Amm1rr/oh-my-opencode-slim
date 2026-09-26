@@ -1770,13 +1770,20 @@ describe('context handler: v2 single cache breakpoint', () => {
         isTaggedPart(part, PHASE_REMINDER_METADATA_KEY),
       ),
     ).toHaveLength(0);
+    expect(partsWithCache(event)).toEqual([
+      {
+        id: 'tool',
+        part: { type: 'tool-result', text: 'ok', cache: { type: 'ephemeral' } },
+      },
+    ]);
   });
 
   test('T2: volatile board tail leaves exactly one mark on copied tool result', async () => {
     const toolPart = { type: 'tool-result', text: 'stable result' };
+    const lastToolPart = { type: 'tool-result', text: 'last result' };
     const event = makeEvent([
       { id: 'u', role: 'user', content: [{ type: 'text', text: 'hi' }] },
-      { id: 'tool', role: 'tool', content: [toolPart] },
+      { id: 'tool', role: 'tool', content: [toolPart, lastToolPart] },
     ]);
     await createSessionContextHandler({
       interviewHandleContext: async () => {},
@@ -1794,10 +1801,12 @@ describe('context handler: v2 single cache breakpoint', () => {
     })(event);
     expect(event.messages.at(-1)?.id).toBe('board');
     expect(partsWithCache(event)).toEqual([
-      { id: 'tool', part: { ...toolPart, cache: { type: 'ephemeral' } } },
+      { id: 'tool', part: { ...lastToolPart, cache: { type: 'ephemeral' } } },
     ]);
-    expect(event.messages[1]?.content[0]).not.toBe(toolPart);
+    expect(event.messages[1]?.content[0]).toBe(toolPart);
+    expect(event.messages[1]?.content[1]).not.toBe(lastToolPart);
     expect(toolPart).toEqual({ type: 'tool-result', text: 'stable result' });
+    expect(lastToolPart).toEqual({ type: 'tool-result', text: 'last result' });
   });
 
   test('T3: user queue marks exactly its last part, not the trailing board', async () => {
