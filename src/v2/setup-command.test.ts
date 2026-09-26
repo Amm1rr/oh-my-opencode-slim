@@ -1809,6 +1809,85 @@ describe('context handler: v2 single cache breakpoint', () => {
     expect(lastToolPart).toEqual({ type: 'tool-result', text: 'last result' });
   });
 
+  test('preserves an existing hint and the selected part identity', async () => {
+    const toolPart = {
+      type: 'tool-result',
+      text: 'cached result',
+      cache: { type: 'ephemeral', ttlSeconds: 3600 },
+    };
+    const event = makeEvent([
+      { id: 'u', role: 'user', content: [{ type: 'text', text: 'hi' }] },
+      { id: 'tool', role: 'tool', content: [toolPart] },
+    ]);
+    await createSessionContextHandler({
+      interviewHandleContext: async () => {},
+      messagesTransform: async (_input, output) => {
+        appendTaggedSyntheticPart(output.messages[0] as never, {
+          text: 'reminder',
+          metadataKey: PHASE_REMINDER_METADATA_KEY,
+        });
+      },
+    })(event);
+    expect(partsWithCache(event)).toEqual([{ id: 'tool', part: toolPart }]);
+    expect(event.messages[1]?.content[0]).toBe(toolPart);
+  });
+
+  test('a foreign hint elsewhere does not suppress the last-part mark', async () => {
+    const foreignPart = {
+      type: 'text',
+      text: 'user',
+      cache: { type: 'ephemeral', ttlSeconds: 3600 },
+    };
+    const event = makeEvent([
+      { id: 'u', role: 'user', content: [foreignPart] },
+      {
+        id: 'tool',
+        role: 'tool',
+        content: [{ type: 'tool-result', text: 'ok' }],
+      },
+    ]);
+    await createSessionContextHandler({
+      interviewHandleContext: async () => {},
+      messagesTransform: async (_input, output) => {
+        appendTaggedSyntheticPart(output.messages[0] as never, {
+          text: 'reminder',
+          metadataKey: PHASE_REMINDER_METADATA_KEY,
+        });
+      },
+    })(event);
+    expect(partsWithCache(event)).toEqual([
+      { id: 'u', part: foreignPart },
+      {
+        id: 'tool',
+        part: { type: 'tool-result', text: 'ok', cache: { type: 'ephemeral' } },
+      },
+    ]);
+    expect(event.messages[0]?.content[0]).toBe(foreignPart);
+  });
+
+  test('inline board on a user turn owns the single cache mark', async () => {
+    const event = makeEvent([
+      { id: 'u', role: 'user', content: [{ type: 'text', text: 'hi' }] },
+    ]);
+    await createSessionContextHandler({
+      interviewHandleContext: async () => {},
+      messagesTransform: async (_input, output) => {
+        appendTaggedSyntheticPart(output.messages[0] as never, {
+          text: 'reminder',
+          metadataKey: PHASE_REMINDER_METADATA_KEY,
+        });
+        appendTaggedSyntheticPart(output.messages[0] as never, {
+          text: 'inline board',
+          metadataKey: BACKGROUND_JOB_BOARD_METADATA_KEY,
+        });
+      },
+    })(event);
+    const board = event.messages[0]?.content.at(-1);
+    expect(isTaggedPart(board, BACKGROUND_JOB_BOARD_METADATA_KEY)).toBe(true);
+    expect(partsWithCache(event)).toEqual([{ id: 'u', part: board }]);
+    expect(board?.cache).toEqual({ type: 'ephemeral' });
+  });
+
   test('T3: user queue marks exactly its last part, not the trailing board', async () => {
     const userPart = { type: 'text', text: 'new user request' };
     const event = makeEvent([{ id: 'u', role: 'user', content: [userPart] }]);

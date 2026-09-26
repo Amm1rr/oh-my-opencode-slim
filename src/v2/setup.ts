@@ -430,10 +430,10 @@ export function createSessionContextHandler(
                 BACKGROUND_JOB_BOARD_METADATA_KEY,
               ),
           );
-          if (target) {
-            const index = target.content.length - 1;
-            target.content[index] = {
-              ...target.content[index],
+          const part = target?.content.at(-1);
+          if (target && part && part.cache === undefined) {
+            target.content[target.content.length - 1] = {
+              ...part,
               cache: { type: 'ephemeral' },
             };
           }
