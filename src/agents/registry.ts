@@ -274,30 +274,21 @@ function marketplaceHostRules(
   const allowedNamespaces = capabilities.mcps.map(
     (name) => `${name.replace(/[^a-zA-Z0-9_-]/g, '_')}_`,
   );
-  const allowedSkills = new Set(capabilities.skills);
   return rules.filter((rule) => {
     if (rule.effect === 'deny') return true;
     if (rule.effect !== 'ask') return false;
     if (rule.action === '*') return true;
     if (rule.action === 'skill') {
-      return (
-        rule.resource === '*' ||
-        [...allowedSkills].some((skill) =>
-          resourcePatternMayMatch(rule.resource, skill),
-        )
-      );
+      // Keep the original host pattern. The native permission ceiling
+      // intersects it with admitted skill IDs without approximating glob
+      // semantics here.
+      return true;
     }
     return (
       allowedActions.has(rule.action) ||
       allowedNamespaces.some((prefix) => rule.action.startsWith(prefix))
     );
   });
-}
-
-function resourcePatternMayMatch(pattern: string, value: string): boolean {
-  if (pattern === value) return true;
-  if (pattern.endsWith('*')) return value.startsWith(pattern.slice(0, -1));
-  return false;
 }
 
 function appendMarketplaceRouting(
@@ -883,8 +874,27 @@ export function buildResolvedAgentRegistry(
     const marketplaceReadRules = marketplaceReadSafeguards(
       packageMetadata?.capabilities.tools ?? [],
     );
+    const ownerReadRule: V2PermissionRule[] =
+      packageMetadata &&
+      Object.hasOwn(sourcePermission, 'read') &&
+      permissionEffect(sourcePermission, 'read') !== 'allow'
+        ? [
+            {
+              action: 'read',
+              resource: '*',
+              effect: permissionEffect(sourcePermission, 'read'),
+            },
+          ]
+        : [];
+    const baselineBeforeReadSafeguards = ownerReadRule.length
+      ? baselineRules.filter((rule) => rule.action !== 'read')
+      : baselineRules;
     policyMap[name] = compilePermissionPolicy({
-      baselineRules: [...baselineRules, ...marketplaceReadRules],
+      baselineRules: [
+        ...baselineBeforeReadSafeguards,
+        ...marketplaceReadRules,
+        ...ownerReadRule,
+      ],
       hostRules: packageMetadata
         ? marketplaceHostRules(hostRuleSet, packageMetadata.capabilities)
         : hostRuleSet,
@@ -967,6 +977,15 @@ export function buildResolvedAgentRegistry(
         }
       }
       const packageMetadata = marketplaceMetadata.get(definition.name);
+      const sourceVisiblePermission = {
+        ...normalizePermission(
+          hostEntries[definition.name]?.permission ??
+            hostEntries[identities[definition.name] ?? definition.name]
+              ?.permission ??
+            definition.config.permission,
+        ),
+        ...normalizePermission(aliasHost?.permission),
+      };
       const visibleTools = packageMetadata
         ? packageMetadata.capabilities.tools.filter(
             (tool) =>
@@ -1037,15 +1056,32 @@ export function buildResolvedAgentRegistry(
         nativeRules[definition.name] ??
         (legacyAlias ? nativeRules[legacyAlias] : undefined) ??
         [];
+      const visibleOwnerReadRule: V2PermissionRule[] =
+        packageMetadata &&
+        Object.hasOwn(sourceVisiblePermission, 'read') &&
+        permissionEffect(sourceVisiblePermission, 'read') !== 'allow'
+          ? [
+              {
+                action: 'read',
+                resource: '*',
+                effect: permissionEffect(sourceVisiblePermission, 'read'),
+              },
+            ]
+          : [];
+      const visibleBaselineRules = adaptPermissions(visiblePermission).filter(
+        (rule): rule is V2PermissionRule =>
+          rule.effect === 'allow' ||
+          rule.effect === 'ask' ||
+          rule.effect === 'deny',
+      );
+      const visibleBaselineBeforeReadSafeguards = visibleOwnerReadRule.length
+        ? visibleBaselineRules.filter((rule) => rule.action !== 'read')
+        : visibleBaselineRules;
       policyMap[display] = compilePermissionPolicy({
         baselineRules: [
-          ...adaptPermissions(visiblePermission).filter(
-            (rule): rule is V2PermissionRule =>
-              rule.effect === 'allow' ||
-              rule.effect === 'ask' ||
-              rule.effect === 'deny',
-          ),
+          ...visibleBaselineBeforeReadSafeguards,
           ...marketplaceReadSafeguards(visibleTools),
+          ...visibleOwnerReadRule,
         ],
         hostRules: packageMetadata
           ? marketplaceHostRules(visibleRules, packageMetadata.capabilities)

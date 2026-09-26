@@ -1065,6 +1065,75 @@ describe('finalized existing-agent registry', () => {
     ).toBe('deny');
   });
 
+  test('keeps owner-wide read ask and deny restrictions across aliases', () => {
+    for (const effect of ['ask', 'deny'] as const) {
+      const runtime = runtimeFor({
+        agents: {
+          'market-agent': {
+            model: 'provider/owner',
+            displayName: 'MarketVisible',
+          },
+        },
+      });
+      const registry = build(
+        runtime,
+        {
+          agent: {
+            'market-agent': { permission: { read: effect } },
+            MarketVisible: { permission: { read: effect } },
+          },
+          mcp: {},
+        },
+        {
+          ...marketplaceOptions(
+            ['team/read-policy'],
+            marketplaceStore({
+              'team/read-policy': marketplacePackage('team/read-policy', {
+                skills: [],
+                mcps: [],
+                tools: ['read'],
+              }),
+            }),
+          ),
+          nativePermissionsByAgent: {
+            'market-agent': [
+              { action: 'read', resource: 'README.md', effect: 'deny' },
+            ],
+          },
+        },
+      );
+      const sdk = registry.getSdkAgentProjection();
+      const policyNames = ['market-agent', 'MarketVisible'] as const;
+      const paths = ['docs/README.md', '.env', '.env.local', '.env.example'];
+
+      for (const name of policyNames) {
+        expect(sdk[name]).toMatchObject({ permission: { read: effect } });
+        const policy = registry.nativePolicies[name];
+        for (const path of paths) {
+          expect(policy.decide('read', path)).toBe(effect);
+        }
+        expect(policy.decide('read', 'README.md')).toBe('deny');
+        const safeguardIndex = policy.rules.findIndex(
+          (rule) =>
+            rule.action === 'read' &&
+            rule.resource === '*.env' &&
+            rule.effect === 'ask',
+        );
+        const ownerReadIndex = policy.rules.findLastIndex(
+          (rule) => rule.action === 'read' && rule.resource === '*',
+        );
+        const hostDenialIndex = policy.rules.findLastIndex(
+          (rule) => rule.action === 'read' && rule.resource === 'README.md',
+        );
+        expect(policy.rules[ownerReadIndex]?.effect).toBe(effect);
+        expect(safeguardIndex).toBeGreaterThanOrEqual(0);
+        expect(ownerReadIndex).toBeGreaterThan(safeguardIndex);
+        expect(policy.rules[hostDenialIndex]?.effect).toBe('deny');
+        expect(hostDenialIndex).toBeGreaterThan(ownerReadIndex);
+      }
+    }
+  });
+
   test('clips host wildcard skill and action rules to package capabilities', () => {
     const runtime = runtimeFor({
       agents: { 'market-agent': { displayName: 'MarketVisible' } },
@@ -1092,7 +1161,7 @@ describe('finalized existing-agent registry', () => {
         nativePermissionsByAgent: {
           'market-agent': [
             { action: '*', resource: '*', effect: 'ask' },
-            { action: 'skill', resource: 'review-*', effect: 'ask' },
+            { action: 'skill', resource: 'review-?', effect: 'ask' },
           ],
         },
       },
@@ -1111,6 +1180,7 @@ describe('finalized existing-agent registry', () => {
     const policy = registry.nativePolicies['market-agent'];
     expect(policy.decide('read', '*')).toBe('ask');
     expect(policy.decide('skill', 'review-a')).toBe('ask');
+    expect(policy.decide('skill', 'review-b')).toBe('deny');
     expect(policy.decide('skill', 'review-secret')).toBe('deny');
     expect(policy.rules).toContainEqual({
       action: 'skill',
@@ -1119,7 +1189,15 @@ describe('finalized existing-agent registry', () => {
     });
     expect(policy.rules).not.toContainEqual({
       action: 'skill',
-      resource: 'review-*',
+      resource: 'review-?',
+      effect: 'ask',
+    });
+    const visiblePolicy = registry.nativePolicies.MarketVisible;
+    expect(visiblePolicy.decide('skill', 'review-a')).toBe('ask');
+    expect(visiblePolicy.decide('skill', 'review-b')).toBe('deny');
+    expect(visiblePolicy.rules).toContainEqual({
+      action: 'skill',
+      resource: 'review-a',
       effect: 'ask',
     });
   });
