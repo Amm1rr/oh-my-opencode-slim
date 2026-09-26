@@ -1,14 +1,30 @@
-import { describe, expect, mock, test } from 'bun:test';
+import { afterEach, describe, expect, mock, test } from 'bun:test';
 import * as fsp from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { BackgroundJobBoard } from '../../utils/background-job-board';
+import { createBackgroundJobTerminalGate } from '../../utils/background-job-terminal-gate';
 import { BackgroundTaskConcurrency } from '../../utils/background-task-concurrency';
 import { createTaskSessionManagerHook } from './index';
 import { createPendingCallTracker } from './pending-call-tracker';
 
 const PARENT = 'parent-1';
+const activeHooks: Array<{
+  hook: ReturnType<typeof createTaskSessionManagerHook>;
+  terminalGate: ReturnType<typeof createBackgroundJobTerminalGate>;
+}> = [];
+
+afterEach(async () => {
+  await Promise.all(
+    activeHooks.splice(0).map(async ({ hook, terminalGate }) => {
+      await hook.event({
+        event: { type: 'server.instance.disposed', properties: {} },
+      });
+      terminalGate.dispose();
+    }),
+  );
+});
 
 function createHook(
   board: BackgroundJobBoard,
@@ -17,10 +33,32 @@ function createHook(
     pendingCallTracker?: ReturnType<typeof createPendingCallTracker>;
   } = {},
 ) {
+  const terminalGate = createBackgroundJobTerminalGate({
+    backgroundJobBoard: board,
+    readRuntime: async (_run, readStartedAt) => ({
+      kind: 'quiescent',
+      origin: 'test',
+      readStartedAt,
+      stable: true,
+    }),
+    readTerminalEvidence: async () => ({
+      data: [
+        {
+          info: {
+            id: 'test-assistant',
+            role: 'assistant',
+            time: { completed: Date.now() },
+            finish: 'stop',
+          },
+          parts: [{ type: 'text', text: 'Review finished.' }],
+        },
+      ],
+    }),
+  });
   board.addTerminalStateListener((taskID) =>
     extra.backgroundTaskConcurrency?.releaseTask(taskID),
   );
-  return createTaskSessionManagerHook(
+  const hook = createTaskSessionManagerHook(
     {
       client: { session: { status: mock(async () => ({ data: {} })) } },
       directory: '/tmp',
@@ -30,9 +68,12 @@ function createHook(
       maxSessionsPerAgent: 2,
       backgroundJobBoard: board,
       shouldManageSession: () => true,
+      terminalGate,
       ...extra,
     },
   );
+  activeHooks.push({ hook, terminalGate });
+  return hook;
 }
 
 const HOST_LAUNCH = (taskID: string) =>

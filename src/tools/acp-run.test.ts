@@ -318,7 +318,7 @@ describe('acp_run integration', () => {
 
     await expect(
       tool.execute(
-        { agent: 'cursor', prompt: 'wait', timeout_ms: 50 } as never,
+        { agent: 'cursor', prompt: 'wait', timeout_ms: 1_000 } as never,
         {
           sessionID: 's',
           messageID: 'm',
@@ -330,7 +330,7 @@ describe('acp_run integration', () => {
           ask: async () => {},
         } as never,
       ),
-    ).rejects.toThrow("ACP agent 'cursor' timed out after 50ms");
+    ).rejects.toThrow("ACP agent 'cursor' timed out after 1000ms");
 
     expect(await readFile(eventsPath, 'utf8')).toBe(
       'prompt\ncancel\neof\nexit\n',
