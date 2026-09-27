@@ -119,6 +119,9 @@ function makeBridge(options?: {
   policy?: unknown;
   pluginAgents?: ReadonlySet<string>;
   onUnavailable?: () => void;
+  requireKnownIdentity?: boolean | (() => boolean);
+  marketplaceAgentNames?: () => ReadonlySet<string>;
+  knownAgentNames?: () => ReadonlySet<string>;
 }): ReturnType<typeof createPermissionRulesBridge> {
   return createPermissionRulesBridge(options?.session, {
     permissionForAgent: (agent) =>
@@ -128,6 +131,15 @@ function makeBridge(options?: {
           : TASK_POLICY
         : undefined,
     pluginAgents: options?.pluginAgents ?? new Set(['probe']),
+    ...(options?.requireKnownIdentity !== undefined
+      ? { requireKnownIdentity: options.requireKnownIdentity }
+      : {}),
+    ...(options?.marketplaceAgentNames
+      ? { marketplaceAgentNames: options.marketplaceAgentNames }
+      : {}),
+    ...(options?.knownAgentNames
+      ? { knownAgentNames: options.knownAgentNames }
+      : {}),
     ...(options?.onUnavailable ? { onUnavailable: options.onUnavailable } : {}),
   });
 }
@@ -426,6 +438,178 @@ describe('built-in agent permission-rule derivation matrix', () => {
 describe('createPermissionRulesBridge', () => {
   beforeEach(() => {
     resetV2GenerationWarnings();
+  });
+
+  test('without session.get, ordinary prompts continue but observed unknown children block', async () => {
+    const ordinary = makeBridge({
+      session: makeSession(),
+    });
+    await expect(
+      ordinary.ensurePromptPermission('ses_ordinary_root'),
+    ).resolves.toBeUndefined();
+
+    const marketplace = makeBridge({
+      session: makeSession(),
+      requireKnownIdentity: true,
+    });
+    await marketplace.observeEvent({
+      type: 'session.created',
+      data: { sessionID: 'ses_marketplace_child', parentID: 'ses_parent' },
+    });
+    await expect(
+      marketplace.ensurePromptPermission('ses_marketplace_child'),
+    ).rejects.toThrow('child session identity is unknown');
+
+    await ordinary.dispose();
+    await marketplace.dispose();
+  });
+
+  test('blocks an unobserved root prompt when marketplace policy is active and lookup is unavailable', async () => {
+    const bridge = makeBridge({
+      session: makeSession(),
+      requireKnownIdentity: () => true,
+      marketplaceAgentNames: () => new Set(['package-agent']),
+    });
+
+    await expect(
+      bridge.ensurePromptPermission('ses_unobserved_marketplace_root'),
+    ).rejects.toThrow('child session identity is unknown');
+    await bridge.dispose();
+  });
+
+  test.each([
+    ['marketplace finalizes before the child event', true],
+    ['the child event precedes marketplace finalization', false],
+  ])(
+    'reads marketplace readiness live when %s',
+    async (_order, finalizedBeforeChild) => {
+      let finalized = finalizedBeforeChild;
+      const marketplace = makeBridge({
+        session: makeSession(),
+        requireKnownIdentity: () => finalized,
+      });
+      if (!finalizedBeforeChild) {
+        await marketplace.observeEvent({
+          type: 'session.created',
+          data: {
+            sessionID: 'ses_deferred_marketplace_child',
+            parentID: 'ses_parent',
+            agent: 'unclassified-agent',
+          },
+        });
+        await expect(
+          marketplace.ensurePromptPermission('ses_deferred_marketplace_child'),
+        ).resolves.toBeUndefined();
+        finalized = true;
+      } else {
+        await marketplace.observeEvent({
+          type: 'session.created',
+          data: {
+            sessionID: 'ses_deferred_marketplace_child',
+            parentID: 'ses_parent',
+            agent: 'unclassified-agent',
+          },
+        });
+      }
+      await expect(
+        marketplace.ensurePromptPermission('ses_deferred_marketplace_child'),
+      ).rejects.toThrow('child session identity is unknown');
+      await marketplace.dispose();
+    },
+  );
+
+  test('blocks direct root marketplace agents without replacing root permissions', async () => {
+    const calls: RulesCall[] = [];
+    const bridge = makeBridge({
+      session: makeSession(async (input) => {
+        calls.push(input as RulesCall);
+        return {};
+      }),
+      pluginAgents: new Set(['probe', 'package-agent']),
+      requireKnownIdentity: () => true,
+      marketplaceAgentNames: () => new Set(['package-agent', 'PackageAlias']),
+    });
+    await bridge.observeEvent({
+      type: 'session.created',
+      data: { sessionID: 'ses_root_package', agent: 'package-agent' },
+    });
+
+    await expect(
+      bridge.ensurePromptPermission('ses_root_package'),
+    ).rejects.toThrow('direct root marketplace agent');
+    expect(calls).toEqual([]);
+    await bridge.dispose();
+  });
+
+  test('resolves root identities without an agent before admitting marketplace prompts', async () => {
+    let lookupCount = 0;
+    const bridge = makeBridge({
+      session: {
+        get: async () => {
+          lookupCount += 1;
+          return {
+            data: {
+              sessionID: 'ses_root_without_agent',
+              agent: 'host-orchestrator',
+            },
+          };
+        },
+        update: async () => ({}),
+      } as unknown as V2Session,
+      requireKnownIdentity: () => true,
+      marketplaceAgentNames: () => new Set(['package-agent']),
+      knownAgentNames: () => new Set(['host-orchestrator']),
+      pluginAgents: new Set(['probe']),
+    });
+    await bridge.observeEvent({
+      type: 'session.created',
+      data: { sessionID: 'ses_root_without_agent' },
+    });
+
+    await expect(
+      bridge.ensurePromptPermission('ses_root_without_agent'),
+    ).resolves.toBeUndefined();
+    expect(lookupCount).toBe(1);
+    await bridge.dispose();
+  });
+
+  test('fails closed for a root without an agent when session lookup is unavailable', async () => {
+    const bridge = makeBridge({
+      session: makeSession(),
+      requireKnownIdentity: () => true,
+      marketplaceAgentNames: () => new Set(['package-agent']),
+    });
+    await bridge.observeEvent({
+      type: 'session.created',
+      data: { sessionID: 'ses_root_without_agent' },
+    });
+
+    await expect(
+      bridge.ensurePromptPermission('ses_root_without_agent'),
+    ).rejects.toThrow('child session identity is unknown');
+    await bridge.dispose();
+  });
+
+  test('admits identified foreign-agent children without replacing their rules', async () => {
+    const updates: RulesCall[] = [];
+    const bridge = makeBridge({
+      session: makeSession(async (input) => {
+        updates.push(input as RulesCall);
+        return {};
+      }),
+      pluginAgents: new Set(['probe']),
+      requireKnownIdentity: () => true,
+      knownAgentNames: () => new Set(['host-foreign-agent']),
+    });
+    await bridge.observeEvent(
+      makeChildCreatedEvent({ agent: 'host-foreign-agent' }),
+    );
+
+    await expect(
+      bridge.ensurePromptPermission('ses_child_1'),
+    ).resolves.toBeUndefined();
+    expect(updates).toEqual([]);
+    await bridge.dispose();
   });
 
   test('(a) applies exact-match rules on a plugin-managed child session', async () => {

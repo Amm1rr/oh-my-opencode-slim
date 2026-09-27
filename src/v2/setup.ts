@@ -799,8 +799,8 @@ const PERMISSION_RULES_UNAVAILABLE_WARNING =
   '[v2][permission-rules] child permission bridge disabled: native agent ' +
   'snapshot and ctx.session.update are required';
 const PERMISSION_IDENTITY_UNAVAILABLE_WARNING =
-  '[v2][permission-rules] child identity unavailable; prompt continues under ' +
-  'host permissions until session.created is observed';
+  '[v2][permission-rules] child identity unavailable; its permission policy ' +
+  'cannot be verified';
 const PERMISSION_RULES_OPERATION_TIMEOUT_MS = 5_000;
 const MAX_PENDING_PERMISSION_UPDATES = 128;
 let permissionRulesUnavailableWarned = false;
@@ -831,6 +831,14 @@ export interface V2PermissionRulesOptions {
    * whose agent is not in this set was not spawned by the plugin's task
    * pipeline and must never have its session rules replaced. */
   pluginAgents: ReadonlySet<string>;
+  /** Marketplace child policies are a security ceiling: prompt admission
+   * must not proceed until the session identity is known and its rules have
+   * been installed. Baseline configured agents retain fail-soft behavior. */
+  requireKnownIdentity?: boolean | (() => boolean);
+  /** Canonical and visible identities owned by finalized marketplace agents. */
+  marketplaceAgentNames?: () => ReadonlySet<string>;
+  /** All finalized host/plugin agent identities, including foreign agents. */
+  knownAgentNames?: () => ReadonlySet<string>;
   /** Injectable degradation sink (tests observe the one-time warning
    * without mocking the logger). */
   onUnavailable?: () => void;
@@ -850,8 +858,9 @@ function classifyPermissionIdentity(
   agent: string | undefined,
   pluginAgents: ReadonlySet<string>,
 ): PermissionIdentityState {
-  if (parentKnown && !parentID) return 'unmanaged';
-  if (!parentKnown || !parentID || !agent) return 'unknown';
+  if (parentKnown && !parentID && agent) return 'unmanaged';
+  if (!parentKnown || !agent) return 'unknown';
+  if (!parentID) return 'unknown';
   return pluginAgents.has(agent) ? 'managed' : 'unmanaged';
 }
 
@@ -891,7 +900,8 @@ export function createPermissionRulesBridge(
    * was available, and apply rules for newly recognized managed children. */
   refreshPluginAgents(): Promise<void> | undefined;
   /** Cache-first prompt barrier. Unknown identities degrade if lookup is
-   * unavailable; known managed identities fail closed on update failures. */
+   * unavailable; known managed identities fail closed on update failures.
+   * Marketplace setups also require identity and policy resolution. */
   ensurePromptPermission(sessionID: string): Promise<void>;
   dispose(): Promise<void>;
 } {
@@ -961,6 +971,48 @@ export function createPermissionRulesBridge(
     if (permissionIdentityUnavailableWarned) return;
     permissionIdentityUnavailableWarned = true;
     log(PERMISSION_IDENTITY_UNAVAILABLE_WARNING);
+  }
+
+  function rejectUnknownIdentity(): never {
+    warnUnknownIdentity();
+    throw new Error(
+      'child session identity is unknown; prompt blocked until its permission policy is installed',
+    );
+  }
+
+  function marketplacePolicyRequired(): boolean {
+    return typeof options.requireKnownIdentity === 'function'
+      ? options.requireKnownIdentity()
+      : options.requireKnownIdentity === true;
+  }
+
+  function isClassifiedAgent(agent: string | undefined): boolean {
+    return Boolean(
+      agent &&
+        (options.pluginAgents.has(agent) ||
+          options.knownAgentNames?.().has(agent)),
+    );
+  }
+
+  function rejectDirectRootMarketplaceAgent(
+    identity: PermissionSessionIdentity,
+  ): never {
+    throw new Error(
+      `direct root marketplace agent '${identity.agent}' cannot be admitted because its permission ceiling cannot be enforced without replacing root session permissions`,
+    );
+  }
+
+  function rejectDirectRootMarketplaceAgentIfNeeded(
+    identity: PermissionSessionIdentity,
+  ): void {
+    if (
+      identity.parentKnown &&
+      !identity.parentID &&
+      identity.agent &&
+      options.marketplaceAgentNames?.().has(identity.agent)
+    ) {
+      rejectDirectRootMarketplaceAgent(identity);
+    }
   }
 
   async function applyChildSessionRules(
@@ -1162,20 +1214,43 @@ export function createPermissionRulesBridge(
   async function ensurePromptPermission(sessionID: string): Promise<void> {
     if (disposed) throw new Error('permission rules bridge is disposed');
     const initialIdentity = identities.get(sessionID);
+    if (initialIdentity)
+      rejectDirectRootMarketplaceAgentIfNeeded(initialIdentity);
     if (initialIdentity?.state === 'managed') {
       await enforceKnownIdentity(sessionID, initialIdentity);
       return;
     }
-    if (initialIdentity?.state === 'unmanaged') return;
+    if (initialIdentity?.state === 'unmanaged') {
+      if (
+        marketplacePolicyRequired() &&
+        initialIdentity.parentID &&
+        !isClassifiedAgent(initialIdentity.agent)
+      ) {
+        rejectUnknownIdentity();
+      }
+      return;
+    }
 
     const getSession = session?.get;
     if (typeof getSession !== 'function') {
+      // Marketplace roots cannot be distinguished from ordinary roots
+      // without an observed identity or a host lookup, so unknown prompts
+      // fail closed once marketplace policy is active.
+      if (
+        marketplacePolicyRequired() &&
+        (!initialIdentity ||
+          initialIdentity.state === 'unknown' ||
+          Boolean(initialIdentity.parentID))
+      ) {
+        rejectUnknownIdentity();
+      }
       warnUnknownIdentity();
       return;
     }
     let pendingLookup = pendingIdentityLookups.get(sessionID);
     if (!pendingLookup) {
       if (pendingIdentityLookups.size >= MAX_PENDING_PERMISSION_UPDATES) {
+        if (marketplacePolicyRequired()) rejectUnknownIdentity();
         warnUnknownIdentity();
         return;
       }
@@ -1199,6 +1274,7 @@ export function createPermissionRulesBridge(
             (!Object.hasOwn(record, 'parentID') &&
               typeof record.agent !== 'string')
           ) {
+            if (marketplacePolicyRequired()) rejectUnknownIdentity();
             warnUnknownIdentity();
             return;
           }
@@ -1206,6 +1282,7 @@ export function createPermissionRulesBridge(
           cacheIdentity(sessionID, identity, lookup);
         } catch (err) {
           if (!lookup.invalidated) {
+            if (marketplacePolicyRequired()) rejectUnknownIdentity();
             warnUnknownIdentity();
             log(
               '[v2][permission-rules] session identity lookup failed',
@@ -1222,9 +1299,18 @@ export function createPermissionRulesBridge(
     await pendingLookup.operation;
     if (disposed) throw new Error('permission rules bridge is disposed');
     const current = identities.get(sessionID);
+    if (current) rejectDirectRootMarketplaceAgentIfNeeded(current);
     if (current?.state === 'managed') {
       await enforceKnownIdentity(sessionID, current);
-    } else if (current?.state === 'unknown' || current === null || !current) {
+    } else if (
+      current?.state === 'unknown' ||
+      current === null ||
+      !current ||
+      (marketplacePolicyRequired() &&
+        current.parentID !== undefined &&
+        !isClassifiedAgent(current.agent))
+    ) {
+      if (marketplacePolicyRequired()) rejectUnknownIdentity();
       warnUnknownIdentity();
     }
   }
@@ -1908,6 +1994,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
         | undefined;
       let permissionRulesBridgeEnabled = false;
       const pluginAgents = new Set<string>();
+      let marketplaceAgentsRequirePromptPolicy = false;
       let permissionRulesBridge:
         | ReturnType<typeof createPermissionRulesBridge>
         | undefined;
@@ -1945,6 +2032,20 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
             nativeAgentSnapshot.permissions,
           );
         finalizedRegistry = registry;
+        marketplaceAgentsRequirePromptPolicy =
+          registry.marketplaceAgentNames.length > 0;
+        // Deferred agent finalization is the first point where marketplace
+        // agents are known. Latch capability failures for the readiness barrier.
+        if (
+          registry.marketplaceAgentNames.length &&
+          typeof ctx.session.update !== 'function'
+        ) {
+          permissionSnapshotFailure = new Error(
+            'Marketplace agents require ctx.session.update to enforce child permission ceilings',
+          );
+          resolvePermissionSnapshotReady();
+          return;
+        }
         resolvedAgents = registry.getSdkAgentProjection() as Record<
           string,
           Record<string, unknown>
@@ -2052,6 +2153,13 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
         const reg = await ctx.agent.transform(captureAgentDraft);
         disposers.push(() => reg.dispose());
         if (permissionSnapshotFailure) {
+          if (
+            permissionSnapshotFailure.message.startsWith(
+              'Marketplace agents require ctx.session.update',
+            )
+          ) {
+            throw permissionSnapshotFailure;
+          }
           throw new Error('Agent permission snapshot finalization failed', {
             cause: permissionSnapshotFailure,
           });
@@ -2272,6 +2380,13 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
             );
           }
           if (permissionSnapshotFailure) {
+            if (
+              permissionSnapshotFailure.message.startsWith(
+                'Marketplace agents require ctx.session.update',
+              )
+            ) {
+              throw permissionSnapshotFailure;
+            }
             throw new Error('Agent permission snapshot finalization failed', {
               cause: permissionSnapshotFailure,
             });
@@ -2427,6 +2542,38 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
                 return finalizedRegistry?.nativePolicies[agent]?.rules;
               },
               pluginAgents,
+              requireKnownIdentity: () => marketplaceAgentsRequirePromptPolicy,
+              marketplaceAgentNames: () => {
+                const registry = finalizedRegistry;
+                if (!registry) return new Set();
+                return new Set(
+                  registry.marketplaceAgentNames.flatMap((name) => [
+                    name,
+                    registry.identities[name] ?? name,
+                  ]),
+                );
+              },
+              knownAgentNames: () => {
+                const names = new Set<string>(pluginAgents);
+                for (const [name, config] of Object.entries(
+                  nativeAgentSnapshot?.agents ?? {},
+                )) {
+                  names.add(name);
+                  if (typeof config.displayName === 'string') {
+                    names.add(config.displayName);
+                  }
+                }
+                const registry = finalizedRegistry;
+                if (registry) {
+                  for (const [name, identity] of Object.entries(
+                    registry.identities,
+                  )) {
+                    names.add(name);
+                    names.add(identity);
+                  }
+                }
+                return names;
+              },
             });
             const permissionBridge = permissionRulesBridge;
             disposers.push(() => permissionBridge.dispose());

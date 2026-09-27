@@ -521,6 +521,8 @@ function getProcessFallbacksInProgress(): Set<string> {
 // Manager
 // ---------------------------------------------------------------------------
 
+export type ForegroundFallbackModel = string | { id: string; variant?: string };
+
 /**
  * Manages runtime model fallback for foreground agent sessions.
  *
@@ -774,7 +776,7 @@ export class ForegroundFallbackManager {
      * e.g. { orchestrator: ['anthropic/claude-opus-4-5', 'openai/gpt-4o'] }
      * The first model that hasn't been tried yet is selected on each fallback.
      */
-    private chains: Record<string, string[]>,
+    private chains: Record<string, ForegroundFallbackModel[]>,
     private readonly enabled: boolean,
     private readonly input: PluginInput,
     /** Retryable errors absorbed (errors 1..maxRetries) before the fallback
@@ -1111,7 +1113,7 @@ export class ForegroundFallbackManager {
     },
     switchModel: (
       sessionID: string,
-      model: { providerID: string; id: string },
+      model: { providerID: string; id: string; variant?: string },
     ) => Promise<unknown>,
   ): Promise<void> {
     let picked: string | undefined;
@@ -1178,6 +1180,9 @@ export class ForegroundFallbackManager {
       switchRequest = switchModel(sessionID, {
         providerID: ref.providerID,
         id: ref.modelID,
+        ...(this.variantFor(agentName, nextModel)
+          ? { variant: this.variantFor(agentName, nextModel) }
+          : {}),
       });
       await withTimeout(
         switchRequest,
@@ -1843,6 +1848,7 @@ export class ForegroundFallbackManager {
     let currentModel = observedModel;
     const agentName = this.sessionAgent.get(sessionID);
     const chain = this.resolveChain(agentName, currentModel);
+    const rearmHead = agentName ? this.chains[agentName]?.[0] : undefined;
     // Callers pre-check via hasFallbackChain; keep as defensive guard only.
     if (!chain.length) return;
     // When the agent is known but no model was captured (common for
@@ -1859,6 +1865,41 @@ export class ForegroundFallbackManager {
     }
     // biome-ignore lint/style/noNonNullAssertion: We just set this above
     let tried = this.sessionTried.get(sessionID)!;
+
+    // A new user turn always re-sends the agent's configured primary:
+    // promptAsync's `model` is a per-message override, so a fallback never
+    // persists past the message it was applied to. Landing here on the
+    // configured primary (rearmHead) with a tried set that already walked
+    // past it therefore means the previous descent has ended and its state
+    // is stale. Without this the next descent resumes one link deeper every
+    // turn (link 2, then 3, then 4...) until the chain is spent and the
+    // session aborts, instead of re-walking from link 2 each turn.
+    //
+    // This does not weaken the backward-fallback guard below: currentModel
+    // is re-added immediately after, so the re-arm head still can never be
+    // picked. Only an OBSERVED configured primary counts. execFallback
+    // infers `currentModel = chain[0]` above when no model was ever
+    // captured for this session, which is the opposite situation —
+    // resetting there would re-pick chain[1] on every error instead of
+    // descending.
+    // size > 1 means a previous descent actually selected a fallback
+    // (tried.add(nextModel) below), so there is stale state to clear. A
+    // single-entry chain never gets there and must stay terminal after its
+    // one abort rather than re-aborting on every error.
+    if (
+      observedModel !== undefined &&
+      rearmHead !== undefined &&
+      modelId(observedModel) === modelId(rearmHead) &&
+      tried.size > 1
+    ) {
+      tried = new Set();
+      this.sessionTried.set(sessionID, tried);
+      // A descent that ended in a stage-2 abort is never followed by a
+      // successful assistant message, so the message.updated recovery path
+      // cannot clear chainExhaustion and fallback would stay disabled for
+      // the rest of the session. A fresh descent earns a fresh chance.
+      this.chainExhaustion.delete(sessionID);
+    }
 
     // After the chain has been exhausted twice (reset retry failed and we
     // aborted), do not intervene again for this session: re-entering would
@@ -2143,12 +2184,13 @@ export class ForegroundFallbackManager {
       });
       return;
     }
+    const variant = this.variantFor(agentName, targetModel);
 
     const promptBody = {
       path: { id: sessionID },
       body: {
         parts: [...replayParts, createInternalAgentTextPart(reminderText)],
-        model: ref,
+        model: { ...ref, ...(variant ? { variant } : {}) },
         ...(agentName ? { agent: agentName } : {}),
       },
       ...(isV2Host && isModelSwitch
@@ -2487,7 +2529,7 @@ export class ForegroundFallbackManager {
     currentModel: string | undefined,
   ): string[] {
     if (agentName) {
-      const chain = this.chains[agentName];
+      const chain = this.chains[agentName]?.map(modelId);
       if (chain) {
         // Dynamic head: when the session runs a model outside the
         // configured chain (session-inherited or /model-picked), that model
@@ -2512,7 +2554,8 @@ export class ForegroundFallbackManager {
     // Agent unknown: try to infer from the current model.
     if (currentModel) {
       for (const chain of Object.values(this.chains)) {
-        if (chain.includes(currentModel)) return chain;
+        const ids = chain.map(modelId);
+        if (ids.includes(currentModel)) return ids;
       }
     }
 
@@ -2521,7 +2564,8 @@ export class ForegroundFallbackManager {
     const all: string[] = [];
     const seen = new Set<string>();
     for (const chain of Object.values(this.chains)) {
-      for (const m of chain) {
+      for (const entry of chain) {
+        const m = modelId(entry);
         if (!seen.has(m)) {
           seen.add(m);
           all.push(m);
@@ -2530,4 +2574,19 @@ export class ForegroundFallbackManager {
     }
     return all;
   }
+
+  private variantFor(
+    agentName: string | undefined,
+    model: string,
+  ): string | undefined {
+    if (!agentName) return undefined;
+    const matching = this.chains[agentName]?.find(
+      (entry) => modelId(entry) === model,
+    );
+    return typeof matching === 'string' ? undefined : matching?.variant;
+  }
+}
+
+function modelId(model: ForegroundFallbackModel): string {
+  return typeof model === 'string' ? model : model.id;
 }

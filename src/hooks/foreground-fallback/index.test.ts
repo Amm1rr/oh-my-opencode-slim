@@ -1202,6 +1202,50 @@ describe('ForegroundFallbackManager session.error', () => {
     expect(call[0].body.model.modelID).toBe('gpt-4o');
   });
 
+  test('applies the selected fallback candidate variant to replay', async () => {
+    mgr = new ForegroundFallbackManager(
+      {
+        orchestrator: [
+          'anthropic/primary',
+          { id: 'openai/fallback', variant: 'fallback-high' },
+        ],
+      },
+      true,
+      { directory: '/test' } as any,
+      0,
+    );
+    await mgr.handleEvent({
+      type: 'message.updated',
+      properties: {
+        info: {
+          sessionID: 'variant-session',
+          providerID: 'anthropic',
+          modelID: 'primary',
+          role: 'assistant',
+          agent: 'orchestrator',
+        },
+      },
+    });
+    await mgr.handleEvent({
+      type: 'session.error',
+      properties: {
+        sessionID: 'variant-session',
+        error: { message: 'Rate limit exceeded' },
+      },
+    });
+
+    const call = mocks.promptAsync.mock.calls[0]?.[0] as {
+      body: {
+        model: { providerID: string; modelID: string; variant?: string };
+      };
+    };
+    expect(call.body.model).toEqual({
+      providerID: 'openai',
+      modelID: 'fallback',
+      variant: 'fallback-high',
+    });
+  });
+
   test('triggers fallback on content-policy moderation session.error', async () => {
     // End-to-end regression: a cyber_policy rejection (HTTP 400
     // invalid_request in production) must advance the fallback chain to the
@@ -2135,12 +2179,14 @@ describe('ForegroundFallbackManager session.error', () => {
   test('v2 host promptBody requests a required model switch', async () => {
     const { mocks } = createMockClient();
     const mgr = new ForegroundFallbackManager(
-      makeChains(),
-      true,
       {
-        directory: '/test',
-        hostFlavor: 'v2',
-      } as any,
+        orchestrator: [
+          'anthropic/claude-opus-4-5',
+          { id: 'openai/gpt-4o', variant: 'high' },
+        ],
+      },
+      true,
+      { directory: '/test', hostFlavor: 'v2' } as any,
       0,
     );
 
@@ -2152,6 +2198,7 @@ describe('ForegroundFallbackManager session.error', () => {
           providerID: 'anthropic',
           modelID: 'claude-opus-4-5',
           role: 'assistant',
+          agent: 'orchestrator',
         },
       },
     });
@@ -2165,6 +2212,9 @@ describe('ForegroundFallbackManager session.error', () => {
 
     const call = mocks.promptAsync.mock.calls[0] as [Record<string, unknown>];
     expect(call[0].modelSwitch).toBe('required');
+    expect(
+      (call[0].body as { model: { variant?: string } }).model.variant,
+    ).toBe('high');
   });
 
   test('switched:false result (v2 switch failure) skips the switch claim', async () => {
@@ -3739,7 +3789,13 @@ describe('ForegroundFallbackManager chain exhaustion', () => {
   test('re-walks from the second chain entry on each new user turn', async () => {
     const { mocks } = createMockClient();
     const mgr = new ForegroundFallbackManager(
-      makeChains(),
+      {
+        orchestrator: [
+          { id: 'anthropic/claude-opus-4-5', variant: 'high' },
+          { id: 'openai/gpt-4o', variant: 'medium' },
+          { id: 'google/gemini-2.5-pro', variant: 'high' },
+        ],
+      },
       true,
       {
         directory: '/test',
@@ -3773,7 +3829,10 @@ describe('ForegroundFallbackManager chain exhaustion', () => {
       expect(mocks.promptAsync).toHaveBeenCalledWith(
         expect.objectContaining({
           body: expect.objectContaining({
-            model: { providerID: 'openai', modelID: 'gpt-4o' },
+            model: expect.objectContaining({
+              providerID: 'openai',
+              modelID: 'gpt-4o',
+            }),
           }),
         }),
       );
@@ -3815,7 +3874,10 @@ describe('ForegroundFallbackManager chain exhaustion', () => {
       expect(mocks.promptAsync.mock.calls[1]?.[0]).toEqual(
         expect.objectContaining({
           body: expect.objectContaining({
-            model: { providerID: 'openai', modelID: 'gpt-4o' },
+            model: expect.objectContaining({
+              providerID: 'openai',
+              modelID: 'gpt-4o',
+            }),
           }),
         }),
       );
