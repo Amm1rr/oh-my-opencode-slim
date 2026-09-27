@@ -838,13 +838,11 @@ describe('createV2Setup e2e', () => {
       expect(deferredMcpTransform).toBeFunction();
       expect(deferredAgentTransform).toBeFunction();
       expect(calls.hooks).toContain('session:prompt');
-      await expect(
-        calls.promptHookCb?.({
+      const earlyPrompt = calls.promptHookCb?.({
           sessionID: 'ses_deferred_mcp_child',
           messageID: 'msg_early',
           prompt: { text: 'early child prompt' },
-        }),
-      ).rejects.toThrow('snapshot is not ready');
+        });
       events.push({
         type: 'session.created',
         data: {
@@ -875,9 +873,7 @@ describe('createV2Setup e2e', () => {
         },
         remove: () => {},
       };
-      expect(() => deferredAgentTransform?.(agentDraft)).toThrow(
-        'MCP configuration snapshot must be captured',
-      );
+      expect(() => deferredAgentTransform?.(agentDraft)).not.toThrow();
       expect(() =>
         deferredMcpTransform?.({
           list: () => [['host-only', { type: 'local' }]],
@@ -889,13 +885,13 @@ describe('createV2Setup e2e', () => {
           remove: () => {},
         }),
       ).not.toThrow();
-      expect(() => deferredAgentTransform?.(agentDraft)).not.toThrow();
       expect(
         (calls as unknown as { explorerRules?: Array<Record<string, unknown>> })
           .explorerRules,
       ).toContainEqual(
         expect.objectContaining({ action: 'host-only_*', effect: 'deny' }),
       );
+      await expect(earlyPrompt).resolves.toBeUndefined();
       await calls.promptHookCb?.({
         sessionID: 'ses_deferred_mcp_child',
         messageID: 'msg_deferred_child',
