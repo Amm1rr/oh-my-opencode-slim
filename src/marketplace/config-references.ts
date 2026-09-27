@@ -7,7 +7,6 @@ import {
   restorePreparedJsonConfig,
   withSerializedConfigWrites,
 } from '../cli/config-io';
-import { getConfigSearchDirs } from '../cli/paths';
 import { findPluginConfigPaths } from '../config/loader';
 import { MarketplaceActivationError } from './errors';
 import { normalizeMarketplacePackageId } from './ids';
@@ -113,6 +112,8 @@ export function withMarketplaceConfigReferencesRemoved(
   id: string,
   operation: (onCommitted: () => void) => void,
 ): void {
+  const initialUserConfigPath =
+    findPluginConfigPaths(projectDir).userConfigPath;
   const projectConfigBase = join(
     resolve(projectDir),
     '.opencode',
@@ -121,10 +122,7 @@ export function withMarketplaceConfigReferencesRemoved(
   const candidateConfigPaths = [
     `${projectConfigBase}.jsonc`,
     `${projectConfigBase}.json`,
-    ...getConfigSearchDirs().flatMap((configDir) => [
-      join(configDir, 'oh-my-opencode-slim.jsonc'),
-      join(configDir, 'oh-my-opencode-slim.json'),
-    ]),
+    ...(initialUserConfigPath ? [initialUserConfigPath] : []),
   ];
   const orderedPaths = [
     ...new Set(candidateConfigPaths.map((configPath) => resolve(configPath))),
@@ -136,11 +134,16 @@ export function withMarketplaceConfigReferencesRemoved(
     withSerializedConfigWrites(orderedPaths, () => {
       // Discover only after acquiring every possible project/user config
       // lease. A project config may have been created while uninstall waited.
-      const discovered = findPluginConfigPaths(projectDir);
-      const configPaths = [
-        discovered.userConfigPath,
-        discovered.projectConfigPath,
-      ]
+      const current = findPluginConfigPaths(projectDir);
+      if (
+        (current.userConfigPath && resolve(current.userConfigPath)) !==
+        (initialUserConfigPath && resolve(initialUserConfigPath))
+      ) {
+        throw new MarketplaceActivationError(
+          'Marketplace user config resolution changed during uninstall; retry the operation',
+        );
+      }
+      const configPaths = [current.userConfigPath, current.projectConfigPath]
         .filter((configPath): configPath is string => configPath !== null)
         .map((configPath) => resolve(configPath));
       const prepared = [];

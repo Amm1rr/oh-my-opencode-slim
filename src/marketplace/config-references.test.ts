@@ -10,13 +10,14 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import { parse } from 'jsonc-parser';
 import { withMarketplaceConfigReferencesRemoved } from './config-references';
 import { acquireMarketplaceLease } from './lease';
 import { getMarketplacePaths } from './paths';
 
 const previousConfigHome = process.env.XDG_CONFIG_HOME;
+const previousOpenCodeConfigDir = process.env.OPENCODE_CONFIG_DIR;
 const previousReferenceId = process.env.MARKETPLACE_REFERENCE_ID;
 const previousKeptId = process.env.MARKETPLACE_KEPT_ID;
 const previousMissingId = process.env.MARKETPLACE_MISSING_ID;
@@ -24,6 +25,9 @@ const previousMissingId = process.env.MARKETPLACE_MISSING_ID;
 afterEach(() => {
   if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
   else process.env.XDG_CONFIG_HOME = previousConfigHome;
+  if (previousOpenCodeConfigDir === undefined)
+    delete process.env.OPENCODE_CONFIG_DIR;
+  else process.env.OPENCODE_CONFIG_DIR = previousOpenCodeConfigDir;
   if (previousReferenceId === undefined) {
     delete process.env.MARKETPLACE_REFERENCE_ID;
   } else {
@@ -374,6 +378,69 @@ describe('marketplace config reference cleanup', () => {
       expect(committed).toBe(true);
       expect(existsSync(fixture.userPath)).toBe(false);
       expect(existsSync(fixture.projectPath)).toBe(false);
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  test('does not lock the unused default config directory when a custom config is selected', () => {
+    const fixture = createConfigs();
+    const defaultConfigDir = join(fixture.root, 'config', 'opencode');
+    const customConfigDir = join(fixture.root, 'custom', 'opencode');
+    const customConfigPath = join(customConfigDir, 'oh-my-opencode-slim.jsonc');
+    const originalMkdir = fs.mkdirSync;
+    try {
+      process.env.OPENCODE_CONFIG_DIR = customConfigDir;
+      mkdirSync(customConfigDir, { recursive: true });
+      writeFileSync(
+        customConfigPath,
+        JSON.stringify({
+          presets: {
+            work: { marketplace: { agents: ['community/remove'] } },
+          },
+        }),
+      );
+      const mkdirSpy = spyOn(fs, 'mkdirSync').mockImplementation(((
+        path: fs.PathLike,
+        ...args: Parameters<typeof fs.mkdirSync>[1][]
+      ) => {
+        const resolvedPath = resolve(path.toString());
+        if (
+          resolvedPath.startsWith(`${resolve(defaultConfigDir)}${sep}`) &&
+          resolvedPath.includes('.oh-my-opencode-slim.')
+        ) {
+          throw Object.assign(
+            new Error('default config directory is read-only'),
+            {
+              code: 'EACCES',
+            },
+          );
+        }
+        return originalMkdir.call(fs, path, ...args);
+      }) as typeof fs.mkdirSync);
+      try {
+        let committed = false;
+        withMarketplaceConfigReferencesRemoved(
+          fixture.project,
+          'community/remove',
+          (onCommitted) => {
+            committed = true;
+            onCommitted();
+          },
+        );
+        expect(committed).toBe(true);
+        expect(
+          parse(readFileSync(customConfigPath, 'utf8')).presets.work.marketplace
+            .agents,
+        ).toEqual([]);
+        expect(
+          readdirSync(defaultConfigDir).some((name) =>
+            name.includes('.oh-my-opencode-slim.'),
+          ),
+        ).toBe(false);
+      } finally {
+        mkdirSpy.mockRestore();
+      }
     } finally {
       rmSync(fixture.root, { recursive: true, force: true });
     }
