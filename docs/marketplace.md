@@ -20,7 +20,7 @@ oh-my-opencode-slim marketplace enable author/package
 oh-my-opencode-slim marketplace disable author/package
 oh-my-opencode-slim marketplace update author/package
 oh-my-opencode-slim marketplace update-file ./package.json
-oh-my-opencode-slim marketplace remove author/package
+oh-my-opencode-slim marketplace uninstall author/package --global
 oh-my-opencode-slim marketplace status
 oh-my-opencode-slim marketplace request-reload
 ```
@@ -28,9 +28,14 @@ oh-my-opencode-slim marketplace request-reload
 Commands reject unknown options, missing targets, and extra arguments. `install`
 and `update` use the configured marketplace registry; `import` and
 `update-file` read local JSON bundles. `enable`/`disable` persist activation
-directives into the active preset. `remove` also removes config references.
-Validation, service, and config failures return a nonzero exit status. A failed
-verification also returns nonzero.
+directives into the active preset. `disable` is project-local and never deletes
+the shared package. `uninstall <id> --global` is the only package deletion
+command; the exact `--global` flag is required. It removes references from the
+current project and known user configuration, then removes the package from the
+shared store. Other project trees are not scanned, so they may retain dangling
+references. The command reports this limitation. Validation, service, and
+config failures return a nonzero exit status. A failed verification also
+returns nonzero.
 
 `status` compares installed desired packages with the live registry only when
 called inside a running plugin generation. Standalone CLI status reports
@@ -41,7 +46,9 @@ it cannot inspect the host's in-memory agent registry.
 
 The orchestrator can use `marketplace_inspect` (`list`, `show`, `verify`,
 `status`, `request_reload`) and `marketplace_manage` (`install`, `import`,
-`update`, `update_file`, `remove`, `enable`, `disable`). Both are restricted by
+`update`, `update_file`, `uninstall`, `enable`, `disable`). `uninstall` requires
+`acknowledge_other_projects: true` and means global shared-store deletion; its
+result warns that other projects are not inspected. Both tools are restricted by
 agent permissions and an execution-time orchestrator identity guard that
 accounts for a configured orchestrator display alias.
 

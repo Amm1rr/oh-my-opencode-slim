@@ -16,7 +16,7 @@ const MANAGE_ACTIONS = [
   'import',
   'update',
   'update_file',
-  'remove',
+  'uninstall',
   'enable',
   'disable',
 ] as const;
@@ -145,6 +145,12 @@ export function createMarketplaceTools(options: MarketplaceToolOptions): {
     args: {
       action: z.enum(MANAGE_ACTIONS).describe('Management action'),
       target: targetSchema(),
+      acknowledge_other_projects: z
+        .literal(true)
+        .optional()
+        .describe(
+          'Required for global uninstall; confirms other projects are not inspected',
+        ),
     },
     async execute(args, context) {
       assertOrchestrator(
@@ -169,9 +175,16 @@ export function createMarketplaceTools(options: MarketplaceToolOptions): {
         case 'update_file':
           result = options.service.updateFile(resolve(cwd, target));
           break;
-        case 'remove':
-          options.service.remove(target);
-          result = { removed: true };
+        case 'uninstall':
+          if (args.acknowledge_other_projects !== true) {
+            throw new Error(
+              'uninstall requires acknowledge_other_projects: true because other projects are not inspected',
+            );
+          }
+          result = options.service.uninstallGlobal(
+            target,
+            args.acknowledge_other_projects,
+          );
           break;
         case 'enable':
           options.service.enable(target);

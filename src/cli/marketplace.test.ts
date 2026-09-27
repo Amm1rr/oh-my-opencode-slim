@@ -25,7 +25,10 @@ function fakeService() {
     verify: () => [{ valid: true }],
     enable: (...args: unknown[]) => calls.push(['enable', ...args]),
     disable: (...args: unknown[]) => calls.push(['disable', ...args]),
-    remove: (...args: unknown[]) => calls.push(['remove', ...args]),
+    uninstallGlobal: (...args: unknown[]) => {
+      calls.push(['uninstall', ...args]);
+      return { uninstalled: true };
+    },
     status: () => ({
       liveAvailable: false,
       livePackages: null,
@@ -87,5 +90,36 @@ describe('marketplace CLI', () => {
       livePackages: null,
       reloadRequired: null,
     });
+  });
+
+  test('requires the exact global uninstall flag and has no remove command', async () => {
+    const { calls, service } = fakeService();
+    const errors: string[] = [];
+    const io = {
+      service,
+      stdout: () => {},
+      stderr: (text: string) => errors.push(text),
+    };
+
+    expect(await runMarketplaceCommand(['remove', 'author/package'], io)).toBe(
+      2,
+    );
+    expect(
+      await runMarketplaceCommand(['uninstall', 'author/package'], io),
+    ).toBe(1);
+    expect(
+      await runMarketplaceCommand(
+        ['uninstall', 'author/package', '--project'],
+        io,
+      ),
+    ).toBe(1);
+    expect(
+      await runMarketplaceCommand(
+        ['uninstall', 'author/package', '--global'],
+        io,
+      ),
+    ).toBe(0);
+    expect(calls).toEqual([['uninstall', 'author/package', true]]);
+    expect(errors).toHaveLength(3);
   });
 });

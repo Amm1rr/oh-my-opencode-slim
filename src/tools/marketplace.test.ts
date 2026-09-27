@@ -33,7 +33,10 @@ function fixture() {
       calls.push(['update_file', path]);
       return {};
     },
-    remove: (target: string) => calls.push(['remove', target]),
+    uninstallGlobal: (target: string, acknowledge: boolean) => {
+      calls.push(['uninstall', target, acknowledge]);
+      return { uninstalled: true };
+    },
     enable: (target: string) => calls.push(['enable', target]),
     disable: (target: string) => calls.push(['disable', target]),
   };
@@ -60,7 +63,7 @@ describe('marketplace tools', () => {
       'import',
       'update',
       'update_file',
-      'remove',
+      'uninstall',
       'enable',
       'disable',
     ]);
@@ -208,5 +211,31 @@ describe('marketplace tools', () => {
         { agent: 'orchestrator' } as never,
       ),
     ).rejects.toThrow('nonblank');
+  });
+
+  test('requires acknowledgement before global uninstall', async () => {
+    const { calls, service } = fixture();
+    const tools = createMarketplaceTools({ service });
+    const manage = tools.marketplace_manage as unknown as {
+      execute(args: never, ctx: never): Promise<string>;
+    };
+
+    await expect(
+      manage.execute(
+        { action: 'uninstall', target: 'author/package' } as never,
+        { agent: 'orchestrator' } as never,
+      ),
+    ).rejects.toThrow('acknowledge_other_projects: true');
+    expect(calls).toEqual([]);
+
+    await manage.execute(
+      {
+        action: 'uninstall',
+        target: 'author/package',
+        acknowledge_other_projects: true,
+      } as never,
+      { agent: 'orchestrator' } as never,
+    );
+    expect(calls).toEqual([['uninstall', 'author/package', true]]);
   });
 });

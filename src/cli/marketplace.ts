@@ -11,7 +11,7 @@ const COMMANDS = [
   'verify',
   'enable',
   'disable',
-  'remove',
+  'uninstall',
   'status',
   'request-reload',
 ] as const;
@@ -107,10 +107,20 @@ export async function runMarketplaceCommand(
         service.disable(requireTarget(command, rest));
         result = { enabled: false };
         break;
-      case 'remove':
-        service.remove(requireTarget(command, rest));
-        result = { removed: true };
+      case 'uninstall': {
+        if (
+          rest.length !== 2 ||
+          !rest[0]?.trim() ||
+          rest[0].startsWith('--') ||
+          rest[1] !== '--global'
+        ) {
+          throw new Error(
+            'uninstall requires exactly <package-id> --global; this removes the shared store and does not inspect other projects',
+          );
+        }
+        result = service.uninstallGlobal(rest[0], true);
         break;
+      }
       case 'status':
         requireNoArgs(command, rest);
         result = service.status();

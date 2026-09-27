@@ -403,7 +403,7 @@ describe('MarketplaceService', () => {
         await downloadStarted.promise;
 
         if (race === 'removed') {
-          service.remove('community/example');
+          service.uninstallGlobal('community/example', true);
         } else {
           service.update(bundle('3.0.0'));
         }
@@ -523,9 +523,9 @@ describe('MarketplaceService', () => {
         },
       );
       try {
-        expect(() => service.remove('community/example')).toThrow(
-          'injected lockfile publication failure',
-        );
+        expect(() =>
+          service.uninstallGlobal('community/example', true),
+        ).toThrow('injected lockfile publication failure');
       } finally {
         rename.mockRestore();
       }
@@ -536,7 +536,7 @@ describe('MarketplaceService', () => {
       expect(service.show('community/example').manifest.id).toBe(
         'community/example',
       );
-      service.remove('community/example');
+      service.uninstallGlobal('community/example', true);
       expect(readFileSync(configPath, 'utf8')).not.toContain(
         'community/example',
       );
@@ -583,9 +583,9 @@ describe('MarketplaceService', () => {
         },
       );
       try {
-        expect(() => service.remove('community/example')).toThrow(
-          'finalization failed; config references remain removed',
-        );
+        expect(() =>
+          service.uninstallGlobal('community/example', true),
+        ).toThrow('finalization failed; config references remain removed');
       } finally {
         unlink.mockRestore();
       }
@@ -643,7 +643,7 @@ describe('MarketplaceService', () => {
       );
       try {
         // The first request commits removal, but cleanup remains pending.
-        service.remove('community/example');
+        service.uninstallGlobal('community/example', true);
         expect(existsSync(quarantineRoot)).toBe(true);
         expect(readFileSync(configPath, 'utf8')).not.toContain(
           'community/example',
@@ -651,9 +651,9 @@ describe('MarketplaceService', () => {
 
         // Simulate stale config left by another writer before a retry.
         writeFileSync(configPath, staleConfig);
-        expect(() => service.remove('community/example')).toThrow(
-          'finalization failed; config references remain removed',
-        );
+        expect(() =>
+          service.uninstallGlobal('community/example', true),
+        ).toThrow('finalization failed; config references remain removed');
         expect(readFileSync(configPath, 'utf8')).not.toContain(
           'community/example',
         );
@@ -670,7 +670,7 @@ describe('MarketplaceService', () => {
         remove.mockRestore();
       }
 
-      service.remove('community/example');
+      service.uninstallGlobal('community/example', true);
       expect(existsSync(quarantineRoot)).toBe(false);
       expect(readFileSync(configPath, 'utf8')).not.toContain(
         'community/example',
@@ -702,10 +702,116 @@ describe('MarketplaceService', () => {
         rootDir: join(root, 'store'),
         projectDir: project,
       });
-      service.remove('community/example');
+      service.uninstallGlobal('community/example', true);
       expect(JSON.parse(readFileSync(configPath, 'utf8'))).toEqual({
         presets: { work: { marketplace: { agents: [] } } },
       });
+    } finally {
+      if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = previousConfigHome;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('disable is project-local and global uninstall requires acknowledgement', () => {
+    const root = tempRoot();
+    const previousConfigHome = process.env.XDG_CONFIG_HOME;
+    const configHome = join(root, 'user-config');
+    const userConfigPath = join(
+      configHome,
+      'opencode',
+      'oh-my-opencode-slim.json',
+    );
+    const projectA = join(root, 'project-a');
+    const projectB = join(root, 'project-b');
+    const storeRoot = join(root, 'shared-marketplace');
+    const config = JSON.stringify({
+      preset: 'work',
+      presets: { work: { marketplace: { agents: ['community/example'] } } },
+    });
+    try {
+      process.env.XDG_CONFIG_HOME = configHome;
+      for (const project of [projectA, projectB]) {
+        mkdirSync(join(project, '.opencode'), { recursive: true });
+        writeFileSync(
+          join(project, '.opencode', 'oh-my-opencode-slim.json'),
+          config,
+        );
+      }
+      const serviceA = new MarketplaceService({
+        rootDir: storeRoot,
+        projectDir: projectA,
+        pluginVersion: '3.5.0',
+      });
+      const serviceB = new MarketplaceService({
+        rootDir: storeRoot,
+        projectDir: projectB,
+        pluginVersion: '3.5.0',
+      });
+      serviceA.install(bundle());
+
+      serviceA.disable('community/example');
+      expect(serviceA.show('community/example').manifest.id).toBe(
+        'community/example',
+      );
+      expect(
+        readFileSync(
+          join(projectB, '.opencode', 'oh-my-opencode-slim.json'),
+          'utf8',
+        ),
+      ).toBe(config);
+
+      mkdirSync(join(configHome, 'opencode'), { recursive: true });
+      writeFileSync(userConfigPath, config);
+
+      const configBeforeUnacknowledged = readFileSync(
+        join(projectA, '.opencode', 'oh-my-opencode-slim.json'),
+        'utf8',
+      );
+      expect(() =>
+        serviceA.uninstallGlobal('community/example', false),
+      ).toThrow('requires explicit acknowledgement');
+      expect(serviceA.show('community/example').manifest.id).toBe(
+        'community/example',
+      );
+      expect(readFileSync(userConfigPath, 'utf8')).toBe(config);
+      expect(
+        readFileSync(
+          join(projectA, '.opencode', 'oh-my-opencode-slim.json'),
+          'utf8',
+        ),
+      ).toBe(configBeforeUnacknowledged);
+
+      expect(serviceA.uninstallGlobal('community/example', true)).toMatchObject(
+        {
+          packageId: 'community/example',
+          uninstalled: true,
+          otherProjectsInspected: false,
+          warning: expect.stringContaining(
+            'Other project configurations were not inspected',
+          ),
+        },
+      );
+      expect(readFileSync(userConfigPath, 'utf8')).not.toContain(
+        'community/example',
+      );
+      expect(
+        readFileSync(
+          join(projectA, '.opencode', 'oh-my-opencode-slim.json'),
+          'utf8',
+        ),
+      ).not.toContain('community/example');
+      expect(
+        readFileSync(
+          join(projectB, '.opencode', 'oh-my-opencode-slim.json'),
+          'utf8',
+        ),
+      ).toBe(config);
+      expect(serviceB.list()).toEqual([]);
+      expect(() => serviceB.show('community/example')).toThrow();
+      expect(serviceB.status().diagnostics).toContain(
+        'community/example: community/example is not installed',
+      );
     } finally {
       if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
       else process.env.XDG_CONFIG_HOME = previousConfigHome;

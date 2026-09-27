@@ -41,7 +41,7 @@ function resolvedId(value: string, field: string): string {
   const resolved = value.replace(/\{env:([^}]+)\}/g, (_match, name: string) => {
     if (process.env[name] === undefined) {
       throw new MarketplaceActivationError(
-        `Cannot remove marketplace package: environment variable '${name}' referenced by marketplace.${field} is not set`,
+        `Cannot uninstall marketplace package: environment variable '${name}' referenced by marketplace.${field} is not set`,
       );
     }
     return process.env[name];
@@ -50,7 +50,7 @@ function resolvedId(value: string, field: string): string {
     return normalizeMarketplacePackageId(resolved);
   } catch (error) {
     throw new MarketplaceActivationError(
-      `Cannot remove marketplace package: invalid marketplace.${field} package ID (${error instanceof Error ? error.message : String(error)})`,
+      `Cannot uninstall marketplace package: invalid marketplace.${field} package ID (${error instanceof Error ? error.message : String(error)})`,
     );
   }
 }
@@ -67,7 +67,7 @@ function removeReferences(config: unknown, packageId: string): unknown {
       !isRecord(presetValue.marketplace)
     ) {
       throw new MarketplaceActivationError(
-        `Cannot remove marketplace package: preset '${presetName}' marketplace directives must be an object`,
+        `Cannot uninstall marketplace package: preset '${presetName}' marketplace directives must be an object`,
       );
     }
     if (!isRecord(presetValue.marketplace)) continue;
@@ -76,14 +76,14 @@ function removeReferences(config: unknown, packageId: string): unknown {
     for (const key of MARKETPLACE_AGENT_LISTS) {
       if (Object.hasOwn(marketplace, key) && !Array.isArray(marketplace[key])) {
         throw new MarketplaceActivationError(
-          `Cannot remove marketplace package: marketplace.${key} must be an array of package IDs`,
+          `Cannot uninstall marketplace package: marketplace.${key} must be an array of package IDs`,
         );
       }
       const entries = marketplace[key];
       if (!Array.isArray(entries)) continue;
       if (entries.some((entry) => typeof entry !== 'string')) {
         throw new MarketplaceActivationError(
-          `Cannot remove marketplace package: marketplace.${key} must contain only package IDs`,
+          `Cannot uninstall marketplace package: marketplace.${key} must contain only package IDs`,
         );
       }
       const filtered = entries.filter(
