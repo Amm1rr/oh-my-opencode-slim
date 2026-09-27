@@ -674,6 +674,92 @@ describe('plugin tool registration', () => {
     }
   });
 
+  test('marketplace status follows the active runtime preset over disk and environment selection', async () => {
+    const originalEnv = { ...process.env };
+    const root = await mkdtemp(
+      '/tmp/oh-my-opencode-slim-marketplace-runtime-preset-',
+    );
+    const configDir = path.join(root, 'config');
+    const dataDir = path.join(root, 'data');
+    await mkdir(configDir, { recursive: true });
+    process.env = {
+      ...originalEnv,
+      OPENCODE_CONFIG_DIR: configDir,
+      XDG_DATA_HOME: dataDir,
+      OH_MY_OPENCODE_SLIM_PRESET: 'disk',
+    };
+    delete process.env.OH_MY_OPENCODE_SLIM_DISABLE;
+    const packageManifest = (id: string, agentName: string) => ({
+      schemaVersion: 2,
+      id,
+      version: '1.0.0',
+      displayName: agentName,
+      description: 'Preset selection fixture',
+      agentName,
+      prompt: 'Preset fixture prompt',
+      skills: [],
+      mcps: [],
+      tools: ['read'],
+      author: { name: 'Test author' },
+      tags: [],
+      license: 'MIT',
+      compatibility: { plugin: '>=1.0.0' },
+      model: { source: 'explicit', candidates: ['provider/package'] },
+      routing: {
+        description: 'Preset package',
+        when: 'A preset package is needed.',
+        keywords: ['preset'],
+      },
+    });
+    const pluginConfig = {
+      preset: 'disk',
+      presets: {
+        disk: { marketplace: { agents: ['team/disk-preset'] } },
+        runtime: { marketplace: { agents: ['team/runtime-preset'] } },
+      },
+    } as Parameters<typeof RuntimeConfig.init>[1];
+    RuntimeConfig.reset(root);
+    RuntimeConfig.init(root, pluginConfig).setRuntimePreset('runtime');
+    const store = new MarketplaceStore({ pluginVersion: '2.2.25' });
+    store.install({
+      manifest: packageManifest('team/disk-preset', 'disk-agent') as never,
+    });
+    store.install({
+      manifest: packageManifest(
+        'team/runtime-preset',
+        'runtime-agent',
+      ) as never,
+    });
+    await Bun.write(
+      path.join(configDir, 'oh-my-opencode-slim.json'),
+      JSON.stringify(pluginConfig),
+    );
+    const hooks = await plugin({
+      client: createPluginClient(async () => ({})),
+      directory: root,
+      worktree: root,
+      serverUrl: new URL('http://127.0.0.1:4096'),
+    } as never);
+    try {
+      await hooks.config?.({ agent: {}, mcp: {} });
+      const marketplaceService = (
+        hooks as unknown as { registryBridge: RegistryFactoryBridge }
+      ).registryBridge.marketplaceService;
+      const status = marketplaceService.status();
+      expect(status.desiredPackageIds).toEqual(['team/runtime-preset']);
+      expect(status.livePackages?.map(({ id }) => id)).toEqual([
+        'team/runtime-preset',
+      ]);
+      expect(status.reloadRequired).toBe(false);
+      expect(marketplaceService.requestReload().reloadRequired).toBe(false);
+    } finally {
+      await hooks.dispose?.();
+      RuntimeConfig.reset(root);
+      process.env = originalEnv;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test('broken selected preset inheritance falls back to baseline agents at startup', async () => {
     const originalEnv = { ...process.env };
     const invalidPresetCases = [

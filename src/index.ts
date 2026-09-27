@@ -1246,6 +1246,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       if (registryRetired || !resolvedAgentRegistry) return undefined;
       return registryBridge.requireRegistry().marketplacePackages;
     },
+    getPresetOverride: () => runtime.getRuntimePreset() ?? undefined,
     getDesiredPackages: () => {
       if (hostSnapshotProvenance !== 'clean' || !latestHostSnapshot) {
         throw new Error(

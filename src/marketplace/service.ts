@@ -38,6 +38,7 @@ export interface MarketplaceServiceOptions
   registryClient?: MarketplaceRegistryDownloadClient;
   getLivePackages?: () => readonly MarketplaceLivePackage[] | undefined;
   getDesiredPackages?: () => readonly MarketplaceLivePackage[];
+  getPresetOverride?: () => string | undefined;
 }
 
 export type MarketplaceRegistryDownloadClient = Pick<
@@ -100,6 +101,7 @@ export class MarketplaceService {
   readonly registryClient: MarketplaceRegistryDownloadClient;
   private readonly getLivePackages?: MarketplaceServiceOptions['getLivePackages'];
   private readonly getDesiredPackages?: MarketplaceServiceOptions['getDesiredPackages'];
+  private readonly getPresetOverride?: MarketplaceServiceOptions['getPresetOverride'];
 
   constructor(options: MarketplaceServiceOptions = {}) {
     const pluginVersion = options.pluginVersion ?? BUILD_VERSION;
@@ -107,6 +109,7 @@ export class MarketplaceService {
     this.projectDir = options.projectDir ?? process.cwd();
     this.getLivePackages = options.getLivePackages;
     this.getDesiredPackages = options.getDesiredPackages;
+    this.getPresetOverride = options.getPresetOverride;
     this.registryClient =
       options.registryClient ??
       new MarketplaceRegistryClient({ pluginVersion });
@@ -199,9 +202,11 @@ export class MarketplaceService {
   status(): MarketplaceRuntimeStatus {
     const livePackages = this.getLivePackages?.();
     const desired = this.readDesiredPackages();
+    const presetOverride = this.getPresetOverride?.();
     return readMarketplaceRuntimeStatus({
       directory: this.projectDir,
       store: this.store,
+      ...(presetOverride === undefined ? {} : { presetOverride }),
       ...(livePackages === undefined ? {} : { livePackages }),
       ...(desired.packages === undefined
         ? {}
@@ -215,9 +220,11 @@ export class MarketplaceService {
   requestReload(): MarketplaceReloadRequest {
     const livePackages = this.getLivePackages?.();
     const desired = this.readDesiredPackages();
+    const presetOverride = this.getPresetOverride?.();
     return requestMarketplaceReload({
       directory: this.projectDir,
       store: this.store,
+      ...(presetOverride === undefined ? {} : { presetOverride }),
       ...(livePackages === undefined ? {} : { livePackages }),
       ...(desired.packages === undefined
         ? {}

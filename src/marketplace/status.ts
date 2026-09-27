@@ -72,11 +72,16 @@ export function readDesiredMarketplacePackageIds(
 export function readMarketplaceRuntimeStatus(input: {
   readonly directory: string;
   readonly store: Pick<MarketplaceStore, 'inspectAll'>;
+  /** Active in-memory preset override; omitted in standalone CLI contexts. */
+  readonly presetOverride?: string;
   readonly livePackages?: readonly MarketplaceLivePackage[];
   readonly desiredPackages?: readonly MarketplaceLivePackage[];
   readonly desiredConfigError?: string;
 }): MarketplaceRuntimeStatus {
-  const desiredPackageIds = readDesiredMarketplacePackageIds(input.directory);
+  const desiredPackageIds = readDesiredMarketplacePackageIds(
+    input.directory,
+    input.presetOverride,
+  );
   const inspection = input.store.inspectAll();
   const wanted = new Set(desiredPackageIds);
   const observedVerifications = new Map(
@@ -179,6 +184,7 @@ export function readMarketplaceRuntimeStatus(input: {
 export function requestMarketplaceReload(input: {
   readonly directory: string;
   readonly store: Pick<MarketplaceStore, 'inspectAll'>;
+  readonly presetOverride?: string;
   readonly livePackages?: readonly MarketplaceLivePackage[];
   readonly desiredPackages?: readonly MarketplaceLivePackage[];
   readonly desiredConfigError?: string;
