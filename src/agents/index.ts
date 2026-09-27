@@ -386,9 +386,9 @@ function applyDefaultPermissions(
   configuredSkills?: readonly string[],
   disabledSkills?: readonly string[],
 ): void {
-  // If the user supplied a shorthand string permission (e.g. "ask"),
-  // it already applies to all tools — preserve it as-is and skip the
-  // object merge, which would corrupt it by spreading the string.
+  // A shorthand string is a user-level rule for every tool. Keep its original
+  // form; marketplace tools independently fail closed through their caller
+  // identity guard for every non-orchestrator agent.
   if (typeof agent.config.permission === 'string') {
     return;
   }
@@ -418,10 +418,17 @@ function applyDefaultPermissions(
       ? (existing.wait_for_user ?? 'allow')
       : 'deny';
   const marketplacePermissions = Object.fromEntries(
-    MARKETPLACE_TOOL_NAMES.map((toolName) => [
-      toolName,
-      agent.name === 'orchestrator' ? 'allow' : 'deny',
-    ]),
+    MARKETPLACE_TOOL_NAMES.map((toolName) => {
+      const configured = existing[toolName];
+      const orchestratorPermission =
+        configured === 'allow' || configured === 'ask' || configured === 'deny'
+          ? configured
+          : 'allow';
+      return [
+        toolName,
+        agent.name === 'orchestrator' ? orchestratorPermission : 'deny',
+      ];
+    }),
   );
 
   agent.config.permission = {
