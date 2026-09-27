@@ -1896,11 +1896,6 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
           }
         });
         disposers.push(() => reg.dispose());
-        if (hostMcpSnapshot === undefined) {
-          throw new Error(
-            'MCP transform did not produce a configuration snapshot',
-          );
-        }
       } catch (err) {
         throw new Error(
           'Unable to snapshot configured MCP namespaces: this host cannot ' +

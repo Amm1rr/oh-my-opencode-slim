@@ -51,6 +51,13 @@ interface MockCalls {
   contextHookCb:
     | ((event: Record<string, unknown>) => Promise<void>)
     | undefined;
+  promptHookCb:
+    | ((event: {
+        sessionID: string;
+        messageID: string;
+        prompt: { text: string };
+      }) => Promise<void>)
+    | undefined;
   disposed: string[];
 }
 
@@ -125,6 +132,7 @@ function makeMockV2Context(projectDir: string): {
     toolBeforeCb: undefined,
     toolAfterCb: undefined,
     contextHookCb: undefined,
+    promptHookCb: undefined,
     disposed: [],
   };
   const events = createEventQueue();
@@ -204,10 +212,15 @@ function makeMockV2Context(projectDir: string): {
     // Runtime session methods deliberately ABSENT: the shim must degrade
     // honestly without them (no fake success shapes).
     session: {
-      hook: async (name: 'context', cb: (event: never) => Promise<void>) => {
+      hook: async (
+        name: 'context' | 'prompt',
+        cb: (event: never) => Promise<void>,
+      ) => {
         calls.hooks.push(`session:${name}`);
         if (name === 'context') {
           calls.contextHookCb = cb as unknown as MockCalls['contextHookCb'];
+        } else if (name === 'prompt') {
+          calls.promptHookCb = cb as unknown as MockCalls['promptHookCb'];
         }
         return reg(`session.hook:${name}`);
       },
@@ -844,21 +857,42 @@ describe('createV2Setup e2e', () => {
     }
   }, 20_000);
 
-  test('missing MCP draft callback cannot become an invented empty snapshot', async () => {
+  test('deferred MCP draft callback does not block setup or ordinary prompts', async () => {
     const { ctx, calls } = makeMockV2Context(projectDir);
     const mcp = ctx.mcp as unknown as {
       transform: (callback: (draft: unknown) => void) => Promise<{
         dispose: () => void;
       }>;
     };
-    mcp.transform = async () => ({
-      dispose: () => calls.disposed.push('mcp.transform'),
-    });
+    let deferredMcpTransform: ((draft: unknown) => void) | undefined;
+    mcp.transform = async (callback) => {
+      deferredMcpTransform = callback;
+      return { dispose: () => calls.disposed.push('mcp.transform') };
+    };
 
-    await expect(createV2Setup()(ctx)).rejects.toThrow(
-      'Unable to snapshot configured MCP namespaces',
-    );
-    expect(calls.disposed).toContain('mcp.transform');
+    const cleanup = await createV2Setup()(ctx);
+    try {
+      expect(deferredMcpTransform).toBeFunction();
+      expect(calls.hooks).toContain('session:prompt');
+      await calls.promptHookCb?.({
+        sessionID: 'ses_deferred_mcp',
+        messageID: 'msg_deferred_mcp',
+        prompt: { text: 'ordinary prompt' },
+      });
+
+      // v2 may execute the transform only after setup, while loading config.
+      expect(() =>
+        deferredMcpTransform?.({
+          list: () => [['host-only', { type: 'local' }]],
+          get: () => ({ type: 'local' }),
+          set: () => {},
+          update: () => {},
+          remove: () => {},
+        }),
+      ).not.toThrow();
+    } finally {
+      await cleanup();
+    }
   }, 20_000);
 
   test('missing MCP transform fails startup and unwinds earlier resources', async () => {
