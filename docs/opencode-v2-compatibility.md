@@ -5,8 +5,9 @@ and OpenCode v2 (`opencode2`) from a single published package. This document
 describes how each host loads the plugin, what is supported where, and how to
 register it.
 
-The verified compatibility baseline is **OpenCode v2.0.7**. The plugin
-requires OpenCode v2.0.7+ on v2 hosts; older v2 hosts are unsupported.
+The repository baseline is **oh-my-opencode-slim v2.2.25** (see
+`package.json`), with live host verification on **OpenCode v2.0.7**. The
+plugin requires OpenCode v2.0.7+ on v2 hosts; older v2 hosts are unsupported.
 Bundled-skill delivery requires the host's in-process skill registration
 channel (a `ctx.skill` draft with `add`), available on OpenCode v2 hosts. On
 v1 hosts bundled skills are **not** delivered: the legacy disk-copy sync was
@@ -78,10 +79,11 @@ bump must re-check that pin.
 
 v2's plugin resolver tries the `server` subpath first
 (`subpaths: ["server", ""]`), which the exports map resolves directly to
-`dist/server/index.js` — the self-contained v2 server bundle, and also the
-entrypoint v2 loads when the `dist/server` directory is registered directly
-(see [Installing on v2](#installing-on-v2)); the release artifact check
-requires it. v1 uses the main entry.
+`dist/server/index.js` — the self-contained v2 server bundle, and the
+artifact the release check requires. Local source development registers an
+external shim directory instead of pointing at `dist/` (see
+[Local source development](#local-source-development-no-publishing)); v1
+uses the main entry.
 
 Upstream npm naming split with the stable line: v2 ships as
 `@opencode/plugin` / `@opencode/client` / `@opencode/sdk` / `@opencode/cli`
@@ -199,7 +201,13 @@ not an optional-degradation path.
       when no agent is ever learned. When the prompt hook registers, the
       context hook's per-request `chat.message` emulation narrows to
       agent/model discovery; hosts that reject the hook name keep the
-      full emulation as fallback.
+      full emulation as fallback. The session-frozen profile bridge is also
+      awaited from this hook BEFORE the admission's first model request: it
+      resolves the session's `parentID`/`agent` through `session.get`,
+      then freezes the child's runtime profile and applies
+      `session.switchModel` idempotently (the event-stream
+      `session.created` consumer is only a prewarm/cleanup path — a first
+      child request can never race the asynchronous event pump).
     - a native `ctx.session.hook("model.request")` registration
       (capability-guarded): the v2 equivalent of the v1 `chat.headers` hook.
       Fires once per provider request with a mutable `headers` record the
@@ -372,7 +380,7 @@ side cannot be observed.
 | webfetch secondary-model summaries | ✅ | ✅ via `ctx.generate.text` | host without `ctx.generate` → summaries unavailable (logged) |
 | Background-job state persistence (tombstones, deletion epochs, alias high-water marks) | ➖ process-local | ✅ via `ctx.storage` | optional domain; absent → pure in-memory fallback, zero behavior change (see [Background job state](#background-job-state-rehydrate-probe-and-persistence)) |
 | Foreground model fallback (rate-limit failover) | ✅ | ✅ shim translates re-prompt into `session.switchModel` + `delivery:"steer"` prompt | — |
-| `/preset` (interactive switcher) | ✅ | ✅ TUI plugin entry (`./tui` → `dist/tui2.js`): sidebar + `/preset` dialog or `/preset <name>` fast path | The layer registers from an `append: "app"` slot render because the host's `keymap.layer` is provider-scoped (calling it from plugin `setup` throws `Keymap.Provider is missing`); the command carries an `id` and `slash.arguments`; host needs `ui.slot` + `keymap.layer`; the interactive picker needs `ui.dialog.select` while `/preset <name>` works without it; feedback uses `ui.toast.show`; config-file `preset` still applies at load |
+| `/preset` (preset manager) | ✅ | ✅ TUI plugin entry (`./tui` → `dist/tui2.js`): sidebar (incl. clickable active-preset row) + the same three-level manager as v1 on bare `/preset`, or `/preset <name>` fast path | The layer registers from an `append: "app"` slot render because the host's `keymap.layer` is provider-scoped (calling it from plugin `setup` throws `Keymap.Provider is missing`); the command carries an `id` and `slash.arguments`; host needs `ui.slot` + `keymap.layer`; the manager needs `ui.dialog.select` + `prompt` + `confirm` (without them the sidebar preset row is informational-only, but `/preset <name>` still applies); feedback uses `ui.toast.show`; config-file `preset` still applies at load. Config edits (manual, manager saves, `/preset`) are watched over `.json` + `.jsonc` candidates (user + project, including files/directories created later, arbitrary `OPENCODE_CONFIG_DIR` names, and nested missing ancestors; ~300 ms debounce) and hot-applied **only** as inference profiles: `model`/`variant` via `session.switchModel` and `temperature`/`options` on the captured child session's request options, plus the sidebar's tui-state model entries. Capture is awaited on the `session.prompt` request path (the `session.created` event consumer is only a prewarm) so a first child request cannot race the event pump. Agent definitions, prompts, tools, permissions, skills, and MCPs stay frozen for the session lifetime; the host registry is never reloaded. The TUI **requests** this refresh and reports `Saved … Live refresh requested`; it cannot observe the server-side watcher (separate process, no safe plugin RPC bridge on the supported host), which logs its own failure cause. A malformed config (`invalid-json`/`invalid-schema`/`read-error`) is rejected before any swap — the last-known-good profiles/sidebar stay — and the fix-and-reload fallback applies |
 | Default primary agent | ✅ finalized visible orchestrator identity | ✅ `draft.default(<visible orchestrator identity>)`; the canonical `orchestrator` entry remains a hidden alias when `displayName` is configured | v1 `default_agent` and v2 draft default target the same visible entry |
 | TUI default agent | ✅ orchestrator | ✅ host follows the default primary agent and hoists it to the head of the agent list | — |
 | Multiplexer (tmux/zellij/herdr/cmux-tui panes) | ✅ | ❌ host-gated off (`hostFlavor: 'v2'` → `shouldEnableMultiplexer` returns false and the session manager is forced to `type: "none"`) | by design — v2 renders subagents natively |
@@ -595,20 +603,21 @@ is not read for plugin config):
 
 ```json
 {
-  "plugin": ["oh-my-opencode-slim@2.2.17"]
+  "plugin": ["oh-my-opencode-slim@2.2.25"]
 }
 ```
 
-For local development, point the config at the built `dist/server`
-**directory**:
+### Local source development (no publishing)
 
-```json
-{
-  "plugin": ["/path/to/oh-my-opencode-slim/dist/server"]
-}
-```
+The v2 local-directory plugin loader resolves a registered directory's own
+entrypoints: the root `index` (server) and `tui` files. This repository's
+root does not contain those (`src/` is the source tree; the v2 bundles live
+under `dist/`), so do **not** register `dist/` or `dist/server` directly —
+the TUI entry would not resolve, and future loader rules may reject a
+partial directory. Use a small external shim directory whose root files
+re-export this repo's built bundles.
 
-Then build:
+Build first:
 
 ```bash
 bun install
@@ -617,6 +626,30 @@ bun run build   # produces dist/index.js (v1), dist/server/index.js (v2
                 # dist/tui2.js (v2 TUI), dist/cli/
 ```
 
+Create the shim OUTSIDE the repository (paths below are generic placeholders
+such as `<home>/opencode-plugins-dev/oh-my-opencode-slim/`):
+
+```ts
+// index.ts — server entry (root `index` is what the loader resolves)
+export { default } from 'file:///absolute/path/to/oh-my-opencode-slim/dist/server/index.js';
+```
+
+```ts
+// tui.ts — TUI entry (root `tui`, loaded by the TUI runtime)
+export { default } from 'file:///absolute/path/to/oh-my-opencode-slim/dist/tui2.js';
+```
+
+Register the shim directory in the OpenCode v2 config:
+
+```json
+{
+  "plugin": ["file:///absolute/path/to/opencode-plugins-dev/oh-my-opencode-slim"]
+}
+```
+
+`bun run build` after each source change; the shim re-exports the fresh
+bundles and no publish step is involved.
+
 Verify with `opencode2 run "list your specialist agents" --standalone` — the
 orchestrator should name explorer, librarian, oracle, designer, fixer.
 
@@ -624,8 +657,9 @@ orchestrator should name explorer, librarian, oracle, designer, fixer.
 
 - **Directory or package entries only.** File-path entries (e.g.
   `…/dist/server.js`) are rejected with the WARN
-  `configured plugin path must be a directory`. A directory entry's
-  `index.js` is the entrypoint — hence `dist/server` above.
+  `configured plugin path must be a directory`. A directory entry's root
+  `index` (server) and `tui` files are the entrypoints — hence the shim
+  above.
 - **Single-file plugins need a wrapper dir** whose `index.js` re-exports the
   original file, e.g. `~/.config/opencode/plugins-dev/<name>/index.js`
   containing `export { default } from "/abs/path/to/plugin.js";`. Do not

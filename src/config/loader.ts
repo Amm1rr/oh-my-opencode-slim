@@ -626,6 +626,33 @@ export function findPluginConfigPaths(directory: string): {
 }
 
 /**
+ * All plugin config candidate paths for a directory, independent of
+ * existence: `.jsonc` then `.json` for every user config search location and
+ * for `<directory>/.opencode`. The loader prefers `.jsonc` over `.json`, and
+ * the v2 watcher must observe creation/deletion/rename and that precedence
+ * change, so it consumes this candidate set instead of existing files only.
+ */
+export function getPluginConfigCandidates(directory: string): {
+  user: string[];
+  project: string[];
+} {
+  const user: string[] = [];
+  for (const configDir of getConfigSearchDirs()) {
+    const basePath = path.join(configDir, 'oh-my-opencode-slim');
+    user.push(`${basePath}.jsonc`, `${basePath}.json`);
+  }
+  const projectBasePath = path.join(
+    directory,
+    '.opencode',
+    'oh-my-opencode-slim',
+  );
+  return {
+    user,
+    project: [`${projectBasePath}.jsonc`, `${projectBasePath}.json`],
+  };
+}
+
+/**
  * Merge two plugin configs using the loader's merge rules.
  * Project/override takes precedence over base.
  */

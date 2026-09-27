@@ -116,10 +116,21 @@ All config files support **JSONC** (JSON with Comments):
 ### Runtime Preset Switching
 
 Presets can also be selected from the TUI with `/preset`. The selection is
-written to the user config file; reload OpenCode for it to take effect. See
+written to the user config file. On v2 hosts the write requests the live
+refresh: after the server-side watcher has re-read the config, the
+saved/applied preset's inference fields (`model`, `variant`, `temperature`,
+`options`) apply to **new child dispatches** (frozen for each child before
+its first request) and the sidebar. Every existing session and every
+non-inference preset field (`prompt`, `tools`, `permission`, `skills`,
+`mcps`, `displayName`) stays frozen until a full reload. A malformed config
+is rejected before any swap — the last-known-good profiles and sidebar are
+kept until the config is fixed. The TUI reports `Saved … Live refresh
+requested` (it cannot observe the server-side watcher); fix the config and
+reload if new dispatches still use the old fields. On v1 hosts, reload
+OpenCode for the change to take effect. See
 [Preset Switching](preset-switching.md) for details.
 
-| `presets` | object | - | Named preset configurations |
+| `presets` | object | - | Named preset configurations. New preset names are limited to letters, digits, `-`, and `_`; `__omo_*` and JavaScript reserved property names (`__proto__`, `constructor`, `prototype`) are rejected for new presets (pre-existing entries with other names stay visible and applicable) |
 |-----------|--------|---|-----------------------------|
 | `presets.<name>.extends` | string | - | Optional single parent preset. The parent is resolved before the child; multiple parents are not supported |
 | `presets.<name>.<agent>.model` | string | - | Model ID in `provider/model` format |
@@ -243,8 +254,13 @@ entry is global: it overrides the active preset, so do not put an agent there
 if its value should vary by preset. Host config remains the final override.
 
 The `/preset` TUI persists the selected preset name and does not create an
-in-memory agent override or hot-swap the current agent registry. Reload
-OpenCode after changing the active preset.
+in-memory agent override. On v2 hosts the write requests the live refresh and
+the re-resolved inference fields apply to new child dispatches (captured
+before their first request) and the sidebar once the server-side watcher has
+refreshed; existing sessions and the prompt/tool/permission/skill/MCP surfaces
+stay frozen until a full reload. A malformed config keeps the last-known-good
+profiles and sidebar and must be fixed (then reloaded) before the change can
+apply. On v1 hosts, reload OpenCode after changing the active preset.
 
 > **niri note:** `companion-v0.1.3` includes the fixed native companion release.
 > To make it open as a bottom-right overlay, add a niri rule matching its stable

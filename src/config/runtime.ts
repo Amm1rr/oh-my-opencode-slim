@@ -209,6 +209,21 @@ export class RuntimeConfig {
     return instance;
   }
 
+  /**
+   * Build an UNREGISTERED instance from a plugin config. Used by read-only
+   * resolution paths (the v2 hot-profile refresh) that must not disturb the
+   * live per-directory singleton. Host override and runtime-preset state can
+   * be applied on the throwaway instance without any global side effect.
+   */
+  static create(
+    directory: string,
+    pluginConfig: ResolvedPluginConfig,
+  ): RuntimeConfig {
+    const instance = new RuntimeConfig(directory);
+    instance.seedPlugin(pluginConfig);
+    return instance;
+  }
+
   /** Remove a directory from the registry (plugin re-init / dispose). */
   static reset(directory: string): void {
     registry.delete(directory);
@@ -524,12 +539,13 @@ export class RuntimeConfig {
    * guard, mirrors the previous config-hook reset branch).
    */
   setRuntimePreset(name: string | null): void {
-    if (!name || !this.pluginConfig?.presets?.[name]) {
+    const presets = this.pluginConfig?.presets;
+    if (!name || !presets || !Object.hasOwn(presets, name)) {
       this.runtimePresetName = null;
       return;
     }
     try {
-      resolvePreset(name, this.pluginConfig.presets);
+      resolvePreset(name, presets);
       this.runtimePresetName = name;
     } catch {
       this.runtimePresetName = null;
@@ -581,7 +597,7 @@ export class RuntimeConfig {
     name: string,
   ): Record<string, AgentOverrideConfig> | undefined {
     const presets = this.pluginConfig?.presets;
-    if (!presets?.[name]) {
+    if (!presets || !Object.hasOwn(presets, name)) {
       return undefined;
     }
     try {

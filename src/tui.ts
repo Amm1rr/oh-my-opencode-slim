@@ -30,6 +30,16 @@ import {
 } from './tui-state';
 import { isPluginDisabledByEnv } from './utils/env';
 import { log } from './utils/logger';
+import {
+  notifyConfigChanged,
+  registerConfigChangeListener,
+} from './v2/config-change-coordinator';
+import {
+  canOpenPresetManagerV2,
+  openPresetManagerV2,
+  type V2PresetManagerContext,
+  type V2PresetUiSurface,
+} from './v2/preset-manager';
 
 const PLUGIN_NAME = 'oh-my-opencode-slim';
 const CONFIG_WARNING_COLOR = 'orange';
@@ -597,6 +607,16 @@ export interface SidebarInteraction {
   hasSelectedText?: () => boolean;
 }
 
+/**
+ * The active preset row rendered below the header/config status block and
+ * above the agent list. `onActivate` is present only when the host can open
+ * the preset manager (v2 dialogs); without it the row is informational-only.
+ */
+export interface SidebarPresetRow {
+  name: string;
+  onActivate?: () => void;
+}
+
 export function createSidebarInteraction(
   navigate: ((sessionID: string) => void) | undefined,
   hasSelectedText?: () => boolean,
@@ -1157,8 +1177,17 @@ function renderSidebar(
   now: () => number = Date.now,
   visibleRootID?: string,
   interaction?: SidebarInteraction,
+  presetRow?: SidebarPresetRow,
 ): JSX.Element {
   const configStatusRow = buildConfigStatusRow(configInvalid, theme);
+  const presetRowEl = presetRow
+    ? buildPresetRow(
+        presetRow,
+        theme,
+        resolveHoverBackground(theme),
+        interaction?.hasSelectedText,
+      )
+    : null;
   const activeAgents = getActiveSidebarAgentNames(snapshot, visibleRootID);
   const targetsByAgent = new Map(
     getSidebarAgentTargets(snapshot, visibleRootID).map((group) => [
@@ -1219,7 +1248,7 @@ function renderSidebar(
     },
     [
       header,
-      ...(sidebarOpen ? [configStatusRow] : []),
+      ...(sidebarOpen ? [configStatusRow, presetRowEl] : []),
       ...(sidebarOpen
         ? getSidebarAgentNames(snapshot).flatMap((agentName) => {
             const model = snapshot.agentModels[agentName] ?? 'pending';
@@ -1327,10 +1356,64 @@ function buildConfigStatusRow(
   );
 }
 
-function readConfigState(directory: string): {
+/**
+ * Active-preset row. With `onActivate` it behaves like the agent rows
+ * (same hover/click decoration); without one it is a muted, informational
+ * line — capability detection happens in the v2 setup, never here.
+ */
+function buildPresetRow(
+  presetRow: SidebarPresetRow,
+  theme: { text: unknown; textMuted: unknown },
+  hoverBackground: unknown,
+  hasSelectedText?: () => boolean,
+): JSX.Element {
+  const clickable = presetRow.onActivate !== undefined;
+  const row = box(
+    {
+      width: '100%',
+      flexDirection: 'row',
+      marginTop: 1,
+      columnGap: 1,
+      ...(clickable ? { shouldFill: true } : {}),
+    },
+    [
+      text({ fg: theme.textMuted, width: 6 }, ['Preset']),
+      text(
+        {
+          fg: clickable ? theme.text : theme.textMuted,
+          wrapMode: 'none',
+          truncate: true,
+          flexShrink: 1,
+        },
+        [presetRow.name],
+      ),
+      ...(clickable
+        ? [text({ fg: theme.textMuted, flexShrink: 0 }, ['▸'])]
+        : []),
+    ],
+  );
+  if (!clickable) return row;
+  return decorateInteractiveRow(row, {
+    hoverBackground,
+    onActivate: presetRow.onActivate,
+    hasSelectedText,
+  });
+}
+
+/**
+ * Config-backed sidebar state (label/badge/compact) read from disk. Exported
+ * for the coordinator/seam tests: the v2 sidebar re-reads this on every poll
+ * and after every config-change notification, so manual edits surface without
+ * waiting for a write through the manager.
+ */
+export interface SidebarConfigState {
   configInvalid: boolean;
   compactSidebar: boolean;
-} {
+  /** Active preset name (`config.preset`), undefined when unset. */
+  presetName?: string;
+}
+
+export function readConfigState(directory: string): SidebarConfigState {
   let configInvalid = false;
   const config = loadPluginConfig(directory, {
     silent: true,
@@ -1349,7 +1432,25 @@ function readConfigState(directory: string): {
     },
   });
   const compactSidebar = config.compactSidebar ?? true;
-  return { configInvalid, compactSidebar };
+  const presetName =
+    typeof config.preset === 'string' && config.preset.length > 0
+      ? config.preset
+      : undefined;
+  return { configInvalid, compactSidebar, presetName };
+}
+
+/**
+ * Surface a broken config without replacing config-backed rows with the
+ * loader's fallback defaults. Once the file is valid again, the fresh state
+ * atomically replaces the retained values.
+ */
+export function retainLastGoodConfigState(
+  current: SidebarConfigState,
+  next: SidebarConfigState,
+): SidebarConfigState {
+  return next.configInvalid
+    ? { ...current, configInvalid: true }
+    : { ...next, configInvalid: false };
 }
 
 export function readConfigInvalid(directory: string): boolean {
@@ -1430,12 +1531,12 @@ interface V2TuiSlotClaim {
   render: (input: { sessionID: string }) => JSX.Element;
 }
 
-interface V2TuiContext {
+interface V2TuiContext extends V2PresetManagerContext {
   location?: { directory: string };
   client?: unknown;
   renderer: { requestRender: () => void; getSelection?: () => unknown };
   theme: V2TuiThemeTokens;
-  ui: {
+  ui: V2PresetUiSurface & {
     slot: (claim: V2TuiSlotClaim) => () => void;
     router: {
       current: () => { type?: string; sessionID?: string };
@@ -1467,20 +1568,41 @@ function v2ThemeView(theme: V2TuiThemeTokens): {
 }
 
 /**
- * V2 entry point: sidebar slot + refresh loop; returns cleanup.
- * `/preset` stays v1-only (`api.command` is absent on v2).
+ * V2 entry point: sidebar slot (incl. the clickable preset row) + refresh
+ * loop; returns cleanup. `/preset` is registered by the v2 TUI plugin entry
+ * (`src/v2/tui.ts`) through the host keymap; the sidebar's preset row opens
+ * the same three-level manager.
  */
 async function setup(ctx: V2TuiContext): Promise<undefined | (() => void)> {
   if (isPluginDisabledByEnv()) return;
 
   const version = (await readPackageVersion()) ?? 'dev';
   let configDirectory = ctx.location?.directory ?? process.cwd();
-  let { configInvalid, compactSidebar } = readConfigState(configDirectory);
+  let { configInvalid, compactSidebar, presetName } =
+    readConfigState(configDirectory);
+  /** Re-read the config-backed sidebar state; returns true when it changed. */
+  const applyConfigState = (): boolean => {
+    const next = retainLastGoodConfigState(
+      { configInvalid, compactSidebar, presetName },
+      readConfigState(configDirectory),
+    );
+    const changed =
+      next.configInvalid !== configInvalid ||
+      next.compactSidebar !== compactSidebar ||
+      next.presetName !== presetName;
+    if (changed) {
+      configInvalid = next.configInvalid;
+      compactSidebar = next.compactSidebar;
+      presetName = next.presetName;
+    }
+    return changed;
+  };
   const [snapshot, setSnapshot] = createSignal(
     readTuiSnapshot(configDirectory),
   );
   const [animationNow, setAnimationNow] = createSignal(Date.now());
   let disposed = false;
+  let unregisterConfigListener = () => {};
   const remoteCache: RemoteModelCache = {};
   const refreshSidebar = async () => {
     if (disposed) return;
@@ -1488,9 +1610,24 @@ async function setup(ctx: V2TuiContext): Promise<undefined | (() => void)> {
     let nextSnapshot = await readTuiSnapshotAsync(currentDirectory);
     if (disposed) return;
     const directoryChanged = currentDirectory !== configDirectory;
+    let stateChanged = false;
     if (directoryChanged) {
       configDirectory = currentDirectory;
-      ({ configInvalid, compactSidebar } = readConfigState(configDirectory));
+      // Never carry one project's last-good preset/layout into another.
+      ({ configInvalid, compactSidebar, presetName } =
+        readConfigState(configDirectory));
+      bindConfigListener();
+      stateChanged = true;
+    }
+    // Config-backed rows (preset label, invalid badge, compact mode) are
+    // re-read on EVERY poll — even when the snapshot is unchanged — so
+    // manual config edits surface without waiting for the next write.
+    if (!directoryChanged) {
+      try {
+        stateChanged = applyConfigState();
+      } catch (err) {
+        log('[v2][tui] config state read failed', String(err));
+      }
     }
     nextSnapshot = await hydrateRemoteModels(
       nextSnapshot,
@@ -1507,10 +1644,14 @@ async function setup(ctx: V2TuiContext): Promise<undefined | (() => void)> {
     ) {
       return;
     }
-    if (!directoryChanged && snapshotSectionsEqual(nextSnapshot, snapshot())) {
+    const snapshotChanged =
+      directoryChanged || !snapshotSectionsEqual(nextSnapshot, snapshot());
+    if (!snapshotChanged && !stateChanged) {
       return;
     }
-    setSnapshot(nextSnapshot);
+    if (snapshotChanged) {
+      setSnapshot(nextSnapshot);
+    }
     ctx.renderer.requestRender();
   };
   const scheduleRefresh = createSerializedRefresh(refreshSidebar);
@@ -1534,6 +1675,47 @@ async function setup(ctx: V2TuiContext): Promise<undefined | (() => void)> {
     selectionGuard(ctx.renderer),
   );
 
+  // Preset row: visible whenever a preset is active, clickable only when the
+  // host exposes the promise dialogs the manager needs. A successful config
+  // write notifies the shared coordinator; this sidebar's listener re-reads
+  // the config-backed rows immediately, while the server-side watcher
+  // refreshes the runtime profiles NEW child dispatches use. Running sessions
+  // keep their own model bindings by design.
+  const presetManagerCtx = (): V2TuiContext => {
+    const augmented = Object.create(ctx as object) as V2TuiContext;
+    augmented.onConfigChanged = () =>
+      notifyConfigChanged(configDirectory, 'preset-manager');
+    return augmented;
+  };
+  function bindConfigListener(): void {
+    unregisterConfigListener();
+    unregisterConfigListener = registerConfigChangeListener(
+      configDirectory,
+      () => {
+        let changed = false;
+        try {
+          changed = applyConfigState();
+        } catch (err) {
+          log('[v2][tui] config state read failed', String(err));
+          return { ok: false, reason: String(err) };
+        }
+        if (changed) scheduleRefresh();
+        return { ok: true };
+      },
+    );
+  }
+  bindConfigListener();
+  const presetRowView = (): SidebarPresetRow | undefined => {
+    if (presetName === undefined) return undefined;
+    if (!canOpenPresetManagerV2(ctx)) return { name: presetName };
+    return {
+      name: presetName,
+      onActivate: () => {
+        void openPresetManagerV2(presetManagerCtx(), configDirectory);
+      },
+    };
+  };
+
   const disposeSlot = ctx.ui.slot({
     append: 'sidebar.content',
     render: () =>
@@ -1555,12 +1737,14 @@ async function setup(ctx: V2TuiContext): Promise<undefined | (() => void)> {
           animationNow,
           visible,
           interaction,
+          presetRowView(),
         );
       }),
   });
 
   return () => {
     disposed = true;
+    unregisterConfigListener();
     disposeSlot();
     clearInterval(renderTimer);
     clearInterval(animationTimer);
