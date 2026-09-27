@@ -136,6 +136,36 @@ describe('marketplace tools', () => {
     ).toEqual([{ id: 'x' }]);
   });
 
+  test('does not treat orchestrator as canonical when a specialist owns that visible name', async () => {
+    const identities = resolveFinalizedOrchestratorIdentities({
+      agentNames: ['orchestrator', 'fixer'],
+      identities: { orchestrator: 'Lead', fixer: 'orchestrator' },
+    });
+    expect(identities).toEqual(new Set(['Lead']));
+
+    const tools = createMarketplaceTools({
+      service: fixture().service,
+      getOrchestratorIdentities: () => identities,
+    });
+    const inspect = tools.marketplace_inspect as unknown as {
+      execute(args: never, ctx: never): Promise<string>;
+    };
+    await expect(
+      inspect.execute(
+        { action: 'list' } as never,
+        { agent: 'orchestrator' } as never,
+      ),
+    ).rejects.toThrow('only to the orchestrator');
+    expect(
+      JSON.parse(
+        await inspect.execute(
+          { action: 'list' } as never,
+          { agent: 'Lead' } as never,
+        ),
+      ),
+    ).toEqual([{ id: 'x' }]);
+  });
+
   test('management adapters resolve files against cwd and never claim reload', async () => {
     const { calls, service } = fixture();
     const tools = createMarketplaceTools({ service, cwd: '/project' });

@@ -32,22 +32,26 @@ export function resolveFinalizedOrchestratorIdentities(input: {
   readonly agentNames: readonly string[];
   readonly identities: Readonly<Record<string, string>>;
 }): ReadonlySet<string> {
-  const displayIdentity = input.identities.orchestrator;
-  const allowed = new Set(['orchestrator']);
-  if (!displayIdentity) return allowed;
+  const ownersByIdentity = new Map<string, Set<string>>();
+  const addOwner = (identity: string, owner: string) => {
+    const normalizedIdentity = normalizeAgentName(identity);
+    const owners =
+      ownersByIdentity.get(normalizedIdentity) ?? new Set<string>();
+    owners.add(owner);
+    ownersByIdentity.set(normalizedIdentity, owners);
+  };
 
-  const normalizedDisplayIdentity = normalizeAgentName(displayIdentity);
-  const owners = input.agentNames.filter((agentName) => {
-    const identity = input.identities[agentName];
-    return (
-      identity !== undefined &&
-      normalizeAgentName(identity) === normalizedDisplayIdentity
-    );
-  });
-  if (owners.length === 1 && owners[0] === 'orchestrator') {
-    allowed.add(normalizedDisplayIdentity);
+  for (const agentName of input.agentNames) {
+    const displayIdentity = input.identities[agentName] ?? agentName;
+    addOwner(agentName, agentName);
+    addOwner(displayIdentity, agentName);
   }
-  return allowed;
+
+  return new Set(
+    [...ownersByIdentity]
+      .filter(([, owners]) => owners.size === 1 && owners.has('orchestrator'))
+      .map(([identity]) => identity),
+  );
 }
 
 function assertOrchestrator(
