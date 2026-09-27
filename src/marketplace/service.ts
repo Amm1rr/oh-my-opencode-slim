@@ -38,10 +38,16 @@ export interface MarketplaceServiceOptions
   projectDir?: string;
   registryClient?: MarketplaceRegistryDownloadClient;
   getLivePackages?: () => readonly MarketplaceLivePackage[] | undefined;
-  getDesiredPackages?: (
+  getDesiredState?: (
     inspection: MarketplaceStoreInspection,
-  ) => readonly MarketplaceLivePackage[];
+  ) => MarketplaceDesiredState;
   getPresetOverride?: () => string | undefined;
+}
+
+export interface MarketplaceDesiredState {
+  readonly packageIds: readonly string[];
+  readonly packages?: readonly MarketplaceLivePackage[];
+  readonly error?: string;
 }
 
 export type MarketplaceRegistryDownloadClient = Pick<
@@ -103,7 +109,7 @@ export class MarketplaceService {
   readonly projectDir: string;
   readonly registryClient: MarketplaceRegistryDownloadClient;
   private readonly getLivePackages?: MarketplaceServiceOptions['getLivePackages'];
-  private readonly getDesiredPackages?: MarketplaceServiceOptions['getDesiredPackages'];
+  private readonly getDesiredState?: MarketplaceServiceOptions['getDesiredState'];
   private readonly getPresetOverride?: MarketplaceServiceOptions['getPresetOverride'];
 
   constructor(options: MarketplaceServiceOptions = {}) {
@@ -111,7 +117,7 @@ export class MarketplaceService {
     this.store = new MarketplaceStore({ ...options, pluginVersion });
     this.projectDir = options.projectDir ?? process.cwd();
     this.getLivePackages = options.getLivePackages;
-    this.getDesiredPackages = options.getDesiredPackages;
+    this.getDesiredState = options.getDesiredState;
     this.getPresetOverride = options.getPresetOverride;
     this.registryClient =
       options.registryClient ??
@@ -212,11 +218,14 @@ export class MarketplaceService {
       store: this.store,
       inspection,
       ...(presetOverride === undefined ? {} : { presetOverride }),
+      ...(desired === undefined
+        ? {}
+        : { desiredPackageIds: desired.packageIds }),
       ...(livePackages === undefined ? {} : { livePackages }),
-      ...(desired.packages === undefined
+      ...(desired?.packages === undefined
         ? {}
         : { desiredPackages: desired.packages }),
-      ...(desired.error === undefined
+      ...(desired?.error === undefined
         ? {}
         : { desiredConfigError: desired.error }),
     });
@@ -232,25 +241,28 @@ export class MarketplaceService {
       store: this.store,
       inspection,
       ...(presetOverride === undefined ? {} : { presetOverride }),
+      ...(desired === undefined
+        ? {}
+        : { desiredPackageIds: desired.packageIds }),
       ...(livePackages === undefined ? {} : { livePackages }),
-      ...(desired.packages === undefined
+      ...(desired?.packages === undefined
         ? {}
         : { desiredPackages: desired.packages }),
-      ...(desired.error === undefined
+      ...(desired?.error === undefined
         ? {}
         : { desiredConfigError: desired.error }),
     });
   }
 
-  private readDesiredPackages(inspection: MarketplaceStoreInspection): {
-    packages?: readonly MarketplaceLivePackage[];
-    error?: string;
-  } {
-    if (!this.getDesiredPackages) return {};
+  private readDesiredPackages(
+    inspection: MarketplaceStoreInspection,
+  ): MarketplaceDesiredState | undefined {
+    if (!this.getDesiredState) return undefined;
     try {
-      return { packages: this.getDesiredPackages(inspection) };
+      return this.getDesiredState(inspection);
     } catch (error) {
       return {
+        packageIds: [],
         error: error instanceof Error ? error.message : String(error),
       };
     }

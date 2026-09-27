@@ -68,7 +68,7 @@ import {
 import { createInterviewManager } from './interview';
 import { discoverPreflightSkills } from './marketplace/preflight';
 import { MarketplaceService } from './marketplace/service';
-import { readDesiredMarketplacePackageIds } from './marketplace/status';
+import { resolveDesiredMarketplacePackageIds } from './marketplace/status';
 import { createBuiltinMcps } from './mcp';
 import {
   ast_grep_replace,
@@ -505,8 +505,8 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
 
     runtime = RuntimeConfig.get(ctx.directory);
     const activePresetName = runtime.getRuntimePreset() ?? config.preset;
-    selectedMarketplacePackageIds = readDesiredMarketplacePackageIds(
-      ctx.directory,
+    selectedMarketplacePackageIds = resolveDesiredMarketplacePackageIds(
+      config,
       activePresetName,
     );
     rewriteDisplayNameMentions = createDisplayNameMentionRewriter(runtime);
@@ -1247,20 +1247,31 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       return registryBridge.requireRegistry().marketplacePackages;
     },
     getPresetOverride: () => runtime.getRuntimePreset() ?? undefined,
-    getDesiredPackages: (packageInspection) => {
-      if (hostSnapshotProvenance !== 'clean' || !latestHostSnapshot) {
-        throw new Error(
-          'The current host agent snapshot is not trustworthy for desired marketplace status',
-        );
-      }
+    getDesiredState: (packageInspection) => {
       const freshConfig = loadPluginConfig(ctx.directory, { silent: true });
+      const runtimePreset = runtime.getRuntimePreset();
+      const desiredPackageIds = resolveDesiredMarketplacePackageIds(
+        freshConfig,
+        runtimePreset ?? undefined,
+      );
+      if (hostSnapshotProvenance !== 'clean' || !latestHostSnapshot) {
+        return {
+          packageIds: desiredPackageIds,
+          error:
+            'The current host agent snapshot is not trustworthy for desired marketplace status',
+        };
+      }
       if (
         packageInspection.lockfileError ||
         packageInspection.operationalError
       ) {
-        throw new Error(
-          packageInspection.lockfileError ?? packageInspection.operationalError,
-        );
+        return {
+          packageIds: desiredPackageIds,
+          error:
+            packageInspection.lockfileError ??
+            packageInspection.operationalError ??
+            'Marketplace package inspection is incomplete',
+        };
       }
       const installedPackages = new Map(
         packageInspection.packages.map((stored) => [
@@ -1286,30 +1297,35 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         freshConfig,
       );
       freshRuntime.captureHostConfig(latestHostSnapshot ?? {});
-      const runtimePreset = runtime.getRuntimePreset();
       if (runtimePreset) freshRuntime.setRuntimePreset(runtimePreset);
-      const activePreset = runtimePreset ?? freshConfig.preset;
       const freshPluginMcps = createBuiltinMcps(freshRuntime.disabledMcps);
-      const freshRegistry = buildResolvedAgentRegistry(freshRuntime, {
-        hostSnapshot: latestHostSnapshot,
-        nativePermissionsByAgent: latestNativePermissionsByAgent,
-        projectDirectory: ctx.directory,
-        hostFlavor,
-        pluginMcps: freshPluginMcps,
-        marketplace: {
-          selectedPackageIds: readDesiredMarketplacePackageIds(
-            ctx.directory,
-            activePreset,
-          ),
-          store: readOnlyActivationStore,
-          pluginVersion: getBuildInfo().version,
-          availableSkillNames: discoverPreflightSkills(
-            freshRuntime,
-            ctx.directory,
-          ),
-        },
-      });
-      return freshRegistry.marketplacePackages;
+      try {
+        const freshRegistry = buildResolvedAgentRegistry(freshRuntime, {
+          hostSnapshot: latestHostSnapshot,
+          nativePermissionsByAgent: latestNativePermissionsByAgent,
+          projectDirectory: ctx.directory,
+          hostFlavor,
+          pluginMcps: freshPluginMcps,
+          marketplace: {
+            selectedPackageIds: desiredPackageIds,
+            store: readOnlyActivationStore,
+            pluginVersion: getBuildInfo().version,
+            availableSkillNames: discoverPreflightSkills(
+              freshRuntime,
+              ctx.directory,
+            ),
+          },
+        });
+        return {
+          packageIds: desiredPackageIds,
+          packages: freshRegistry.marketplacePackages,
+        };
+      } catch (error) {
+        return {
+          packageIds: desiredPackageIds,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
     },
   });
   registryBridge = {

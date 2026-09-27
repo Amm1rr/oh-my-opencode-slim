@@ -1,13 +1,6 @@
 import type { MarketplaceLivePackage } from '../agents/registry.js';
-import {
-  findPluginConfigPaths,
-  loadPluginConfigFromPath,
-  mergePluginConfigs,
-} from '../config/loader.js';
-import {
-  PresetResolutionError,
-  resolvePresetDefinition,
-} from '../config/presets.js';
+import { loadPluginConfig } from '../config/loader.js';
+import type { ResolvedPluginConfig } from '../config/schema.js';
 import type { MarketplaceStore, MarketplaceStoreInspection } from './store.js';
 
 export interface MarketplaceRuntimeStatus {
@@ -42,30 +35,21 @@ export function readDesiredMarketplacePackageIds(
   directory: string,
   presetOverride?: string,
 ): readonly string[] {
-  const paths = findPluginConfigPaths(directory);
-  const userConfig = paths.userConfigPath
-    ? (loadPluginConfigFromPath(paths.userConfigPath, { silent: true }) ?? {})
-    : {};
-  const projectConfig = paths.projectConfigPath
-    ? loadPluginConfigFromPath(paths.projectConfigPath, { silent: true })
-    : null;
-  const config = projectConfig
-    ? mergePluginConfigs(userConfig, projectConfig)
-    : userConfig;
-  const presetName =
-    presetOverride ?? process.env.OH_MY_OPENCODE_SLIM_PRESET ?? config.preset;
+  const config = loadPluginConfig(directory, { silent: true });
+  return resolveDesiredMarketplacePackageIds(config, presetOverride);
+}
+
+export function resolveDesiredMarketplacePackageIds(
+  config: ResolvedPluginConfig,
+  presetOverride?: string,
+): readonly string[] {
+  // loadPluginConfig applies a truthy environment override; runtime overrides
+  // have priority but an empty one falls through exactly like startup.
+  const presetName = presetOverride || config.preset;
   if (!presetName) return [];
-  const presets = config.presets ?? {};
-  if (!presets[presetName]) return [];
-  try {
-    return [
-      ...(resolvePresetDefinition(presetName, presets).marketplace?.agents ??
-        []),
-    ].sort(textOrder);
-  } catch (error) {
-    if (error instanceof PresetResolutionError) return [];
-    throw error;
-  }
+  return [...(config.marketplacePresets?.[presetName]?.agents ?? [])].sort(
+    textOrder,
+  );
 }
 
 /** Read desired config and package verification without changing marketplace state. */
@@ -76,14 +60,15 @@ export function readMarketplaceRuntimeStatus(input: {
   readonly inspection?: MarketplaceStoreInspection;
   /** Active in-memory preset override; omitted in standalone CLI contexts. */
   readonly presetOverride?: string;
+  /** Selection computed from the same normalized config used for projection. */
+  readonly desiredPackageIds?: readonly string[];
   readonly livePackages?: readonly MarketplaceLivePackage[];
   readonly desiredPackages?: readonly MarketplaceLivePackage[];
   readonly desiredConfigError?: string;
 }): MarketplaceRuntimeStatus {
-  const desiredPackageIds = readDesiredMarketplacePackageIds(
-    input.directory,
-    input.presetOverride,
-  );
+  const desiredPackageIds =
+    input.desiredPackageIds ??
+    readDesiredMarketplacePackageIds(input.directory, input.presetOverride);
   const inspection = input.inspection ?? input.store.inspectAll();
   const wanted = new Set(desiredPackageIds);
   const observedVerifications = new Map(
@@ -188,6 +173,7 @@ export function requestMarketplaceReload(input: {
   readonly store: Pick<MarketplaceStore, 'inspectAll'>;
   readonly inspection?: MarketplaceStoreInspection;
   readonly presetOverride?: string;
+  readonly desiredPackageIds?: readonly string[];
   readonly livePackages?: readonly MarketplaceLivePackage[];
   readonly desiredPackages?: readonly MarketplaceLivePackage[];
   readonly desiredConfigError?: string;

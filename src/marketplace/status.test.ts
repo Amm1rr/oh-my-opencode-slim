@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  readDesiredMarketplacePackageIds,
   readMarketplaceRuntimeStatus,
   requestMarketplaceReload,
 } from './status.js';
@@ -48,6 +49,32 @@ const packageA = {
 };
 
 describe('marketplace runtime status', () => {
+  test('empty preset environment value falls back to the configured preset', () => {
+    const previousPreset = process.env.OH_MY_OPENCODE_SLIM_PRESET;
+    const fixture = setup(
+      {
+        preset: 'configured',
+        presets: {
+          configured: { marketplace: { agents: ['team/configured'] } },
+        },
+      },
+      { packages: [], verifications: [] },
+    );
+    try {
+      process.env.OH_MY_OPENCODE_SLIM_PRESET = '';
+      expect(readDesiredMarketplacePackageIds(fixture.directory)).toEqual([
+        'team/configured',
+      ]);
+    } finally {
+      if (previousPreset === undefined) {
+        delete process.env.OH_MY_OPENCODE_SLIM_PRESET;
+      } else {
+        process.env.OH_MY_OPENCODE_SLIM_PRESET = previousPreset;
+      }
+      fixture.cleanup();
+    }
+  });
+
   test('distinguishes fresh desired/current package state from frozen live state', () => {
     const fixture = setup(
       {
