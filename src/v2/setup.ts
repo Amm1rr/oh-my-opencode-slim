@@ -1182,7 +1182,12 @@ export function createPermissionRulesBridge(
 
     const getSession = session?.get;
     if (typeof getSession !== 'function') {
-      if (options.requireKnownIdentity) rejectUnknownIdentity();
+      // Without a lookup API, only an observed child is a known-identity
+      // barrier candidate. Roots and sessions with no observed classification
+      // must not be blocked merely because marketplace agents are enabled.
+      if (options.requireKnownIdentity && initialIdentity?.parentID) {
+        rejectUnknownIdentity();
+      }
       warnUnknownIdentity();
       return;
     }
@@ -2084,6 +2089,13 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
         const reg = await ctx.agent.transform(captureAgentDraft);
         disposers.push(() => reg.dispose());
         if (permissionSnapshotFailure) {
+          if (
+            permissionSnapshotFailure.message.startsWith(
+              'Marketplace agents require ctx.session.update',
+            )
+          ) {
+            throw permissionSnapshotFailure;
+          }
           throw new Error('Agent permission snapshot finalization failed', {
             cause: permissionSnapshotFailure,
           });
@@ -2304,6 +2316,13 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
             );
           }
           if (permissionSnapshotFailure) {
+            if (
+              permissionSnapshotFailure.message.startsWith(
+                'Marketplace agents require ctx.session.update',
+              )
+            ) {
+              throw permissionSnapshotFailure;
+            }
             throw new Error('Agent permission snapshot finalization failed', {
               cause: permissionSnapshotFailure,
             });

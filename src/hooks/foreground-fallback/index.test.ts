@@ -3787,7 +3787,13 @@ describe('ForegroundFallbackManager chain exhaustion', () => {
   test('re-walks from the second chain entry on each new user turn', async () => {
     const { mocks } = createMockClient();
     const mgr = new ForegroundFallbackManager(
-      makeChains(),
+      {
+        orchestrator: [
+          { id: 'anthropic/claude-opus-4-5', variant: 'high' },
+          { id: 'openai/gpt-4o', variant: 'medium' },
+          { id: 'google/gemini-2.5-pro', variant: 'high' },
+        ],
+      },
       true,
       {
         directory: '/test',
@@ -3821,7 +3827,10 @@ describe('ForegroundFallbackManager chain exhaustion', () => {
       expect(mocks.promptAsync).toHaveBeenCalledWith(
         expect.objectContaining({
           body: expect.objectContaining({
-            model: { providerID: 'openai', modelID: 'gpt-4o' },
+            model: expect.objectContaining({
+              providerID: 'openai',
+              modelID: 'gpt-4o',
+            }),
           }),
         }),
       );
@@ -3863,7 +3872,10 @@ describe('ForegroundFallbackManager chain exhaustion', () => {
       expect(mocks.promptAsync.mock.calls[1]?.[0]).toEqual(
         expect.objectContaining({
           body: expect.objectContaining({
-            model: { providerID: 'openai', modelID: 'gpt-4o' },
+            model: expect.objectContaining({
+              providerID: 'openai',
+              modelID: 'gpt-4o',
+            }),
           }),
         }),
       );

@@ -119,6 +119,7 @@ function makeBridge(options?: {
   policy?: unknown;
   pluginAgents?: ReadonlySet<string>;
   onUnavailable?: () => void;
+  requireKnownIdentity?: boolean;
 }): ReturnType<typeof createPermissionRulesBridge> {
   return createPermissionRulesBridge(options?.session, {
     permissionForAgent: (agent) =>
@@ -128,6 +129,7 @@ function makeBridge(options?: {
           : TASK_POLICY
         : undefined,
     pluginAgents: options?.pluginAgents ?? new Set(['probe']),
+    ...(options?.requireKnownIdentity ? { requireKnownIdentity: true } : {}),
     ...(options?.onUnavailable ? { onUnavailable: options.onUnavailable } : {}),
   });
 }
@@ -426,6 +428,31 @@ describe('built-in agent permission-rule derivation matrix', () => {
 describe('createPermissionRulesBridge', () => {
   beforeEach(() => {
     resetV2GenerationWarnings();
+  });
+
+  test('without session.get, ordinary prompts continue but observed unknown children block', async () => {
+    const ordinary = makeBridge({
+      session: makeSession(),
+      requireKnownIdentity: true,
+    });
+    await expect(
+      ordinary.ensurePromptPermission('ses_ordinary_root'),
+    ).resolves.toBeUndefined();
+
+    const marketplace = makeBridge({
+      session: makeSession(),
+      requireKnownIdentity: true,
+    });
+    await marketplace.observeEvent({
+      type: 'session.created',
+      data: { sessionID: 'ses_marketplace_child', parentID: 'ses_parent' },
+    });
+    await expect(
+      marketplace.ensurePromptPermission('ses_marketplace_child'),
+    ).rejects.toThrow('child session identity is unknown');
+
+    await ordinary.dispose();
+    await marketplace.dispose();
   });
 
   test('(a) applies exact-match rules on a plugin-managed child session', async () => {

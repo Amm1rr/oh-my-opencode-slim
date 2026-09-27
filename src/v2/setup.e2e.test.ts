@@ -983,13 +983,33 @@ describe('createV2Setup e2e', () => {
       expect(childUpdates[0]?.permissions).toContainEqual(
         expect.objectContaining({ action: '*', resource: '*', effect: 'deny' }),
       );
-      // session.update being present is not sufficient for marketplace
-      // admission: an unobserved child must be identified and have its policy
-      // installed before the downstream prompt bridge can proceed.
+      // With no session.get, an unobserved session cannot be assumed to be a
+      // marketplace child. Ordinary/unclassified prompts remain admissible.
       await expect(
         calls.promptHookCb?.({
           sessionID: 'ses_marketplace_unknown',
           messageID: 'msg_unknown',
+        }),
+      ).resolves.toBeUndefined();
+
+      // Once a session event establishes that this is a child, missing agent
+      // identity is a marketplace policy barrier and must still block prompt.
+      events.push({
+        type: 'session.created',
+        data: {
+          sessionID: 'ses_marketplace_unclassified_child',
+          parentID: 'ses_marketplace_parent',
+        },
+      });
+      const childEventDeadline = Date.now() + 2_000;
+      while (events.pulled() < 2 && Date.now() < childEventDeadline) {
+        await Bun.sleep(10);
+      }
+      await Bun.sleep(10);
+      await expect(
+        calls.promptHookCb?.({
+          sessionID: 'ses_marketplace_unclassified_child',
+          messageID: 'msg_unclassified_child',
         }),
       ).rejects.toThrow(/identity is unknown; prompt blocked/i);
     } finally {
@@ -1197,7 +1217,7 @@ describe('createV2Setup e2e', () => {
     }
   }, 20_000);
 
-  test('missing MCP draft callback cannot become an invented empty snapshot', async () => {
+  test('missing MCP draft callback keeps managed prompts behind readiness', async () => {
     const { ctx, calls } = makeMockV2Context(projectDir);
     const mcp = ctx.mcp as unknown as {
       transform: (callback: (draft: unknown) => void) => Promise<{
@@ -1208,9 +1228,18 @@ describe('createV2Setup e2e', () => {
       dispose: () => calls.disposed.push('mcp.transform'),
     });
 
-    await expect(createV2Setup()(ctx)).rejects.toThrow(
-      'Unable to snapshot configured MCP namespaces',
-    );
+    const cleanup = await createV2Setup()(ctx);
+    try {
+      await expect(
+        calls.promptHookCb?.({
+          sessionID: 'ses_missing_mcp_draft',
+          messageID: 'msg_missing_mcp_draft',
+          prompt: { text: 'Do not admit without finalized MCP scope.' },
+        }),
+      ).rejects.toThrow('Agent permission snapshot readiness timed out');
+    } finally {
+      await cleanup();
+    }
     expect(calls.disposed).toContain('mcp.transform');
   }, 20_000);
 
