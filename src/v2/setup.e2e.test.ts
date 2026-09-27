@@ -839,10 +839,10 @@ describe('createV2Setup e2e', () => {
       expect(deferredAgentTransform).toBeFunction();
       expect(calls.hooks).toContain('session:prompt');
       const earlyPrompt = calls.promptHookCb?.({
-          sessionID: 'ses_deferred_mcp_child',
-          messageID: 'msg_early',
-          prompt: { text: 'early child prompt' },
-        });
+        sessionID: 'ses_deferred_mcp_child',
+        messageID: 'msg_early',
+        prompt: { text: 'early child prompt' },
+      });
       events.push({
         type: 'session.created',
         data: {

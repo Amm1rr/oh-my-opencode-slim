@@ -71,6 +71,7 @@ import {
   type V2CommandSubmit,
 } from './session-submit';
 import type {
+  V2AgentDraft,
   V2Cleanup,
   V2CommandDefinition,
   V2CommandDraft,
@@ -80,7 +81,6 @@ import type {
   V2SessionContextEvent,
   V2SessionModelRequestEvent,
   V2SessionPromptEvent,
-  V2AgentDraft,
   V2ToolAfterEvent,
   V2ToolBeforeEvent,
 } from './types';
@@ -1929,7 +1929,10 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       let hostMcpSnapshot: Record<string, unknown> | undefined;
 
       const finalizeAgentDraft = (draft: V2AgentDraft) => {
-        if (hostMcpSnapshot === undefined || nativeAgentSnapshot === undefined) {
+        if (
+          hostMcpSnapshot === undefined ||
+          nativeAgentSnapshot === undefined
+        ) {
           return;
         }
         const registry =
@@ -1952,7 +1955,8 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
           if (
             !registry.agentNames.includes(name) &&
             !Object.hasOwn(registry.identities, name)
-          ) continue;
+          )
+            continue;
           applyAgentToDraft(
             draft,
             name,
