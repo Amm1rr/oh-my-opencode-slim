@@ -8,7 +8,7 @@ import {
   PresetResolutionError,
   resolvePresetDefinition,
 } from '../config/presets.js';
-import type { MarketplaceStore } from './store.js';
+import type { MarketplaceStore, MarketplaceStoreInspection } from './store.js';
 
 export interface MarketplaceRuntimeStatus {
   readonly desiredPackageIds: readonly string[];
@@ -72,6 +72,8 @@ export function readDesiredMarketplacePackageIds(
 export function readMarketplaceRuntimeStatus(input: {
   readonly directory: string;
   readonly store: Pick<MarketplaceStore, 'inspectAll'>;
+  /** Reuse the service's single lease-consistent inspection when provided. */
+  readonly inspection?: MarketplaceStoreInspection;
   /** Active in-memory preset override; omitted in standalone CLI contexts. */
   readonly presetOverride?: string;
   readonly livePackages?: readonly MarketplaceLivePackage[];
@@ -82,7 +84,7 @@ export function readMarketplaceRuntimeStatus(input: {
     input.directory,
     input.presetOverride,
   );
-  const inspection = input.store.inspectAll();
+  const inspection = input.inspection ?? input.store.inspectAll();
   const wanted = new Set(desiredPackageIds);
   const observedVerifications = new Map(
     inspection.verifications
@@ -184,6 +186,7 @@ export function readMarketplaceRuntimeStatus(input: {
 export function requestMarketplaceReload(input: {
   readonly directory: string;
   readonly store: Pick<MarketplaceStore, 'inspectAll'>;
+  readonly inspection?: MarketplaceStoreInspection;
   readonly presetOverride?: string;
   readonly livePackages?: readonly MarketplaceLivePackage[];
   readonly desiredPackages?: readonly MarketplaceLivePackage[];

@@ -14,7 +14,6 @@ export interface RegistryFactoryBridge {
       Record<string, readonly V2PermissionRule[]>
     >,
   ): ResolvedAgentRegistry;
-  markHostSnapshotAmbiguous(): void;
   requireRegistry(): ResolvedAgentRegistry;
   prepareCommands(config: Record<string, unknown>): void;
   retire(): void;

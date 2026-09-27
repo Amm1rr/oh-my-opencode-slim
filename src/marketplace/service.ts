@@ -25,6 +25,7 @@ import {
 } from './status.js';
 import {
   MarketplaceStore,
+  type MarketplaceStoreInspection,
   type MarketplaceStoreOptions,
   type MarketplaceVerification,
   type StoredMarketplacePackage,
@@ -37,7 +38,9 @@ export interface MarketplaceServiceOptions
   projectDir?: string;
   registryClient?: MarketplaceRegistryDownloadClient;
   getLivePackages?: () => readonly MarketplaceLivePackage[] | undefined;
-  getDesiredPackages?: () => readonly MarketplaceLivePackage[];
+  getDesiredPackages?: (
+    inspection: MarketplaceStoreInspection,
+  ) => readonly MarketplaceLivePackage[];
   getPresetOverride?: () => string | undefined;
 }
 
@@ -201,11 +204,13 @@ export class MarketplaceService {
 
   status(): MarketplaceRuntimeStatus {
     const livePackages = this.getLivePackages?.();
-    const desired = this.readDesiredPackages();
+    const inspection = this.store.inspectAll();
+    const desired = this.readDesiredPackages(inspection);
     const presetOverride = this.getPresetOverride?.();
     return readMarketplaceRuntimeStatus({
       directory: this.projectDir,
       store: this.store,
+      inspection,
       ...(presetOverride === undefined ? {} : { presetOverride }),
       ...(livePackages === undefined ? {} : { livePackages }),
       ...(desired.packages === undefined
@@ -219,11 +224,13 @@ export class MarketplaceService {
 
   requestReload(): MarketplaceReloadRequest {
     const livePackages = this.getLivePackages?.();
-    const desired = this.readDesiredPackages();
+    const inspection = this.store.inspectAll();
+    const desired = this.readDesiredPackages(inspection);
     const presetOverride = this.getPresetOverride?.();
     return requestMarketplaceReload({
       directory: this.projectDir,
       store: this.store,
+      inspection,
       ...(presetOverride === undefined ? {} : { presetOverride }),
       ...(livePackages === undefined ? {} : { livePackages }),
       ...(desired.packages === undefined
@@ -235,13 +242,13 @@ export class MarketplaceService {
     });
   }
 
-  private readDesiredPackages(): {
+  private readDesiredPackages(inspection: MarketplaceStoreInspection): {
     packages?: readonly MarketplaceLivePackage[];
     error?: string;
   } {
     if (!this.getDesiredPackages) return {};
     try {
-      return { packages: this.getDesiredPackages() };
+      return { packages: this.getDesiredPackages(inspection) };
     } catch (error) {
       return {
         error: error instanceof Error ? error.message : String(error),

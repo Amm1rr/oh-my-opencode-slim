@@ -2089,9 +2089,6 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
         }
         pendingAgentDraft = draft;
         try {
-          if (finalizedRegistry) {
-            registryBridge?.markHostSnapshotAmbiguous();
-          }
           if (!nativeSnapshotCaptured) {
             const nativeByAgent: Record<string, V2PermissionRule[]> = {};
             const hostAgents: Record<string, Record<string, unknown>> = {};

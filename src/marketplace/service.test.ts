@@ -69,6 +69,37 @@ function deferred<T>() {
 }
 
 describe('MarketplaceService', () => {
+  test('uses one inspection snapshot for each status and reload request', () => {
+    const root = tempRoot();
+    const desiredInspections: unknown[] = [];
+    try {
+      const service = new MarketplaceService({
+        rootDir: join(root, 'store'),
+        projectDir: root,
+        pluginVersion: '3.5.0',
+        getLivePackages: () => [],
+        getDesiredPackages: (inspection) => {
+          desiredInspections.push(inspection);
+          return [];
+        },
+      });
+      const inspectAll = spyOn(service.store, 'inspectAll');
+
+      expect(service.status().reloadRequired).toBe(false);
+      expect(service.requestReload().reloadRequired).toBe(false);
+
+      expect(inspectAll).toHaveBeenCalledTimes(2);
+      const inspectedSnapshots = inspectAll.mock.results.map(
+        ({ value }) => value,
+      );
+      expect(desiredInspections).toHaveLength(2);
+      expect(desiredInspections[0]).toBe(inspectedSnapshots[0]);
+      expect(desiredInspections[1]).toBe(inspectedSnapshots[1]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test('requires explicit updates and only accepts strictly newer versions', () => {
     const root = tempRoot();
     try {

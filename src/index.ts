@@ -191,7 +191,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   let agents: ReturnType<typeof getAgentConfigsFromDefinitions>;
   let resolvedAgentRegistry: ResolvedAgentRegistry | undefined;
   let latestHostSnapshot: RegistryHostSnapshot | undefined;
-  let hostSnapshotProvenance: 'unknown' | 'clean' | 'ambiguous' = 'unknown';
+  let hostSnapshotProvenance: 'unknown' | 'clean' = 'unknown';
   let latestNativePermissionsByAgent: Readonly<
     Record<string, readonly import('./v2/types').V2PermissionRule[]>
   > = {};
@@ -1247,14 +1247,13 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       return registryBridge.requireRegistry().marketplacePackages;
     },
     getPresetOverride: () => runtime.getRuntimePreset() ?? undefined,
-    getDesiredPackages: () => {
+    getDesiredPackages: (packageInspection) => {
       if (hostSnapshotProvenance !== 'clean' || !latestHostSnapshot) {
         throw new Error(
           'The current host agent snapshot is not trustworthy for desired marketplace status',
         );
       }
       const freshConfig = loadPluginConfig(ctx.directory, { silent: true });
-      const packageInspection = marketplaceService.store.inspectAll();
       if (
         packageInspection.lockfileError ||
         packageInspection.operationalError
@@ -1369,9 +1368,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       }
       return resolvedAgentRegistry;
     },
-    markHostSnapshotAmbiguous() {
-      hostSnapshotProvenance = 'ambiguous';
-    },
     requireRegistry() {
       if (registryRetired) throw new Error('Agent registry is retired');
       if (!resolvedAgentRegistry)
@@ -1411,10 +1407,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         RuntimeConfig.get(ctx.directory).captureHostConfig(
           preMutationHostSnapshot,
         );
-      } else {
-        // A v1 config replay may already contain this generation's projected
-        // agents. Do not treat that object as a fresh native host snapshot.
-        hostSnapshotProvenance = 'ambiguous';
       }
       // Force default_agent to the orchestrator's visible entry when unset,
       // and also when the user pointed it at an omos subagent name (opencode

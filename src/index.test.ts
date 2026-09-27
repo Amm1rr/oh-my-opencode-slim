@@ -364,6 +364,16 @@ describe('plugin tool registration', () => {
       const initialStatus = registryBridge.marketplaceService.status();
       expect(initialStatus.liveAvailable).toBe(true);
       expect(initialStatus.reloadRequired).toBe(false);
+      await hooks.config?.(hostConfig);
+      const replayStatus = registryBridge.marketplaceService.status();
+      expect(replayStatus.reloadRequired).toBe(false);
+      expect(replayStatus.diagnostics).not.toContain(
+        'The current host agent snapshot is not trustworthy for desired marketplace status',
+      );
+      registryBridge.finalize(structuredClone(hostConfig) as never, {});
+      expect(registryBridge.marketplaceService.status().reloadRequired).toBe(
+        false,
+      );
 
       const localSkillDir = path.join(
         root,
@@ -401,12 +411,6 @@ describe('plugin tool registration', () => {
       expect(registryBridge.marketplaceService.status().reloadRequired).toBe(
         true,
       );
-      await hooks.config?.(hostConfig);
-      const hostReplayStatus = registryBridge.marketplaceService.status();
-      expect(hostReplayStatus.reloadRequired).toBeNull();
-      expect(hostReplayStatus.diagnostics).toContain(
-        'The current host agent snapshot is not trustworthy for desired marketplace status',
-      );
       await hooks.config?.({
         agent: {
           explorer: { model: 'provider/inherited-model-drift' },
@@ -417,9 +421,9 @@ describe('plugin tool registration', () => {
           },
         },
       });
-      expect(
-        registryBridge.marketplaceService.status().reloadRequired,
-      ).toBeNull();
+      expect(registryBridge.marketplaceService.status().reloadRequired).toBe(
+        true,
+      );
       expect(hostConfig.agent).toHaveProperty('selected-agent');
       expect(hostConfig.agent).not.toHaveProperty('unselected-agent');
       expect(hostConfig.agent).not.toHaveProperty('changed_baseline');
