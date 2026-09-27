@@ -23,15 +23,6 @@ import {
   DEFAULT_MAX_SESSION_METADATA_ENTRIES,
   TOAST_DURATION_MS,
 } from './config/constants';
-import {
-  findPluginConfigPaths,
-  loadPluginConfigFromPath,
-  mergePluginConfigs,
-} from './config/loader';
-import {
-  PresetResolutionError,
-  resolvePresetDefinition,
-} from './config/presets';
 import { RuntimeConfig } from './config/runtime';
 import { getBuildInfo } from './generated/build-info';
 import { HEALTH_CHECK, minimumExpectedToolCount } from './health-check';
@@ -76,7 +67,8 @@ import {
 } from './hooks/types';
 import { createInterviewManager } from './interview';
 import { discoverPreflightSkills } from './marketplace/preflight';
-import { MarketplaceStore } from './marketplace/store';
+import { MarketplaceService } from './marketplace/service';
+import { resolveDesiredMarketplacePackageIds } from './marketplace/status';
 import { createBuiltinMcps } from './mcp';
 import {
   ast_grep_replace,
@@ -172,34 +164,6 @@ async function appLog(
 const lastImageSkippedToastByDir = new Map<string, number>();
 const IMAGE_SKIPPED_DEBOUNCE_MS = 60_000;
 
-function loadMarketplaceSelectionSnapshot(
-  directory: string,
-  presetName: string | undefined,
-): readonly string[] {
-  if (!presetName) return Object.freeze([]);
-  const paths = findPluginConfigPaths(directory);
-  const userConfig = paths.userConfigPath
-    ? (loadPluginConfigFromPath(paths.userConfigPath, { silent: true }) ?? {})
-    : {};
-  const projectConfig = paths.projectConfigPath
-    ? loadPluginConfigFromPath(paths.projectConfigPath, { silent: true })
-    : null;
-  const factoryConfig = projectConfig
-    ? mergePluginConfigs(userConfig, projectConfig)
-    : userConfig;
-  const presets = factoryConfig.presets ?? {};
-  if (!presets[presetName]) return Object.freeze([]);
-  try {
-    return Object.freeze([
-      ...(resolvePresetDefinition(presetName, presets).marketplace?.agents ??
-        []),
-    ]);
-  } catch (error) {
-    if (error instanceof PresetResolutionError) return Object.freeze([]);
-    throw error;
-  }
-}
-
 // Module-level runtime preset tracking. Survives plugin re-inits triggered
 // by client.config.update() → Instance.dispose(). When the plugin function
 // re-runs, it checks this variable and applies the runtime preset instead
@@ -226,6 +190,11 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   let agentDefs: ReturnType<typeof createAgents>;
   let agents: ReturnType<typeof getAgentConfigsFromDefinitions>;
   let resolvedAgentRegistry: ResolvedAgentRegistry | undefined;
+  let latestHostSnapshot: RegistryHostSnapshot | undefined;
+  let hostSnapshotProvenance: 'unknown' | 'clean' = 'unknown';
+  let latestNativePermissionsByAgent: Readonly<
+    Record<string, readonly import('./v2/types').V2PermissionRule[]>
+  > = {};
   let registryRetired = false;
   let mcps: ReturnType<typeof createBuiltinMcps>;
   // Host flavor ('v2' on OpenCode v2 hosts via the client shim, undefined on
@@ -521,23 +490,30 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // factory-local state, while module-level runtime preset state may persist.
     // Reapply that persisted preset so each fresh generation creates agents
     // with the correct models.
-    const runtimePreset = RuntimeConfig.get(ctx.directory).getRuntimePreset();
-    if (runtimePreset && config.presets?.[runtimePreset]) {
+    const runtimeConfig = RuntimeConfig.get(ctx.directory);
+    const previousRuntimePreset = runtimeConfig.getRuntimePreset();
+    const runtimePreset = runtimeConfig.resolveRuntimePreset(config);
+    if (runtimePreset) {
       config.preset = runtimePreset;
       // Re-merge runtime preset into config.agents (loadPluginConfig
       // already merged the config-file preset, not the runtime one).
       // Runtime preset is override so it wins over config-file preset.
-      const presetAgents = config.presets[runtimePreset];
+      const presetAgents = config.presets?.[runtimePreset];
+      if (!presetAgents) {
+        throw new Error(
+          `Resolved runtime preset '${runtimePreset}' is missing`,
+        );
+      }
       config.agents = deepMerge(config.agents, presetAgents);
-    } else if (runtimePreset) {
+    } else if (previousRuntimePreset) {
       // Preset was deleted from config since last switch - clear stale state
-      RuntimeConfig.get(ctx.directory).setRuntimePreset(null);
+      runtimeConfig.setRuntimePreset(null);
     }
 
     runtime = RuntimeConfig.get(ctx.directory);
     const activePresetName = runtime.getRuntimePreset() ?? config.preset;
-    selectedMarketplacePackageIds = loadMarketplaceSelectionSnapshot(
-      ctx.directory,
+    selectedMarketplacePackageIds = resolveDesiredMarketplacePackageIds(
+      config,
       activePresetName,
     );
     rewriteDisplayNameMentions = createDisplayNameMentionRewriter(runtime);
@@ -1269,9 +1245,107 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     return undefined;
   }
 
-  const registryBridge: RegistryFactoryBridge = {
+  let registryBridge: RegistryFactoryBridge;
+  const marketplaceService = new MarketplaceService({
+    projectDir: ctx.directory,
+    pluginVersion: getBuildInfo().version,
+    getLivePackages: () => {
+      if (registryRetired || !resolvedAgentRegistry) return undefined;
+      return registryBridge.requireRegistry().marketplacePackages;
+    },
+    getPresetOverride: () => runtime.getRuntimePreset() ?? undefined,
+    getDesiredState: (packageInspection) => {
+      const freshConfig = loadPluginConfig(ctx.directory, { silent: true });
+      const runtimePreset = runtime.resolveRuntimePreset(freshConfig);
+      const desiredPackageIds = resolveDesiredMarketplacePackageIds(
+        freshConfig,
+        runtimePreset ?? undefined,
+      );
+      if (hostSnapshotProvenance !== 'clean' || !latestHostSnapshot) {
+        return {
+          packageIds: desiredPackageIds,
+          error:
+            'The current host agent snapshot is not trustworthy for desired marketplace status',
+        };
+      }
+      if (
+        packageInspection.lockfileError ||
+        packageInspection.operationalError
+      ) {
+        return {
+          packageIds: desiredPackageIds,
+          error:
+            packageInspection.lockfileError ??
+            packageInspection.operationalError ??
+            'Marketplace package inspection is incomplete',
+        };
+      }
+      const installedPackages = new Map(
+        packageInspection.packages.map((stored) => [
+          stored.manifest.id,
+          stored,
+        ]),
+      );
+      const readOnlyActivationStore = {
+        loadSelected(ids: readonly string[]) {
+          const packages = new Map();
+          const errors = new Map<string, Error>();
+          for (const id of ids) {
+            const stored = installedPackages.get(id);
+            if (stored) packages.set(id, stored);
+            else
+              errors.set(id, new Error(`${id} is not installed or verified`));
+          }
+          return { packages, errors };
+        },
+      };
+      const freshRuntime = RuntimeConfig.createDetached(
+        ctx.directory,
+        freshConfig,
+      );
+      freshRuntime.captureHostConfig(latestHostSnapshot ?? {});
+      if (runtimePreset) freshRuntime.setRuntimePreset(runtimePreset);
+      const freshPluginMcps = createBuiltinMcps(freshRuntime.disabledMcps);
+      try {
+        const freshRegistry = buildResolvedAgentRegistry(freshRuntime, {
+          hostSnapshot: latestHostSnapshot,
+          nativePermissionsByAgent: latestNativePermissionsByAgent,
+          projectDirectory: ctx.directory,
+          hostFlavor,
+          pluginMcps: freshPluginMcps,
+          marketplace: {
+            selectedPackageIds: desiredPackageIds,
+            store: readOnlyActivationStore,
+            pluginVersion: getBuildInfo().version,
+            availableSkillNames: discoverPreflightSkills(
+              freshRuntime,
+              ctx.directory,
+            ),
+          },
+        });
+        return {
+          packageIds: desiredPackageIds,
+          packages: freshRegistry.marketplacePackages,
+        };
+      } catch (error) {
+        return {
+          packageIds: desiredPackageIds,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    },
+  });
+  registryBridge = {
+    marketplaceService,
     finalize(hostSnapshot, nativePermissionsByAgent) {
       if (registryRetired) throw new Error('Agent registry is retired');
+      if (!latestHostSnapshot) {
+        latestHostSnapshot = structuredClone(hostSnapshot);
+        latestNativePermissionsByAgent = structuredClone(
+          nativePermissionsByAgent,
+        );
+        hostSnapshotProvenance = 'clean';
+      }
       if (!resolvedAgentRegistry) {
         RuntimeConfig.get(ctx.directory).captureHostConfig(hostSnapshot);
         resolvedAgentRegistry = buildResolvedAgentRegistry(runtime, {
@@ -1283,9 +1357,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           nativePermissionsByAgent,
           marketplace: {
             selectedPackageIds: selectedMarketplacePackageIds,
-            store: new MarketplaceStore({
-              pluginVersion: getBuildInfo().version,
-            }),
+            store: marketplaceService.store,
             pluginVersion: getBuildInfo().version,
             availableSkillNames: selectedMarketplacePackageIds.length
               ? discoverPreflightSkills(runtime, ctx.directory)
@@ -1353,6 +1425,8 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         ? undefined
         : (structuredClone(opencodeConfig) as RegistryHostSnapshot);
       if (preMutationHostSnapshot) {
+        latestHostSnapshot = preMutationHostSnapshot;
+        hostSnapshotProvenance = 'clean';
         RuntimeConfig.get(ctx.directory).captureHostConfig(
           preMutationHostSnapshot,
         );

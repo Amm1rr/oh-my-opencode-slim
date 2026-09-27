@@ -912,6 +912,8 @@ export type PluginConfig = RawPluginConfig;
 /** Configuration shape consumed by RuntimeConfig after preset resolution. */
 export type ResolvedPluginConfig = Omit<RawPluginConfig, 'presets'> & {
   presets?: Record<string, Preset>;
+  /** Fully inherited marketplace activation data retained for status reads. */
+  marketplacePresets?: Record<string, MarketplaceActivation>;
 };
 
 // PluginConfigSchema describes the parsed file shape. It must not claim to

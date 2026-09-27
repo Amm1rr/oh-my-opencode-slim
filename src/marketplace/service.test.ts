@@ -69,6 +69,84 @@ function deferred<T>() {
 }
 
 describe('MarketplaceService', () => {
+  test('uses selection and projection from one normalized config snapshot', () => {
+    const root = tempRoot();
+    const packageId = 'community/config-snapshot';
+    let configReads = 0;
+    let projection:
+      | {
+          id: string;
+          runtimeName: string;
+          version: string;
+          digest: string;
+          configFingerprint: string;
+        }
+      | undefined;
+    try {
+      const service = new MarketplaceService({
+        rootDir: join(root, 'store'),
+        projectDir: root,
+        pluginVersion: '3.5.0',
+        getLivePackages: () => (projection ? [projection] : []),
+        getDesiredState: () => {
+          configReads += 1;
+          const resolvedSnapshot = {
+            packageIds: [packageId],
+            packages: projection ? [projection] : [],
+          };
+          return resolvedSnapshot;
+        },
+      });
+      const stored = service.install(bundle('1.0.0', packageId));
+      projection = {
+        id: packageId,
+        runtimeName: 'example',
+        version: stored.manifest.version,
+        digest: stored.digest,
+        configFingerprint: 'snapshot-fingerprint',
+      };
+
+      const status = service.status();
+      expect(configReads).toBe(1);
+      expect(status.desiredPackageIds).toEqual([packageId]);
+      expect(status.livePackages?.map(({ id }) => id)).toEqual([packageId]);
+      expect(status.reloadRequired).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('uses one inspection snapshot for each status and reload request', () => {
+    const root = tempRoot();
+    const desiredInspections: unknown[] = [];
+    try {
+      const service = new MarketplaceService({
+        rootDir: join(root, 'store'),
+        projectDir: root,
+        pluginVersion: '3.5.0',
+        getLivePackages: () => [],
+        getDesiredState: (inspection) => {
+          desiredInspections.push(inspection);
+          return { packageIds: [], packages: [] };
+        },
+      });
+      const inspectAll = spyOn(service.store, 'inspectAll');
+
+      expect(service.status().reloadRequired).toBe(false);
+      expect(service.requestReload().reloadRequired).toBe(false);
+
+      expect(inspectAll).toHaveBeenCalledTimes(2);
+      const inspectedSnapshots = inspectAll.mock.results.map(
+        ({ value }) => value,
+      );
+      expect(desiredInspections).toHaveLength(2);
+      expect(desiredInspections[0]).toBe(inspectedSnapshots[0]);
+      expect(desiredInspections[1]).toBe(inspectedSnapshots[1]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test('requires explicit updates and only accepts strictly newer versions', () => {
     const root = tempRoot();
     try {

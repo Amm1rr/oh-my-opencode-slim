@@ -10,12 +10,13 @@ import {
   mergePresetMaps,
   normalizePreset,
   PresetResolutionError,
-  resolvePreset,
+  resolvePresetDefinition,
 } from './presets';
 import {
   BackgroundJobsConfigSchema,
   InterviewConfigSchema,
   LEGACY_FALLBACK_KEYS,
+  type MarketplaceActivation,
   PluginConfigSchema,
   type RawPluginConfig,
   type ResolvedPluginConfig,
@@ -713,12 +714,20 @@ export function loadPluginConfig(
   // valid presets from being selected. A failed chain is omitted completely,
   // so the selected preset can never receive a partially resolved ancestor.
   let resolvedPresets: ResolvedPresetMap | undefined;
+  let resolvedMarketplacePresets:
+    | Record<string, MarketplaceActivation>
+    | undefined;
   const presetInheritanceFailures = new Set<string>();
   if (config.presets) {
     resolvedPresets = {};
+    resolvedMarketplacePresets = {};
     for (const name of Object.keys(config.presets)) {
       try {
-        resolvedPresets[name] = resolvePreset(name, config.presets);
+        const definition = resolvePresetDefinition(name, config.presets);
+        resolvedPresets[name] = definition.agents;
+        if (definition.marketplace) {
+          resolvedMarketplacePresets[name] = definition.marketplace;
+        }
       } catch (error) {
         presetInheritanceFailures.add(name);
         const message =
@@ -739,7 +748,13 @@ export function loadPluginConfig(
 
   const { presets: _rawPresets, ...configWithoutPresets } = config;
   const runtimeConfig: ResolvedPluginConfig = resolvedPresets
-    ? { ...configWithoutPresets, presets: resolvedPresets }
+    ? {
+        ...configWithoutPresets,
+        presets: resolvedPresets,
+        ...(resolvedMarketplacePresets
+          ? { marketplacePresets: resolvedMarketplacePresets }
+          : {}),
+      }
     : configWithoutPresets;
 
   // Resolve preset and merge with root agents

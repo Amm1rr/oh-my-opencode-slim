@@ -10,6 +10,7 @@ import {
   createMarketplaceAgentDefinitions,
   type MarketplaceAgentMetadata,
 } from '../marketplace/agent-definitions';
+import { marketplaceConfigFingerprint } from '../marketplace/config-identity';
 import { MARKETPLACE_TOOL_NAMES } from '../marketplace/schemas';
 import { normalizeAgentName } from '../utils/agent-variant';
 import { adaptPermissions } from '../v2/adapters';
@@ -30,6 +31,7 @@ export interface ResolvedAgentRegistry {
   readonly hostFlavor: string | undefined;
   readonly agentNames: readonly string[];
   readonly marketplaceAgentNames: readonly string[];
+  readonly marketplacePackages: readonly MarketplaceLivePackage[];
   readonly identities: Readonly<Record<string, string>>;
   readonly modelCandidates: Readonly<
     Record<string, readonly { id: string; variant?: string }[]>
@@ -47,6 +49,14 @@ export interface ResolvedAgentRegistry {
   readonly finalAgentConfig: Readonly<Record<string, unknown>>;
   readonly managedAgentConfig: Readonly<Record<string, unknown>>;
   getSdkAgentProjection(): Record<string, SDKAgentConfig>;
+}
+
+export interface MarketplaceLivePackage {
+  readonly id: string;
+  readonly runtimeName: string;
+  readonly version: string;
+  readonly digest: string;
+  readonly configFingerprint: string;
 }
 
 export interface RegistryHostSnapshot extends HostConfigSnapshot {
@@ -347,6 +357,7 @@ export function buildResolvedAgentRegistry(
     }
   }
   const marketplaceMetadata = new Map<string, MarketplaceAgentMetadata>();
+  let marketplacePackages: MarketplaceLivePackage[] = [];
   if (options.marketplace?.selectedPackageIds.length) {
     const customOwnerNames = new Set(runtime.customAgentNames);
     const reservedAgentNames = new Set<string>([
@@ -379,6 +390,13 @@ export function buildResolvedAgentRegistry(
       disabledMcpNames: runtime.disabledMcps,
       reservedAgentNames,
     });
+    marketplacePackages = plan.agents.map((admission) => ({
+      id: admission.packageId,
+      runtimeName: admission.agentName,
+      version: admission.version,
+      digest: admission.digest,
+      configFingerprint: '',
+    }));
     const constructed = createMarketplaceAgentDefinitions(plan);
     const admittedNames = new Set(
       constructed.agents.map((agent) => agent.name),
@@ -1103,10 +1121,37 @@ export function buildResolvedAgentRegistry(
     }
   }
   const frozenManagedAgents = freeze(managedAgentConfig);
+  const frozenMarketplacePackages = marketplacePackages.map((item) => {
+    const visibleName = identities[item.runtimeName];
+    return {
+      ...item,
+      configFingerprint: marketplaceConfigFingerprint({
+        id: item.id,
+        runtimeName: item.runtimeName,
+        identity: visibleName,
+        canonicalConfig: finalAgentConfig[item.runtimeName],
+        visibleConfig:
+          visibleName && visibleName !== item.runtimeName
+            ? finalAgentConfig[visibleName]
+            : undefined,
+        canonicalPolicy: policyMap[item.runtimeName],
+        visiblePolicy:
+          visibleName && visibleName !== item.runtimeName
+            ? policyMap[visibleName]
+            : undefined,
+        canonicalModelCandidates: candidateMap[item.runtimeName],
+        visibleModelCandidates:
+          visibleName && visibleName !== item.runtimeName
+            ? candidateMap[visibleName]
+            : undefined,
+      }),
+    };
+  });
   return Object.freeze({
     hostFlavor,
     agentNames: Object.freeze(definitions.map((definition) => definition.name)),
     marketplaceAgentNames: Object.freeze([...marketplaceMetadata.keys()]),
+    marketplacePackages: freeze(clone(frozenMarketplacePackages)),
     identities: frozenIdentities,
     modelCandidates: frozenCandidates,
     effectiveStartupModels: frozenEffective,

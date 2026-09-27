@@ -1,4 +1,5 @@
 import { readFileSync, realpathSync } from 'node:fs';
+import type { MarketplaceLivePackage } from '../agents/registry.js';
 import { BUILD_VERSION } from '../generated/build-info.js';
 import {
   DEFAULT_MARKETPLACE_REGISTRY_URL,
@@ -17,7 +18,14 @@ import type { MarketplaceRegistryDownload } from './registry-client.js';
 import { MarketplaceRegistryClient } from './registry-client.js';
 import type { MarketplacePackageBundle } from './schemas.js';
 import {
+  type MarketplaceReloadRequest,
+  type MarketplaceRuntimeStatus,
+  readMarketplaceRuntimeStatus,
+  requestMarketplaceReload,
+} from './status.js';
+import {
   MarketplaceStore,
+  type MarketplaceStoreInspection,
   type MarketplaceStoreOptions,
   type MarketplaceVerification,
   type StoredMarketplacePackage,
@@ -29,6 +37,17 @@ export interface MarketplaceServiceOptions
   pluginVersion?: string;
   projectDir?: string;
   registryClient?: MarketplaceRegistryDownloadClient;
+  getLivePackages?: () => readonly MarketplaceLivePackage[] | undefined;
+  getDesiredState?: (
+    inspection: MarketplaceStoreInspection,
+  ) => MarketplaceDesiredState;
+  getPresetOverride?: () => string | undefined;
+}
+
+export interface MarketplaceDesiredState {
+  readonly packageIds: readonly string[];
+  readonly packages?: readonly MarketplaceLivePackage[];
+  readonly error?: string;
 }
 
 export type MarketplaceRegistryDownloadClient = Pick<
@@ -89,11 +108,17 @@ export class MarketplaceService {
   readonly store: MarketplaceStore;
   readonly projectDir: string;
   readonly registryClient: MarketplaceRegistryDownloadClient;
+  private readonly getLivePackages?: MarketplaceServiceOptions['getLivePackages'];
+  private readonly getDesiredState?: MarketplaceServiceOptions['getDesiredState'];
+  private readonly getPresetOverride?: MarketplaceServiceOptions['getPresetOverride'];
 
   constructor(options: MarketplaceServiceOptions = {}) {
     const pluginVersion = options.pluginVersion ?? BUILD_VERSION;
     this.store = new MarketplaceStore({ ...options, pluginVersion });
     this.projectDir = options.projectDir ?? process.cwd();
+    this.getLivePackages = options.getLivePackages;
+    this.getDesiredState = options.getDesiredState;
+    this.getPresetOverride = options.getPresetOverride;
     this.registryClient =
       options.registryClient ??
       new MarketplaceRegistryClient({ pluginVersion });
@@ -181,6 +206,66 @@ export class MarketplaceService {
     return id
       ? [this.store.verify(normalizeMarketplacePackageId(id))]
       : this.store.verifyAll();
+  }
+
+  status(): MarketplaceRuntimeStatus {
+    const livePackages = this.getLivePackages?.();
+    const inspection = this.store.inspectAll();
+    const desired = this.readDesiredPackages(inspection);
+    const presetOverride = this.getPresetOverride?.();
+    return readMarketplaceRuntimeStatus({
+      directory: this.projectDir,
+      store: this.store,
+      inspection,
+      ...(presetOverride === undefined ? {} : { presetOverride }),
+      ...(desired === undefined
+        ? {}
+        : { desiredPackageIds: desired.packageIds }),
+      ...(livePackages === undefined ? {} : { livePackages }),
+      ...(desired?.packages === undefined
+        ? {}
+        : { desiredPackages: desired.packages }),
+      ...(desired?.error === undefined
+        ? {}
+        : { desiredConfigError: desired.error }),
+    });
+  }
+
+  requestReload(): MarketplaceReloadRequest {
+    const livePackages = this.getLivePackages?.();
+    const inspection = this.store.inspectAll();
+    const desired = this.readDesiredPackages(inspection);
+    const presetOverride = this.getPresetOverride?.();
+    return requestMarketplaceReload({
+      directory: this.projectDir,
+      store: this.store,
+      inspection,
+      ...(presetOverride === undefined ? {} : { presetOverride }),
+      ...(desired === undefined
+        ? {}
+        : { desiredPackageIds: desired.packageIds }),
+      ...(livePackages === undefined ? {} : { livePackages }),
+      ...(desired?.packages === undefined
+        ? {}
+        : { desiredPackages: desired.packages }),
+      ...(desired?.error === undefined
+        ? {}
+        : { desiredConfigError: desired.error }),
+    });
+  }
+
+  private readDesiredPackages(
+    inspection: MarketplaceStoreInspection,
+  ): MarketplaceDesiredState | undefined {
+    if (!this.getDesiredState) return undefined;
+    try {
+      return this.getDesiredState(inspection);
+    } catch (error) {
+      return {
+        packageIds: [],
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
   }
 
   remove(id: string): void {

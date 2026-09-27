@@ -10,6 +10,7 @@ import {
 import { readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import path from 'node:path';
+import type { RegistryFactoryBridge } from './agents/registry-bridge';
 import { stateFilePath } from './companion/manager';
 import { RuntimeConfig } from './config/runtime';
 import * as wakeHooks from './hooks';
@@ -343,16 +344,6 @@ describe('plugin tool registration', () => {
       worktree: root,
       serverUrl: new URL('http://127.0.0.1:4096'),
     } as never);
-    await Bun.write(
-      path.join(configDir, 'oh-my-opencode-slim.json'),
-      JSON.stringify({
-        preset: 'changed',
-        agents: { changed_baseline: { model: 'provider/changed' } },
-        presets: {
-          changed: { marketplace: { agents: ['team/unselected'] } },
-        },
-      }),
-    );
     const hostConfig = {
       agent: {
         orchestrator: { displayName: 'Lead' },
@@ -365,6 +356,74 @@ describe('plugin tool registration', () => {
     };
     try {
       await hooks.config?.(hostConfig);
+      const registryBridge = (
+        hooks as unknown as {
+          registryBridge: RegistryFactoryBridge;
+        }
+      ).registryBridge;
+      const initialStatus = registryBridge.marketplaceService.status();
+      expect(initialStatus.liveAvailable).toBe(true);
+      expect(initialStatus.reloadRequired).toBe(false);
+      await hooks.config?.(hostConfig);
+      const replayStatus = registryBridge.marketplaceService.status();
+      expect(replayStatus.reloadRequired).toBe(false);
+      expect(replayStatus.diagnostics).not.toContain(
+        'The current host agent snapshot is not trustworthy for desired marketplace status',
+      );
+      registryBridge.finalize(structuredClone(hostConfig) as never, {});
+      expect(registryBridge.marketplaceService.status().reloadRequired).toBe(
+        false,
+      );
+
+      const localSkillDir = path.join(
+        root,
+        '.opencode',
+        'skills',
+        'local-skill',
+      );
+      await mkdir(localSkillDir, { recursive: true });
+      await Bun.write(
+        path.join(localSkillDir, 'SKILL.md'),
+        '---\nname: local-skill\ndescription: Local skill fixture\n---\n',
+      );
+      await Bun.write(
+        path.join(configDir, 'oh-my-opencode-slim.json'),
+        JSON.stringify({
+          preset: 'active',
+          fallback: { enabled: true, maxRetries: 0 },
+          agents: {
+            'selected-agent': {
+              prompt: 'Changed prompt',
+              displayName: 'ChangedVisible',
+              model: 'owner/changed',
+              permission: { read: 'deny' },
+              skills: ['base-skill', 'removed-skill'],
+              skills_add: ['added-skill'],
+              skills_remove: ['removed-skill'],
+              skills_include_local: true,
+            },
+          },
+          presets: {
+            active: { marketplace: { agents: ['team/selected'] } },
+          },
+        }),
+      );
+      expect(registryBridge.marketplaceService.status().reloadRequired).toBe(
+        true,
+      );
+      await hooks.config?.({
+        agent: {
+          explorer: { model: 'provider/inherited-model-drift' },
+          'selected-agent': {
+            model: 'provider/host-override-drift',
+            prompt: 'Host override drift',
+            displayName: 'HostSelected',
+          },
+        },
+      });
+      expect(registryBridge.marketplaceService.status().reloadRequired).toBe(
+        true,
+      );
       expect(hostConfig.agent).toHaveProperty('selected-agent');
       expect(hostConfig.agent).not.toHaveProperty('unselected-agent');
       expect(hostConfig.agent).not.toHaveProperty('changed_baseline');
@@ -450,6 +509,21 @@ describe('plugin tool registration', () => {
       } as never);
       expect(fallbackPrompts).toHaveLength(2);
       expect(JSON.stringify(fallbackPrompts[1])).toContain('package-fallback');
+
+      const generationB = await plugin({
+        client: createPluginClient(async () => ({})),
+        directory: root,
+        worktree: root,
+        serverUrl: new URL('http://127.0.0.1:4096'),
+      } as never);
+      await generationB.config?.({ agent: {} });
+      const bridgeB = (
+        generationB as unknown as {
+          registryBridge: RegistryFactoryBridge;
+        }
+      ).registryBridge;
+      expect(bridgeB.marketplaceService.status().reloadRequired).toBe(false);
+      await generationB.dispose?.();
     } finally {
       await hooks.dispose?.();
       process.env = originalEnv;
@@ -512,6 +586,198 @@ describe('plugin tool registration', () => {
       );
     } finally {
       await hooks.dispose?.();
+      process.env = originalEnv;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('fresh desired projection uses newly enabled builtin MCPs', async () => {
+    const originalEnv = { ...process.env };
+    const root = await mkdtemp(
+      '/tmp/oh-my-opencode-slim-marketplace-fresh-mcp-',
+    );
+    const configDir = path.join(root, 'config');
+    await mkdir(configDir, { recursive: true });
+    process.env = {
+      ...originalEnv,
+      OPENCODE_CONFIG_DIR: configDir,
+      XDG_DATA_HOME: path.join(root, 'data'),
+    };
+    delete process.env.OH_MY_OPENCODE_SLIM_DISABLE;
+    const store = new MarketplaceStore({ pluginVersion: '2.2.25' });
+    store.install({
+      manifest: {
+        schemaVersion: 2,
+        id: 'team/requires-context7',
+        version: '1.0.0',
+        displayName: 'Requires Context7',
+        description: 'Fresh MCP config fixture',
+        agentName: 'requires-context7-agent',
+        prompt: 'Use Context7.',
+        skills: [],
+        mcps: ['context7'],
+        tools: ['read'],
+        author: { name: 'Test author' },
+        tags: [],
+        license: 'MIT',
+        compatibility: { plugin: '>=1.0.0' },
+        model: { source: 'explicit', candidates: ['provider/package'] },
+        routing: {
+          description: 'MCP fixture',
+          when: 'A Context7 test is needed.',
+          keywords: ['context7'],
+        },
+      } as never,
+    });
+    const configPath = path.join(configDir, 'oh-my-opencode-slim.json');
+    await Bun.write(
+      configPath,
+      JSON.stringify({
+        preset: 'inactive',
+        disabled_mcps: ['context7'],
+        presets: {
+          inactive: { marketplace: { agents: [] } },
+          active: {
+            marketplace: { agents: ['team/requires-context7'] },
+          },
+        },
+      }),
+    );
+    const hooks = await plugin({
+      client: createPluginClient(async () => ({})),
+      directory: root,
+      worktree: root,
+      serverUrl: new URL('http://127.0.0.1:4096'),
+    } as never);
+    try {
+      await hooks.config?.({ agent: {}, mcp: {} });
+      const registryBridge = (
+        hooks as unknown as { registryBridge: RegistryFactoryBridge }
+      ).registryBridge;
+      await Bun.write(
+        configPath,
+        JSON.stringify({
+          preset: 'active',
+          disabled_mcps: [],
+          presets: {
+            inactive: { marketplace: { agents: [] } },
+            active: {
+              marketplace: { agents: ['team/requires-context7'] },
+            },
+          },
+        }),
+      );
+
+      const status = registryBridge.marketplaceService.status();
+      expect(status.reloadRequired).toBe(true);
+      expect(status.diagnostics).toEqual([]);
+    } finally {
+      await hooks.dispose?.();
+      process.env = originalEnv;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('marketplace status follows the active runtime preset over disk and environment selection', async () => {
+    const originalEnv = { ...process.env };
+    const root = await mkdtemp(
+      '/tmp/oh-my-opencode-slim-marketplace-runtime-preset-',
+    );
+    const configDir = path.join(root, 'config');
+    const dataDir = path.join(root, 'data');
+    await mkdir(configDir, { recursive: true });
+    process.env = {
+      ...originalEnv,
+      OPENCODE_CONFIG_DIR: configDir,
+      XDG_DATA_HOME: dataDir,
+      OH_MY_OPENCODE_SLIM_PRESET: 'disk',
+    };
+    delete process.env.OH_MY_OPENCODE_SLIM_DISABLE;
+    const packageManifest = (id: string, agentName: string) => ({
+      schemaVersion: 2,
+      id,
+      version: '1.0.0',
+      displayName: agentName,
+      description: 'Preset selection fixture',
+      agentName,
+      prompt: 'Preset fixture prompt',
+      skills: [],
+      mcps: [],
+      tools: ['read'],
+      author: { name: 'Test author' },
+      tags: [],
+      license: 'MIT',
+      compatibility: { plugin: '>=1.0.0' },
+      model: { source: 'explicit', candidates: ['provider/package'] },
+      routing: {
+        description: 'Preset package',
+        when: 'A preset package is needed.',
+        keywords: ['preset'],
+      },
+    });
+    const pluginConfig = {
+      preset: 'disk',
+      presets: {
+        disk: { marketplace: { agents: ['team/disk-preset'] } },
+        runtime: { marketplace: { agents: ['team/runtime-preset'] } },
+      },
+    } as Parameters<typeof RuntimeConfig.init>[1];
+    RuntimeConfig.reset(root);
+    RuntimeConfig.init(root, pluginConfig).setRuntimePreset('runtime');
+    const store = new MarketplaceStore({ pluginVersion: '2.2.25' });
+    store.install({
+      manifest: packageManifest('team/disk-preset', 'disk-agent') as never,
+    });
+    store.install({
+      manifest: packageManifest(
+        'team/runtime-preset',
+        'runtime-agent',
+      ) as never,
+    });
+    await Bun.write(
+      path.join(configDir, 'oh-my-opencode-slim.json'),
+      JSON.stringify(pluginConfig),
+    );
+    const hooks = await plugin({
+      client: createPluginClient(async () => ({})),
+      directory: root,
+      worktree: root,
+      serverUrl: new URL('http://127.0.0.1:4096'),
+    } as never);
+    try {
+      await hooks.config?.({ agent: {}, mcp: {} });
+      const marketplaceService = (
+        hooks as unknown as { registryBridge: RegistryFactoryBridge }
+      ).registryBridge.marketplaceService;
+      const status = marketplaceService.status();
+      expect(status.desiredPackageIds).toEqual(['team/runtime-preset']);
+      expect(status.livePackages?.map(({ id }) => id)).toEqual([
+        'team/runtime-preset',
+      ]);
+      expect(status.reloadRequired).toBe(false);
+      expect(marketplaceService.requestReload().reloadRequired).toBe(false);
+
+      await Bun.write(
+        path.join(configDir, 'oh-my-opencode-slim.json'),
+        JSON.stringify({
+          preset: 'disk',
+          presets: {
+            disk: { marketplace: { agents: ['team/disk-preset'] } },
+          },
+        }),
+      );
+      const deletedOverrideStatus = marketplaceService.status();
+      expect(deletedOverrideStatus.desiredPackageIds).toEqual([
+        'team/disk-preset',
+      ]);
+      expect(deletedOverrideStatus.livePackages?.map(({ id }) => id)).toEqual([
+        'team/runtime-preset',
+      ]);
+      expect(deletedOverrideStatus.reloadRequired).toBe(true);
+      expect(marketplaceService.requestReload().reloadRequired).toBe(true);
+    } finally {
+      await hooks.dispose?.();
+      RuntimeConfig.reset(root);
       process.env = originalEnv;
       await rm(root, { recursive: true, force: true });
     }
