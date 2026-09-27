@@ -2,7 +2,6 @@ import { describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { marketplaceConfigFingerprint } from './config-identity.js';
 import {
   readMarketplaceRuntimeStatus,
   requestMarketplaceReload,
@@ -86,24 +85,14 @@ describe('marketplace runtime status', () => {
           runtimeName: 'example',
           version: '1.0.0',
           digest: 'digest-a',
-          configFingerprint: marketplaceConfigFingerprint({
-            id: 'team/example',
-            runtimeName: 'example',
-            version: '1.0.0',
-            digest: 'digest-a',
-            agentOverride: {
-              prompt: 'generation A prompt',
-              model: 'provider/model-a',
-              permission: { read: 'ask' },
-              displayName: 'Example A',
-            },
-          }),
+          configFingerprint: 'generation-a',
         }),
       ]);
       const statusA = readMarketplaceRuntimeStatus({
         directory: fixture.directory,
         store: fixture.store,
         livePackages: liveA,
+        desiredPackages: liveA,
       });
       expect(statusA.reloadRequired).toBe(false);
 
@@ -148,6 +137,14 @@ describe('marketplace runtime status', () => {
         directory: fixture.directory,
         store: { inspectAll: () => changedInspection },
         livePackages: liveA,
+        desiredPackages: [
+          {
+            ...liveA[0],
+            version: '2.0.0',
+            digest: 'digest-b',
+            configFingerprint: 'generation-b',
+          },
+        ],
       });
       expect(statusChanged.reloadRequired).toBe(true);
       expect(statusChanged.livePackages).toEqual(liveA);
@@ -157,18 +154,7 @@ describe('marketplace runtime status', () => {
           ...liveA[0],
           version: '2.0.0',
           digest: 'digest-b',
-          configFingerprint: marketplaceConfigFingerprint({
-            id: 'team/example',
-            runtimeName: 'example',
-            version: '2.0.0',
-            digest: 'digest-b',
-            agentOverride: {
-              prompt: 'generation B prompt',
-              model: 'provider/model-b',
-              permission: { read: 'deny' },
-              displayName: 'Example B',
-            },
-          }),
+          configFingerprint: 'generation-b',
         },
       ];
       expect(
@@ -176,8 +162,101 @@ describe('marketplace runtime status', () => {
           directory: fixture.directory,
           store: { inspectAll: () => changedInspection },
           livePackages: liveB,
+          desiredPackages: liveB,
         }).reloadRequired,
       ).toBe(false);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  test('incomplete inventory makes reload status unknown and avoids restart advice', () => {
+    const fixture = setup(
+      {
+        preset: 'active',
+        presets: {
+          active: { marketplace: { agents: ['team/example'] } },
+        },
+      },
+      {
+        packages: [],
+        verifications: [],
+        operationalError: 'Marketplace package inspection stopped early',
+      },
+    );
+    try {
+      const live = [
+        {
+          id: 'team/example',
+          runtimeName: 'example',
+          version: '1.0.0',
+          digest: 'digest-a',
+          configFingerprint: 'fingerprint-a',
+        },
+      ];
+      const response = requestMarketplaceReload({
+        directory: fixture.directory,
+        store: fixture.store,
+        livePackages: live,
+        desiredPackages: live,
+      });
+      expect(response.reloadRequired).toBeNull();
+      expect(response.diagnostics).toContain(
+        'Marketplace package inspection stopped early',
+      );
+      expect(response.message).toContain('status is incomplete');
+      expect(response.message).not.toContain('Restart or reload OpenCode');
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  test('requires reload when only a marketplace fallback-chain fingerprint changes', () => {
+    const fixture = setup(
+      {
+        preset: 'active',
+        presets: {
+          active: { marketplace: { agents: ['team/example'] } },
+        },
+      },
+      {
+        packages: [packageA as never],
+        verifications: [
+          {
+            id: 'team/example',
+            version: '1.0.0',
+            valid: true,
+            expectedDigest: 'digest-a',
+            actualDigest: 'digest-a',
+            message: 'verified',
+          },
+        ],
+      },
+    );
+    try {
+      const live = [
+        {
+          id: 'team/example',
+          runtimeName: 'example',
+          version: '1.0.0',
+          digest: 'digest-a',
+          configFingerprint: 'primary-plus-fallback-a',
+        },
+      ];
+      const desired = [
+        {
+          ...live[0],
+          configFingerprint: 'primary-plus-fallback-b',
+        },
+      ];
+      expect(
+        readMarketplaceRuntimeStatus({
+          directory: fixture.directory,
+          store: fixture.store,
+          livePackages: live,
+          desiredPackages: desired,
+        }).reloadRequired,
+      ).toBe(true);
     } finally {
       fixture.cleanup();
     }

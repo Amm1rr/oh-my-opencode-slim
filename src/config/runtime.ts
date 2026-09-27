@@ -189,6 +189,16 @@ export class RuntimeConfig {
     return instance;
   }
 
+  /** Create an isolated runtime snapshot for read-only status projections. */
+  static createDetached(
+    directory: string,
+    pluginConfig: ResolvedPluginConfig,
+  ): RuntimeConfig {
+    const instance = new RuntimeConfig(directory);
+    instance.seedPlugin(pluginConfig);
+    return instance;
+  }
+
   /** Lazy per-directory accessor; creates an empty instance if unseeded. */
   static get(directory: string): RuntimeConfig {
     let instance = registry.get(directory);

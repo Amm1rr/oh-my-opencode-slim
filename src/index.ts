@@ -190,6 +190,11 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   let agentDefs: ReturnType<typeof createAgents>;
   let agents: ReturnType<typeof getAgentConfigsFromDefinitions>;
   let resolvedAgentRegistry: ResolvedAgentRegistry | undefined;
+  let latestHostSnapshot: RegistryHostSnapshot | undefined;
+  let hostSnapshotProvenance: 'unknown' | 'clean' | 'ambiguous' = 'unknown';
+  let latestNativePermissionsByAgent: Readonly<
+    Record<string, readonly import('./v2/types').V2PermissionRule[]>
+  > = {};
   let registryRetired = false;
   let mcps: ReturnType<typeof createBuiltinMcps>;
   // Host flavor ('v2' on OpenCode v2 hosts via the client shim, undefined on
@@ -1241,11 +1246,83 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       if (registryRetired || !resolvedAgentRegistry) return undefined;
       return registryBridge.requireRegistry().marketplacePackages;
     },
+    getDesiredPackages: () => {
+      if (hostSnapshotProvenance !== 'clean' || !latestHostSnapshot) {
+        throw new Error(
+          'The current host agent snapshot is not trustworthy for desired marketplace status',
+        );
+      }
+      const freshConfig = loadPluginConfig(ctx.directory, { silent: true });
+      const packageInspection = marketplaceService.store.inspectAll();
+      if (
+        packageInspection.lockfileError ||
+        packageInspection.operationalError
+      ) {
+        throw new Error(
+          packageInspection.lockfileError ?? packageInspection.operationalError,
+        );
+      }
+      const installedPackages = new Map(
+        packageInspection.packages.map((stored) => [
+          stored.manifest.id,
+          stored,
+        ]),
+      );
+      const readOnlyActivationStore = {
+        loadSelected(ids: readonly string[]) {
+          const packages = new Map();
+          const errors = new Map<string, Error>();
+          for (const id of ids) {
+            const stored = installedPackages.get(id);
+            if (stored) packages.set(id, stored);
+            else
+              errors.set(id, new Error(`${id} is not installed or verified`));
+          }
+          return { packages, errors };
+        },
+      };
+      const freshRuntime = RuntimeConfig.createDetached(
+        ctx.directory,
+        freshConfig,
+      );
+      freshRuntime.captureHostConfig(latestHostSnapshot ?? {});
+      const runtimePreset = runtime.getRuntimePreset();
+      if (runtimePreset) freshRuntime.setRuntimePreset(runtimePreset);
+      const activePreset = runtimePreset ?? freshConfig.preset;
+      const freshPluginMcps = createBuiltinMcps(freshRuntime.disabledMcps);
+      const freshRegistry = buildResolvedAgentRegistry(freshRuntime, {
+        hostSnapshot: latestHostSnapshot,
+        nativePermissionsByAgent: latestNativePermissionsByAgent,
+        projectDirectory: ctx.directory,
+        hostFlavor,
+        pluginMcps: freshPluginMcps,
+        marketplace: {
+          selectedPackageIds: readDesiredMarketplacePackageIds(
+            ctx.directory,
+            activePreset,
+          ),
+          store: readOnlyActivationStore,
+          pluginVersion: getBuildInfo().version,
+          availableSkillNames: discoverPreflightSkills(
+            freshRuntime,
+            ctx.directory,
+          ),
+        },
+      });
+      return freshRegistry.marketplacePackages;
+    },
   });
   registryBridge = {
     marketplaceService,
     finalize(hostSnapshot, nativePermissionsByAgent) {
       if (registryRetired) throw new Error('Agent registry is retired');
+      if (!latestHostSnapshot) {
+        latestHostSnapshot = structuredClone(hostSnapshot);
+        latestNativePermissionsByAgent = structuredClone(
+          nativePermissionsByAgent,
+        );
+        hostSnapshotProvenance = 'clean';
+      }
       if (!resolvedAgentRegistry) {
         RuntimeConfig.get(ctx.directory).captureHostConfig(hostSnapshot);
         resolvedAgentRegistry = buildResolvedAgentRegistry(runtime, {
@@ -1291,6 +1368,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       }
       return resolvedAgentRegistry;
     },
+    markHostSnapshotAmbiguous() {
+      hostSnapshotProvenance = 'ambiguous';
+    },
     requireRegistry() {
       if (registryRetired) throw new Error('Agent registry is retired');
       if (!resolvedAgentRegistry)
@@ -1325,9 +1405,15 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         ? undefined
         : (structuredClone(opencodeConfig) as RegistryHostSnapshot);
       if (preMutationHostSnapshot) {
+        latestHostSnapshot = preMutationHostSnapshot;
+        hostSnapshotProvenance = 'clean';
         RuntimeConfig.get(ctx.directory).captureHostConfig(
           preMutationHostSnapshot,
         );
+      } else {
+        // A v1 config replay may already contain this generation's projected
+        // agents. Do not treat that object as a fresh native host snapshot.
+        hostSnapshotProvenance = 'ambiguous';
       }
       // Force default_agent to the orchestrator's visible entry when unset,
       // and also when the user pointed it at an omos subagent name (opencode

@@ -1,8 +1,6 @@
 import type { MarketplaceLivePackage } from '../agents/registry.js';
-import { resolveEffectiveAgentOverrides } from '../config/effective-agent-overrides.js';
 import {
   findPluginConfigPaths,
-  loadPluginConfig,
   loadPluginConfigFromPath,
   mergePluginConfigs,
 } from '../config/loader.js';
@@ -10,8 +8,6 @@ import {
   PresetResolutionError,
   resolvePresetDefinition,
 } from '../config/presets.js';
-import { discoverProjectLocalSkillNames } from '../config/project-skills.js';
-import { marketplaceConfigFingerprint } from './config-identity.js';
 import type { MarketplaceStore } from './store.js';
 
 export interface MarketplaceRuntimeStatus {
@@ -29,6 +25,7 @@ export interface MarketplaceRuntimeStatus {
   readonly reloadRequired: boolean | null;
   readonly lockfileError?: string;
   readonly operationalError?: string;
+  readonly diagnostics: readonly string[];
 }
 
 export interface MarketplaceReloadRequest extends MarketplaceRuntimeStatus {
@@ -76,13 +73,10 @@ export function readMarketplaceRuntimeStatus(input: {
   readonly directory: string;
   readonly store: Pick<MarketplaceStore, 'inspectAll'>;
   readonly livePackages?: readonly MarketplaceLivePackage[];
+  readonly desiredPackages?: readonly MarketplaceLivePackage[];
+  readonly desiredConfigError?: string;
 }): MarketplaceRuntimeStatus {
   const desiredPackageIds = readDesiredMarketplacePackageIds(input.directory);
-  const freshConfig = loadPluginConfig(input.directory, { silent: true });
-  const effectiveAgentOverrides = resolveEffectiveAgentOverrides(
-    freshConfig.agents ?? {},
-    () => discoverProjectLocalSkillNames(input.directory),
-  );
   const inspection = input.store.inspectAll();
   const wanted = new Set(desiredPackageIds);
   const observedVerifications = new Map(
@@ -109,38 +103,41 @@ export function readMarketplaceRuntimeStatus(input: {
       .filter(({ manifest }) => wanted.has(manifest.id))
       .map((stored) => [stored.manifest.id, stored]),
   );
-  const freshFingerprints = new Map(
-    [...diskPackages].map(([id, stored]) => [
-      id,
-      marketplaceConfigFingerprint({
-        id,
-        runtimeName: stored.manifest.agentName,
-        version: stored.manifest.version,
-        digest: stored.digest,
-        agentOverride: effectiveAgentOverrides[stored.manifest.agentName],
-      }),
-    ]),
-  );
   const verificationById = new Map(
     verifications.map((item) => [item.id, item]),
   );
   const liveById = new Map((livePackages ?? []).map((item) => [item.id, item]));
-  const reloadRequired: boolean | null = !liveAvailable
-    ? null
-    : desiredPackageIds.length !== (livePackages?.length ?? 0) ||
-      desiredPackageIds.some((id) => {
-        const live = liveById.get(id);
-        const current = diskPackages.get(id);
-        const verification = verificationById.get(id);
-        return (
-          !live ||
-          !current ||
-          !verification?.valid ||
-          live.version !== current.manifest.version ||
-          live.digest !== current.digest ||
-          live.configFingerprint !== freshFingerprints.get(id)
-        );
-      });
+  const desiredById = new Map(
+    (input.desiredPackages ?? []).map((item) => [item.id, item]),
+  );
+  const diagnostics = [
+    ...(inspection.lockfileError ? [inspection.lockfileError] : []),
+    ...(inspection.operationalError ? [inspection.operationalError] : []),
+    ...(input.desiredConfigError ? [input.desiredConfigError] : []),
+  ];
+  const reloadRequired: boolean | null =
+    !liveAvailable ||
+    inspection.lockfileError ||
+    inspection.operationalError ||
+    input.desiredConfigError !== undefined ||
+    input.desiredPackages === undefined
+      ? null
+      : desiredPackageIds.length !== (livePackages?.length ?? 0) ||
+        desiredPackageIds.some((id) => {
+          const live = liveById.get(id);
+          const current = diskPackages.get(id);
+          const verification = verificationById.get(id);
+          const desired = desiredById.get(id);
+          return (
+            !live ||
+            !current ||
+            !verification?.valid ||
+            !desired ||
+            live.version !== current.manifest.version ||
+            live.digest !== current.digest ||
+            live.configFingerprint !== desired.configFingerprint
+          );
+        });
 
   return {
     desiredPackageIds,
@@ -148,6 +145,7 @@ export function readMarketplaceRuntimeStatus(input: {
     liveAvailable,
     livePackages,
     reloadRequired,
+    diagnostics,
     ...(inspection.lockfileError
       ? { lockfileError: inspection.lockfileError }
       : {}),
@@ -162,17 +160,22 @@ export function requestMarketplaceReload(input: {
   readonly directory: string;
   readonly store: Pick<MarketplaceStore, 'inspectAll'>;
   readonly livePackages?: readonly MarketplaceLivePackage[];
+  readonly desiredPackages?: readonly MarketplaceLivePackage[];
+  readonly desiredConfigError?: string;
 }): MarketplaceReloadRequest {
   const status = readMarketplaceRuntimeStatus(input);
   return {
     ...status,
     accepted: false,
-    message: status.liveAvailable
-      ? status.reloadRequired
-        ? 'A host reload is required to apply the desired marketplace state. Restart or reload OpenCode from the host; no reload was performed.'
-        : status.reloadRequired === false
-          ? 'The live marketplace snapshot already matches the desired state. No reload was performed.'
-          : 'Whether a host reload is required is unknown. Restart or reload OpenCode from the host to apply the desired state; no reload was performed.'
-      : 'The live marketplace snapshot is unavailable in this standalone context. Restart or reload OpenCode from the host to apply the desired state; no reload was performed.',
+    message:
+      status.diagnostics.length > 0
+        ? `Marketplace status is incomplete, so whether a host reload is required is unknown. Resolve the reported marketplace/config diagnostics and check again; no reload was performed. ${status.diagnostics.join('; ')}`
+        : status.liveAvailable
+          ? status.reloadRequired
+            ? 'A host reload is required to apply the desired marketplace state. Restart or reload OpenCode from the host; no reload was performed.'
+            : status.reloadRequired === false
+              ? 'The live marketplace snapshot already matches the desired state. No reload was performed.'
+              : 'Whether a host reload is required is unknown. Restart or reload OpenCode from the host to apply the desired state; no reload was performed.'
+          : 'The live marketplace snapshot is unavailable in this standalone context. Restart or reload OpenCode from the host to apply the desired state; no reload was performed.',
   };
 }

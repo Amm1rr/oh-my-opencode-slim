@@ -747,6 +747,110 @@ describe('finalized existing-agent registry', () => {
     expect(Object.isFrozen(registry.marketplacePackages[0])).toBe(true);
   });
 
+  test('fingerprints inherited builtin models and effective host agent overrides', () => {
+    const extension = marketplacePackage('team/extended', {
+      extends: { builtin: 'explorer', promptMode: 'append' },
+      model: { source: 'builtin' },
+      skills: [],
+      mcps: [],
+    });
+    const extensionOptions = marketplaceOptions(
+      ['team/extended'],
+      marketplaceStore({ 'team/extended': extension }),
+    );
+    const inherited = (model: string) =>
+      build(
+        runtimeFor({}),
+        { agent: { explorer: { model }, mcp: {} } },
+        extensionOptions,
+      ).marketplacePackages[0];
+    const inheritedA = inherited('provider/explorer-a');
+    const inheritedB = inherited('provider/explorer-b');
+    expect(inheritedA?.configFingerprint).not.toBe(
+      inheritedB?.configFingerprint,
+    );
+    expect(
+      build(
+        runtimeFor({}),
+        {
+          agent: { explorer: { model: 'provider/explorer-a' }, mcp: {} },
+        },
+        extensionOptions,
+      ).finalAgentConfig['market-agent'],
+    ).toMatchObject({ model: 'provider/explorer-a' });
+
+    const ownerRuntimeConfig = {
+      agents: {
+        'market-agent': {
+          model: 'provider/owner',
+          prompt: 'Owner prompt',
+        },
+      },
+    } as Parameters<typeof RuntimeConfig.init>[1];
+    const ownerRegistry = (prompt: string) =>
+      build(
+        runtimeFor(ownerRuntimeConfig),
+        {
+          agent: {
+            explorer: { model: 'provider/explorer-a' },
+            'market-agent': { prompt },
+            mcp: {},
+          },
+        },
+        extensionOptions,
+      ).marketplacePackages[0];
+    expect(ownerRegistry('Host prompt A')?.configFingerprint).not.toBe(
+      ownerRegistry('Host prompt B')?.configFingerprint,
+    );
+  });
+
+  test('fingerprints the full marketplace fallback model chain', () => {
+    const packageConfig = marketplaceOptions(
+      ['team/fallback-chain'],
+      marketplaceStore({
+        'team/fallback-chain': marketplacePackage('team/fallback-chain', {
+          agentName: 'fallback-agent',
+          skills: [],
+          mcps: [],
+        }),
+      }),
+    );
+    const registryFor = (fallback: string) =>
+      build(
+        runtimeFor({
+          agents: {
+            'fallback-agent': {
+              model: ['provider/primary', fallback],
+            },
+          },
+        } as Parameters<typeof RuntimeConfig.init>[1]),
+        { agent: {}, mcp: {} },
+        packageConfig,
+      );
+    const first = registryFor('provider/fallback-a');
+    const second = registryFor('provider/fallback-b');
+
+    expect(first.finalAgentConfig['fallback-agent']).toMatchObject({
+      model: 'provider/primary',
+    });
+    expect(second.finalAgentConfig['fallback-agent']).toMatchObject({
+      model: 'provider/primary',
+    });
+    expect(first.modelCandidates['fallback-agent']).toEqual([
+      { id: 'provider/primary' },
+      { id: 'provider/fallback-a' },
+    ]);
+    expect(second.modelCandidates['fallback-agent']).toEqual([
+      { id: 'provider/primary' },
+      { id: 'provider/fallback-b' },
+    ]);
+    expect(first.marketplacePackages[0]?.configFingerprint).not.toBe(
+      second.marketplacePackages[0]?.configFingerprint,
+    );
+    expect(Object.isFrozen(first.modelCandidates['fallback-agent'])).toBe(true);
+    expect(Object.isFrozen(first.marketplacePackages[0])).toBe(true);
+  });
+
   test('allows packages without MCP requirements when the host snapshot has no MCP key', () => {
     const runtime = runtimeFor({});
     const registry = build(

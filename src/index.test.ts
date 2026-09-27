@@ -401,6 +401,25 @@ describe('plugin tool registration', () => {
       expect(registryBridge.marketplaceService.status().reloadRequired).toBe(
         true,
       );
+      await hooks.config?.(hostConfig);
+      const hostReplayStatus = registryBridge.marketplaceService.status();
+      expect(hostReplayStatus.reloadRequired).toBeNull();
+      expect(hostReplayStatus.diagnostics).toContain(
+        'The current host agent snapshot is not trustworthy for desired marketplace status',
+      );
+      await hooks.config?.({
+        agent: {
+          explorer: { model: 'provider/inherited-model-drift' },
+          'selected-agent': {
+            model: 'provider/host-override-drift',
+            prompt: 'Host override drift',
+            displayName: 'HostSelected',
+          },
+        },
+      });
+      expect(
+        registryBridge.marketplaceService.status().reloadRequired,
+      ).toBeNull();
       expect(hostConfig.agent).toHaveProperty('selected-agent');
       expect(hostConfig.agent).not.toHaveProperty('unselected-agent');
       expect(hostConfig.agent).not.toHaveProperty('changed_baseline');
@@ -561,6 +580,93 @@ describe('plugin tool registration', () => {
       await expect(hooks.config?.({ agent: {} })).rejects.toThrow(
         'missing-required-dependency',
       );
+    } finally {
+      await hooks.dispose?.();
+      process.env = originalEnv;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('fresh desired projection uses newly enabled builtin MCPs', async () => {
+    const originalEnv = { ...process.env };
+    const root = await mkdtemp(
+      '/tmp/oh-my-opencode-slim-marketplace-fresh-mcp-',
+    );
+    const configDir = path.join(root, 'config');
+    await mkdir(configDir, { recursive: true });
+    process.env = {
+      ...originalEnv,
+      OPENCODE_CONFIG_DIR: configDir,
+      XDG_DATA_HOME: path.join(root, 'data'),
+    };
+    delete process.env.OH_MY_OPENCODE_SLIM_DISABLE;
+    const store = new MarketplaceStore({ pluginVersion: '2.2.25' });
+    store.install({
+      manifest: {
+        schemaVersion: 2,
+        id: 'team/requires-context7',
+        version: '1.0.0',
+        displayName: 'Requires Context7',
+        description: 'Fresh MCP config fixture',
+        agentName: 'requires-context7-agent',
+        prompt: 'Use Context7.',
+        skills: [],
+        mcps: ['context7'],
+        tools: ['read'],
+        author: { name: 'Test author' },
+        tags: [],
+        license: 'MIT',
+        compatibility: { plugin: '>=1.0.0' },
+        model: { source: 'explicit', candidates: ['provider/package'] },
+        routing: {
+          description: 'MCP fixture',
+          when: 'A Context7 test is needed.',
+          keywords: ['context7'],
+        },
+      } as never,
+    });
+    const configPath = path.join(configDir, 'oh-my-opencode-slim.json');
+    await Bun.write(
+      configPath,
+      JSON.stringify({
+        preset: 'inactive',
+        disabled_mcps: ['context7'],
+        presets: {
+          inactive: { marketplace: { agents: [] } },
+          active: {
+            marketplace: { agents: ['team/requires-context7'] },
+          },
+        },
+      }),
+    );
+    const hooks = await plugin({
+      client: createPluginClient(async () => ({})),
+      directory: root,
+      worktree: root,
+      serverUrl: new URL('http://127.0.0.1:4096'),
+    } as never);
+    try {
+      await hooks.config?.({ agent: {}, mcp: {} });
+      const registryBridge = (
+        hooks as unknown as { registryBridge: RegistryFactoryBridge }
+      ).registryBridge;
+      await Bun.write(
+        configPath,
+        JSON.stringify({
+          preset: 'active',
+          disabled_mcps: [],
+          presets: {
+            inactive: { marketplace: { agents: [] } },
+            active: {
+              marketplace: { agents: ['team/requires-context7'] },
+            },
+          },
+        }),
+      );
+
+      const status = registryBridge.marketplaceService.status();
+      expect(status.reloadRequired).toBe(true);
+      expect(status.diagnostics).toEqual([]);
     } finally {
       await hooks.dispose?.();
       process.env = originalEnv;

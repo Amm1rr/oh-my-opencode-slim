@@ -390,19 +390,12 @@ export function buildResolvedAgentRegistry(
       disabledMcpNames: runtime.disabledMcps,
       reservedAgentNames,
     });
-    const agentOverrides = runtime.agents();
     marketplacePackages = plan.agents.map((admission) => ({
       id: admission.packageId,
       runtimeName: admission.agentName,
       version: admission.version,
       digest: admission.digest,
-      configFingerprint: marketplaceConfigFingerprint({
-        id: admission.packageId,
-        runtimeName: admission.agentName,
-        version: admission.version,
-        digest: admission.digest,
-        agentOverride: agentOverrides[admission.agentName],
-      }),
+      configFingerprint: '',
     }));
     const constructed = createMarketplaceAgentDefinitions(plan);
     const admittedNames = new Set(
@@ -1128,11 +1121,37 @@ export function buildResolvedAgentRegistry(
     }
   }
   const frozenManagedAgents = freeze(managedAgentConfig);
+  const frozenMarketplacePackages = marketplacePackages.map((item) => {
+    const visibleName = identities[item.runtimeName];
+    return {
+      ...item,
+      configFingerprint: marketplaceConfigFingerprint({
+        id: item.id,
+        runtimeName: item.runtimeName,
+        identity: visibleName,
+        canonicalConfig: finalAgentConfig[item.runtimeName],
+        visibleConfig:
+          visibleName && visibleName !== item.runtimeName
+            ? finalAgentConfig[visibleName]
+            : undefined,
+        canonicalPolicy: policyMap[item.runtimeName],
+        visiblePolicy:
+          visibleName && visibleName !== item.runtimeName
+            ? policyMap[visibleName]
+            : undefined,
+        canonicalModelCandidates: candidateMap[item.runtimeName],
+        visibleModelCandidates:
+          visibleName && visibleName !== item.runtimeName
+            ? candidateMap[visibleName]
+            : undefined,
+      }),
+    };
+  });
   return Object.freeze({
     hostFlavor,
     agentNames: Object.freeze(definitions.map((definition) => definition.name)),
     marketplaceAgentNames: Object.freeze([...marketplaceMetadata.keys()]),
-    marketplacePackages: freeze(clone(marketplacePackages)),
+    marketplacePackages: freeze(clone(frozenMarketplacePackages)),
     identities: frozenIdentities,
     modelCandidates: frozenCandidates,
     effectiveStartupModels: frozenEffective,

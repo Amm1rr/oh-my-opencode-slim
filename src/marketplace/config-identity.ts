@@ -1,22 +1,5 @@
 import { createHash } from 'node:crypto';
 
-const EFFECTIVE_AGENT_FIELDS = [
-  'description',
-  'displayName',
-  'hidden',
-  'inheritModelFrom',
-  'mcps',
-  'model',
-  'options',
-  'permission',
-  'prompt',
-  'skills',
-  'temperature',
-  'tools',
-  'variant',
-  'color',
-] as const;
-
 function canonical(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonical);
   if (value && typeof value === 'object') {
@@ -29,33 +12,31 @@ function canonical(value: unknown): unknown {
   return value;
 }
 
-/** Hash only agent override fields consumed by marketplace registry assembly. */
+/** Hash the complete finalized marketplace projection deterministically. */
 export function marketplaceConfigFingerprint(input: {
   readonly id: string;
   readonly runtimeName: string;
-  readonly version: string;
-  readonly digest: string;
-  readonly agentOverride: unknown;
+  readonly identity: string | undefined;
+  readonly canonicalConfig: unknown;
+  readonly visibleConfig: unknown;
+  readonly canonicalPolicy: unknown;
+  readonly visiblePolicy: unknown;
+  readonly canonicalModelCandidates: unknown;
+  readonly visibleModelCandidates: unknown;
 }): string {
-  const source =
-    input.agentOverride && typeof input.agentOverride === 'object'
-      ? (input.agentOverride as Record<string, unknown>)
-      : {};
-  const effectiveOverride = Object.fromEntries(
-    EFFECTIVE_AGENT_FIELDS.filter((field) => field in source).map((field) => [
-      field,
-      source[field],
-    ]),
-  );
   return createHash('sha256')
     .update(
       JSON.stringify(
         canonical({
           id: input.id,
           runtimeName: input.runtimeName,
-          version: input.version,
-          digest: input.digest,
-          agentOverride: effectiveOverride,
+          identity: input.identity,
+          canonicalConfig: input.canonicalConfig,
+          visibleConfig: input.visibleConfig,
+          canonicalPolicy: input.canonicalPolicy,
+          visiblePolicy: input.visiblePolicy,
+          canonicalModelCandidates: input.canonicalModelCandidates,
+          visibleModelCandidates: input.visibleModelCandidates,
         }),
       ),
     )
