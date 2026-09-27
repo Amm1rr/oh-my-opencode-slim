@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import {
   MarketplaceCompatibilityError,
   MarketplaceConflictError,
@@ -859,6 +859,77 @@ describe('MarketplaceService', () => {
     } finally {
       if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
       else process.env.XDG_CONFIG_HOME = previousConfigHome;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('uninstalls from writable user config when project config paths are read-only and absent', () => {
+    const root = tempRoot();
+    const previousConfigHome = process.env.XDG_CONFIG_HOME;
+    const previousOpenCodeConfigDir = process.env.OPENCODE_CONFIG_DIR;
+    const userConfigDir = join(root, 'custom-config');
+    const userConfigPath = join(userConfigDir, 'oh-my-opencode-slim.json');
+    const projectDir = join(root, 'read-only-project');
+    const projectConfigDir = join(projectDir, '.opencode');
+    const originalAccess = fsModule.accessSync;
+    try {
+      process.env.XDG_CONFIG_HOME = join(root, 'xdg-config');
+      process.env.OPENCODE_CONFIG_DIR = userConfigDir;
+      mkdirSync(userConfigDir, { recursive: true });
+      mkdirSync(projectConfigDir, { recursive: true });
+      writeFileSync(
+        userConfigPath,
+        JSON.stringify({
+          presets: {
+            work: { marketplace: { agents: ['community/example'] } },
+          },
+        }),
+      );
+      const service = new MarketplaceService({
+        rootDir: join(root, 'writable-store'),
+        projectDir,
+        pluginVersion: '3.5.0',
+      });
+      service.install(bundle());
+
+      const accessSpy = spyOn(fsModule, 'accessSync').mockImplementation(((
+        path: fsModule.PathLike,
+        mode?: number,
+      ) => {
+        if (resolve(path.toString()) === resolve(projectConfigDir)) {
+          throw Object.assign(
+            new Error('project config directory is read-only'),
+            {
+              code: 'EACCES',
+            },
+          );
+        }
+        return originalAccess.call(fsModule, path, mode);
+      }) as typeof fsModule.accessSync);
+      try {
+        expect(
+          service.uninstallGlobal('community/example', true).uninstalled,
+        ).toBe(true);
+        expect(service.list()).toEqual([]);
+        expect(
+          JSON.parse(readFileSync(userConfigPath, 'utf8')).presets.work
+            .marketplace.agents,
+        ).toEqual([]);
+        expect(
+          existsSync(join(projectConfigDir, 'oh-my-opencode-slim.json')),
+        ).toBe(false);
+        expect(
+          existsSync(join(projectConfigDir, 'oh-my-opencode-slim.jsonc')),
+        ).toBe(false);
+      } finally {
+        accessSpy.mockRestore();
+      }
+    } finally {
+      if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = previousConfigHome;
+      if (previousOpenCodeConfigDir === undefined)
+        delete process.env.OPENCODE_CONFIG_DIR;
+      else process.env.OPENCODE_CONFIG_DIR = previousOpenCodeConfigDir;
       rmSync(root, { recursive: true, force: true });
     }
   });

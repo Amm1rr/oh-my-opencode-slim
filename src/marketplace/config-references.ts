@@ -1,5 +1,5 @@
-import { existsSync, readFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { accessSync, constants, readFileSync, statSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { parse, printParseErrorCode } from 'jsonc-parser';
 import {
   prepareJsonConfigWrite,
@@ -7,11 +7,77 @@ import {
   restorePreparedJsonConfig,
   withSerializedConfigWrites,
 } from '../cli/config-io';
+import { getConfigSearchDirs } from '../cli/paths';
 import { findPluginConfigPaths } from '../config/loader';
 import { MarketplaceActivationError } from './errors';
 import { normalizeMarketplacePackageId } from './ids';
 
 type RecordValue = Record<string, unknown>;
+
+function errorCode(error: unknown): string | undefined {
+  if (!error || typeof error !== 'object') return undefined;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === 'string' ? code : undefined;
+}
+
+function isMissingPathError(error: unknown): boolean {
+  return errorCode(error) === 'ENOENT' || errorCode(error) === 'ENOTDIR';
+}
+
+function pathExists(configPath: string): boolean {
+  try {
+    statSync(configPath);
+    return true;
+  } catch (error) {
+    if (isMissingPathError(error)) return false;
+    throw error;
+  }
+}
+
+function canCreateConfigLock(configPath: string): boolean {
+  let parent = dirname(configPath);
+  while (true) {
+    let parentStat: ReturnType<typeof statSync>;
+    try {
+      parentStat = statSync(parent);
+    } catch (error) {
+      if (errorCode(error) === 'ENOENT') {
+        const ancestor = dirname(parent);
+        if (ancestor === parent) throw error;
+        parent = ancestor;
+        continue;
+      }
+      if (errorCode(error) === 'ENOTDIR') return false;
+      throw error;
+    }
+    if (!parentStat.isDirectory()) return false;
+    try {
+      accessSync(parent, constants.W_OK | constants.X_OK);
+      return true;
+    } catch (error) {
+      if (['EACCES', 'EPERM', 'EROFS'].includes(errorCode(error) ?? '')) {
+        return false;
+      }
+      throw error;
+    }
+  }
+}
+
+function shouldLockProjectConfig(configPath: string): boolean {
+  // Lock existing files regardless of their parent permissions. For missing
+  // files, lock only if a writer could create the config while uninstall waits.
+  return pathExists(configPath) || canCreateConfigLock(configPath);
+}
+
+function findExistingUserConfigPath(): string | null {
+  for (const configDir of getConfigSearchDirs()) {
+    for (const extension of ['.jsonc', '.json']) {
+      const configPath = join(configDir, `oh-my-opencode-slim${extension}`);
+      if (pathExists(configPath)) return resolve(configPath);
+    }
+  }
+  return null;
+}
 
 const MARKETPLACE_AGENT_LISTS = [
   'agents',
@@ -112,8 +178,7 @@ export function withMarketplaceConfigReferencesRemoved(
   id: string,
   operation: (onCommitted: () => void) => void,
 ): void {
-  const initialUserConfigPath =
-    findPluginConfigPaths(projectDir).userConfigPath;
+  const initialUserConfigPath = findExistingUserConfigPath();
   const projectConfigBase = join(
     resolve(projectDir),
     '.opencode',
@@ -125,30 +190,37 @@ export function withMarketplaceConfigReferencesRemoved(
     ...(initialUserConfigPath ? [initialUserConfigPath] : []),
   ];
   const orderedPaths = [
-    ...new Set(candidateConfigPaths.map((configPath) => resolve(configPath))),
+    ...new Set(
+      candidateConfigPaths
+        .filter(
+          (configPath) =>
+            configPath === initialUserConfigPath ||
+            shouldLockProjectConfig(configPath),
+        )
+        .map((configPath) => resolve(configPath)),
+    ),
   ].sort();
   const targetId = normalizeMarketplacePackageId(id);
 
   let committed = false;
   try {
     withSerializedConfigWrites(orderedPaths, () => {
-      // Discover only after acquiring every possible project/user config
-      // lease. A project config may have been created while uninstall waited.
+      // Rediscover while holding the selected user config and all feasible
+      // project config leases. A project config may have been created while
+      // uninstall waited.
       const current = findPluginConfigPaths(projectDir);
-      if (
-        (current.userConfigPath && resolve(current.userConfigPath)) !==
-        (initialUserConfigPath && resolve(initialUserConfigPath))
-      ) {
+      const currentUserConfigPath = findExistingUserConfigPath();
+      if (currentUserConfigPath !== initialUserConfigPath) {
         throw new MarketplaceActivationError(
           'Marketplace user config resolution changed during uninstall; retry the operation',
         );
       }
-      const configPaths = [current.userConfigPath, current.projectConfigPath]
+      const configPaths = [currentUserConfigPath, current.projectConfigPath]
         .filter((configPath): configPath is string => configPath !== null)
         .map((configPath) => resolve(configPath));
       const prepared = [];
       for (const configPath of [...new Set(configPaths)].sort()) {
-        if (!existsSync(configPath)) continue;
+        if (!pathExists(configPath)) continue;
         const original = readFileSync(configPath, 'utf8');
         const config = parseConfig(configPath, original);
         const updated = removeReferences(config, targetId);

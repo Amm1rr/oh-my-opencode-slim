@@ -446,6 +446,76 @@ describe('marketplace config reference cleanup', () => {
     }
   });
 
+  test('uninstalls through writable user config when the project config directory is read-only', () => {
+    const fixture = createConfigs();
+    const projectConfigDir = dirname(fixture.projectPath);
+    const originalAccess = fs.accessSync;
+    const originalMkdir = fs.mkdirSync;
+    try {
+      writeFileSync(
+        fixture.userPath,
+        JSON.stringify({
+          presets: {
+            work: { marketplace: { agents: ['community/remove'] } },
+          },
+        }),
+      );
+      const accessSpy = spyOn(fs, 'accessSync').mockImplementation(((
+        path: fs.PathLike,
+        mode?: number,
+      ) => {
+        if (resolve(path.toString()) === resolve(projectConfigDir)) {
+          throw Object.assign(
+            new Error('project config directory is read-only'),
+            {
+              code: 'EACCES',
+            },
+          );
+        }
+        return originalAccess.call(fs, path, mode);
+      }) as typeof fs.accessSync);
+      const mkdirSpy = spyOn(fs, 'mkdirSync').mockImplementation(((
+        path: fs.PathLike,
+        ...args: Parameters<typeof fs.mkdirSync>[1][]
+      ) => {
+        if (
+          resolve(path.toString()).startsWith(
+            `${resolve(projectConfigDir)}${sep}`,
+          ) &&
+          resolve(path.toString()).includes('.oh-my-opencode-slim.')
+        ) {
+          throw Object.assign(new Error('unexpected project config lock'), {
+            code: 'EACCES',
+          });
+        }
+        return originalMkdir.call(fs, path, ...args);
+      }) as typeof fs.mkdirSync);
+      try {
+        let storeMutationCommitted = false;
+        withMarketplaceConfigReferencesRemoved(
+          fixture.project,
+          'community/remove',
+          (onCommitted) => {
+            storeMutationCommitted = true;
+            onCommitted();
+          },
+        );
+
+        expect(storeMutationCommitted).toBe(true);
+        expect(
+          parse(readFileSync(fixture.userPath, 'utf8')).presets.work.marketplace
+            .agents,
+        ).toEqual([]);
+        expect(readdirSync(projectConfigDir)).toEqual([]);
+      } finally {
+        mkdirSpy.mockRestore();
+        accessSpy.mockRestore();
+      }
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
   test.each(['json', 'jsonc'] as const)(
     'waits for and rediscovers a project .%s config created during uninstall',
     async (extension) => {
