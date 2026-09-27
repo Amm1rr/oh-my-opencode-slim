@@ -540,6 +540,20 @@ export class RuntimeConfig {
     return this.runtimePresetName;
   }
 
+  /** Return the runtime override only when it resolves in this config snapshot. */
+  resolveRuntimePreset(
+    pluginConfig: ResolvedPluginConfig | undefined = this.pluginConfig,
+  ): string | null {
+    const name = this.runtimePresetName;
+    if (!name || !pluginConfig?.presets?.[name]) return null;
+    try {
+      resolvePreset(name, pluginConfig.presets);
+      return name;
+    } catch {
+      return null;
+    }
+  }
+
   /** Record that an agent's model was switched at runtime. */
   everModelSwitched(name: string): void {
     this.switchedModels.add(name);

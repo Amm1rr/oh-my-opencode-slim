@@ -756,6 +756,25 @@ describe('plugin tool registration', () => {
       ]);
       expect(status.reloadRequired).toBe(false);
       expect(marketplaceService.requestReload().reloadRequired).toBe(false);
+
+      await Bun.write(
+        path.join(configDir, 'oh-my-opencode-slim.json'),
+        JSON.stringify({
+          preset: 'disk',
+          presets: {
+            disk: { marketplace: { agents: ['team/disk-preset'] } },
+          },
+        }),
+      );
+      const deletedOverrideStatus = marketplaceService.status();
+      expect(deletedOverrideStatus.desiredPackageIds).toEqual([
+        'team/disk-preset',
+      ]);
+      expect(deletedOverrideStatus.livePackages?.map(({ id }) => id)).toEqual([
+        'team/runtime-preset',
+      ]);
+      expect(deletedOverrideStatus.reloadRequired).toBe(true);
+      expect(marketplaceService.requestReload().reloadRequired).toBe(true);
     } finally {
       await hooks.dispose?.();
       RuntimeConfig.reset(root);

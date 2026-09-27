@@ -490,17 +490,24 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // factory-local state, while module-level runtime preset state may persist.
     // Reapply that persisted preset so each fresh generation creates agents
     // with the correct models.
-    const runtimePreset = RuntimeConfig.get(ctx.directory).getRuntimePreset();
-    if (runtimePreset && config.presets?.[runtimePreset]) {
+    const runtimeConfig = RuntimeConfig.get(ctx.directory);
+    const previousRuntimePreset = runtimeConfig.getRuntimePreset();
+    const runtimePreset = runtimeConfig.resolveRuntimePreset(config);
+    if (runtimePreset) {
       config.preset = runtimePreset;
       // Re-merge runtime preset into config.agents (loadPluginConfig
       // already merged the config-file preset, not the runtime one).
       // Runtime preset is override so it wins over config-file preset.
-      const presetAgents = config.presets[runtimePreset];
+      const presetAgents = config.presets?.[runtimePreset];
+      if (!presetAgents) {
+        throw new Error(
+          `Resolved runtime preset '${runtimePreset}' is missing`,
+        );
+      }
       config.agents = deepMerge(config.agents, presetAgents);
-    } else if (runtimePreset) {
+    } else if (previousRuntimePreset) {
       // Preset was deleted from config since last switch - clear stale state
-      RuntimeConfig.get(ctx.directory).setRuntimePreset(null);
+      runtimeConfig.setRuntimePreset(null);
     }
 
     runtime = RuntimeConfig.get(ctx.directory);
@@ -1249,7 +1256,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     getPresetOverride: () => runtime.getRuntimePreset() ?? undefined,
     getDesiredState: (packageInspection) => {
       const freshConfig = loadPluginConfig(ctx.directory, { silent: true });
-      const runtimePreset = runtime.getRuntimePreset();
+      const runtimePreset = runtime.resolveRuntimePreset(freshConfig);
       const desiredPackageIds = resolveDesiredMarketplacePackageIds(
         freshConfig,
         runtimePreset ?? undefined,
