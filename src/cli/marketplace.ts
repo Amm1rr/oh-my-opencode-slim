@@ -28,6 +28,7 @@ function usage(): string {
     'Usage: oh-my-opencode-slim marketplace <command> [target]',
     `Commands: ${COMMANDS.join(', ')}`,
     'Targets are package IDs/selectors or bundle file paths as appropriate.',
+    'enable/disable accept optional --user; default activation scope is project.',
   ].join('\n');
 }
 
@@ -41,6 +42,21 @@ function requireTarget(command: string, args: readonly string[]): string {
 function requireNoArgs(command: string, args: readonly string[]): void {
   if (args.length !== 0)
     throw new Error(`${command} does not accept arguments`);
+}
+
+function requireActivationArgs(
+  command: string,
+  args: readonly string[],
+): { target: string; scope: 'project' | 'user' } {
+  if (
+    (args.length !== 1 && args.length !== 2) ||
+    !args[0]?.trim() ||
+    args[0].startsWith('--') ||
+    (args.length === 2 && args[1] !== '--user')
+  ) {
+    throw new Error(`${command} requires <package-id> [--user]`);
+  }
+  return { target: args[0], scope: args[1] === '--user' ? 'user' : 'project' };
 }
 
 /** Run a strict marketplace CLI command; all package/config operations use the service. */
@@ -68,6 +84,13 @@ export async function runMarketplaceCommand(
 
   try {
     const service = io.service ?? new MarketplaceService({ projectDir: cwd });
+    if (
+      rest.includes('--user') &&
+      command !== 'enable' &&
+      command !== 'disable'
+    ) {
+      throw new Error('--user is only supported by enable and disable');
+    }
     let result: unknown;
     switch (command) {
       case 'install':
@@ -100,11 +123,17 @@ export async function runMarketplaceCommand(
           : 0;
       }
       case 'enable':
-        service.enable(requireTarget(command, rest));
+        {
+          const { target, scope } = requireActivationArgs(command, rest);
+          service.enable(target, scope);
+        }
         result = { enabled: true };
         break;
       case 'disable':
-        service.disable(requireTarget(command, rest));
+        {
+          const { target, scope } = requireActivationArgs(command, rest);
+          service.disable(target, scope);
+        }
         result = { enabled: false };
         break;
       case 'uninstall': {

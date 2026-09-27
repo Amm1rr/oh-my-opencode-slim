@@ -13,6 +13,8 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { parse } from 'jsonc-parser';
 import { withMarketplaceConfigReferencesRemoved } from './config-references';
+import { acquireMarketplaceLease } from './lease';
+import { getMarketplacePaths } from './paths';
 
 const previousConfigHome = process.env.XDG_CONFIG_HOME;
 const previousReferenceId = process.env.MARKETPLACE_REFERENCE_ID;
@@ -376,4 +378,83 @@ describe('marketplace config reference cleanup', () => {
       rmSync(fixture.root, { recursive: true, force: true });
     }
   });
+
+  test.each(['json', 'jsonc'] as const)(
+    'waits for and rediscovers a project .%s config created during uninstall',
+    async (extension) => {
+      const fixture = createConfigs();
+      const projectConfigPath = fixture.projectPath.replace(
+        /\.jsonc$/,
+        `.${extension}`,
+      );
+      const lockRoot = join(
+        dirname(projectConfigPath),
+        `.${basename(projectConfigPath)}.write-lock`,
+      );
+      const heldLease = acquireMarketplaceLease(getMarketplacePaths(lockRoot));
+      const readyPath = join(fixture.root, 'uninstall.ready');
+      const resultPath = join(fixture.root, 'uninstall.result');
+      let worker: ReturnType<typeof Bun.spawn> | undefined;
+      let released = false;
+      try {
+        const script = `import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { withMarketplaceConfigReferencesRemoved } from './src/marketplace/config-references.ts';
+const { project, id, configPath, readyPath, resultPath } = JSON.parse(process.argv[1]);
+writeFileSync(readyPath, 'ready');
+withMarketplaceConfigReferencesRemoved(project, id, (onCommitted) => {
+  writeFileSync(resultPath, existsSync(configPath) ? readFileSync(configPath, 'utf8') : 'missing');
+  onCommitted();
+});`;
+        worker = Bun.spawn(
+          [
+            'bun',
+            '-e',
+            script,
+            JSON.stringify({
+              project: fixture.project,
+              id: 'community/remove',
+              configPath: projectConfigPath,
+              readyPath,
+              resultPath,
+            }),
+          ],
+          { stdout: 'pipe', stderr: 'pipe', env: { ...process.env } },
+        );
+
+        const deadline = Date.now() + 10_000;
+        while (!existsSync(readyPath)) {
+          if (Date.now() >= deadline) {
+            throw new Error('Timed out waiting for uninstall worker to start');
+          }
+          await Bun.sleep(10);
+        }
+        await Bun.sleep(100);
+        expect(existsSync(resultPath)).toBe(false);
+
+        writeFileSync(
+          projectConfigPath,
+          JSON.stringify({
+            presets: {
+              work: { marketplace: { agents: ['community/remove'] } },
+            },
+          }),
+        );
+        heldLease.release();
+        released = true;
+
+        expect(await worker.exited).toBe(0);
+        expect(await new Response(worker.stderr).text()).toBe('');
+        expect(JSON.parse(readFileSync(resultPath, 'utf8'))).toEqual({
+          presets: { work: { marketplace: { agents: [] } } },
+        });
+        expect(JSON.parse(readFileSync(projectConfigPath, 'utf8'))).toEqual({
+          presets: { work: { marketplace: { agents: [] } } },
+        });
+      } finally {
+        if (!released) heldLease.release();
+        if (worker) await worker.exited;
+        rmSync(fixture.root, { recursive: true, force: true });
+      }
+    },
+  );
 });

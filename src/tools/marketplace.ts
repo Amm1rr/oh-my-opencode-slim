@@ -151,6 +151,10 @@ export function createMarketplaceTools(options: MarketplaceToolOptions): {
         .describe(
           'Required for global uninstall; confirms other projects are not inspected',
         ),
+      scope: z
+        .enum(['project', 'user'])
+        .optional()
+        .describe('Activation scope; defaults to project'),
     },
     async execute(args, context) {
       assertOrchestrator(
@@ -161,6 +165,13 @@ export function createMarketplaceTools(options: MarketplaceToolOptions): {
       const target = args.target.trim();
       if (!target)
         throw new Error('marketplace_manage requires a nonblank target');
+      if (
+        args.scope !== undefined &&
+        args.action !== 'enable' &&
+        args.action !== 'disable'
+      ) {
+        throw new Error('scope is only supported by enable and disable');
+      }
       let result: unknown;
       switch (args.action) {
         case 'install':
@@ -187,11 +198,11 @@ export function createMarketplaceTools(options: MarketplaceToolOptions): {
           );
           break;
         case 'enable':
-          options.service.enable(target);
+          options.service.enable(target, args.scope ?? 'project');
           result = { enabled: true };
           break;
         case 'disable':
-          options.service.disable(target);
+          options.service.disable(target, args.scope ?? 'project');
           result = { enabled: false };
           break;
       }

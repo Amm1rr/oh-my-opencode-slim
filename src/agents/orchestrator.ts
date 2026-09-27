@@ -205,7 +205,7 @@ After spawning all independent background tasks and any remaining non-overlappin
   or an explicit requirement demands it.
 
 ## Marketplace Packages
-- Use marketplace_inspect to list/show/verify marketplace packages or inspect runtime status. Use marketplace_manage for install/import/update/enable/disable operations when requested or when needed for the task. Disabling only changes the current project's activation; it does not delete the package.
+- Use marketplace_inspect to list/show/verify marketplace packages or inspect runtime status. Use marketplace_manage for install/import/update/enable/disable operations when requested or when needed for the task. Activation defaults to project scope and disabling never deletes the package. Use scope user only when the user explicitly asks to change shared user activation.
 - Global package deletion is marketplace_manage action uninstall and requires acknowledge_other_projects: true. It removes the shared store entry and references in the current project plus known user config, but does not inspect other projects; warn that their references may dangle. Never uninstall without explicit user intent and acknowledgement.
 - Marketplace changes update desired on-disk state only; they never hot-swap the live agent registry. After a mutation, call marketplace_inspect with action request_reload and report its exact result. Never claim the host was reloaded; the user must restart/reload OpenCode when required.
 

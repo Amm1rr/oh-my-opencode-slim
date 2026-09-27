@@ -391,10 +391,13 @@ describe('plugin tool registration', () => {
         { agent: 'orchestrator' } as never,
       );
       const persistedActivation = readFileSync(
-        path.join(configDir, 'oh-my-opencode-slim.json'),
+        path.join(root, '.opencode', 'oh-my-opencode-slim.jsonc'),
         'utf8',
       );
       expect(persistedActivation).toContain('team/unselected');
+      expect(
+        readFileSync(path.join(configDir, 'oh-my-opencode-slim.json'), 'utf8'),
+      ).not.toContain('team/unselected');
       expect(hostConfig.agent).not.toHaveProperty('unselected-agent');
 
       const localSkillDir = path.join(

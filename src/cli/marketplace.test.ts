@@ -59,7 +59,14 @@ describe('marketplace CLI', () => {
         stdout: () => {},
       }),
     ).toBe(0);
-    expect(calls[1]).toEqual(['enable', 'author/package']);
+    expect(calls[1]).toEqual(['enable', 'author/package', 'project']);
+    expect(
+      await runMarketplaceCommand(['disable', 'author/package', '--user'], {
+        service,
+        stdout: () => {},
+      }),
+    ).toBe(0);
+    expect(calls[2]).toEqual(['disable', 'author/package', 'user']);
   });
 
   test('rejects unknown commands, flags, missing targets, and extra args', async () => {
@@ -73,7 +80,10 @@ describe('marketplace CLI', () => {
     expect(await runMarketplaceCommand(['show', '--bad'], io)).toBe(1);
     expect(await runMarketplaceCommand(['list', 'extra'], io)).toBe(1);
     expect(await runMarketplaceCommand(['install'], io)).toBe(1);
-    expect(errors).toHaveLength(4);
+    expect(
+      await runMarketplaceCommand(['install', 'author/package', '--user'], io),
+    ).toBe(1);
+    expect(errors).toHaveLength(5);
   });
 
   test('standalone status preserves unavailable live registry state', async () => {

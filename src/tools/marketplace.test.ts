@@ -37,8 +37,10 @@ function fixture() {
       calls.push(['uninstall', target, acknowledge]);
       return { uninstalled: true };
     },
-    enable: (target: string) => calls.push(['enable', target]),
-    disable: (target: string) => calls.push(['disable', target]),
+    enable: (target: string, scope: string) =>
+      calls.push(['enable', target, scope]),
+    disable: (target: string, scope: string) =>
+      calls.push(['disable', target, scope]),
   };
   return { calls, service: service as never };
 }
@@ -185,7 +187,7 @@ describe('marketplace tools', () => {
     );
     expect(calls).toEqual([
       ['import', '/project/bundle.json'],
-      ['enable', 'author/name'],
+      ['enable', 'author/name', 'project'],
     ]);
     const inspect = tools.marketplace_inspect as unknown as {
       execute(args: never, ctx: never): Promise<string>;
@@ -237,5 +239,26 @@ describe('marketplace tools', () => {
       { agent: 'orchestrator' } as never,
     );
     expect(calls).toEqual([['uninstall', 'author/package', true]]);
+  });
+
+  test('routes activation scope and rejects scope for unrelated actions', async () => {
+    const { calls, service } = fixture();
+    const tools = createMarketplaceTools({ service });
+    const manage = tools.marketplace_manage as unknown as {
+      execute(args: never, ctx: never): Promise<string>;
+    };
+
+    await manage.execute(
+      { action: 'disable', target: 'author/package', scope: 'user' } as never,
+      { agent: 'orchestrator' } as never,
+    );
+    expect(calls).toEqual([['disable', 'author/package', 'user']]);
+    await expect(
+      manage.execute(
+        { action: 'install', target: 'author/package', scope: 'user' } as never,
+        { agent: 'orchestrator' } as never,
+      ),
+    ).rejects.toThrow('scope is only supported by enable and disable');
+    expect(calls).toHaveLength(1);
   });
 });

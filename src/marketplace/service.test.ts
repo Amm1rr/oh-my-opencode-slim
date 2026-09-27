@@ -713,6 +713,50 @@ describe('MarketplaceService', () => {
     }
   });
 
+  test('uses the runtime preset override for activation and status', () => {
+    const root = tempRoot();
+    const previousConfigHome = process.env.XDG_CONFIG_HOME;
+    const project = join(root, 'project');
+    const configPath = join(project, '.opencode', 'oh-my-opencode-slim.jsonc');
+    try {
+      process.env.XDG_CONFIG_HOME = join(root, 'config');
+      mkdirSync(join(project, '.opencode'), { recursive: true });
+      writeFileSync(
+        configPath,
+        JSON.stringify({
+          preset: 'persisted',
+          presets: { persisted: {}, runtime: {} },
+        }),
+      );
+      const service = new MarketplaceService({
+        rootDir: join(root, 'store'),
+        projectDir: project,
+        pluginVersion: '3.5.0',
+        getPresetOverride: () => 'runtime',
+      });
+      service.install(bundle());
+
+      service.enable('community/example');
+      let saved = JSON.parse(readFileSync(configPath, 'utf8'));
+      expect(saved.preset).toBe('persisted');
+      expect(saved.presets.persisted.marketplace).toBeUndefined();
+      expect(saved.presets.runtime.marketplace.agents_add).toEqual([
+        'community/example',
+      ]);
+      expect(service.status().desiredPackageIds).toEqual(['community/example']);
+
+      service.disable('community/example');
+      saved = JSON.parse(readFileSync(configPath, 'utf8'));
+      expect(saved.presets.runtime.marketplace.agents_add).toEqual([]);
+      expect(saved.presets.persisted.marketplace).toBeUndefined();
+      expect(service.status().desiredPackageIds).toEqual([]);
+    } finally {
+      if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = previousConfigHome;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test('disable is project-local and global uninstall requires acknowledgement', () => {
     const root = tempRoot();
     const previousConfigHome = process.env.XDG_CONFIG_HOME;

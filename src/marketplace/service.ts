@@ -9,6 +9,7 @@ import {
 import {
   disableMarketplacePackage,
   enableMarketplaceAgent,
+  type MarketplaceActivationScope,
 } from './activation-config.js';
 import { withMarketplaceConfigReferencesRemoved } from './config-references.js';
 import {
@@ -305,12 +306,23 @@ export class MarketplaceService {
     };
   }
 
-  enable(id: string): void {
-    enableMarketplaceAgent(this.projectDir, id, this.store);
+  enable(id: string, scope: MarketplaceActivationScope = 'project'): void {
+    enableMarketplaceAgent(
+      this.projectDir,
+      id,
+      this.store,
+      scope,
+      this.getPresetOverride?.(),
+    );
   }
 
-  disable(id: string): void {
-    disableMarketplacePackage(this.projectDir, id);
+  disable(id: string, scope: MarketplaceActivationScope = 'project'): void {
+    disableMarketplacePackage(
+      this.projectDir,
+      id,
+      scope,
+      this.getPresetOverride?.(),
+    );
   }
 
   private registrySource(

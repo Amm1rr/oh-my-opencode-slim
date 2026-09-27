@@ -16,8 +16,8 @@ oh-my-opencode-slim marketplace import ./package.json
 oh-my-opencode-slim marketplace list
 oh-my-opencode-slim marketplace show author/package
 oh-my-opencode-slim marketplace verify author/package
-oh-my-opencode-slim marketplace enable author/package
-oh-my-opencode-slim marketplace disable author/package
+oh-my-opencode-slim marketplace enable author/package [--user]
+oh-my-opencode-slim marketplace disable author/package [--user]
 oh-my-opencode-slim marketplace update author/package
 oh-my-opencode-slim marketplace update-file ./package.json
 oh-my-opencode-slim marketplace uninstall author/package --global
@@ -28,14 +28,17 @@ oh-my-opencode-slim marketplace request-reload
 Commands reject unknown options, missing targets, and extra arguments. `install`
 and `update` use the configured marketplace registry; `import` and
 `update-file` read local JSON bundles. `enable`/`disable` persist activation
-directives into the active preset. `disable` is project-local and never deletes
-the shared package. `uninstall <id> --global` is the only package deletion
-command; the exact `--global` flag is required. It removes references from the
-current project and known user configuration, then removes the package from the
-shared store. Other project trees are not scanned, so they may retain dangling
-references. The command reports this limitation. Validation, service, and
-config failures return a nonzero exit status. A failed verification also
-returns nonzero.
+directives into the active preset. Activation defaults to project scope: it
+creates a project config override when needed and never falls back to editing
+the shared user config. Pass `--user` to explicitly update the user config and
+its active preset. The user config is shared by projects. `disable` only changes
+activation and never deletes the shared package. `uninstall <id> --global` is
+the only package deletion command; the exact `--global` flag is required. It
+removes references from the current project and known user configuration, then
+removes the package from the shared store. Other project trees are not scanned,
+so they may retain dangling references. The command reports this limitation.
+Validation, service, and config failures return a nonzero exit status. A failed
+verification also returns nonzero.
 
 `status` compares installed desired packages with the live registry only when
 called inside a running plugin generation. Standalone CLI status reports
@@ -51,6 +54,8 @@ The orchestrator can use `marketplace_inspect` (`list`, `show`, `verify`,
 result warns that other projects are not inspected. Both tools are restricted by
 agent permissions and an execution-time orchestrator identity guard that
 accounts for a configured orchestrator display alias.
+`enable` and `disable` accept optional `scope: project|user`, defaulting to
+`project`; other actions reject `scope`.
 
 Management tools mutate desired disk state only. `request_reload` only reports
 whether restarting/reloading OpenCode is required; it never reloads the host or
@@ -75,6 +80,7 @@ Marketplace activation lives under a preset's `marketplace` block. For example:
 ```
 
 Use the CLI `enable`/`disable` commands to update this state safely, including
-layered presets. See [Marketplace package contract](marketplace-contract.md)
-for bundle and registry schemas and [Configuration](configuration.md) for
-config locations.
+layered presets. Their default project scope creates a project override; pass
+`--user` only to change shared user activation. See
+[Marketplace package contract](marketplace-contract.md) for bundle and registry
+schemas and [Configuration](configuration.md) for config locations.

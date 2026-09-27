@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { parse, printParseErrorCode } from 'jsonc-parser';
 import {
   prepareJsonConfigWrite,
@@ -7,6 +7,7 @@ import {
   restorePreparedJsonConfig,
   withSerializedConfigWrites,
 } from '../cli/config-io';
+import { getConfigSearchDirs } from '../cli/paths';
 import { findPluginConfigPaths } from '../config/loader';
 import { MarketplaceActivationError } from './errors';
 import { normalizeMarketplacePackageId } from './ids';
@@ -112,18 +113,38 @@ export function withMarketplaceConfigReferencesRemoved(
   id: string,
   operation: (onCommitted: () => void) => void,
 ): void {
-  const discovered = findPluginConfigPaths(projectDir);
-  const configPaths = [discovered.userConfigPath, discovered.projectConfigPath]
-    .filter((configPath): configPath is string => configPath !== null)
-    .map((configPath) => resolve(configPath));
-  const orderedPaths = [...new Set(configPaths)].sort();
+  const projectConfigBase = join(
+    resolve(projectDir),
+    '.opencode',
+    'oh-my-opencode-slim',
+  );
+  const candidateConfigPaths = [
+    `${projectConfigBase}.jsonc`,
+    `${projectConfigBase}.json`,
+    ...getConfigSearchDirs().flatMap((configDir) => [
+      join(configDir, 'oh-my-opencode-slim.jsonc'),
+      join(configDir, 'oh-my-opencode-slim.json'),
+    ]),
+  ];
+  const orderedPaths = [
+    ...new Set(candidateConfigPaths.map((configPath) => resolve(configPath))),
+  ].sort();
   const targetId = normalizeMarketplacePackageId(id);
 
   let committed = false;
   try {
     withSerializedConfigWrites(orderedPaths, () => {
+      // Discover only after acquiring every possible project/user config
+      // lease. A project config may have been created while uninstall waited.
+      const discovered = findPluginConfigPaths(projectDir);
+      const configPaths = [
+        discovered.userConfigPath,
+        discovered.projectConfigPath,
+      ]
+        .filter((configPath): configPath is string => configPath !== null)
+        .map((configPath) => resolve(configPath));
       const prepared = [];
-      for (const configPath of orderedPaths) {
+      for (const configPath of [...new Set(configPaths)].sort()) {
         if (!existsSync(configPath)) continue;
         const original = readFileSync(configPath, 'utf8');
         const config = parseConfig(configPath, original);
