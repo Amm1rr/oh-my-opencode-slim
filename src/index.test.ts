@@ -10,6 +10,7 @@ import {
 import { readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import path from 'node:path';
+import type { RegistryFactoryBridge } from './agents/registry-bridge';
 import { stateFilePath } from './companion/manager';
 import { RuntimeConfig } from './config/runtime';
 import * as wakeHooks from './hooks';
@@ -343,16 +344,6 @@ describe('plugin tool registration', () => {
       worktree: root,
       serverUrl: new URL('http://127.0.0.1:4096'),
     } as never);
-    await Bun.write(
-      path.join(configDir, 'oh-my-opencode-slim.json'),
-      JSON.stringify({
-        preset: 'changed',
-        agents: { changed_baseline: { model: 'provider/changed' } },
-        presets: {
-          changed: { marketplace: { agents: ['team/unselected'] } },
-        },
-      }),
-    );
     const hostConfig = {
       agent: {
         orchestrator: { displayName: 'Lead' },
@@ -365,6 +356,51 @@ describe('plugin tool registration', () => {
     };
     try {
       await hooks.config?.(hostConfig);
+      const registryBridge = (
+        hooks as unknown as {
+          registryBridge: RegistryFactoryBridge;
+        }
+      ).registryBridge;
+      const initialStatus = registryBridge.marketplaceService.status();
+      expect(initialStatus.liveAvailable).toBe(true);
+      expect(initialStatus.reloadRequired).toBe(false);
+
+      const localSkillDir = path.join(
+        root,
+        '.opencode',
+        'skills',
+        'local-skill',
+      );
+      await mkdir(localSkillDir, { recursive: true });
+      await Bun.write(
+        path.join(localSkillDir, 'SKILL.md'),
+        '---\nname: local-skill\ndescription: Local skill fixture\n---\n',
+      );
+      await Bun.write(
+        path.join(configDir, 'oh-my-opencode-slim.json'),
+        JSON.stringify({
+          preset: 'active',
+          fallback: { enabled: true, maxRetries: 0 },
+          agents: {
+            'selected-agent': {
+              prompt: 'Changed prompt',
+              displayName: 'ChangedVisible',
+              model: 'owner/changed',
+              permission: { read: 'deny' },
+              skills: ['base-skill', 'removed-skill'],
+              skills_add: ['added-skill'],
+              skills_remove: ['removed-skill'],
+              skills_include_local: true,
+            },
+          },
+          presets: {
+            active: { marketplace: { agents: ['team/selected'] } },
+          },
+        }),
+      );
+      expect(registryBridge.marketplaceService.status().reloadRequired).toBe(
+        true,
+      );
       expect(hostConfig.agent).toHaveProperty('selected-agent');
       expect(hostConfig.agent).not.toHaveProperty('unselected-agent');
       expect(hostConfig.agent).not.toHaveProperty('changed_baseline');
@@ -450,6 +486,21 @@ describe('plugin tool registration', () => {
       } as never);
       expect(fallbackPrompts).toHaveLength(2);
       expect(JSON.stringify(fallbackPrompts[1])).toContain('package-fallback');
+
+      const generationB = await plugin({
+        client: createPluginClient(async () => ({})),
+        directory: root,
+        worktree: root,
+        serverUrl: new URL('http://127.0.0.1:4096'),
+      } as never);
+      await generationB.config?.({ agent: {} });
+      const bridgeB = (
+        generationB as unknown as {
+          registryBridge: RegistryFactoryBridge;
+        }
+      ).registryBridge;
+      expect(bridgeB.marketplaceService.status().reloadRequired).toBe(false);
+      await generationB.dispose?.();
     } finally {
       await hooks.dispose?.();
       process.env = originalEnv;

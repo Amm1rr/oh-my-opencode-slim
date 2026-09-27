@@ -734,6 +734,17 @@ describe('finalized existing-agent registry', () => {
     expect(loads).toEqual([['team/selected']]);
     expect(registry.agentNames).toContain('market-agent');
     expect(registry.agentNames).not.toContain('unselected-agent');
+    expect(registry.marketplacePackages).toEqual([
+      expect.objectContaining({
+        id: 'team/selected',
+        runtimeName: 'market-agent',
+        version: '1.0.0',
+        digest: 'a'.repeat(64),
+        configFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+      }),
+    ]);
+    expect(Object.isFrozen(registry.marketplacePackages)).toBe(true);
+    expect(Object.isFrozen(registry.marketplacePackages[0])).toBe(true);
   });
 
   test('allows packages without MCP requirements when the host snapshot has no MCP key', () => {

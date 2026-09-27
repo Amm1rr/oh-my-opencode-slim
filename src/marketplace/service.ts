@@ -1,4 +1,5 @@
 import { readFileSync, realpathSync } from 'node:fs';
+import type { MarketplaceLivePackage } from '../agents/registry.js';
 import { BUILD_VERSION } from '../generated/build-info.js';
 import {
   DEFAULT_MARKETPLACE_REGISTRY_URL,
@@ -17,6 +18,12 @@ import type { MarketplaceRegistryDownload } from './registry-client.js';
 import { MarketplaceRegistryClient } from './registry-client.js';
 import type { MarketplacePackageBundle } from './schemas.js';
 import {
+  type MarketplaceReloadRequest,
+  type MarketplaceRuntimeStatus,
+  readMarketplaceRuntimeStatus,
+  requestMarketplaceReload,
+} from './status.js';
+import {
   MarketplaceStore,
   type MarketplaceStoreOptions,
   type MarketplaceVerification,
@@ -29,6 +36,7 @@ export interface MarketplaceServiceOptions
   pluginVersion?: string;
   projectDir?: string;
   registryClient?: MarketplaceRegistryDownloadClient;
+  getLivePackages?: () => readonly MarketplaceLivePackage[] | undefined;
 }
 
 export type MarketplaceRegistryDownloadClient = Pick<
@@ -89,11 +97,13 @@ export class MarketplaceService {
   readonly store: MarketplaceStore;
   readonly projectDir: string;
   readonly registryClient: MarketplaceRegistryDownloadClient;
+  private readonly getLivePackages?: MarketplaceServiceOptions['getLivePackages'];
 
   constructor(options: MarketplaceServiceOptions = {}) {
     const pluginVersion = options.pluginVersion ?? BUILD_VERSION;
     this.store = new MarketplaceStore({ ...options, pluginVersion });
     this.projectDir = options.projectDir ?? process.cwd();
+    this.getLivePackages = options.getLivePackages;
     this.registryClient =
       options.registryClient ??
       new MarketplaceRegistryClient({ pluginVersion });
@@ -181,6 +191,24 @@ export class MarketplaceService {
     return id
       ? [this.store.verify(normalizeMarketplacePackageId(id))]
       : this.store.verifyAll();
+  }
+
+  status(): MarketplaceRuntimeStatus {
+    const livePackages = this.getLivePackages?.();
+    return readMarketplaceRuntimeStatus({
+      directory: this.projectDir,
+      store: this.store,
+      ...(livePackages === undefined ? {} : { livePackages }),
+    });
+  }
+
+  requestReload(): MarketplaceReloadRequest {
+    const livePackages = this.getLivePackages?.();
+    return requestMarketplaceReload({
+      directory: this.projectDir,
+      store: this.store,
+      ...(livePackages === undefined ? {} : { livePackages }),
+    });
   }
 
   remove(id: string): void {

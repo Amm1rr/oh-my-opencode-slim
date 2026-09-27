@@ -347,10 +347,14 @@ the current plugin generation. Subsequent v1 `config()` calls and v2 agent
 transform replays reproject that same owned model and permission policy; they
 do not absorb later changes to managed host entries or native rules. Foreign
 host-owned entries remain outside the managed projection. To apply changed
-managed configuration, reload the plugin so a fresh generation can capture a
-new snapshot. This is a generation boundary, not hot configuration: the
-planned V3 PR 10 status/reload work will report desired-versus-live state and
-provide explicit reload control, without making an active registry mutable.
+managed configuration, restart or reload OpenCode from the host so a fresh
+generation can capture a new snapshot. This is a generation boundary, not hot
+configuration. Marketplace status reports desired-versus-live state, and an
+explicit reload request returns this host action as an instruction; the plugin
+does not expose a supported full-host reload API, create a generation, or
+mutate an active registry. When no finalized registry is available (for example,
+in standalone CLI use), status reports `reloadRequired: null` because the live
+side cannot be observed.
 
 ## Feature matrix
 
@@ -504,9 +508,12 @@ currently break this plugin:
   matches raw MCP tool names: MCP access is granted per server name
   (`"mcps": ["context7", "!gh_grep"]` in agent config), and registration
   uses its own server names via `draft.set(name, ...)`.
-- **`opencode reload` recreates plugin instances in-process.** The CLI
-  `opencode reload` command, the TUI reload command, and the
-  `location.reload` HTTP endpoint all rebuild the host's location
+- **Host reload is not callable by plugins.** A host may provide an external
+  `opencode reload` command or a `location.reload` endpoint, but neither is
+  part of the plugin's supported API. Marketplace `requestReload` only reports
+  that a host reload/restart is required and never claims one occurred. The
+  When an operator invokes the CLI `opencode reload` command, the TUI reload
+  command, or the `location.reload` HTTP endpoint, the host rebuilds its location
   service layer: plugin instances are destroyed and recreated, `setup`
   re-enters in the same process, and the host calls the cleanup
   returned by the previous generation before the new generation loads.

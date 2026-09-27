@@ -331,11 +331,10 @@ export class MarketplaceStore {
   }
 
   inspectAll(): MarketplaceStoreInspection {
-    return this.withLease((lease) => {
+    return this.withLease(() => {
       let lockfile: MarketplaceLockfile;
       try {
         lockfile = this.readLockfile();
-        this.reconcileLockedState(lockfile, lease);
       } catch (error) {
         if (error instanceof MarketplaceLockfileError) {
           return {

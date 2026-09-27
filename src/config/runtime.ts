@@ -30,6 +30,7 @@ import {
   SUBAGENT_NAMES,
 } from './constants';
 import type { CouncilConfig } from './council-schema';
+import { resolveEffectiveAgentOverrides } from './effective-agent-overrides';
 import {
   deepMerge,
   mergeAgentOverrides,
@@ -48,7 +49,7 @@ import {
   type ResolvedPluginConfig,
   type WebfetchConfig,
 } from './schema';
-import { getCustomAgentNames, normalizeAgentSkillDirectives } from './utils';
+import { getCustomAgentNames } from './utils';
 
 /** A single agent entry from the host opencode.json config. */
 export interface HostAgentConfig {
@@ -255,12 +256,8 @@ export class RuntimeConfig {
     const merged = runtimePreset
       ? mergeAgentOverrides(base, runtimePreset)
       : base;
-    const includesLocalSkills = Object.values(merged).some(
-      (override) => override.skills_include_local === true,
-    );
-    return normalizeAgentSkillDirectives(
-      merged,
-      includesLocalSkills ? this.projectLocalSkillNames() : [],
+    return resolveEffectiveAgentOverrides(merged, () =>
+      this.projectLocalSkillNames(),
     );
   }
 

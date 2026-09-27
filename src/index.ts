@@ -23,15 +23,6 @@ import {
   DEFAULT_MAX_SESSION_METADATA_ENTRIES,
   TOAST_DURATION_MS,
 } from './config/constants';
-import {
-  findPluginConfigPaths,
-  loadPluginConfigFromPath,
-  mergePluginConfigs,
-} from './config/loader';
-import {
-  PresetResolutionError,
-  resolvePresetDefinition,
-} from './config/presets';
 import { RuntimeConfig } from './config/runtime';
 import { getBuildInfo } from './generated/build-info';
 import { HEALTH_CHECK, minimumExpectedToolCount } from './health-check';
@@ -76,7 +67,8 @@ import {
 } from './hooks/types';
 import { createInterviewManager } from './interview';
 import { discoverPreflightSkills } from './marketplace/preflight';
-import { MarketplaceStore } from './marketplace/store';
+import { MarketplaceService } from './marketplace/service';
+import { readDesiredMarketplacePackageIds } from './marketplace/status';
 import { createBuiltinMcps } from './mcp';
 import {
   ast_grep_replace,
@@ -171,34 +163,6 @@ async function appLog(
 // Debounce: only show image-skipped toast once per 60 seconds per project
 const lastImageSkippedToastByDir = new Map<string, number>();
 const IMAGE_SKIPPED_DEBOUNCE_MS = 60_000;
-
-function loadMarketplaceSelectionSnapshot(
-  directory: string,
-  presetName: string | undefined,
-): readonly string[] {
-  if (!presetName) return Object.freeze([]);
-  const paths = findPluginConfigPaths(directory);
-  const userConfig = paths.userConfigPath
-    ? (loadPluginConfigFromPath(paths.userConfigPath, { silent: true }) ?? {})
-    : {};
-  const projectConfig = paths.projectConfigPath
-    ? loadPluginConfigFromPath(paths.projectConfigPath, { silent: true })
-    : null;
-  const factoryConfig = projectConfig
-    ? mergePluginConfigs(userConfig, projectConfig)
-    : userConfig;
-  const presets = factoryConfig.presets ?? {};
-  if (!presets[presetName]) return Object.freeze([]);
-  try {
-    return Object.freeze([
-      ...(resolvePresetDefinition(presetName, presets).marketplace?.agents ??
-        []),
-    ]);
-  } catch (error) {
-    if (error instanceof PresetResolutionError) return Object.freeze([]);
-    throw error;
-  }
-}
 
 // Module-level runtime preset tracking. Survives plugin re-inits triggered
 // by client.config.update() → Instance.dispose(). When the plugin function
@@ -536,7 +500,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
 
     runtime = RuntimeConfig.get(ctx.directory);
     const activePresetName = runtime.getRuntimePreset() ?? config.preset;
-    selectedMarketplacePackageIds = loadMarketplaceSelectionSnapshot(
+    selectedMarketplacePackageIds = readDesiredMarketplacePackageIds(
       ctx.directory,
       activePresetName,
     );
@@ -1269,7 +1233,17 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     return undefined;
   }
 
-  const registryBridge: RegistryFactoryBridge = {
+  let registryBridge: RegistryFactoryBridge;
+  const marketplaceService = new MarketplaceService({
+    projectDir: ctx.directory,
+    pluginVersion: getBuildInfo().version,
+    getLivePackages: () => {
+      if (registryRetired || !resolvedAgentRegistry) return undefined;
+      return registryBridge.requireRegistry().marketplacePackages;
+    },
+  });
+  registryBridge = {
+    marketplaceService,
     finalize(hostSnapshot, nativePermissionsByAgent) {
       if (registryRetired) throw new Error('Agent registry is retired');
       if (!resolvedAgentRegistry) {
@@ -1283,9 +1257,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           nativePermissionsByAgent,
           marketplace: {
             selectedPackageIds: selectedMarketplacePackageIds,
-            store: new MarketplaceStore({
-              pluginVersion: getBuildInfo().version,
-            }),
+            store: marketplaceService.store,
             pluginVersion: getBuildInfo().version,
             availableSkillNames: selectedMarketplacePackageIds.length
               ? discoverPreflightSkills(runtime, ctx.directory)
