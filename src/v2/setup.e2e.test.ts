@@ -469,7 +469,7 @@ describe('createV2Setup e2e', () => {
     }
   }, 20_000);
 
-  test('malformed native agent permissions fail the deferred finalization callback', async () => {
+  test('late malformed agent transform fails readiness without escaping callback', async () => {
     const { ctx, calls } = makeMockV2Context(projectDir);
     let deferred: ((draft: unknown) => void) | undefined;
     const agent = ctx.agent as unknown as {
@@ -486,15 +486,32 @@ describe('createV2Setup e2e', () => {
     };
     const cleanup = await createV2Setup()(ctx);
     try {
+      const prompt = calls.promptHookCb?.({
+        sessionID: 'ses_malformed_agent',
+        messageID: 'msg_malformed_agent',
+        prompt: { text: 'prompt waits for agent readiness' },
+      });
+      expect(deferred).toBeFunction();
       expect(() =>
         deferred?.({
           list: () => [{ id: 'explorer' }],
           get: () => ({ id: 'explorer', mode: 'subagent' }),
         }),
-      ).toThrow("Native agent 'explorer' did not expose a permissions array");
+      ).not.toThrow();
+      const promptError = await prompt?.then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      expect(promptError).toMatchObject({
+        message: 'Agent permission snapshot finalization failed',
+        cause: expect.objectContaining({
+          message: "Native agent 'explorer' did not expose a permissions array",
+        }),
+      });
     } finally {
       await cleanup();
     }
+    expect(calls.disposed).toContain('malformed-agent-transform');
   }, 20_000);
 
   test('v2 draft registration applies display-name model and ordered policy overrides', async () => {

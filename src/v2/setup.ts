@@ -1772,6 +1772,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
     // setup still needs the directory for config loading and tool adapters.
     const directory = resolveV2Directory(ctx);
     const disposers: Array<() => Promise<void> | void> = [];
+    let generationDisposed = false;
     let stopPermissionPromptAdmission: (() => Promise<void>) | undefined;
     let stopPermissionEventIntake: (() => Promise<void>) | undefined;
     let v1Hooks: Record<string, unknown> | undefined;
@@ -1893,6 +1894,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
         | ReturnType<RegistryFactoryBridge['requireRegistry']>
         | undefined;
       let permissionSnapshotReady = false;
+      let permissionSnapshotFailure: Error | undefined;
       let resolvePermissionSnapshotReady!: () => void;
       const permissionSnapshotReadiness = new Promise<void>((resolve) => {
         resolvePermissionSnapshotReady = resolve;
@@ -1929,6 +1931,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       let hostMcpSnapshot: Record<string, unknown> | undefined;
 
       const finalizeAgentDraft = (draft: V2AgentDraft) => {
+        if (permissionSnapshotFailure) return;
         if (
           hostMcpSnapshot === undefined ||
           nativeAgentSnapshot === undefined
@@ -1974,35 +1977,17 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
         permissionSnapshotReady = true;
         resolvePermissionSnapshotReady();
       };
-      try {
-        if (typeof ctx.mcp?.transform !== 'function') {
-          throw new Error('MCP configuration draft is unavailable');
+      const captureAgentDraft = (draft: V2AgentDraft) => {
+        if (permissionSnapshotFailure) {
+          if (generationDisposed) {
+            throw new Error(
+              'Agent transform callback belongs to a retired generation',
+            );
+          }
+          return;
         }
-        const reg = await ctx.mcp.transform((draft) => {
-          const configured = draft.list();
-          if (!Array.isArray(configured)) {
-            throw new Error('MCP configuration draft returned no inventory');
-          }
-          hostMcpSnapshot = Object.fromEntries(configured);
-          for (const [name, config] of Object.entries(mcps)) {
-            draft.set(name, adaptMcpServer(config));
-          }
-          if (pendingAgentDraft) finalizeAgentDraft(pendingAgentDraft);
-        });
-        disposers.push(() => reg.dispose());
-      } catch (err) {
-        throw new Error(
-          'Unable to snapshot configured MCP namespaces: this host cannot ' +
-            'expose configured MCP namespaces; update to a supported v2 host',
-          { cause: err },
-        );
-      }
-
-      // ── Agents ──
-      let nativeSnapshotCaptured = false;
-      try {
-        const reg = await ctx.agent.transform((draft) => {
-          pendingAgentDraft = draft;
+        pendingAgentDraft = draft;
+        try {
           if (!nativeSnapshotCaptured) {
             const nativeByAgent: Record<string, V2PermissionRule[]> = {};
             const hostAgents: Record<string, Record<string, unknown>> = {};
@@ -2030,8 +2015,47 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
             nativeSnapshotCaptured = true;
           }
           finalizeAgentDraft(draft);
+        } catch (error) {
+          if (generationDisposed) throw error;
+          permissionSnapshotFailure =
+            error instanceof Error ? error : new Error(String(error));
+          resolvePermissionSnapshotReady();
+        }
+      };
+      try {
+        if (typeof ctx.mcp?.transform !== 'function') {
+          throw new Error('MCP configuration draft is unavailable');
+        }
+        const reg = await ctx.mcp.transform((draft) => {
+          const configured = draft.list();
+          if (!Array.isArray(configured)) {
+            throw new Error('MCP configuration draft returned no inventory');
+          }
+          hostMcpSnapshot = Object.fromEntries(configured);
+          for (const [name, config] of Object.entries(mcps)) {
+            draft.set(name, adaptMcpServer(config));
+          }
+          if (pendingAgentDraft) finalizeAgentDraft(pendingAgentDraft);
         });
         disposers.push(() => reg.dispose());
+      } catch (err) {
+        throw new Error(
+          'Unable to snapshot configured MCP namespaces: this host cannot ' +
+            'expose configured MCP namespaces; update to a supported v2 host',
+          { cause: err },
+        );
+      }
+
+      // ── Agents ──
+      let nativeSnapshotCaptured = false;
+      try {
+        const reg = await ctx.agent.transform(captureAgentDraft);
+        disposers.push(() => reg.dispose());
+        if (permissionSnapshotFailure) {
+          throw new Error('Agent permission snapshot finalization failed', {
+            cause: permissionSnapshotFailure,
+          });
+        }
         log('[v2] agents registered', {
           count: Object.keys(resolvedAgents ?? {}).length,
         });
@@ -2246,6 +2270,11 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
               PERMISSION_RULES_OPERATION_TIMEOUT_MS,
               'Agent permission snapshot readiness timed out',
             );
+          }
+          if (permissionSnapshotFailure) {
+            throw new Error('Agent permission snapshot finalization failed', {
+              cause: permissionSnapshotFailure,
+            });
           }
           const permissionBridge = permissionRulesBridge;
           if (permissionBridge) {
@@ -2471,6 +2500,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
 
       return async () => {
         log('[v2] dispose invoked');
+        generationDisposed = true;
         registryBridge?.retire();
         // Mark disposed immediately, then stop new admissions and event
         // intake before awaiting the bounded drain. The OpenCode plugin
