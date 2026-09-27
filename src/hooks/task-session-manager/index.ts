@@ -199,6 +199,9 @@ export function createTaskSessionManagerHook(
     /** Opt-in provider → "foreground" map for same-provider background
      *  conversion. */
     sameProviderPolicy?: Record<string, 'foreground'>;
+    /** Host flavor marker ('v2' on OpenCode v2 hosts); selects the native
+     *  delegation vocabulary in model-visible tool guidance. Defaults v1. */
+    hostFlavor?: string;
     shouldManageSession: (sessionID: string) => boolean;
     /** Register a session as orchestrator when the transform hook detects
      *  an orchestrator message but the session isn't in the agent map yet. */
@@ -626,6 +629,7 @@ export function createTaskSessionManagerHook(
         taskContextTracker,
         getLifecycleEpoch: () => rehydrateState.nextEpoch,
         hasUntrackedRunningChild: options.hasUntrackedRunningChild,
+        hostFlavor: options.hostFlavor,
       }),
 
     'tool.execute.after': async (
@@ -652,6 +656,7 @@ export function createTaskSessionManagerHook(
           const deletionEpoch = rehydrateState.deletionEpochs.get(taskID);
           return deletionEpoch !== undefined && lifecycleEpoch < deletionEpoch;
         },
+        hostFlavor: options.hostFlavor,
       });
       runtimeStatusReconciler.schedule();
     },

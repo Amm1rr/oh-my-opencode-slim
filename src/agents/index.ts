@@ -649,7 +649,8 @@ export function createAgents(
 
   // Build dynamic councillor agents from council config (flatten mode).
   // Each councillor becomes a dispatchable subagent with its own model,
-  // so the orchestrator can task() them with native panes at depth 1.
+  // so the orchestrator can delegate to them with the host delegation tool
+  // (`task()` on v1, `subagent()` on v2) with native panes at depth 1.
   // Only a *configured* color is inherited: councillor override first, then
   // council override. No default fallback — unconfigured councillors stay
   // colorless so the host TUI palette keeps assigning distinct colors.

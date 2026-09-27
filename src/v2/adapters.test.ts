@@ -5,7 +5,6 @@ import {
   applyAgentToDraft,
   compileAgentPermissions,
   parseModelRef,
-  rewritePromptForV2,
   snapshotNativeAgentForRegistry,
 } from './adapters';
 import type { V2AgentDraft } from './types';
@@ -208,27 +207,6 @@ describe('compileAgentPermissions', () => {
   });
 });
 
-describe('rewritePromptForV2', () => {
-  test('rewrites delegation call + param', () => {
-    expect(
-      rewritePromptForV2(
-        "task(subagent_type='explorer', description='x', prompt='y')",
-      ),
-    ).toBe("subagent(agent='explorer', description='x', prompt='y')");
-  });
-
-  test('passes through non-strings unchanged', () => {
-    expect(rewritePromptForV2(undefined)).toBeUndefined();
-    expect(rewritePromptForV2(42)).toBe(42);
-  });
-
-  test('rewrites every occurrence', () => {
-    expect(rewritePromptForV2('task(a)\ntask(b)')).toBe(
-      'subagent(a)\nsubagent(b)',
-    );
-  });
-});
-
 describe('applyAgentToDraft', () => {
   function recorder(): {
     draft: V2AgentDraft;
@@ -249,7 +227,7 @@ describe('applyAgentToDraft', () => {
     return { draft, calls };
   }
 
-  test('sets id/name/mode and rewrites the prompt into system', () => {
+  test('sets id/name/mode and passes the prompt through to system', () => {
     const { draft, calls } = recorder();
     applyAgentToDraft(draft, 'explorer', {
       description: 'recon',
@@ -263,7 +241,7 @@ describe('applyAgentToDraft', () => {
       name: 'explorer',
       mode: 'subagent',
       description: 'recon',
-      system: "Delegate via subagent(agent='x')",
+      system: "Delegate via task(subagent_type='x')",
     });
   });
 

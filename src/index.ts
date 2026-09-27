@@ -128,6 +128,7 @@ import {
 } from './utils/system-collapse';
 import { createTuiReusableProjection } from './utils/tui-reusable-projection';
 import { createV2Setup } from './v2';
+import { delegationWording } from './v2/delegation';
 import {
   isInternalAdmission,
   recordInternalAdmission,
@@ -499,6 +500,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // prompt assembly so v2 prompts say subagent(...)/agent directly.
     hostFlavor = (ctx as Parameters<Plugin>[0] & { hostFlavor?: string })
       .hostFlavor;
+    const delegation = delegationWording(hostFlavor);
     agentDefs = createAgents(runtime, {
       projectDirectory: ctx.directory,
       hostFlavor,
@@ -543,6 +545,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       maxContextLines: runtime.backgroundJobs.maxContextLines,
       readContextMinLines: runtime.backgroundJobs.readContextMinLines,
       readContextMaxFiles: runtime.backgroundJobs.readContextMaxFiles,
+      delegationTool: delegation.tool,
     });
     admissionRuntimeLease = acquireAdmissionRuntime(
       ctx.directory,
@@ -794,6 +797,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           : undefined),
       sameProviderPolicy: runtime.backgroundJobs.sameProviderPolicy,
       getSessionModel: (sessionID) => sessionMetadata.getModel(sessionID),
+      hostFlavor,
       shouldManageSession: (sessionID) =>
         sessionMetadata.getAgent(sessionID) === 'orchestrator' ||
         sessionMetadata.isTaskManaged(sessionID),

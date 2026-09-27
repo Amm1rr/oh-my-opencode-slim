@@ -20,6 +20,7 @@ import {
   type RuntimeSessionStatusSnapshot,
   runtimeSessionStatus,
 } from '../utils/session-runtime-status';
+import { idParamFor, readTaskRef, taskRefArgs } from './task-ref';
 
 interface TaskResultToolOptions {
   input: PluginInput;
@@ -28,6 +29,7 @@ interface TaskResultToolOptions {
 }
 
 function pending(
+  idParam: string,
   taskID: string,
   uncertain: boolean,
   status?: 'busy' | 'idle' | 'retry',
@@ -35,13 +37,13 @@ function pending(
 ): string {
   if (status === 'idle')
     return [
-      `task_id: ${taskID}`,
+      `${idParam}: ${taskID}`,
       'state: pending',
       'message: Task is quiescent; wait for terminal reconciliation before retrieving its result.',
       'next: retry task_result after the terminal notification',
     ].join('\n');
   return [
-    `task_id: ${taskID}`,
+    `${idParam}: ${taskID}`,
     uncertain
       ? 'state: running (unconfirmed)'
       : `state: ${status === 'retry' ? 'retry' : 'running'}`,
@@ -61,21 +63,20 @@ export function createTaskResultTool(
       backgroundJobBoard: options.backgroundJobBoard,
       input: options.input,
     });
+  const idParam = idParamFor(options.input);
   return {
     task_result: tool({
       description: `Retrieve the final text already produced by a specialist task, or inspect its active state without resuming or re-running it.
 
-Use this when the user asks to see a prior task's full result, or before retrying work whose completed output may already answer the request. If the task is still running, this returns a status message; only a completed task returns its final text. Accepts either the native task_id/session ID or the parent-scoped alias shown in the Background Job Board. This tool is read-only and never sends a new prompt to the specialist.`,
+Use this when the user asks to see a prior task's full result, or before retrying work whose completed output may already answer the request. If the task is still running, this returns a status message; only a completed task returns its final text. Accepts either the native ${idParam} or the parent-scoped alias shown in the Background Job Board. This tool is read-only and never sends a new prompt to the specialist.`,
       args: {
-        task_id: tool.schema
-          .string()
-          .describe('Task ID or Background Job Board alias'),
+        ...taskRefArgs(idParam),
       },
       async execute(args, toolContext) {
         const parentSessionID = toolContext?.sessionID;
         if (!parentSessionID) throw new Error('task_result requires sessionID');
-        const requested = args.task_id.trim();
-        if (!requested) throw new Error('task_result requires task_id');
+        const requested = readTaskRef(args, idParam);
+        if (!requested) throw new Error(`task_result requires ${idParam}`);
         const board = options.backgroundJobBoard;
         const tracked = board.resolve(parentSessionID, requested);
         const taskID = tracked?.taskID ?? requested;
@@ -116,6 +117,7 @@ Use this when the user asks to see a prior task's full result, or before retryin
         }
         if (current?.state === 'running')
           return pending(
+            idParam,
             taskID,
             current.statusUncertain,
             snapshot && runtimeSessionStatus(snapshot, taskID),
@@ -156,7 +158,7 @@ Use this when the user asks to see a prior task's full result, or before retryin
               ? current.terminalState
               : current.state;
           if (state === 'completed' && result?.kind !== 'committed')
-            return pending(taskID, true);
+            return pending(idParam, taskID, true);
           board.markUsed(parentSessionID, taskID);
           if (state === 'error')
             throw new Error(
@@ -176,9 +178,9 @@ Use this when the user asks to see a prior task's full result, or before retryin
         snapshot = await getRuntimeSessionStatusSnapshot(options.input);
         const status = runtimeSessionStatus(snapshot, taskID);
         if (status === 'busy' || status === 'retry')
-          return pending(taskID, false, status, false);
+          return pending(idParam, taskID, false, status, false);
         if (snapshot.error || snapshot.malformedSessionIDs.has(taskID))
-          return pending(taskID, true, undefined, false);
+          return pending(idParam, taskID, true, undefined, false);
         const response = await fetchChildTranscript(
           client,
           taskID,

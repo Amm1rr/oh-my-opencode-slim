@@ -4,9 +4,10 @@
  * - `parseModelRef`: "provider/model" string → v2 Model.Ref.
  * - `adaptPermissions`: v1 permission map → v2 Rule[] (with v2 permissive base +
  *   `task`→`subagent`, `bash`→`execute` mapping).
- * - `rewritePromptForV2`: rewrite v1 delegation syntax in agent/system prompts.
  * - `delegationVocabulary`: native per-flavor delegation tool/param names for
  *   prompt-build sites (v2 `subagent`/`agent` vs v1 `task`/`subagent_type`).
+ * - `controlParamName`: native per-flavor identifier param for the control
+ *   tools, shared with `delegationVocabulary`'s resume param.
  * - `adaptTool`: v1 ToolDefinition ({description,args,execute}) → v2 Tool.Info.
  * - `applyAgentToDraft`: mutate a v2 agent draft entry from a v1 agent config.
  */
@@ -142,23 +143,22 @@ export function compileAgentPermissions(
   ];
 }
 
-/** Rewrite v1 delegation syntax to v2. v2 renamed `task` → `subagent` and
- * `subagent_type` → `agent`. Applied to agent prompts at registration and to
- * the runtime system prompt so the orchestrator emits valid v2 tool calls. */
-export function rewritePromptForV2(text: unknown): unknown {
-  if (typeof text !== 'string') return text;
-  return text
-    .replace(/\bsubagent_type\b/g, 'agent')
-    .replace(/\btask\s*\(/g, 'subagent(');
+/** Model-visible identifier parameter for control tools (`task_result`,
+ * `task_status`, `task_reply`, `task_revive`, `task_message`, `task_cancel`) —
+ * the same per-host vocabulary as the delegation resume param. v2 hosts use
+ * `sessionID`; v1 hosts (and any unknown flavor) use `task_id`. */
+export function controlParamName(hostFlavor: string | undefined): string {
+  return hostFlavor === 'v2' ? 'sessionID' : 'task_id';
 }
 
 /** Native delegation vocabulary for a host flavor. v2 hosts expose the
  * built-in `subagent` tool with the `agent` parameter; v1 hosts (and any
  * unknown flavor) use `task` with `subagent_type`. Prompt-build sites call
- * this so generated text matches the host's actual tool directly, instead
- * of emitting v1 wording and relying on `rewritePromptForV2` — which
- * remains as belt-and-suspenders for user-customized presets that still
- * contain v1 wording. */
+ * this so generated text matches the host's actual tool directly; every
+ * user-supplied prompt (inline `prompt`, `<agent>.md`/append files,
+ * `orchestratorPrompt` snippets, custom and ACP agent prompts, council
+ * councillor prompts) must likewise be written in the host's own
+ * vocabulary, since no prompt rewriting is applied. */
 export interface DelegationVocabulary {
   /** Name of the host's delegation tool: `subagent` on v2, `task` on v1. */
   tool: string;
@@ -168,14 +168,29 @@ export interface DelegationVocabulary {
   /** Name of the delegation tool's optional model parameter, when the
    * host's subagent tool supports one (OpenCode v2.0.5+). */
   modelParam: string | undefined;
+  /** Name of the delegation tool's existing-session argument, shared with
+   * the control tools (`controlParamName`): `sessionID` on v2, `task_id` on
+   * v1. Resuming a child session requires this exact parameter; the wrong
+   * name silently spawns a new session instead. */
+  resumeParam: string;
 }
 
 export function delegationVocabulary(
   hostFlavor: string | undefined,
 ): DelegationVocabulary {
   return hostFlavor === 'v2'
-    ? { tool: 'subagent', agentParam: 'agent', modelParam: 'model' }
-    : { tool: 'task', agentParam: 'subagent_type', modelParam: undefined };
+    ? {
+        tool: 'subagent',
+        agentParam: 'agent',
+        modelParam: 'model',
+        resumeParam: controlParamName(hostFlavor),
+      }
+    : {
+        tool: 'task',
+        agentParam: 'subagent_type',
+        modelParam: undefined,
+        resumeParam: controlParamName(hostFlavor),
+      };
 }
 
 /** Adapt a v1 tool definition ({description, args, execute}) to a v2 tool. */
@@ -264,8 +279,7 @@ export function applyAgentToDraft(
       (v1.mode as string) ?? (name === 'orchestrator' ? 'primary' : 'subagent');
     agent.hidden = v1.hidden === true;
     if (typeof v1.description === 'string') agent.description = v1.description;
-    if (typeof v1.prompt === 'string')
-      agent.system = rewritePromptForV2(v1.prompt);
+    if (typeof v1.prompt === 'string') agent.system = v1.prompt;
     if (model) {
       agent.model = {
         id: model.id,

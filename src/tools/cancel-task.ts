@@ -24,6 +24,7 @@ import {
   runtimeSessionStatus,
 } from '../utils/session-runtime-status';
 import { isHostTerminalOutcome } from '../utils/task';
+import { idParamFor, readTaskRef, taskRefArgs } from './task-ref';
 
 const z = tool.schema;
 
@@ -60,14 +61,13 @@ class LeaseOperationTimeoutError extends Error {
 export function createCancelTaskTool(
   options: TaskControlToolOptions,
 ): Record<'task_cancel', ToolDefinition> {
+  const idParam = idParamFor(options.input);
   const task_cancel = tool({
     description: `Cancel a tracked background specialist task without deleting its session.
 
 Use only for obsolete, wrong, conflicting, or user-requested cancellation. The retained session can be revived after the lifecycle lane acknowledges its terminal state.`,
     args: {
-      task_id: z
-        .string()
-        .describe('Tracked background task ID or Background Job Board alias'),
+      ...taskRefArgs(idParam),
       reason: z.string().optional().describe('Short cancellation reason'),
     },
     async execute(args, toolContext) {
@@ -76,8 +76,8 @@ Use only for obsolete, wrong, conflicting, or user-requested cancellation. The r
         toolContext,
         'task_cancel',
       );
-      const requested = args.task_id.trim();
-      if (!requested) throw new Error('task_cancel requires task_id');
+      const requested = readTaskRef(args, idParam);
+      if (!requested) throw new Error(`task_cancel requires ${idParam}`);
 
       const job = options.backgroundJobBoard.resolve(
         parentSessionID,
@@ -85,6 +85,7 @@ Use only for obsolete, wrong, conflicting, or user-requested cancellation. The r
       );
       if (!job) {
         return unknownTaskOutput(
+          idParam,
           requested,
           await untrackedTaskReason(options, parentSessionID, requested),
         );
@@ -96,6 +97,7 @@ Use only for obsolete, wrong, conflicting, or user-requested cancellation. The r
       };
       if (job.state !== 'running') {
         return staleCancellationOutput(
+          idParam,
           options,
           execution,
           `task is ${job.state}, not running`,
@@ -108,7 +110,7 @@ Use only for obsolete, wrong, conflicting, or user-requested cancellation. The r
         const current = options.backgroundJobBoard.get(execution.taskID);
         const message = error instanceof Error ? error.message : String(error);
         return [
-          `task_id: ${execution.taskID}`,
+          `${idParam}: ${execution.taskID}`,
           `state: ${current?.state ?? 'unknown'}`,
           '',
           '<task_error>',
@@ -119,7 +121,7 @@ Use only for obsolete, wrong, conflicting, or user-requested cancellation. The r
 
       const state = options.backgroundJobBoard.getState(execution.taskID);
       return [
-        `task_id: ${execution.taskID}`,
+        `${idParam}: ${execution.taskID}`,
         `state: ${state ?? 'cancelled'}`,
         '',
         '<task_error>',
@@ -572,9 +574,13 @@ function operationBoolean(response: unknown): boolean | undefined {
   return typeof response.data === 'boolean' ? response.data : undefined;
 }
 
-function unknownTaskOutput(taskID: string, message: string): string {
+function unknownTaskOutput(
+  idParam: string,
+  taskID: string,
+  message: string,
+): string {
   return [
-    `task_id: ${taskID}`,
+    `${idParam}: ${taskID}`,
     'state: unknown',
     '',
     '<task_error>',
@@ -607,13 +613,14 @@ function assertCapturedExecution(
 }
 
 function staleCancellationOutput(
+  idParam: string,
   options: TaskControlToolOptions,
   execution: CapturedExecution,
   detail: string,
 ): string {
   const current = options.backgroundJobBoard.get(execution.taskID);
   return [
-    `task_id: ${execution.taskID}`,
+    `${idParam}: ${execution.taskID}`,
     `state: ${current?.state ?? 'unknown'}`,
     '',
     '<task_error>',

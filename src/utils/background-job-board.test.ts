@@ -619,6 +619,30 @@ describe('BackgroundJobBoard', () => {
     ).toEqual([]);
   });
 
+  test('retained recovery wording names the host delegation tool', () => {
+    const board = new BackgroundJobBoard({ delegationTool: 'subagent' });
+    board.registerLaunch({
+      taskID: 'ses_stopped',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'idle review',
+      now: 100,
+    });
+    board.markStopped('ses_stopped', 'no native result', 110, undefined, 110);
+    board.markReconciled('ses_stopped');
+
+    const prompt = board.formatForPrompt('parent-1');
+    expect(prompt).toContain(
+      'Recovery: no terminal result; recoverable with task_revive, not subagent()',
+    );
+    expect(prompt).toContain(
+      'Stopped sessions without a terminal result are retained for task_revive, not subagent().',
+    );
+    // The control tool `task_revive` is host-neutral; only the delegation
+    // tool is renamed.
+    expect(prompt).not.toContain('not task()');
+  });
+
   test('trimRetained evicts acknowledged stopped sessions beyond the per-agent cap', () => {
     const board = new BackgroundJobBoard({ maxReusablePerAgent: 1 });
     board.registerLaunch({

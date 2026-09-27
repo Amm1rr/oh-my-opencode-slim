@@ -157,7 +157,8 @@ const TASK_SUPERVISION_TOOLS = new Set(['task_status', 'task_result']);
 function taskIDFromArgs(args: unknown): string | undefined {
   if (!args || typeof args !== 'object' || Array.isArray(args))
     return undefined;
-  const taskID = (args as Record<string, unknown>).task_id;
+  const record = args as Record<string, unknown>;
+  const taskID = record.sessionID ?? record.task_id;
   return typeof taskID === 'string' && taskID.trim() !== ''
     ? taskID.trim()
     : undefined;
@@ -165,7 +166,9 @@ function taskIDFromArgs(args: unknown): string | undefined {
 
 function taskIDFromOutput(output: unknown): string | undefined {
   if (typeof output !== 'string') return undefined;
-  const match = output.match(/(?:task_id:\s*|Task\s+[^\n(]*\()([^\s)]+)/i);
+  const match = output.match(
+    /(?:(?:task_id|sessionID):\s*|Task\s+[^\n(]*\()([^\s)]+)/i,
+  );
   return match?.[1];
 }
 

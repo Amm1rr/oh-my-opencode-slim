@@ -10,6 +10,8 @@ import {
 import type { BackgroundJobStore } from '../utils/background-job-store';
 import { getClient } from '../utils/opencode-client';
 import { OperationTimeoutError, withTimeout } from '../utils/session';
+import { type DelegationWording, delegationWording } from '../v2/delegation';
+import { idParamFor, readTaskRef, taskRefArgs } from './task-ref';
 
 const z = tool.schema;
 const MAX_MESSAGE_LENGTH = 500;
@@ -31,13 +33,12 @@ export function createTaskMessageTool(options: {
   backgroundJobBoard: BackgroundJobStore;
   messageTimeoutMs?: number;
 }): Record<'task_message', ToolDefinition> {
+  const idParam = idParamFor(options.input);
   const task_message = tool({
     description:
       'Queue a bounded message for a live child task without launching, resuming, or interrupting it.',
     args: {
-      task_id: z
-        .string()
-        .describe('Tracked live task ID or parent-scoped alias'),
+      ...taskRefArgs(idParam),
       message: z
         .string()
         .trim()
@@ -49,12 +50,16 @@ export function createTaskMessageTool(options: {
       const parentSessionID = toolContext?.sessionID;
       if (!parentSessionID) throw new Error('task_message requires sessionID');
 
-      const requested = args.task_id.trim();
+      const hostFlavor = (options.input as { hostFlavor?: string }).hostFlavor;
+      const delegation = delegationWording(hostFlavor);
+
+      const requested = readTaskRef(args, idParam);
+      if (!requested) throw new Error(`task_message requires ${idParam}`);
       const job = options.backgroundJobBoard.resolve(
         parentSessionID,
         requested,
       );
-      if (!job) throw new Error(`Unknown task ID or alias: ${args.task_id}`);
+      if (!job) throw new Error(`Unknown task ID or alias: ${requested}`);
 
       const currentJob = getCurrentTaskMessageJob(
         options.backgroundJobBoard,
@@ -62,6 +67,7 @@ export function createTaskMessageTool(options: {
         requested,
         job.taskID,
         job.generation,
+        delegation,
       );
 
       const lease = options.backgroundJobBoard.acquireMessageLease(
@@ -83,6 +89,7 @@ export function createTaskMessageTool(options: {
           requested,
           lease.taskID,
           lease.generation,
+          delegation,
         );
 
         const session = getClient(options.input).session;
@@ -95,7 +102,7 @@ export function createTaskMessageTool(options: {
         let modelSelection: ContinuationModelSelection | undefined;
         // v2 prompts inherit persisted session selection; per-call overrides
         // cannot be represented atomically. Keep the v1 lookup/pin unchanged.
-        if ((options.input as { hostFlavor?: string }).hostFlavor !== 'v2') {
+        if (hostFlavor !== 'v2') {
           const lookupController = new AbortController();
           try {
             modelSelection = await withTimeout(
@@ -136,6 +143,7 @@ export function createTaskMessageTool(options: {
               requested,
               lease.taskID,
               lease.generation,
+              delegation,
             );
             const body = {
               ...(modelSelection
@@ -165,6 +173,7 @@ export function createTaskMessageTool(options: {
           requested,
           lease.taskID,
           lease.generation,
+          delegation,
         );
         return `Message queued for ${latestJob.alias} (${latestJob.taskID}) without launching or resuming it.`;
       } catch (error) {
@@ -331,6 +340,7 @@ function getCurrentTaskMessageJob(
   requested: string,
   expectedTaskID: string,
   expectedGeneration: number,
+  delegation: DelegationWording,
 ): NonNullable<ReturnType<BackgroundJobStore['get']>> {
   const current = backgroundJobBoard.get(expectedTaskID);
   const resolved = backgroundJobBoard.resolve(parentSessionID, requested);
@@ -356,7 +366,7 @@ function getCurrentTaskMessageJob(
   if (current.state !== 'running') {
     if (current.state === 'stopped') {
       throw new Error(
-        `Task ${requested} stopped without a terminal result. task_message only queues messages for running tasks and does not continue it. Use task_revive with task_id: "${requested}" to continue the retained session.`,
+        `Task ${requested} stopped without a terminal result. task_message only queues messages for running tasks and does not continue it. Use task_revive with ${delegation.resumeParam}: "${requested}" to continue the retained session.`,
       );
     }
     const terminalState =
@@ -365,7 +375,7 @@ function getCurrentTaskMessageJob(
         : current.state;
     if (['completed', 'error', 'cancelled'].includes(terminalState)) {
       throw new Error(
-        `Task ${requested} is terminal (${terminalState}). task_message only queues messages for running tasks and does not continue it. Call task_result first if its terminal result is not yet acknowledged; once it appears under Reusable Sessions, resume it with task by passing task_id: "${requested}", its existing ${current.agent} specialist, a new prompt, and background: true.`,
+        `Task ${requested} is terminal (${terminalState}). task_message only queues messages for running tasks and does not continue it. Call task_result first if its terminal result is not yet acknowledged; once it appears under Reusable Sessions, resume it with ${delegation.tool} by passing ${delegation.resumeParam}: "${requested}", its existing ${current.agent} specialist, a new prompt, and background: true.`,
       );
     }
     throw new Error(

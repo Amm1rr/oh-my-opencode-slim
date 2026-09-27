@@ -15,6 +15,7 @@ function createTool(overrides?: {
   verifyAbortMs?: number;
   abortRetryIntervalMs?: number;
   stableStoppedMs?: number;
+  hostFlavor?: string;
 }) {
   const board = new BackgroundJobBoard();
   const abort = mock(overrides?.abort ?? (async () => ({})));
@@ -31,7 +32,11 @@ function createTool(overrides?: {
     session: { abort, status, get: getSession, delete: deleteSession },
   };
   const tools = createCancelTaskTool({
-    input: { directory: '/test/project', client: mockClient } as any,
+    input: {
+      directory: '/test/project',
+      client: mockClient,
+      ...(overrides?.hostFlavor ? { hostFlavor: overrides.hostFlavor } : {}),
+    } as any,
     backgroundJobBoard: board,
     shouldManageSession: overrides?.shouldManageSession ?? (() => true),
     abortTimeoutMs: overrides?.abortTimeoutMs,
@@ -577,5 +582,30 @@ describe('task_cancel tool', () => {
         agent: 'fixer',
       } as any),
     ).rejects.toThrow('orchestrator');
+  });
+
+  test('v2 exposes sessionID and emits sessionID labels', async () => {
+    const { board, taskCancel } = createTool({ hostFlavor: 'v2' });
+    board.registerLaunch({
+      taskID: 'ses_1',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+    });
+
+    expect(Object.keys(taskCancel.args)).toContain('sessionID');
+
+    const output = await taskCancel.execute(
+      { sessionID: 'ses_1', reason: 'obsolete' },
+      context,
+    );
+    expect(String(output)).toContain('sessionID: ses_1');
+    expect(parseTaskStatusOutput(String(output))).toMatchObject({
+      taskID: 'ses_1',
+      state: 'cancelled',
+    });
+
+    await expect(
+      taskCancel.execute({ sessionID: ' ' }, context),
+    ).rejects.toThrow('requires sessionID');
   });
 });

@@ -145,13 +145,16 @@ function parseTaskOutputHeader(output: string): TaskOutputHeader {
       output,
     );
   if (working) return { taskID: working[1], state: 'running' };
-  // v1 textual header: key/value lines in the header region (before
-  // `<task_result>`/`<task_error>`), never inside the result body.
+  // Textual header: key/value lines in the header region (before
+  // `<task_result>`/`<task_error>`), never inside the result body. Accepts
+  // the v1 `task_id:` key and the v2 `sessionID:` key.
   const header = getTaskHeader(output);
   const parsed: TaskOutputHeader = {};
   for (const line of header.split(/\r?\n/)) {
     const trimmed = line.trim();
-    const idMatch = /^task_id:\s*([^\s()]+)(?:\s*\(.*)?$/i.exec(trimmed);
+    const idMatch = /^(?:task_id|sessionID):\s*([^\s()]+)(?:\s*\(.*)?$/i.exec(
+      trimmed,
+    );
     if (idMatch) parsed.taskID ??= idMatch[1];
     const stateMatch =
       /^state:\s*(running|completed|error|cancelled)\s*$/i.exec(trimmed);

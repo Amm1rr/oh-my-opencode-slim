@@ -839,6 +839,119 @@ describe('tool execute bridge normalization', () => {
     });
   });
 
+  test('before bridge normalizes a legacy task_id to sessionID', async () => {
+    const before = async () => {};
+    const event = {
+      tool: 'subagent',
+      sessionID: 'ses_parent',
+      agent: 'orchestrator',
+      messageID: 'msg_1',
+      id: 'call_legacy',
+      input: {
+        agent: 'fixer',
+        description: 'd',
+        prompt: 'p',
+        task_id: 'ses_legacy',
+      },
+    };
+    const { beforeBridge } = createToolExecuteBridges(before, undefined);
+    await beforeBridge(event);
+    expect(event.input).toEqual({
+      agent: 'fixer',
+      description: 'd',
+      prompt: 'p',
+      sessionID: 'ses_legacy',
+    });
+    expect(event.input).not.toHaveProperty('task_id');
+  });
+
+  test('before bridge preserves a fresh spawn when a hook deletes task_id', async () => {
+    const before = async (_i: unknown, o: { args: unknown }) => {
+      delete (o.args as Record<string, unknown>).task_id;
+    };
+    const event = {
+      tool: 'subagent',
+      sessionID: 'ses_parent',
+      agent: 'orchestrator',
+      messageID: 'msg_1',
+      id: 'call_drop',
+      input: {
+        agent: 'fixer',
+        description: 'd',
+        prompt: 'p',
+        task_id: 'ses_x',
+      },
+    };
+    const { beforeBridge } = createToolExecuteBridges(before, undefined);
+    await beforeBridge(event);
+    // A dropped resume id must NOT resurrect as a sessionID (which would
+    // resume the wrong child instead of spawning fresh).
+    expect(event.input).toEqual({
+      agent: 'fixer',
+      description: 'd',
+      prompt: 'p',
+    });
+    expect(event.input).not.toHaveProperty('sessionID');
+    expect(event.input).not.toHaveProperty('task_id');
+  });
+
+  test('before bridge lets canonical sessionID win over a legacy task_id', async () => {
+    const before = async () => {};
+    const event = {
+      tool: 'subagent',
+      sessionID: 'ses_parent',
+      agent: 'orchestrator',
+      messageID: 'msg_1',
+      id: 'call_both',
+      input: {
+        agent: 'fixer',
+        description: 'd',
+        prompt: 'p',
+        task_id: 'ses_legacy',
+        sessionID: 'ses_canonical',
+      },
+    };
+    const { beforeBridge } = createToolExecuteBridges(before, undefined);
+    await beforeBridge(event);
+    expect(event.input).toEqual({
+      agent: 'fixer',
+      description: 'd',
+      prompt: 'p',
+      sessionID: 'ses_canonical',
+    });
+    expect(event.input).not.toHaveProperty('task_id');
+  });
+
+  test('before bridge leaves a non-delegation call and absent hook untouched', async () => {
+    const before = async () => {};
+    const readEvent = {
+      tool: 'read',
+      sessionID: 'ses_parent',
+      agent: 'fixer',
+      messageID: 'msg_1',
+      id: 'call_read',
+      input: { filePath: 'src/x.ts' },
+    };
+    const { beforeBridge } = createToolExecuteBridges(before, undefined);
+    await beforeBridge(readEvent);
+    expect(readEvent.input).toEqual({ filePath: 'src/x.ts' });
+
+    const noHookEvent = {
+      tool: 'subagent',
+      sessionID: 'ses_parent',
+      agent: 'orchestrator',
+      messageID: 'msg_1',
+      id: 'call_no_hook',
+      input: { agent: 'fixer', task_id: 'ses_untouched' },
+    };
+    const inert = createToolExecuteBridges(undefined, undefined);
+    await inert.beforeBridge(noHookEvent);
+    expect(noHookEvent.input).toEqual({
+      agent: 'fixer',
+      task_id: 'ses_untouched',
+    });
+  });
+
   test('before bridge rethrows hook rejection so v2 refuses the call', async () => {
     const before = async () => {
       throw new Error('duplicate spawn refused');

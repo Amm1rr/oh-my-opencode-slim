@@ -7,7 +7,8 @@ const COUNCILLOR_AGENT_PREFIX = 'councillor-';
 /**
  * Build dynamic councillor agents from council config presets.
  * Each councillor gets its own agent (name + model) so the orchestrator
- * can task() them with native panes at depth 1 using per-councillor models.
+ * can dispatch them with native panes (via `task()` on v1, `subagent()` on v2)
+ * at depth 1 using per-councillor models.
  * Agent names are prefixed with `councillor-` because raw councillor names
  * (e.g. "alpha") can collide with OpenCode-reserved agent type names.
  */

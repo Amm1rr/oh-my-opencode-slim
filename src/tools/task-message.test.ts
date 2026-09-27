@@ -33,9 +33,13 @@ function makeSession(prompt: ReturnType<typeof mock>) {
   };
 }
 
-function createTool(board: BackgroundJobBoard) {
+function createTool(board: BackgroundJobBoard, hostFlavor?: string) {
   return createTaskMessageTool({
-    input: { directory: '/test', client } as any,
+    input: {
+      directory: '/test',
+      client,
+      ...(hostFlavor ? { hostFlavor } : {}),
+    } as any,
     backgroundJobBoard: board,
   }).task_message;
 }
@@ -626,6 +630,63 @@ describe('task_message', () => {
       ),
     ).rejects.toThrow('cancellation was requested');
     expect(cancellingPrompt).not.toHaveBeenCalled();
+  });
+
+  test('terminal-resume guidance names the host delegation tool', async () => {
+    const v1Board = new BackgroundJobBoard();
+    registerRunningChild(v1Board);
+    v1Board.updateStatus({ taskID: 'ses_child1', state: 'completed' });
+    client = { session: { prompt: makePrompt() } };
+    await expect(
+      createTool(v1Board).execute(
+        { task_id: 'ses_child1', message: 'Too late' },
+        { sessionID: 'parent-1' } as any,
+      ),
+    ).rejects.toThrow('resume it with task by passing task_id: "ses_child1"');
+
+    const v2Board = new BackgroundJobBoard();
+    registerRunningChild(v2Board);
+    v2Board.updateStatus({ taskID: 'ses_child1', state: 'completed' });
+    client = { session: { prompt: makePrompt() } };
+    let message = '';
+    try {
+      await createTool(v2Board, 'v2').execute(
+        { task_id: 'ses_child1', message: 'Too late' },
+        { sessionID: 'parent-1' } as any,
+      );
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toContain(
+      'resume it with subagent by passing sessionID: "ses_child1"',
+    );
+    // The control tool `task_result` on the same sentence is unaffected.
+    expect(message).toContain('Call task_result first');
+    expect(message).not.toContain('task(');
+    expect(message).not.toContain('task_id');
+  });
+
+  test('v2 exposes sessionID and accepts the task_id alias', async () => {
+    const board = new BackgroundJobBoard();
+    registerRunningChild(board);
+    const prompt = makePrompt();
+    client = { session: makeSession(prompt) };
+    const task_message = createTool(board, 'v2');
+
+    expect(Object.keys(task_message.args)).toContain('sessionID');
+
+    await expect(
+      task_message.execute(
+        { sessionID: 'ses_child1', message: 'Native update' },
+        { sessionID: 'parent-1' } as any,
+      ),
+    ).resolves.toContain('queued');
+    await expect(
+      task_message.execute({ task_id: 'ses_child1', message: 'Alias update' }, {
+        sessionID: 'parent-1',
+      } as any),
+    ).resolves.toContain('queued');
+    expect(prompt).toHaveBeenCalledTimes(2);
   });
 
   test('rejects a child owned by another parent', async () => {

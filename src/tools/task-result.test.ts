@@ -10,7 +10,7 @@ const gates: BackgroundJobTerminalGate[] = [];
 afterEach(() => {
   for (const gate of gates.splice(0)) gate.dispose();
 });
-function harness(tracked = true) {
+function harness(tracked = true, hostFlavor?: string) {
   const board = new BackgroundJobBoard();
   const run = tracked
     ? board.registerLaunch({
@@ -33,6 +33,7 @@ function harness(tracked = true) {
   const input = {
     directory: '/tmp',
     client: { session: { get, status, messages } },
+    ...(hostFlavor ? { hostFlavor } : {}),
   } as never;
   const gate = createBackgroundJobTerminalGate({
     backgroundJobBoard: board,
@@ -92,6 +93,7 @@ function harness(tracked = true) {
     get,
     status,
     messages,
+    tool,
     execute,
     settle,
     input,
@@ -292,4 +294,48 @@ test('unknown alias and empty task id are rejected', async () => {
   const h = harness();
   await expect(h.execute('exp-99')).rejects.toThrow('Unknown task ID');
   await expect(h.execute(' ')).rejects.toThrow('requires task_id');
+});
+
+test('v2 exposes sessionID, accepts the task_id alias, and emits a sessionID label', async () => {
+  const h = harness(true, 'v2');
+  expect(Object.keys(h.tool.args)).toContain('sessionID');
+  expect(Object.keys(h.tool.args)).toContain('task_id');
+
+  await h.settle('completed');
+  const context = {
+    sessionID: 'parent-1',
+    agent: 'orchestrator',
+  } as never;
+  expect(await h.tool.execute({ sessionID: 'exp-1' }, context)).toBe(
+    'final findings',
+  );
+  expect(await h.tool.execute({ task_id: 'exp-1' }, context)).toBe(
+    'final findings',
+  );
+});
+
+test('v2 emits sessionID: in pending output and rejects an empty identifier', async () => {
+  const h = harness(true, 'v2');
+  h.status.mockResolvedValue({ data: { ses_child1: { type: 'busy' } } });
+  const context = {
+    sessionID: 'parent-1',
+    agent: 'orchestrator',
+  } as never;
+
+  const output = await h.tool.execute({ sessionID: 'exp-1' }, context);
+  expect(String(output)).toContain('sessionID: ses_child1');
+  await expect(h.tool.execute({ sessionID: ' ' }, context)).rejects.toThrow(
+    'requires sessionID',
+  );
+});
+
+test('v1 keeps the task_id schema and label', async () => {
+  const h = harness();
+  expect(Object.keys(h.tool.args)).toEqual(['task_id']);
+  h.status.mockResolvedValue({ data: { ses_child1: { type: 'busy' } } });
+  const output = await h.tool.execute({ task_id: 'exp-1' }, {
+    sessionID: 'parent-1',
+    agent: 'orchestrator',
+  } as never);
+  expect(String(output)).toContain('task_id: ses_child1');
 });
