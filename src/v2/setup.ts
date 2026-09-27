@@ -886,6 +886,9 @@ export function createPermissionRulesBridge(
   observeEvent(event: Record<string, unknown>): Promise<void>;
   /** Compatibility seam for focused bridge tests and child creation paths. */
   observeSessionCreated(event: Record<string, unknown>): Promise<void>;
+  /** Reclassify identities observed before the finalized plugin-agent roster
+   * was available, and apply rules for newly recognized managed children. */
+  refreshPluginAgents(): Promise<void> | undefined;
   /** Cache-first prompt barrier. Unknown identities degrade if lookup is
    * unavailable; known managed identities fail closed on update failures. */
   ensurePromptPermission(sessionID: string): Promise<void>;
@@ -1225,10 +1228,42 @@ export function createPermissionRulesBridge(
     }
   }
 
+  function refreshPluginAgents(): Promise<void> | undefined {
+    const newlyManaged: Array<[string, PermissionSessionIdentity]> = [];
+    for (const [sessionID, identity] of identities) {
+      if (!identity) continue;
+      const state = classifyPermissionIdentity(
+        identity.parentKnown,
+        identity.parentID,
+        identity.agent,
+        options.pluginAgents,
+      );
+      if (state === identity.state) continue;
+      const updated = { ...identity, state };
+      identities.set(sessionID, updated);
+      if (state === 'managed') newlyManaged.push([sessionID, updated]);
+    }
+    if (newlyManaged.length === 0) return;
+    return Promise.all(
+      newlyManaged.map(async ([sessionID, identity]) => {
+        try {
+          await enforceKnownIdentity(sessionID, identity);
+        } catch (err) {
+          // The later prompt barrier retries a failed child rules update.
+          log('[v2][permission-rules] deferred child projection failed', {
+            sessionID,
+            err: String(err),
+          });
+        }
+      }),
+    ).then(() => undefined);
+  }
+
   return {
     observeEvent,
     observeSessionCreated: observeEvent,
     ensurePromptPermission,
+    refreshPluginAgents,
     dispose() {
       if (disposal) return disposal;
       disposed = true;
@@ -1856,14 +1891,13 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       let finalizedRegistry:
         | ReturnType<RegistryFactoryBridge['requireRegistry']>
         | undefined;
-      let nativePermissionRulesByAgent:
-        | Record<string, V2PermissionRule[]>
-        | undefined;
       let permissionSnapshotReady = false;
       let permissionRulesBridgeEnabled = false;
+      const pluginAgents = new Set<string>();
       let permissionRulesBridge:
         | ReturnType<typeof createPermissionRulesBridge>
         | undefined;
+      let permissionReadiness: Promise<void> | undefined;
       let synthCommands:
         | Record<string, { template?: string; description?: string }>
         | undefined;
@@ -1905,110 +1939,91 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       }
 
       // ── Agents ──
-      let transformError: unknown;
-      let transformFailed = false;
       let nativeSnapshotCaptured = false;
       try {
         const reg = await ctx.agent.transform((draft) => {
-          try {
-            if (!nativeSnapshotCaptured) {
-              const nativeByAgent: Record<string, V2PermissionRule[]> = {};
-              const hostAgents: Record<string, Record<string, unknown>> = {};
-              const listedAgents = draft.list();
-              if (!Array.isArray(listedAgents)) {
-                throw new Error('agent transform did not expose a native list');
-              }
-              for (const listed of listedAgents) {
-                const name = typeof listed.id === 'string' ? listed.id : '';
-                if (!name) continue;
-                const native = draft.get(name) ?? listed;
-                if (!Array.isArray(native.permissions)) {
-                  throw new Error(
-                    `Native agent '${name}' did not expose a permissions array`,
-                  );
-                }
-                const snapshot = snapshotNativeAgentForRegistry(native);
-                hostAgents[name] = snapshot.config;
-                nativeByAgent[name] = snapshot.permissions;
-              }
-              const registry = registryBridge.finalize(
-                { agent: hostAgents, mcp: hostMcpSnapshot },
-                nativeByAgent,
-              );
-              finalizedRegistry = registry;
-              nativePermissionRulesByAgent = nativeByAgent;
-              permissionSnapshotReady = true;
-              nativeSnapshotCaptured = true;
-            }
-            const registry = registryBridge.requireRegistry();
-            finalizedRegistry = registry;
-            resolvedAgents = registry.getSdkAgentProjection() as Record<
-              string,
-              Record<string, unknown>
-            >;
-            for (const [name, cfg] of Object.entries(resolvedAgents)) {
-              // This transform may replay after the first materialization.
-              // Only our canonical agents and aliases are managed; host-owned
-              // registrations must remain byte-for-byte untouched.
-              if (
-                !registry.agentNames.includes(name) &&
-                !Object.hasOwn(registry.identities, name)
-              ) {
-                continue;
-              }
-              applyAgentToDraft(
-                draft,
-                name,
-                cfg,
-                registry.nativePolicies[name]?.rules,
-              );
-            }
-            // Make orchestrator the default primary agent.
-            if (resolvedAgents.orchestrator) {
-              try {
-                draft.default(
-                  registry.identities.orchestrator ?? 'orchestrator',
-                );
-              } catch {
-                /* default() optional */
-              }
-            }
-          } catch (err) {
-            transformFailed = true;
-            transformError = err;
-            throw err;
+          if (hostMcpSnapshot === undefined) {
+            throw new Error(
+              'MCP configuration snapshot must be captured before agent finalization',
+            );
           }
+          if (!nativeSnapshotCaptured) {
+            const nativeByAgent: Record<string, V2PermissionRule[]> = {};
+            const hostAgents: Record<string, Record<string, unknown>> = {};
+            const listedAgents = draft.list();
+            if (!Array.isArray(listedAgents)) {
+              throw new Error('agent transform did not expose a native list');
+            }
+            for (const listed of listedAgents) {
+              const name = typeof listed.id === 'string' ? listed.id : '';
+              if (!name) continue;
+              const native = draft.get(name) ?? listed;
+              if (!Array.isArray(native.permissions)) {
+                throw new Error(
+                  `Native agent '${name}' did not expose a permissions array`,
+                );
+              }
+              const snapshot = snapshotNativeAgentForRegistry(native);
+              hostAgents[name] = snapshot.config;
+              nativeByAgent[name] = snapshot.permissions;
+            }
+            const registry = registryBridge.finalize(
+              { agent: hostAgents, mcp: hostMcpSnapshot },
+              nativeByAgent,
+            );
+            finalizedRegistry = registry;
+            nativeSnapshotCaptured = true;
+          }
+          const registry = registryBridge.requireRegistry();
+          finalizedRegistry = registry;
+          resolvedAgents = registry.getSdkAgentProjection() as Record<
+            string,
+            Record<string, unknown>
+          >;
+          pluginAgents.clear();
+          for (const name of Object.keys(resolvedAgents)) {
+            pluginAgents.add(name);
+          }
+          if (permissionRulesBridge) {
+            permissionReadiness = permissionRulesBridge.refreshPluginAgents();
+          }
+          for (const [name, cfg] of Object.entries(resolvedAgents)) {
+            // This transform may replay after the first materialization.
+            // Only our canonical agents and aliases are managed; host-owned
+            // registrations must remain byte-for-byte untouched.
+            if (
+              !registry.agentNames.includes(name) &&
+              !Object.hasOwn(registry.identities, name)
+            ) {
+              continue;
+            }
+            applyAgentToDraft(
+              draft,
+              name,
+              cfg,
+              registry.nativePolicies[name]?.rules,
+            );
+          }
+          // Make orchestrator the default primary agent.
+          if (resolvedAgents.orchestrator) {
+            try {
+              draft.default(registry.identities.orchestrator ?? 'orchestrator');
+            } catch {
+              /* default() optional */
+            }
+          }
+          permissionSnapshotReady = true;
         });
         disposers.push(() => reg.dispose());
         log('[v2] agents registered', {
           count: Object.keys(resolvedAgents ?? {}).length,
         });
-        // v2 transform callbacks may be deferred until State.batch flushes.
-        // agent.list() forces those transforms, so snapshot reads above are
-        // complete before the event stream or prompt barrier can use them.
-        try {
-          await withTimeout(
-            ctx.agent.list(),
-            PERMISSION_RULES_OPERATION_TIMEOUT_MS,
-            'Native permission snapshot materialization timed out',
-          );
-          if (transformFailed) throw transformError;
-          if (
-            nativePermissionRulesByAgent === undefined ||
-            !nativeSnapshotCaptured
-          ) {
-            throw new Error('agent transform did not produce a snapshot');
-          }
-        } catch (err) {
-          throw transformFailed ? (transformError ?? err) : err;
-        }
       } catch (err) {
         registryBridge.retire();
         throw err;
       }
 
-      permissionRulesBridgeEnabled =
-        permissionSnapshotReady && typeof ctx.session.update === 'function';
+      permissionRulesBridgeEnabled = typeof ctx.session.update === 'function';
       if (!permissionRulesBridgeEnabled && !permissionRulesUnavailableWarned) {
         permissionRulesUnavailableWarned = true;
         log(PERMISSION_RULES_UNAVAILABLE_WARNING);
@@ -2208,8 +2223,14 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       if (chatMessage) {
         const bridge = createSessionPromptBridge(chatMessage);
         const promptReg = await ctx.session.hook('prompt', async (event) => {
+          if (!permissionSnapshotReady) {
+            throw new Error(
+              'Agent permission snapshot is not ready; refusing prompt before agent finalization',
+            );
+          }
           const permissionBridge = permissionRulesBridge;
           if (permissionBridge) {
+            if (permissionReadiness) await permissionReadiness;
             await permissionBridge.ensurePromptPermission(event.sessionID);
           }
           await bridge.handlePrompt(event);
@@ -2357,7 +2378,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
               permissionForAgent: (agent) => {
                 return finalizedRegistry?.nativePolicies[agent]?.rules;
               },
-              pluginAgents: new Set(Object.keys(resolvedAgents ?? {})),
+              pluginAgents,
             });
             const permissionBridge = permissionRulesBridge;
             disposers.push(() => permissionBridge.dispose());

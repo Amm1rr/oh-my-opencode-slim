@@ -988,18 +988,15 @@ describe('createV2Setup permission rules wiring', () => {
   });
 
   test.each([
-    { snapshotAvailable: true, getAvailable: true, updateAvailable: true },
-    { snapshotAvailable: false, getAvailable: true, updateAvailable: true },
-    { snapshotAvailable: true, getAvailable: false, updateAvailable: true },
-    { snapshotAvailable: true, getAvailable: true, updateAvailable: false },
+    { getAvailable: true, updateAvailable: true },
+    { getAvailable: false, updateAvailable: true },
+    { getAvailable: true, updateAvailable: false },
     {
-      snapshotAvailable: true,
       getAvailable: true,
       updateAvailable: true,
       abortRegistrationFailure: true,
     },
     {
-      snapshotAvailable: true,
       getAvailable: true,
       updateAvailable: true,
       neverSettleUpdate: true,
@@ -1007,7 +1004,6 @@ describe('createV2Setup permission rules wiring', () => {
   ])(
     'setup prompt barrier capability probe %#',
     async ({
-      snapshotAvailable,
       getAvailable,
       updateAvailable,
       abortRegistrationFailure = false,
@@ -1068,17 +1064,6 @@ describe('createV2Setup permission rules wiring', () => {
           },
           reload: async () => ({}),
           list: async () => {
-            if (!transformsApplied) {
-              transformsApplied = true;
-              transformAgents({
-                list: () => nativeAgents,
-                get: () => undefined,
-                default: () => {},
-                update: () => {},
-                remove: () => {},
-              });
-            }
-            if (!snapshotAvailable) throw new Error('agent listing failed');
             return nativeAgents;
           },
         },
@@ -1202,27 +1187,21 @@ describe('createV2Setup permission rules wiring', () => {
         expect(Date.now() - startedAt).toBeLessThan(6_000);
         return;
       }
-      if (!snapshotAvailable) {
-        await expect(setupPromise).rejects.toThrow('agent listing failed');
-        expect(registrationDisposals).toBeGreaterThan(0);
-        expect(() =>
-          transformAgents({
-            list: () => nativeAgents,
-            get: () => undefined,
-            default: () => {},
-            update: () => {},
-            remove: () => {},
-          }),
-        ).toThrow('retired');
-        return;
-      }
       const cleanup = await setupPromise;
 
       try {
-        // agent.list() during setup forced the host's deferred transform.
+        // Simulate the host's batch flush after setup returned.
+        transformsApplied = true;
+        transformAgents({
+          list: () => nativeAgents,
+          get: () => undefined,
+          default: () => {},
+          update: () => {},
+          remove: () => {},
+        });
         expect(transformsApplied).toBe(true);
         expect(promptHandler).toBeDefined();
-        const bridgeEnabled = snapshotAvailable && updateAvailable;
+        const bridgeEnabled = updateAvailable;
         const prompt = promptHandler as NonNullable<typeof promptHandler>;
         holdRulesUpdate = bridgeEnabled;
         if (getAvailable && bridgeEnabled && !neverSettleUpdate) {
