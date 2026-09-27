@@ -6,6 +6,11 @@ import {
   MarketplacePackageBundleSchema,
   MarketplacePackageManifestSchema,
 } from '../marketplace-contract/index.js';
+import {
+  disableMarketplacePackage,
+  enableMarketplaceAgent,
+  type MarketplaceActivationScope,
+} from './activation-config.js';
 import { withMarketplaceConfigReferencesRemoved } from './config-references.js';
 import {
   MarketplaceCompatibilityError,
@@ -48,6 +53,16 @@ export interface MarketplaceDesiredState {
   readonly packageIds: readonly string[];
   readonly packages?: readonly MarketplaceLivePackage[];
   readonly error?: string;
+}
+
+export const MARKETPLACE_UNINSTALL_SCOPE_WARNING =
+  'Other project configurations were not inspected and may retain dangling marketplace package references.';
+
+export interface MarketplaceUninstallResult {
+  readonly packageId: string;
+  readonly uninstalled: true;
+  readonly otherProjectsInspected: false;
+  readonly warning: typeof MARKETPLACE_UNINSTALL_SCOPE_WARNING;
 }
 
 export type MarketplaceRegistryDownloadClient = Pick<
@@ -268,12 +283,45 @@ export class MarketplaceService {
     }
   }
 
-  remove(id: string): void {
+  uninstallGlobal(
+    id: string,
+    acknowledgeOtherProjects: boolean,
+  ): MarketplaceUninstallResult {
+    if (acknowledgeOtherProjects !== true) {
+      throw new MarketplaceValidationError(
+        'Global marketplace uninstall requires explicit acknowledgement that other project configs are not inspected',
+      );
+    }
     const normalizedId = normalizeMarketplacePackageId(id);
     withMarketplaceConfigReferencesRemoved(
       this.projectDir,
       normalizedId,
       (onCommitted) => this.store.remove(normalizedId, { onCommitted }),
+    );
+    return {
+      packageId: normalizedId,
+      uninstalled: true,
+      otherProjectsInspected: false,
+      warning: MARKETPLACE_UNINSTALL_SCOPE_WARNING,
+    };
+  }
+
+  enable(id: string, scope: MarketplaceActivationScope = 'project'): void {
+    enableMarketplaceAgent(
+      this.projectDir,
+      id,
+      this.store,
+      scope,
+      this.getPresetOverride?.(),
+    );
+  }
+
+  disable(id: string, scope: MarketplaceActivationScope = 'project'): void {
+    disableMarketplacePackage(
+      this.projectDir,
+      id,
+      scope,
+      this.getPresetOverride?.(),
     );
   }
 

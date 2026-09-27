@@ -49,6 +49,10 @@ const TASK_CONTROL_TOOL_NAMES = [
   'task_status',
   'task_result',
 ] as const;
+const MARKETPLACE_TOOL_NAMES = [
+  'marketplace_inspect',
+  'marketplace_manage',
+] as const;
 const SAFE_AGENT_ALIAS_RE = /^[a-z][a-z0-9_-]*$/i;
 
 export function resolvePrimaryModelValue(value: unknown): string | undefined {
@@ -382,9 +386,9 @@ function applyDefaultPermissions(
   configuredSkills?: readonly string[],
   disabledSkills?: readonly string[],
 ): void {
-  // If the user supplied a shorthand string permission (e.g. "ask"),
-  // it already applies to all tools — preserve it as-is and skip the
-  // object merge, which would corrupt it by spreading the string.
+  // A shorthand string is a user-level rule for every tool. Keep its original
+  // form; marketplace tools independently fail closed through their caller
+  // identity guard for every non-orchestrator agent.
   if (typeof agent.config.permission === 'string') {
     return;
   }
@@ -413,12 +417,26 @@ function applyDefaultPermissions(
     agent.name === 'orchestrator'
       ? (existing.wait_for_user ?? 'allow')
       : 'deny';
+  const marketplacePermissions = Object.fromEntries(
+    MARKETPLACE_TOOL_NAMES.map((toolName) => {
+      const configured = existing[toolName];
+      const orchestratorPermission =
+        configured === 'allow' || configured === 'ask' || configured === 'deny'
+          ? configured
+          : 'allow';
+      return [
+        toolName,
+        agent.name === 'orchestrator' ? orchestratorPermission : 'deny',
+      ];
+    }),
+  );
 
   agent.config.permission = {
     ...existing,
     question: questionPerm,
     ...taskControlPermissions,
     wait_for_user: waitForUserPerm,
+    ...marketplacePermissions,
     // Apply skill permissions as nested object under 'skill' key
     skill: {
       ...(typeof existing.skill === 'object' ? existing.skill : {}),

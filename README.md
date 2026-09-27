@@ -54,6 +54,8 @@ The main idea is simple: instead of forcing one model to do everything, the plug
 - **[Fully customizable](docs/configuration.md)** - custom agents, prompt
   overrides, per-agent skill/MCP permissions, and
   [project-local customization](docs/project-local-customization.md).
+- **[Marketplace packages](docs/marketplace.md)** - install and manage community
+  agents; package changes apply only after reloading OpenCode.
 
 ### What Users Say
 
@@ -651,6 +653,7 @@ Use this section as a map: start with installation, then jump to features, confi
 | **[Installation Guide](docs/installation.md)** | Install the plugin, use CLI flags, reset config, and troubleshoot setup |
 | **[OpenCode v2 Compatibility](docs/opencode-v2-compatibility.md)** | Run the same plugin on `opencode2`: feature matrix, v2.0.x compatibility baseline, version pinning |
 | **[Configuration](docs/configuration.md)** | Config file locations, JSONC support, prompt overrides, and full option reference |
+| **[Marketplace](docs/marketplace.md)** | Install, inspect, activate, and update marketplace agent packages |
 | **[Project Customization](docs/project-local-customization.md)** | Repository-specific custom agents, prompt overrides, per-agent skills, and precedence |
 | **[Background Orchestration](docs/background-orchestration.md)** | Scheduler-first orchestrator model built around native background subagents |
 | **[Maintainer Guide](docs/maintainers.md)** | Issue triage rules, label meanings, support routing, and repo maintenance workflow |

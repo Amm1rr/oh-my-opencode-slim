@@ -580,6 +580,64 @@ describe('orchestrator agent', () => {
     }
   });
 
+  test('marketplace tools are enabled only for the orchestrator by default', () => {
+    const agents = createAgents(
+      runtimeFor({
+        agents: {
+          fixer: { permission: { marketplace_manage: 'allow' } },
+        },
+      }),
+    );
+    const orchestrator = agents.find((agent) => agent.name === 'orchestrator');
+    const fixer = agents.find((agent) => agent.name === 'fixer');
+    expect(orchestrator).toBeDefined();
+    expect(fixer).toBeDefined();
+    if (!orchestrator || !fixer) throw new Error('Expected built-in agents');
+    for (const name of ['marketplace_inspect', 'marketplace_manage']) {
+      expect(
+        (orchestrator.config.permission as Record<string, unknown>)[name],
+      ).toBe('allow');
+      expect((fixer.config.permission as Record<string, unknown>)[name]).toBe(
+        'deny',
+      );
+    }
+  });
+
+  test.each(['allow', 'ask', 'deny'] as const)(
+    'preserves explicit orchestrator marketplace permission %s',
+    (action) => {
+      const agents = createAgents(
+        runtimeFor({
+          agents: {
+            orchestrator: {
+              permission: {
+                marketplace_inspect: action,
+                marketplace_manage: action,
+              },
+            },
+          },
+        }),
+      );
+      const orchestrator = agents.find(
+        (agent) => agent.name === 'orchestrator',
+      );
+      const permissions = orchestrator?.config.permission as Record<
+        string,
+        unknown
+      >;
+      expect(permissions.marketplace_inspect).toBe(action);
+      expect(permissions.marketplace_manage).toBe(action);
+    },
+  );
+
+  test('preserves shorthand specialist permissions unchanged', () => {
+    const agents = createAgents(
+      runtimeFor({ agents: { fixer: { permission: 'allow' } } }),
+    );
+    const fixer = agents.find((agent) => agent.name === 'fixer');
+    expect(fixer?.config.permission).toBe('allow');
+  });
+
   test('orchestrator is allowed to invoke wait_for_user', () => {
     const agents = createAgents(runtimeFor());
     const orchestrator = agents.find((a) => a.name === 'orchestrator');

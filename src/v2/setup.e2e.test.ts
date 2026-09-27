@@ -330,6 +330,12 @@ describe('createV2Setup e2e', () => {
     expect(calls.agentUpdates.map((u) => u.id)).toContain('orchestrator');
     expect(calls.agentDefault).toBe('orchestrator');
     expect(calls.toolAdds.length).toBeGreaterThan(0);
+    expect(calls.toolAdds.map((tool) => tool.name)).toContain(
+      'marketplace_inspect',
+    );
+    expect(calls.toolAdds.map((tool) => tool.name)).toContain(
+      'marketplace_manage',
+    );
     // CodeMode split (upstream Tool.snapshot): every registered tool must
     // carry `options: { codemode: false }` or it never becomes a direct
     // model-visible tool definition — it lands in the `execute` tool's

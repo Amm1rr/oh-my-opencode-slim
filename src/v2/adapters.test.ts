@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { createReadOnlyAgentPermission } from '../agents/permissions';
 import {
   adaptPermissions,
+  adaptTool,
   applyAgentToDraft,
   compileAgentPermissions,
   parseModelRef,
@@ -57,6 +58,44 @@ describe('parseModelRef', () => {
   test('undefined for degenerate slashes', () => {
     expect(parseModelRef('/claude')).toBeUndefined(); // empty provider
     expect(parseModelRef('anthropic/')).toBeUndefined(); // empty id
+  });
+});
+
+describe('adaptTool agent context', () => {
+  test('does not invent orchestrator identity for marketplace tools', async () => {
+    let capturedAgent: string | undefined = 'not-called';
+    const marketplaceTool = adaptTool(
+      'marketplace_manage',
+      {
+        execute: async (_args, context) => {
+          capturedAgent = (context as { agent?: string }).agent;
+          return 'ok';
+        },
+      },
+      '/project',
+      {},
+    );
+
+    await marketplaceTool.execute({}, undefined);
+    expect(capturedAgent).toBeUndefined();
+  });
+
+  test('preserves legacy missing-agent context for unrelated tools', async () => {
+    let capturedAgent: string | undefined;
+    const unrelatedTool = adaptTool(
+      'task_status',
+      {
+        execute: async (_args, context) => {
+          capturedAgent = (context as { agent?: string }).agent;
+          return 'ok';
+        },
+      },
+      '/project',
+      {},
+    );
+
+    await unrelatedTool.execute({}, undefined);
+    expect(capturedAgent).toBe('orchestrator');
   });
 });
 

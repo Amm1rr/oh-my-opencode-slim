@@ -214,7 +214,11 @@ export function adaptTool(
       const v1Ctx = {
         sessionID: ctx?.sessionID ?? '',
         messageID: ctx?.messageID ?? '',
-        agent: ctx?.agent ?? 'orchestrator',
+        agent:
+          ctx?.agent ??
+          (name === 'marketplace_inspect' || name === 'marketplace_manage'
+            ? undefined
+            : 'orchestrator'),
         directory,
         worktree: directory,
         abort: new AbortController().signal,

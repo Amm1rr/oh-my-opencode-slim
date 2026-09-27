@@ -28,6 +28,12 @@ OH_MY_OPENCODE_SLIM_DISABLE=1 opencode
 
 If OmO-slim detects an invalid plugin config for the current project, the TUI sidebar shows a warning. Run `oh-my-opencode-slim doctor` from your project root for full diagnostics.
 
+Marketplace agent packages are selected through the active preset's
+`marketplace` configuration. The CLI and orchestrator tools update desired
+disk state only; they do not mutate the current session's agent registry. See
+the [Marketplace guide](marketplace.md) for activation, status, and reload
+commands.
+
 The TUI sidebar uses the compact layout by default. Set `compactSidebar` to
 `false` in `oh-my-opencode-slim.jsonc` to use the expanded layout:
 

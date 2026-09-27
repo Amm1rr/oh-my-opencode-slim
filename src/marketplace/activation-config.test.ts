@@ -17,6 +17,7 @@ import {
 } from './activation-config';
 import { acquireMarketplaceLease } from './lease';
 import { getMarketplacePaths } from './paths';
+import { readDesiredMarketplacePackageIds } from './status';
 import { MarketplaceStore } from './store';
 
 const PACKAGE_A = 'community/docs-researcher';
@@ -120,8 +121,13 @@ describe('marketplace activation persistence', () => {
           );
           fixture.store.install(bundle(PACKAGE_A, 'docsresearcher'));
 
-          enableMarketplaceAgent(fixture.project, PACKAGE_A, fixture.store);
-          disableMarketplacePackage(fixture.project, PACKAGE_A);
+          enableMarketplaceAgent(
+            fixture.project,
+            PACKAGE_A,
+            fixture.store,
+            layer,
+          );
+          disableMarketplacePackage(fixture.project, PACKAGE_A, layer);
 
           const saved = JSON.parse(readFileSync(configPath, 'utf8'));
           expect(saved.presets.work.agents.marketplace).toEqual(override);
@@ -244,7 +250,7 @@ describe('marketplace activation persistence', () => {
 }\n`;
       writeFileSync(fixture.userConfig.replace(/\.json$/, '.jsonc'), source);
       fixture.store.install(bundle(PACKAGE_A, 'docsresearcher'));
-      enableMarketplaceAgent(fixture.project, PACKAGE_A, fixture.store);
+      enableMarketplaceAgent(fixture.project, PACKAGE_A, fixture.store, 'user');
 
       const written = fixture.userConfig.replace(/\.json$/, '.jsonc');
       const contents = readFileSync(written, 'utf8');
@@ -260,6 +266,99 @@ describe('marketplace activation persistence', () => {
         disabled_agents: ['legacy-agent'],
       });
       expect(existsSync(`${written}.bak`)).toBe(true);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  test('project scope masks shared user activation without changing another project', () => {
+    const fixture = setup();
+    const otherProject = join(fixture.root, 'other-project');
+    const projectJsonc = fixture.projectConfig.replace(/\.json$/, '.jsonc');
+    try {
+      const sharedConfig = JSON.stringify({
+        preset: 'work',
+        presets: { work: { marketplace: { agents: [PACKAGE_A] } } },
+      });
+      writeFileSync(fixture.userConfig, sharedConfig);
+      fixture.store.install(bundle(PACKAGE_A, 'docsresearcher'));
+      mkdirSync(otherProject, { recursive: true });
+
+      disableMarketplacePackage(fixture.project, PACKAGE_A);
+
+      expect(existsSync(projectJsonc)).toBe(true);
+      expect(existsSync(fixture.projectConfig)).toBe(false);
+      expect(readFileSync(fixture.userConfig, 'utf8')).toBe(sharedConfig);
+      const projectPresets = parse(readFileSync(projectJsonc, 'utf8')).presets;
+      expect(projectPresets.work.marketplace).toEqual({
+        agents_remove: [PACKAGE_A],
+      });
+      expect(
+        resolvePresetDefinition(
+          'work',
+          mergePresetMaps(
+            parse(readFileSync(fixture.userConfig, 'utf8')).presets,
+            projectPresets,
+          ) ?? {},
+        ).marketplace?.agents,
+      ).toEqual([]);
+      expect(
+        resolvePresetDefinition(
+          'work',
+          parse(readFileSync(fixture.userConfig, 'utf8')).presets,
+        ).marketplace?.agents,
+      ).toEqual([PACKAGE_A]);
+      expect(readDesiredMarketplacePackageIds(otherProject)).toEqual([
+        PACKAGE_A,
+      ]);
+
+      enableMarketplaceAgent(fixture.project, PACKAGE_A, fixture.store);
+      expect(
+        parse(readFileSync(projectJsonc, 'utf8')).presets.work.marketplace,
+      ).toEqual({ agents_remove: [] });
+      expect(readFileSync(fixture.userConfig, 'utf8')).toBe(sharedConfig);
+      expect(
+        resolvePresetDefinition(
+          'work',
+          mergePresetMaps(
+            parse(readFileSync(fixture.userConfig, 'utf8')).presets,
+            parse(readFileSync(projectJsonc, 'utf8')).presets,
+          ) ?? {},
+        ).marketplace?.agents,
+      ).toEqual([PACKAGE_A]);
+      expect(readDesiredMarketplacePackageIds(otherProject)).toEqual([
+        PACKAGE_A,
+      ]);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  test('explicit user scope changes only the user config', () => {
+    const fixture = setup();
+    try {
+      const sharedConfig = JSON.stringify({
+        preset: 'user-work',
+        presets: {
+          'user-work': { marketplace: { agents: [PACKAGE_A] } },
+        },
+      });
+      writeFileSync(fixture.userConfig, sharedConfig);
+      const projectConfig = JSON.stringify({
+        preset: 'project-work',
+        presets: { 'project-work': {} },
+      });
+      writeFileSync(fixture.projectConfig, projectConfig);
+
+      disableMarketplacePackage(fixture.project, PACKAGE_A, 'user');
+
+      expect(readFileSync(fixture.userConfig, 'utf8')).not.toBe(sharedConfig);
+      expect(
+        JSON.parse(readFileSync(fixture.userConfig, 'utf8')).presets[
+          'user-work'
+        ].marketplace,
+      ).toEqual({ agents: [] });
+      expect(readFileSync(fixture.projectConfig, 'utf8')).toBe(projectConfig);
     } finally {
       fixture.cleanup();
     }
@@ -402,8 +501,8 @@ describe('marketplace activation persistence', () => {
       );
       fixture.store.install(bundle(PACKAGE_A, 'docsresearcher'));
 
-      disableMarketplacePackage(fixture.project, PACKAGE_A);
-      enableMarketplaceAgent(fixture.project, PACKAGE_A, fixture.store);
+      disableMarketplacePackage(fixture.project, PACKAGE_A, 'user');
+      enableMarketplaceAgent(fixture.project, PACKAGE_A, fixture.store, 'user');
       expect(
         JSON.parse(readFileSync(fixture.userConfig, 'utf8')).presets.work
           .marketplace,
@@ -531,7 +630,7 @@ describe('marketplace activation persistence', () => {
       );
       fixture.store.install(bundle(PACKAGE_A, 'docsresearcher'));
 
-      disableMarketplacePackage(fixture.project, PACKAGE_A);
+      disableMarketplacePackage(fixture.project, PACKAGE_A, 'user');
       let saved = JSON.parse(readFileSync(fixture.userConfig, 'utf8'));
       expect(saved.presets.work.marketplace.agents).toEqual([PACKAGE_B]);
 
@@ -544,12 +643,12 @@ describe('marketplace activation persistence', () => {
         ],
       };
       writeFileSync(fixture.userConfig, JSON.stringify(saved));
-      disableMarketplacePackage(fixture.project, PACKAGE_A);
+      disableMarketplacePackage(fixture.project, PACKAGE_A, 'user');
       saved = JSON.parse(readFileSync(fixture.userConfig, 'utf8'));
       expect(saved.presets.work.marketplace.agents_add).toEqual([
         '{env:MARKETPLACE_LOCAL_OTHER}',
       ]);
-      enableMarketplaceAgent(fixture.project, PACKAGE_A, fixture.store);
+      enableMarketplaceAgent(fixture.project, PACKAGE_A, fixture.store, 'user');
       saved = JSON.parse(readFileSync(fixture.userConfig, 'utf8'));
       expect(saved.presets.work.marketplace.agents_add).toEqual([
         '{env:MARKETPLACE_LOCAL_OTHER}',
@@ -593,13 +692,13 @@ describe('marketplace activation persistence', () => {
       );
       fixture.store.install(bundle(PACKAGE_A, 'docsresearcher'));
 
-      enableMarketplaceAgent(fixture.project, PACKAGE_A, fixture.store);
+      enableMarketplaceAgent(fixture.project, PACKAGE_A, fixture.store, 'user');
 
       expect(
         JSON.parse(readFileSync(fixture.userConfig, 'utf8')).presets.work
           .marketplace.agents_remove,
       ).toEqual(['{env:MARKETPLACE_REMOVE_OTHER}']);
-      disableMarketplacePackage(fixture.project, PACKAGE_A);
+      disableMarketplacePackage(fixture.project, PACKAGE_A, 'user');
       expect(
         JSON.parse(readFileSync(fixture.userConfig, 'utf8')).presets.work
           .marketplace.agents_remove,
@@ -634,7 +733,7 @@ describe('marketplace activation persistence', () => {
       );
       const original = readFileSync(fixture.userConfig, 'utf8');
       expect(() =>
-        disableMarketplacePackage(fixture.project, PACKAGE_A),
+        disableMarketplacePackage(fixture.project, PACKAGE_A, 'user'),
       ).toThrow(
         "environment variable 'MARKETPLACE_MISSING_PACKAGE' is not set",
       );
@@ -649,7 +748,7 @@ describe('marketplace activation persistence', () => {
       writeFileSync(fixture.userConfig, JSON.stringify(invalid));
       const invalidOriginal = readFileSync(fixture.userConfig, 'utf8');
       expect(() =>
-        disableMarketplacePackage(fixture.project, PACKAGE_A),
+        disableMarketplacePackage(fixture.project, PACKAGE_A, 'user'),
       ).toThrow('invalid marketplace.agents_add package ID');
       expect(readFileSync(fixture.userConfig, 'utf8')).toBe(invalidOriginal);
     } finally {
@@ -786,6 +885,39 @@ describe('marketplace activation persistence', () => {
     }
   });
 
+  test.each(['project', 'user'] as const)(
+    'falls back to the persisted preset when the environment preset is empty in %s scope',
+    (scope) => {
+      const fixture = setup();
+      try {
+        process.env.OH_MY_OPENCODE_SLIM_PRESET = '';
+        writeFileSync(
+          fixture.userConfig,
+          JSON.stringify({ preset: 'work', presets: { work: {} } }),
+        );
+        fixture.store.install(bundle(PACKAGE_A, 'docsresearcher'));
+
+        enableMarketplaceAgent(
+          fixture.project,
+          PACKAGE_A,
+          fixture.store,
+          scope,
+        );
+
+        const targetPath =
+          scope === 'project'
+            ? fixture.projectConfig.replace(/\.json$/, '.jsonc')
+            : fixture.userConfig;
+        expect(
+          JSON.parse(readFileSync(targetPath, 'utf8')).presets.work.marketplace
+            .agents_add,
+        ).toEqual([PACKAGE_A]);
+      } finally {
+        fixture.cleanup();
+      }
+    },
+  );
+
   test('competing processes retain both package activations', async () => {
     const fixture = setup();
     const lockRoot = join(
@@ -812,7 +944,7 @@ import { MarketplaceStore } from './src/marketplace/store.ts';
 import { writeFileSync } from 'node:fs';
 const { directory, packageId, root, readyPath, donePath } = JSON.parse(process.argv[1]);
 writeFileSync(readyPath, 'ready');
-enableMarketplaceAgent(directory, packageId, new MarketplaceStore({ rootDir: root, pluginVersion: '3.2.0' }));
+   enableMarketplaceAgent(directory, packageId, new MarketplaceStore({ rootDir: root, pluginVersion: '3.2.0' }), 'user');
 writeFileSync(donePath, 'done');`,
             JSON.stringify({
               directory: fixture.project,
@@ -895,7 +1027,7 @@ const store = new MarketplaceStore({ rootDir: root, pluginVersion: '3.2.0' });
 const reader = { show(id) { writeFileSync(showPath, 'checked'); return store.show(id); } };
 writeFileSync(readyPath, 'ready');
 try {
-  enableMarketplaceAgent(directory, packageId, reader);
+  enableMarketplaceAgent(directory, packageId, reader, 'user');
   writeFileSync(resultPath, 'enabled');
 } catch (error) {
   writeFileSync(resultPath, String(error));
@@ -952,13 +1084,13 @@ try {
       );
       fixture.store.install(bundle(PACKAGE_A, 'docsresearcher'));
 
-      enableMarketplaceAgent(fixture.project, PACKAGE_A, fixture.store);
+      enableMarketplaceAgent(fixture.project, PACKAGE_A, fixture.store, 'user');
       expect(
         JSON.parse(readFileSync(fixture.userConfig, 'utf8')).presets.work
           .marketplace.agents_add,
       ).toEqual([PACKAGE_A]);
 
-      disableMarketplacePackage(fixture.project, PACKAGE_A);
+      disableMarketplacePackage(fixture.project, PACKAGE_A, 'user');
       fixture.store.remove(PACKAGE_A);
 
       expect(
@@ -983,7 +1115,12 @@ try {
       mkdirSync(`${fixture.userConfig}.bak`);
 
       expect(() =>
-        enableMarketplaceAgent(fixture.project, PACKAGE_A, fixture.store),
+        enableMarketplaceAgent(
+          fixture.project,
+          PACKAGE_A,
+          fixture.store,
+          'user',
+        ),
       ).toThrow();
       expect(readFileSync(fixture.userConfig, 'utf8')).toBe(original);
       expect(

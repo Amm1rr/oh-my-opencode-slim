@@ -171,6 +171,8 @@ describe('plugin tool registration', () => {
     expect(hooks.tool?.task_cancel).toBeDefined();
     expect(hooks.tool?.task_revive).toBeDefined();
     expect(hooks.tool?.wait_for_user).toBeDefined();
+    expect(hooks.tool?.marketplace_inspect).toBeDefined();
+    expect(hooks.tool?.marketplace_manage).toBeDefined();
     await expect(
       hooks.tool?.wait_for_user?.execute(
         { reason: 'Complete the external approval.' },
@@ -355,6 +357,11 @@ describe('plugin tool registration', () => {
       },
     };
     try {
+      await expect(
+        hooks.tool?.marketplace_inspect?.execute({ action: 'status' }, {
+          agent: 'Lead',
+        } as never),
+      ).rejects.toThrow('until the agent registry is finalized');
       await hooks.config?.(hostConfig);
       const registryBridge = (
         hooks as unknown as {
@@ -374,6 +381,24 @@ describe('plugin tool registration', () => {
       expect(registryBridge.marketplaceService.status().reloadRequired).toBe(
         false,
       );
+      await expect(
+        hooks.tool?.marketplace_inspect?.execute({ action: 'status' }, {
+          agent: 'Lead',
+        } as never),
+      ).resolves.toContain('"liveAvailable": true');
+      await hooks.tool?.marketplace_manage?.execute(
+        { action: 'enable', target: 'team/unselected' },
+        { agent: 'orchestrator' } as never,
+      );
+      const persistedActivation = readFileSync(
+        path.join(root, '.opencode', 'oh-my-opencode-slim.jsonc'),
+        'utf8',
+      );
+      expect(persistedActivation).toContain('team/unselected');
+      expect(
+        readFileSync(path.join(configDir, 'oh-my-opencode-slim.json'), 'utf8'),
+      ).not.toContain('team/unselected');
+      expect(hostConfig.agent).not.toHaveProperty('unselected-agent');
 
       const localSkillDir = path.join(
         root,
