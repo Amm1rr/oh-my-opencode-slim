@@ -6,6 +6,7 @@ import {
 
 function fixture() {
   const calls: unknown[][] = [];
+  const committed: string[] = [];
   const service = {
     projectDir: '/workspace',
     list: () => [{ id: 'x' }],
@@ -17,16 +18,20 @@ function fixture() {
       reloadRequired: null,
     }),
     requestReload: () => ({ accepted: false, reloadRequired: null }),
-    installRemote: async (target: string) => {
-      calls.push(['install', target]);
+    installRemote: async (target: string, signal?: AbortSignal) => {
+      calls.push(['install', target, signal]);
+      if (signal?.aborted) throw new Error('install aborted before commit');
+      committed.push(`install:${target}`);
       return {};
     },
     importFile: (path: string) => {
       calls.push(['import', path]);
       return {};
     },
-    updateRemote: async (target: string) => {
-      calls.push(['update', target]);
+    updateRemote: async (target: string, signal?: AbortSignal) => {
+      calls.push(['update', target, signal]);
+      if (signal?.aborted) throw new Error('update aborted before commit');
+      committed.push(`update:${target}`);
       return {};
     },
     updateFile: (path: string) => {
@@ -42,7 +47,7 @@ function fixture() {
     disable: (target: string, scope: string) =>
       calls.push(['disable', target, scope]),
   };
-  return { calls, service: service as never };
+  return { calls, committed, service: service as never };
 }
 
 describe('marketplace tools', () => {
@@ -261,4 +266,26 @@ describe('marketplace tools', () => {
     ).rejects.toThrow('scope is only supported by enable and disable');
     expect(calls).toHaveLength(1);
   });
+
+  test.each(['install', 'update'] as const)(
+    'passes the abort signal to remote %s and does not commit when aborted',
+    async (action) => {
+      const { calls, committed, service } = fixture();
+      const tools = createMarketplaceTools({ service });
+      const manage = tools.marketplace_manage as unknown as {
+        execute(args: never, ctx: never): Promise<string>;
+      };
+      const controller = new AbortController();
+      controller.abort();
+
+      await expect(
+        manage.execute(
+          { action, target: 'author/package' } as never,
+          { agent: 'orchestrator', abort: controller.signal } as never,
+        ),
+      ).rejects.toThrow(`${action} aborted before commit`);
+      expect(calls).toEqual([[action, 'author/package', controller.signal]]);
+      expect(committed).toEqual([]);
+    },
+  );
 });

@@ -175,13 +175,13 @@ export function createMarketplaceTools(options: MarketplaceToolOptions): {
       let result: unknown;
       switch (args.action) {
         case 'install':
-          result = await options.service.installRemote(target);
+          result = await options.service.installRemote(target, context?.abort);
           break;
         case 'import':
           result = options.service.importFile(resolve(cwd, target));
           break;
         case 'update':
-          result = await options.service.updateRemote(target);
+          result = await options.service.updateRemote(target, context?.abort);
           break;
         case 'update_file':
           result = options.service.updateFile(resolve(cwd, target));
