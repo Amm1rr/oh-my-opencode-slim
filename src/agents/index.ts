@@ -49,6 +49,10 @@ const TASK_CONTROL_TOOL_NAMES = [
   'task_status',
   'task_result',
 ] as const;
+const MARKETPLACE_TOOL_NAMES = [
+  'marketplace_inspect',
+  'marketplace_manage',
+] as const;
 const SAFE_AGENT_ALIAS_RE = /^[a-z][a-z0-9_-]*$/i;
 
 export function resolvePrimaryModelValue(value: unknown): string | undefined {
@@ -413,12 +417,19 @@ function applyDefaultPermissions(
     agent.name === 'orchestrator'
       ? (existing.wait_for_user ?? 'allow')
       : 'deny';
+  const marketplacePermissions = Object.fromEntries(
+    MARKETPLACE_TOOL_NAMES.map((toolName) => [
+      toolName,
+      agent.name === 'orchestrator' ? 'allow' : 'deny',
+    ]),
+  );
 
   agent.config.permission = {
     ...existing,
     question: questionPerm,
     ...taskControlPermissions,
     wait_for_user: waitForUserPerm,
+    ...marketplacePermissions,
     // Apply skill permissions as nested object under 'skill' key
     skill: {
       ...(typeof existing.skill === 'object' ? existing.skill : {}),

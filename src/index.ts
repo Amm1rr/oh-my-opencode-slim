@@ -75,6 +75,7 @@ import {
   ast_grep_search,
   createAcpRunTool,
   createCancelTaskTool,
+  createMarketplaceTools,
   createTaskMessageTool,
   createTaskReplyTool,
   createTaskResultTool,
@@ -82,6 +83,7 @@ import {
   createTaskStatusTool,
   createWaitForUserTool,
   createWebfetchTool,
+  resolveFinalizedOrchestratorIdentities,
 } from './tools';
 import { pickAgentModelRef } from './tools/smartfetch/secondary-model';
 import {
@@ -1136,7 +1138,11 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       );
     }
 
-    toolCount = Object.keys(tools).length;
+    toolCount =
+      Object.keys(tools).length +
+      ['marketplace_inspect', 'marketplace_manage'].filter(
+        (name) => !runtime.disabledTools.includes(name),
+      ).length;
   } catch (err) {
     terminalGate?.dispose();
     admissionRuntimeLease?.release();
@@ -1407,6 +1413,21 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       registryRetired = true;
     },
   };
+  const marketplaceTools = createMarketplaceTools({
+    service: marketplaceService,
+    cwd: ctx.directory,
+    getOrchestratorIdentities: () => {
+      const registry = registryBridge.requireRegistry();
+      return resolveFinalizedOrchestratorIdentities(registry);
+    },
+  });
+  if (!runtime.disabledTools.includes('marketplace_inspect')) {
+    tools.marketplace_inspect = marketplaceTools.marketplace_inspect;
+  }
+  if (!runtime.disabledTools.includes('marketplace_manage')) {
+    tools.marketplace_manage = marketplaceTools.marketplace_manage;
+  }
+  toolCount = Object.keys(tools).length;
 
   return {
     registryBridge,

@@ -6,6 +6,10 @@ import {
   MarketplacePackageBundleSchema,
   MarketplacePackageManifestSchema,
 } from '../marketplace-contract/index.js';
+import {
+  disableMarketplacePackage,
+  enableMarketplaceAgent,
+} from './activation-config.js';
 import { withMarketplaceConfigReferencesRemoved } from './config-references.js';
 import {
   MarketplaceCompatibilityError,
@@ -275,6 +279,14 @@ export class MarketplaceService {
       normalizedId,
       (onCommitted) => this.store.remove(normalizedId, { onCommitted }),
     );
+  }
+
+  enable(id: string): void {
+    enableMarketplaceAgent(this.projectDir, id, this.store);
+  }
+
+  disable(id: string): void {
+    disableMarketplacePackage(this.projectDir, id);
   }
 
   private registrySource(
