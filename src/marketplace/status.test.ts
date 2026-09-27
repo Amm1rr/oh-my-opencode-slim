@@ -211,6 +211,60 @@ describe('marketplace runtime status', () => {
     }
   });
 
+  test.each([
+    [
+      'missing selected package',
+      { packages: [], verifications: [] },
+      'team/example: team/example is not installed',
+    ],
+    [
+      'verification-failed selected package',
+      {
+        packages: [packageA],
+        verifications: [
+          {
+            id: 'team/example',
+            version: '1.0.0',
+            valid: false,
+            expectedDigest: 'digest-expected',
+            actualDigest: 'digest-a',
+            message: 'package digest verification failed',
+          },
+        ],
+      },
+      'team/example: package digest verification failed',
+    ],
+  ] as const)(
+    '%s blocks definite reload advice until package repair',
+    (_name, inspection, diagnostic) => {
+      const fixture = setup(
+        {
+          preset: 'active',
+          presets: {
+            active: { marketplace: { agents: ['team/example'] } },
+          },
+        },
+        inspection as MarketplaceStoreInspection,
+      );
+      try {
+        const response = requestMarketplaceReload({
+          directory: fixture.directory,
+          store: fixture.store,
+          livePackages: [],
+          desiredPackages: [],
+        });
+        expect(response.reloadRequired).toBeNull();
+        expect(response.verifications[0]?.valid).toBe(false);
+        expect(response.diagnostics).toContain(diagnostic);
+        expect(response.message).toContain('Resolve the reported');
+        expect(response.message).toContain('repair them');
+        expect(response.message).not.toContain('Restart or reload OpenCode');
+      } finally {
+        fixture.cleanup();
+      }
+    },
+  );
+
   test('requires reload when only a marketplace fallback-chain fingerprint changes', () => {
     const fixture = setup(
       {
@@ -292,7 +346,11 @@ describe('marketplace runtime status', () => {
       });
       expect(fixture.readCount()).toBe(before + 1);
       expect(response.accepted).toBe(false);
-      expect(response.message).toContain('Restart or reload OpenCode');
+      expect(response.reloadRequired).toBeNull();
+      expect(response.diagnostics).toContain(
+        'team/base: team/base is not installed',
+      );
+      expect(response.message).toContain('Resolve the reported');
       expect(response.liveAvailable).toBe(false);
       expect(response.reloadRequired).toBeNull();
     } finally {

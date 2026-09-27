@@ -115,23 +115,43 @@ export function readMarketplaceRuntimeStatus(input: {
     ...(inspection.operationalError ? [inspection.operationalError] : []),
     ...(input.desiredConfigError ? [input.desiredConfigError] : []),
   ];
+  const packageDiagnostics: string[] = [];
+  for (const id of desiredPackageIds) {
+    const current = diskPackages.get(id);
+    const verification = verificationById.get(id);
+    const desired = desiredById.get(id);
+    if (!current) {
+      packageDiagnostics.push(
+        `${id}: ${verification?.message ?? 'package is not installed'}`,
+      );
+    } else if (!verification?.valid) {
+      packageDiagnostics.push(
+        `${id}: ${verification?.message ?? 'package verification is unavailable'}`,
+      );
+    } else if (input.desiredPackages !== undefined && !desired) {
+      packageDiagnostics.push(
+        `${id}: package is not admitted to the desired marketplace registry`,
+      );
+    }
+  }
+  diagnostics.push(...packageDiagnostics);
+  const packageStateIncomplete = packageDiagnostics.length > 0;
   const reloadRequired: boolean | null =
     !liveAvailable ||
     inspection.lockfileError ||
     inspection.operationalError ||
     input.desiredConfigError !== undefined ||
-    input.desiredPackages === undefined
+    input.desiredPackages === undefined ||
+    packageStateIncomplete
       ? null
       : desiredPackageIds.length !== (livePackages?.length ?? 0) ||
         desiredPackageIds.some((id) => {
           const live = liveById.get(id);
           const current = diskPackages.get(id);
-          const verification = verificationById.get(id);
           const desired = desiredById.get(id);
           return (
             !live ||
             !current ||
-            !verification?.valid ||
             !desired ||
             live.version !== current.manifest.version ||
             live.digest !== current.digest ||
@@ -164,18 +184,26 @@ export function requestMarketplaceReload(input: {
   readonly desiredConfigError?: string;
 }): MarketplaceReloadRequest {
   const status = readMarketplaceRuntimeStatus(input);
+  const packageDiagnostics = status.diagnostics.filter((diagnostic) =>
+    status.desiredPackageIds.some((id) => diagnostic.startsWith(`${id}:`)),
+  );
+  const hasOtherDiagnostics = status.diagnostics.some(
+    (diagnostic) => !packageDiagnostics.includes(diagnostic),
+  );
   return {
     ...status,
     accepted: false,
     message:
-      status.diagnostics.length > 0
-        ? `Marketplace status is incomplete, so whether a host reload is required is unknown. Resolve the reported marketplace/config diagnostics and check again; no reload was performed. ${status.diagnostics.join('; ')}`
-        : status.liveAvailable
-          ? status.reloadRequired
-            ? 'A host reload is required to apply the desired marketplace state. Restart or reload OpenCode from the host; no reload was performed.'
-            : status.reloadRequired === false
-              ? 'The live marketplace snapshot already matches the desired state. No reload was performed.'
-              : 'Whether a host reload is required is unknown. Restart or reload OpenCode from the host to apply the desired state; no reload was performed.'
-          : 'The live marketplace snapshot is unavailable in this standalone context. Restart or reload OpenCode from the host to apply the desired state; no reload was performed.',
+      packageDiagnostics.length > 0 && !hasOtherDiagnostics
+        ? `Selected marketplace packages are blocked; repair them before evaluating whether a host reload is required. Resolve the reported package diagnostics and check again; no reload was performed. ${status.diagnostics.join('; ')}`
+        : status.diagnostics.length > 0
+          ? `Marketplace status is incomplete, so whether a host reload is required is unknown. Resolve the reported marketplace/config diagnostics and check again; no reload was performed. ${status.diagnostics.join('; ')}`
+          : status.liveAvailable
+            ? status.reloadRequired
+              ? 'A host reload is required to apply the desired marketplace state. Restart or reload OpenCode from the host; no reload was performed.'
+              : status.reloadRequired === false
+                ? 'The live marketplace snapshot already matches the desired state. No reload was performed.'
+                : 'Whether a host reload is required is unknown. Restart or reload OpenCode from the host to apply the desired state; no reload was performed.'
+            : 'The live marketplace snapshot is unavailable in this standalone context. Restart or reload OpenCode from the host to apply the desired state; no reload was performed.',
   };
 }
