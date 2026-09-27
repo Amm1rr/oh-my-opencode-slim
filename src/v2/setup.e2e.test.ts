@@ -51,6 +51,13 @@ interface MockCalls {
   contextHookCb:
     | ((event: Record<string, unknown>) => Promise<void>)
     | undefined;
+  promptHookCb:
+    | ((event: {
+        sessionID: string;
+        messageID: string;
+        prompt: { text: string };
+      }) => Promise<void>)
+    | undefined;
   disposed: string[];
 }
 
@@ -125,6 +132,7 @@ function makeMockV2Context(projectDir: string): {
     toolBeforeCb: undefined,
     toolAfterCb: undefined,
     contextHookCb: undefined,
+    promptHookCb: undefined,
     disposed: [],
   };
   const events = createEventQueue();
@@ -204,10 +212,15 @@ function makeMockV2Context(projectDir: string): {
     // Runtime session methods deliberately ABSENT: the shim must degrade
     // honestly without them (no fake success shapes).
     session: {
-      hook: async (name: 'context', cb: (event: never) => Promise<void>) => {
+      hook: async (
+        name: 'context' | 'prompt',
+        cb: (event: never) => Promise<void>,
+      ) => {
         calls.hooks.push(`session:${name}`);
         if (name === 'context') {
           calls.contextHookCb = cb as unknown as MockCalls['contextHookCb'];
+        } else if (name === 'prompt') {
+          calls.promptHookCb = cb as unknown as MockCalls['promptHookCb'];
         }
         return reg(`session.hook:${name}`);
       },
@@ -344,57 +357,6 @@ describe('createV2Setup e2e', () => {
     await cleanup(); // passes when neither call throws
   }, 20_000);
 
-  test('deferred agent snapshot failures fail startup and unwind registrations', async () => {
-    const { ctx, calls } = makeMockV2Context(projectDir);
-    let deferred: ((draft: unknown) => void) | undefined;
-    const agent = ctx.agent as unknown as {
-      transform: (callback: (draft: unknown) => void) => Promise<{
-        dispose: () => void;
-      }>;
-      list: () => Promise<unknown[]>;
-    };
-    agent.transform = async (callback) => {
-      deferred = callback;
-      return {
-        dispose: () => calls.disposed.push('deferred-agent-transform'),
-      };
-    };
-    agent.list = async () => {
-      try {
-        deferred?.({
-          list: () => {
-            throw new Error('snapshot failed');
-          },
-        });
-      } catch {
-        // The host may swallow a deferred transform error and still resolve list.
-      }
-      return [];
-    };
-
-    await expect(createV2Setup()(ctx)).rejects.toThrow('snapshot failed');
-    expect(calls.disposed).toContain('deferred-agent-transform');
-  }, 20_000);
-
-  test('a resolved agent list with a dropped transform fails and unwinds', async () => {
-    const { ctx, calls } = makeMockV2Context(projectDir);
-    const agent = ctx.agent as unknown as {
-      transform: (callback: (draft: unknown) => void) => Promise<{
-        dispose: () => void;
-      }>;
-      list: () => Promise<unknown[]>;
-    };
-    agent.transform = async () => ({
-      dispose: () => calls.disposed.push('dropped-agent-transform'),
-    });
-    agent.list = async () => [];
-
-    await expect(createV2Setup()(ctx)).rejects.toThrow(
-      'agent transform did not produce a snapshot',
-    );
-    expect(calls.disposed).toContain('dropped-agent-transform');
-  }, 20_000);
-
   test('retired generations reject late agent transform callbacks', async () => {
     const { ctx } = makeMockV2Context(projectDir);
     let deferred: ((draft: unknown) => void) | undefined;
@@ -402,17 +364,11 @@ describe('createV2Setup e2e', () => {
       transform: (callback: (draft: unknown) => void) => Promise<{
         dispose: () => void;
       }>;
-      list: () => Promise<unknown[]>;
     };
     agent.transform = async (callback) => {
       deferred = callback;
       return { dispose: () => {} };
     };
-    agent.list = async () => {
-      deferred?.({ list: () => [], update: () => {} });
-      return [];
-    };
-
     const cleanup = await createV2Setup()(ctx);
     await cleanup();
     expect(() => deferred?.({ list: () => [] })).toThrow('retired');
@@ -513,7 +469,7 @@ describe('createV2Setup e2e', () => {
     }
   }, 20_000);
 
-  test('malformed listed native agent permissions fail setup and unwind registrations', async () => {
+  test('late malformed agent transform fails readiness without escaping callback', async () => {
     const { ctx, calls } = makeMockV2Context(projectDir);
     let deferred: ((draft: unknown) => void) | undefined;
     const agent = ctx.agent as unknown as {
@@ -528,19 +484,34 @@ describe('createV2Setup e2e', () => {
         dispose: () => calls.disposed.push('malformed-agent-transform'),
       };
     };
-    agent.list = async () => {
-      deferred?.({
-        list: () => [{ id: 'explorer' }],
-        get: () => ({ id: 'explorer', mode: 'subagent' }),
+    const cleanup = await createV2Setup()(ctx);
+    try {
+      const prompt = calls.promptHookCb?.({
+        sessionID: 'ses_malformed_agent',
+        messageID: 'msg_malformed_agent',
+        prompt: { text: 'prompt waits for agent readiness' },
       });
-      return [];
-    };
-
-    await expect(createV2Setup()(ctx)).rejects.toThrow(
-      "Native agent 'explorer' did not expose a permissions array",
-    );
+      expect(deferred).toBeFunction();
+      expect(() =>
+        deferred?.({
+          list: () => [{ id: 'explorer' }],
+          get: () => ({ id: 'explorer', mode: 'subagent' }),
+        }),
+      ).not.toThrow();
+      const promptError = await prompt?.then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      expect(promptError).toMatchObject({
+        message: 'Agent permission snapshot finalization failed',
+        cause: expect.objectContaining({
+          message: "Native agent 'explorer' did not expose a permissions array",
+        }),
+      });
+    } finally {
+      await cleanup();
+    }
     expect(calls.disposed).toContain('malformed-agent-transform');
-    expect(calls.disposed).toContain('mcp.transform');
   }, 20_000);
 
   test('v2 draft registration applies display-name model and ordered policy overrides', async () => {
@@ -844,21 +815,121 @@ describe('createV2Setup e2e', () => {
     }
   }, 20_000);
 
-  test('missing MCP draft callback cannot become an invented empty snapshot', async () => {
-    const { ctx, calls } = makeMockV2Context(projectDir);
+  test('batch-deferred MCP and agent transforms finalize before managed prompts', async () => {
+    const { ctx, calls, events } = makeMockV2Context(projectDir);
     const mcp = ctx.mcp as unknown as {
       transform: (callback: (draft: unknown) => void) => Promise<{
         dispose: () => void;
       }>;
     };
-    mcp.transform = async () => ({
-      dispose: () => calls.disposed.push('mcp.transform'),
-    });
+    const agent = ctx.agent as unknown as {
+      transform: (callback: (draft: unknown) => void) => Promise<{
+        dispose: () => void;
+      }>;
+      list: () => Promise<unknown[]>;
+    };
+    let deferredMcpTransform: ((draft: unknown) => void) | undefined;
+    let deferredAgentTransform: ((draft: unknown) => void) | undefined;
+    const childUpdates: Array<Record<string, unknown>> = [];
+    mcp.transform = async (callback) => {
+      deferredMcpTransform = callback;
+      return { dispose: () => calls.disposed.push('mcp.transform') };
+    };
+    agent.transform = async (callback) => {
+      deferredAgentTransform = callback;
+      return { dispose: () => calls.disposed.push('agent.transform') };
+    };
+    agent.list = async () => {
+      throw new Error('setup must not materialize the agent registry');
+    };
+    (
+      ctx.session as unknown as {
+        update: (input: Record<string, unknown>) => Promise<void>;
+      }
+    ).update = async (input) => {
+      childUpdates.push(input);
+    };
 
-    await expect(createV2Setup()(ctx)).rejects.toThrow(
-      'Unable to snapshot configured MCP namespaces',
-    );
-    expect(calls.disposed).toContain('mcp.transform');
+    const cleanup = await createV2Setup()(ctx);
+    try {
+      expect(deferredMcpTransform).toBeFunction();
+      expect(deferredAgentTransform).toBeFunction();
+      expect(calls.hooks).toContain('session:prompt');
+      const earlyPrompt = calls.promptHookCb?.({
+        sessionID: 'ses_deferred_mcp_child',
+        messageID: 'msg_early',
+        prompt: { text: 'early child prompt' },
+      });
+      events.push({
+        type: 'session.created',
+        data: {
+          sessionID: 'ses_deferred_mcp_child',
+          parentID: 'ses_parent',
+          agent: 'explorer',
+        },
+      });
+      // Let the event pump cache the child while its initial plugin roster is
+      // still empty; finalization must reclassify it rather than lose it.
+      await Bun.sleep(25);
+
+      const agentDraft = {
+        list: () => [],
+        get: () => undefined,
+        default: () => {},
+        update: (
+          name: string,
+          project: (draft: Record<string, unknown>) => void,
+        ) => {
+          const draft: Record<string, unknown> = {};
+          project(draft);
+          if (name === 'explorer') {
+            calls.agentUpdates.push({ id: name });
+            (calls as unknown as { explorerRules?: unknown }).explorerRules =
+              draft.permissions;
+          }
+        },
+        remove: () => {},
+      };
+      expect(() => deferredAgentTransform?.(agentDraft)).not.toThrow();
+      expect(() =>
+        deferredMcpTransform?.({
+          list: () => [['host-only', { type: 'local' }]],
+          get: () => ({ type: 'local' }),
+          set: (name: string, config: Record<string, unknown>) => {
+            calls.mcpSets.push({ name, config });
+          },
+          update: () => {},
+          remove: () => {},
+        }),
+      ).not.toThrow();
+      expect(
+        (calls as unknown as { explorerRules?: Array<Record<string, unknown>> })
+          .explorerRules,
+      ).toContainEqual(
+        expect.objectContaining({ action: 'host-only_*', effect: 'deny' }),
+      );
+      await expect(earlyPrompt).resolves.toBeUndefined();
+      await calls.promptHookCb?.({
+        sessionID: 'ses_deferred_mcp_child',
+        messageID: 'msg_deferred_child',
+        prompt: { text: 'managed child prompt after flush' },
+      });
+      await calls.promptHookCb?.({
+        sessionID: 'ses_deferred_mcp',
+        messageID: 'msg_deferred_mcp',
+        prompt: { text: 'ordinary prompt after flush' },
+      });
+      const deadline = Date.now() + 2_000;
+      while (childUpdates.length === 0 && Date.now() < deadline) {
+        await Bun.sleep(10);
+      }
+      expect(childUpdates).toHaveLength(1);
+      expect(childUpdates[0]?.permissions).toContainEqual(
+        expect.objectContaining({ action: 'host-only_*', effect: 'deny' }),
+      );
+    } finally {
+      await cleanup();
+    }
   }, 20_000);
 
   test('missing MCP transform fails startup and unwinds earlier resources', async () => {
