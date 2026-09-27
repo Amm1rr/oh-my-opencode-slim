@@ -280,8 +280,13 @@ export function resolveMarketplaceActivation(
       );
       continue;
     }
+    const inheritedMcps = manifest.extends
+      ? (DEFAULT_AGENT_MCPS[manifest.extends.builtin] ?? [])
+      : [];
+    const requiredMcps = [...new Set([...inheritedMcps, ...manifest.mcps])];
+    const inheritedMcpSet = new Set(inheritedMcps);
     const missingSkills = manifest.skills.filter((name) => !skills.has(name));
-    const missingMcps = manifest.mcps.filter((name) => !mcps.has(name));
+    const missingMcps = requiredMcps.filter((name) => !mcps.has(name));
     if (missingSkills.length || missingMcps.length) {
       diagnostics.push(
         diagnostic(
@@ -289,18 +294,17 @@ export function resolveMarketplaceActivation(
           'missing-required-dependency',
           `${id} requires unavailable ${[
             ...missingSkills.map((name) => `skill ${name}`),
-            ...missingMcps.map((name) => `MCP ${name}`),
+            ...missingMcps.map((name) =>
+              inheritedMcpSet.has(name)
+                ? `MCP ${name} inherited by ${manifest.extends?.builtin}`
+                : `MCP ${name}`,
+            ),
           ].join(', ')}`,
         ),
       );
       continue;
     }
-    const effectiveMcps = [
-      ...(manifest.extends
-        ? (DEFAULT_AGENT_MCPS[manifest.extends.builtin] ?? [])
-        : []),
-      ...manifest.mcps,
-    ].filter((name) => mcps.has(name));
+    const effectiveMcps = requiredMcps;
     const ambiguous = ambiguousMcpNamespaces(effectiveMcps, mcps);
     if (ambiguous.length) {
       diagnostics.push(
@@ -332,7 +336,7 @@ export function resolveMarketplaceActivation(
       digest: stored.digest,
       manifest,
       requiredSkills: manifest.skills,
-      requiredMcps: manifest.mcps,
+      requiredMcps,
     });
   }
 

@@ -1848,6 +1848,7 @@ export class ForegroundFallbackManager {
     let currentModel = observedModel;
     const agentName = this.sessionAgent.get(sessionID);
     const chain = this.resolveChain(agentName, currentModel);
+    const rearmHead = agentName ? this.chains[agentName]?.[0] : undefined;
     // Callers pre-check via hasFallbackChain; keep as defensive guard only.
     if (!chain.length) return;
     // When the agent is known but no model was captured (common for
@@ -1887,6 +1888,7 @@ export class ForegroundFallbackManager {
     // one abort rather than re-aborting on every error.
     if (
       observedModel !== undefined &&
+      rearmHead !== undefined &&
       modelId(observedModel) === modelId(rearmHead) &&
       tried.size > 1
     ) {
@@ -1898,7 +1900,6 @@ export class ForegroundFallbackManager {
       // the rest of the session. A fresh descent earns a fresh chance.
       this.chainExhaustion.delete(sessionID);
     }
-
 
     // After the chain has been exhausted twice (reset retry failed and we
     // aborted), do not intervene again for this session: re-entering would
@@ -2183,12 +2184,13 @@ export class ForegroundFallbackManager {
       });
       return;
     }
+    const variant = this.variantFor(agentName, targetModel);
 
     const promptBody = {
       path: { id: sessionID },
       body: {
         parts: [...replayParts, createInternalAgentTextPart(reminderText)],
-        model: ref,
+        model: { ...ref, ...(variant ? { variant } : {}) },
         ...(agentName ? { agent: agentName } : {}),
       },
       ...(isV2Host && isModelSwitch

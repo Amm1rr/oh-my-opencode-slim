@@ -1212,6 +1212,7 @@ describe('ForegroundFallbackManager session.error', () => {
       },
       true,
       { directory: '/test' } as any,
+      0,
     );
     await mgr.handleEvent({
       type: 'message.updated',
@@ -2186,6 +2187,7 @@ describe('ForegroundFallbackManager session.error', () => {
       },
       true,
       { directory: '/test', hostFlavor: 'v2' } as any,
+      0,
     );
 
     await mgr.handleEvent({

@@ -303,7 +303,7 @@ describe('marketplace activation planning', () => {
     expect(result.diagnostics[0]?.code).toBe('ambiguous-mcp-namespace');
   });
 
-  test('ignores implicit extension MCP namespaces absent from enabled inventory', () => {
+  test('rejects unavailable MCPs required by inherited role prompts', () => {
     const { result } = fixture(
       ['team/librarian'],
       [
@@ -315,10 +315,30 @@ describe('marketplace activation planning', () => {
       { mcps: ['context7_extra'] },
     );
 
-    expect(result.agents.map((agent) => agent.packageId)).toEqual([
-      'team/librarian',
-    ]);
+    expect(result.agents).toEqual([]);
+    expect(result.diagnostics[0]?.code).toBe('missing-required-dependency');
+    expect(result.diagnostics[0]?.message).toContain(
+      'MCP context7 inherited by librarian',
+    );
+    expect(result.diagnostics[0]?.message).toContain(
+      'MCP gh_grep inherited by librarian',
+    );
+  });
+
+  test('admits extensions only when every inherited MCP dependency is available', () => {
+    const { result } = fixture(
+      ['team/librarian'],
+      [
+        stored('team/librarian', 'library-agent', {
+          extends: { builtin: 'librarian', promptMode: 'append' },
+        }),
+      ],
+      new Map(),
+      { mcps: ['context7', 'gh_grep'] },
+    );
+
     expect(result.diagnostics).toEqual([]);
+    expect(result.agents[0]?.requiredMcps).toEqual(['context7', 'gh_grep']);
   });
 
   test('rejects overlapping available implicit extension MCP namespaces', () => {
@@ -330,7 +350,7 @@ describe('marketplace activation planning', () => {
         }),
       ],
       new Map(),
-      { mcps: ['context7', 'context7_extra'] },
+      { mcps: ['context7', 'gh_grep', 'context7_extra'] },
     );
 
     expect(result.agents).toEqual([]);

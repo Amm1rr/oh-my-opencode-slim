@@ -420,14 +420,10 @@ export function buildResolvedAgentRegistry(
       ]),
       ...Object.keys(runtime.acpAgents).map((name) => ({ name })),
       ...Object.entries(host.agent ?? {}).flatMap(([name, config]) => {
-        const matchingOwner = Object.entries(runtime.agents()).find(
-          ([ownerName, ownerConfig]) =>
-            customOwnerNames.has(ownerName) &&
-            typeof ownerConfig.displayName === 'string' &&
-            normalizeAgentName(ownerConfig.displayName).toLowerCase() ===
-              normalizeAgentName(name).toLowerCase(),
-        )?.[0];
-        const owner = matchingOwner ?? name;
+        // Only the actual configured custom-agent key establishes package
+        // ownership. A displayName collision never transfers ownership to a
+        // different host key (e.g. host key `PackageAlias`).
+        const owner = customOwnerNames.has(name) ? name : undefined;
         return [
           { name, owner },
           ...(typeof config.displayName === 'string'

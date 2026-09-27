@@ -927,6 +927,74 @@ describe('finalized existing-agent registry', () => {
     ).toThrow('collides with a reserved agent identity');
   });
 
+  test('host agent keys cannot inherit package ownership from display-name collisions', () => {
+    const runtime = runtimeFor({
+      agents: {
+        packagealias: { displayName: 'PackageAlias' },
+      },
+    });
+    expect(() =>
+      build(
+        runtime,
+        {
+          agent: {
+            PackageAlias: { displayName: 'Unrelated host agent' },
+          },
+          mcp: {},
+        },
+        marketplaceOptions(
+          ['team/package-alias-key-collision'],
+          marketplaceStore({
+            'team/package-alias-key-collision': marketplacePackage(
+              'team/package-alias-key-collision',
+              {
+                agentName: 'packagealias',
+                skills: [],
+                mcps: [],
+              },
+            ),
+          }),
+        ),
+      ),
+    ).toThrow('collides with a reserved agent identity');
+  });
+
+  test('requires inherited MCP prompt dependencies and projects their grants', () => {
+    const runtime = runtimeFor({});
+    const registry = build(
+      runtime,
+      {
+        mcp: {
+          context7: { type: 'remote' },
+          gh_grep: { type: 'remote' },
+        },
+      },
+      marketplaceOptions(
+        ['team/librarian-extension'],
+        marketplaceStore({
+          'team/librarian-extension': marketplacePackage(
+            'team/librarian-extension',
+            {
+              agentName: 'package-librarian',
+              skills: [],
+              mcps: [],
+              extends: { builtin: 'librarian', promptMode: 'append' },
+            },
+          ),
+        }),
+      ),
+    );
+    const agent = registry.getSdkAgentProjection()['package-librarian'] as {
+      mcps?: string[];
+      permission?: Record<string, unknown>;
+    };
+    expect(agent.mcps).toEqual(['context7', 'gh_grep']);
+    expect(agent.permission).toMatchObject({
+      'context7_*': 'allow',
+      'gh_grep_*': 'allow',
+    });
+  });
+
   test('projects marketplace SDK and v2 child policy with default-deny ceilings', () => {
     const runtime = runtimeFor({
       agents: { 'market-agent': { displayName: 'Market Visible' } },
@@ -935,7 +1003,7 @@ describe('finalized existing-agent registry', () => {
       runtime,
       {
         agent: {
-          'Market Visible': {
+          'market-agent': {
             permission: {
               '*': 'allow',
               bash: 'allow',
@@ -1080,7 +1148,6 @@ describe('finalized existing-agent registry', () => {
         {
           agent: {
             'market-agent': { permission: { read: effect } },
-            MarketVisible: { permission: { read: effect } },
           },
           mcp: {},
         },
@@ -1142,7 +1209,7 @@ describe('finalized existing-agent registry', () => {
       runtime,
       {
         agent: {
-          MarketVisible: {
+          'market-agent': {
             permission: 'ask',
           },
         },
@@ -1302,7 +1369,7 @@ describe('finalized existing-agent registry', () => {
     const registry = build(
       runtime,
       {
-        agent: { MarketVisible: { permission: { skill: 'deny' } } },
+        agent: { 'market-agent': { permission: { skill: 'deny' } } },
         mcp: { 'host-mcp': { type: 'local' } },
       },
       marketplaceOptions(
@@ -1340,7 +1407,7 @@ describe('finalized existing-agent registry', () => {
     const registry = build(
       runtime,
       {
-        agent: { MarketVisible: { mcps: [] } },
+        agent: { 'market-agent': { mcps: [] } },
         mcp: { 'host-mcp': { type: 'local' } },
       },
       {
@@ -1505,7 +1572,7 @@ describe('finalized existing-agent registry', () => {
       runtime,
       {
         agent: {
-          MarketVisible: {
+          'market-agent': {
             model: 'host/selected',
             variant: 'host-variant',
           },

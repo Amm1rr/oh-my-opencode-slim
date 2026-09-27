@@ -311,6 +311,7 @@ describe('plugin tool registration', () => {
       path.join(configDir, 'oh-my-opencode-slim.json'),
       JSON.stringify({
         preset: 'active',
+        fallback: { enabled: true, maxRetries: 0 },
         agents: {
           'selected-agent': {
             displayName: 'SelectedVisible',
@@ -356,7 +357,7 @@ describe('plugin tool registration', () => {
       agent: {
         orchestrator: { displayName: 'Lead' },
         Lead: { prompt: 'Visible host orchestrator prompt' },
-        SelectedVisible: {
+        'selected-agent': {
           model: 'provider/host-selected',
           variant: 'host-variant',
         },
