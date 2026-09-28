@@ -57,6 +57,10 @@ import {
   resetClientShimGenerationWarnings,
   resolveV2Directory,
 } from './client-shim';
+import {
+  createProfileRefreshRunner,
+  watchPluginConfigFiles,
+} from './config-watch';
 import { subagentArgsToV1, toolNameToV1, v1ArgsToSubagent } from './delegation';
 import { mapV2EventToV1 } from './event-adapter';
 import {
@@ -65,6 +69,12 @@ import {
   recordInternalAdmission,
 } from './internal-admissions';
 import { createV2InterviewBridge } from './interview-bridge';
+import {
+  applyRuntimeProfileOptions,
+  createSessionProfileBridge,
+  reconcileRuntimeProfileOptionKeys,
+  type V2AgentRuntimeProfiles,
+} from './runtime-profiles';
 import {
   createSessionSubmit,
   textFromContent,
@@ -275,6 +285,10 @@ export interface V2SessionContextHandlerDeps {
       messages: Array<{ info: { role: string }; parts: unknown[] }>;
     },
   ) => Promise<void>;
+  /** Session-frozen runtime profile application: mutates ONLY the request
+   * `options` record (temperature/provider options) for a captured child
+   * session. Never touches system/messages/tools. */
+  applyRuntimeProfile?: (event: V2SessionContextEvent) => void;
 }
 
 /** Build the single `ctx.session.hook("context")` handler: interview marker
@@ -454,6 +468,17 @@ export function createSessionContextHandler(
         }
       } catch (err) {
         log('[v2] messages transform bridge failed', String(err));
+      }
+    }
+    // Session-frozen runtime profile: a captured child session gets its
+    // profile's temperature/provider options on the request options record.
+    // Model/variant travel through session.switchModel at capture time;
+    // system/messages/tools stay byte-stable.
+    if (deps.applyRuntimeProfile) {
+      try {
+        deps.applyRuntimeProfile(event);
+      } catch (err) {
+        log('[v2] runtime profile apply failed', String(err));
       }
     }
   };
@@ -2100,9 +2125,16 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
               const name = typeof listed.id === 'string' ? listed.id : '';
               if (!name) continue;
               const native = draft.get(name) ?? listed;
-              if (!Array.isArray(native.permissions)) {
+              // `permissions` is optional in the host type surface: absent
+              // means "no native rule overrides", not a fatal condition.
+              // Only a malformed non-array value latches a failure (surfaced
+              // at prompt time with its cause, never a silent setup death).
+              if (
+                native.permissions !== undefined &&
+                !Array.isArray(native.permissions)
+              ) {
                 throw new Error(
-                  `Native agent '${name}' did not expose a permissions array`,
+                  `Native agent '${name}' exposed a malformed permissions field`,
                 );
               }
               const snapshot = snapshotNativeAgentForRegistry(native);
@@ -2171,11 +2203,65 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
         registryBridge.retire();
         throw err;
       }
+      const agentConfigs = resolvedAgents ?? {};
 
       permissionRulesBridgeEnabled = typeof ctx.session.update === 'function';
       if (!permissionRulesBridgeEnabled && !permissionRulesUnavailableWarned) {
         permissionRulesUnavailableWarned = true;
         log(PERMISSION_RULES_UNAVAILABLE_WARNING);
+      }
+
+      // ── Runtime profiles + config-file watcher ──
+      // Watches every config candidate (user + project, .json + .jsonc,
+      // including not-yet-created files/directories). On a settled change the
+      // v1 factory's `v2.refreshProfiles` hook re-reads the config and
+      // resolves ONLY model/variant/temperature/options per agent, atomically
+      // swapped here and projected to the sidebar through the existing
+      // tui-state writer. Failure is honest: no swap, one logged cause.
+      let currentProfiles: V2AgentRuntimeProfiles = {};
+      try {
+        const factoryRefreshProfiles = (
+          v1Hooks as { 'v2.refreshProfiles'?: unknown }
+        )['v2.refreshProfiles'];
+        if (typeof factoryRefreshProfiles === 'function') {
+          const refreshProfiles = factoryRefreshProfiles as (options?: {
+            allowInvalidFallback?: boolean;
+          }) => Promise<
+            | { ok: true; profiles: V2AgentRuntimeProfiles }
+            | { ok: false; reason: string }
+          >;
+          // Startup has no last-good table. Seed from the loader's normal
+          // fallback config so malformed input stays non-fatal, then make all
+          // later watcher refreshes strict and retain this seed on failure.
+          const initial = await refreshProfiles({ allowInvalidFallback: true });
+          if (!initial.ok) {
+            throw new Error(initial.reason);
+          }
+          currentProfiles = reconcileRuntimeProfileOptionKeys(
+            {},
+            initial.profiles,
+          );
+          const runner = createProfileRefreshRunner({
+            refresh: refreshProfiles,
+            apply: (profiles) => {
+              currentProfiles = reconcileRuntimeProfileOptionKeys(
+                currentProfiles,
+                profiles,
+              );
+            },
+          });
+          const watch = watchPluginConfigFiles({
+            directory,
+            onChanged: (signal) => runner(signal),
+          });
+          disposers.push(() => watch.dispose());
+        } else {
+          log(
+            '[v2] v1 factory exposes no v2.refreshProfiles hook; config edits need a reload',
+          );
+        }
+      } catch (err) {
+        log('[v2] config watcher registration failed', String(err));
       }
 
       // ── Tools ──
@@ -2362,15 +2448,33 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       // churn path keyed on events this bridge does not otherwise need.
       const chatHeaderStates = new Map<string, ChatHeaderSessionState>();
 
+      // Session-frozen runtime profiles: freeze the current profile for each
+      // newly seen plugin CHILD session and switch its model before the
+      // first request. Existing/resumed children keep their captured
+      // profile; parents and foreign agents are never touched.
+      //
+      // Created BEFORE the native prompt hook below so the hook can await
+      // `ensureSessionProfile`: the prompt hook is the guaranteed
+      // request-path capture (a child's first admission cannot race the
+      // asynchronous event pump), while `observeEvent` remains a
+      // prewarm/cleanup consumer of `session.created`/`session.deleted`.
+      let promptBridge: V2SessionPromptBridge | undefined;
+      const sessionProfileBridge = createSessionProfileBridge({
+        profiles: () => currentProfiles,
+        pluginAgents: new Set(Object.keys(agentConfigs)),
+        session: ctx.session,
+        knownAgent: (sessionID) => promptBridge?.agentForSession(sessionID),
+      });
+
       // Native per-admission prompt hook (v2): `session.prompt` fires once
       // per admitted input with the eventual inbox User messageID — the
       // identity v1 chat.message consumers key on. With it registered the
       // context hook's per-request chat.message emulation narrows to
       // agent/model discovery (registration is unconditional on full
       // contexts — a registration failure fails setup).
-      let promptBridge: V2SessionPromptBridge | undefined;
       if (chatMessage) {
         const bridge = createSessionPromptBridge(chatMessage);
+        promptBridge = bridge;
         const promptReg = await ctx.session.hook('prompt', async (event) => {
           if (!permissionSnapshotReady) {
             await withTimeout(
@@ -2396,6 +2500,9 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
             if (permissionReadiness) await permissionReadiness;
             await permissionBridge.ensurePromptPermission(event.sessionID);
           }
+          // Freeze and switch the inference profile before the admitted
+          // input's first model request; the event stream is only a prewarm.
+          await sessionProfileBridge.ensureSessionProfile(event.sessionID);
           await bridge.handlePrompt(event);
         });
         stopPermissionPromptAdmission = boundedPermissionStop(
@@ -2403,7 +2510,6 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
           'Permission prompt hook disposal timed out',
         );
         disposers.push(stopPermissionPromptAdmission);
-        promptBridge = bridge;
         log('[v2] native session prompt hook registered');
       }
 
@@ -2426,6 +2532,13 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
           promptBridge?.agentForSession(sessionID),
         systemTransform,
         messagesTransform,
+        // Captured child sessions get their frozen temperature/provider
+        // options on the request options record only.
+        applyRuntimeProfile: (event) =>
+          applyRuntimeProfileOptions(
+            event,
+            sessionProfileBridge.profileForSession(event.sessionID),
+          ),
       });
       const reg = await ctx.session.hook('context', handler);
       disposers.push(() => reg.dispose());
@@ -2604,7 +2717,11 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
                   }
                   // Child-session permission projection sees the same RAW
                   // event (before v1-shape synthesis) so it is independent
-                  // of v1 event-hook presence.
+                  // of v1 event-hook presence. Profile prewarm runs first so
+                  // a held permission update cannot delay identity capture
+                  // and force the awaited prompt path into another session
+                  // lookup for the same child.
+                  await sessionProfileBridge.observeEvent(next.value);
                   await permissionRulesBridge?.observeEvent(next.value);
                   if (eventHook) {
                     for (const ev of mapV2EventToV1(next.value)) {
@@ -2694,6 +2811,25 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       };
     } catch (err) {
       registryBridge?.retire();
+      // The original cause MUST reach the plugin log and stderr before the
+      // unwind: without it a live setup failure is invisible (the host only
+      // sees a rejected plugin load). Walk the `cause` chain too — wrapper
+      // errors alone hide the host-side reason.
+      const causes: string[] = [];
+      let cursor: unknown = err;
+      while (cursor !== undefined && cursor !== null && causes.length < 5) {
+        causes.push(
+          cursor instanceof Error
+            ? (cursor.stack ?? cursor.message)
+            : String(cursor),
+        );
+        cursor = cursor instanceof Error ? cursor.cause : undefined;
+      }
+      log(
+        '[v2] FATAL: setup failed after factory init',
+        causes.join('\ncaused by: '),
+      );
+      console.error('[oh-my-opencode-slim][v2] setup failed:', err);
       // Best-effort abort-path cleanup: LIFO over the saved disposers,
       // each isolated so a failing disposer cannot mask the original
       // error, then the v1 dispose hook, then rethrow unchanged.

@@ -180,7 +180,12 @@ The default generated configuration includes both `openai` and `opencode-go` pre
 
 Presets can inherit from one base preset with `extends`: a `design` preset can
 extend `base` and override only its designer model. Changes are persisted by
-`/preset` and take effect after an OpenCode reload. See
+`/preset`. On v2 hosts the saved/applied preset's inference fields (`model`,
+`variant`, `temperature`, `options`) apply to new child dispatches (frozen for
+each child before its first request) and the sidebar once the server-side
+config watcher has refreshed them; a malformed config keeps the last-known-good
+state, and existing sessions plus prompt/tool/policy/skill/MCP changes stay
+frozen until a full reload; on v1 hosts reload OpenCode. See
 [Configuration](docs/configuration.md#preset-inheritance) for the inheritance
 example and precedence rules.
 

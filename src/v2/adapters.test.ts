@@ -342,6 +342,29 @@ describe('applyAgentToDraft', () => {
     expect((request.settings as Record<string, unknown>).temperature).toBe(0);
   });
 
+  test('maps options into request.body (provider options are not dropped)', () => {
+    const { draft, calls } = recorder();
+    applyAgentToDraft(draft, 'a', {
+      options: { thinking: { type: 'enabled', budgetTokens: 4096 } },
+    });
+
+    const request = calls[0].agent.request as Record<string, unknown>;
+    expect(request.body).toEqual({
+      thinking: { type: 'enabled', budgetTokens: 4096 },
+    });
+  });
+
+  test('ignores array/null options in request.body', () => {
+    const { draft, calls } = recorder();
+    applyAgentToDraft(draft, 'a', { options: [1, 2] as never });
+    applyAgentToDraft(draft, 'b', { options: null as never });
+
+    for (const call of calls) {
+      const request = call.agent.request as Record<string, unknown>;
+      expect(request.body).toBeUndefined();
+    }
+  });
+
   test('clears an existing model when the finalized config inherits it', () => {
     const calls: Array<Record<string, unknown>> = [];
     const draft: V2AgentDraft = {

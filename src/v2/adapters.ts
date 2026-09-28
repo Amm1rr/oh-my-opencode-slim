@@ -294,6 +294,19 @@ export function applyAgentToDraft(
     if (typeof v1.temperature === 'number') {
       settings.temperature = v1.temperature;
     }
+    // v1 `options` are provider-specific request options; the v2 host merges
+    // `request.body` into the outgoing provider request body. Dropping them
+    // here would silently lose configured thinking/reasoning options on v2.
+    if (
+      v1.options &&
+      typeof v1.options === 'object' &&
+      !Array.isArray(v1.options)
+    ) {
+      request.body = {
+        ...(asRecord(request.body) ?? {}),
+        ...(v1.options as Record<string, unknown>),
+      };
+    }
     if (Object.keys(settings).length > 0) request.settings = settings;
     agent.request = request;
     // v2 permission evaluation is last-match-wins (findLast). v1 `tools` lists

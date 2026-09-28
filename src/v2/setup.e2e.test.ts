@@ -496,6 +496,14 @@ describe('createV2Setup e2e', () => {
         dispose: () => calls.disposed.push('malformed-agent-transform'),
       };
     };
+    agent.list = async () => {
+      deferred?.({
+        list: () => [{ id: 'explorer' }],
+        get: () => ({ id: 'explorer', mode: 'subagent', permissions: 'nope' }),
+      });
+      return [];
+    };
+
     const cleanup = await createV2Setup()(ctx);
     try {
       const prompt = calls.promptHookCb?.({
@@ -507,7 +515,11 @@ describe('createV2Setup e2e', () => {
       expect(() =>
         deferred?.({
           list: () => [{ id: 'explorer' }],
-          get: () => ({ id: 'explorer', mode: 'subagent' }),
+          get: () => ({
+            id: 'explorer',
+            mode: 'subagent',
+            permissions: 'nope',
+          }),
         }),
       ).not.toThrow();
       const promptError = await prompt?.then(
@@ -517,13 +529,42 @@ describe('createV2Setup e2e', () => {
       expect(promptError).toMatchObject({
         message: 'Agent permission snapshot finalization failed',
         cause: expect.objectContaining({
-          message: "Native agent 'explorer' did not expose a permissions array",
+          message:
+            "Native agent 'explorer' exposed a malformed permissions field",
         }),
       });
     } finally {
       await cleanup();
     }
     expect(calls.disposed).toContain('malformed-agent-transform');
+  }, 20_000);
+
+  test('native agents without a permissions field register normally', async () => {
+    const { ctx } = makeMockV2Context(projectDir);
+    let deferred: ((draft: unknown) => void) | undefined;
+    const agent = ctx.agent as unknown as {
+      transform: (callback: (draft: unknown) => void) => Promise<{
+        dispose: () => void;
+      }>;
+      list: () => Promise<unknown[]>;
+    };
+    agent.transform = async (callback) => {
+      deferred = callback;
+      return { dispose: () => {} };
+    };
+    agent.list = async () => {
+      deferred?.({
+        list: () => [{ id: 'build' }],
+        get: () => ({ id: 'build', mode: 'primary' }),
+        update: (_name: string, mutate: (agent: unknown) => void) => mutate({}),
+        default: () => {},
+        remove: () => {},
+      });
+      return [];
+    };
+
+    const cleanup = await createV2Setup()(ctx);
+    await cleanup();
   }, 20_000);
 
   test('v2 draft registration applies display-name model and ordered policy overrides', async () => {
