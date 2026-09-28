@@ -675,7 +675,7 @@ Use this section as a map: start with installation, then jump to features, confi
   <p><sub>Every merged contribution leaves a mark on the realm.</sub></p>
 
   <!-- ALL-CONTRIBUTORS-BADGE:START - Do not remove or modify this section -->
-[![All Contributors](https://img.shields.io/badge/all_contributors-122-orange.svg?style=flat-square)](#contributors-)
+[![All Contributors](https://img.shields.io/badge/all_contributors-123-orange.svg?style=flat-square)](#contributors-)
 <!-- ALL-CONTRIBUTORS-BADGE:END -->
 </div>
 
@@ -849,6 +849,7 @@ Use this section as a map: start with installation, then jump to features, confi
     <tr>
       <td align="center" valign="top" width="16.66%"><a href="https://github.com/wirsbf"><img src="https://avatars.githubusercontent.com/u/144008530?v=4?s=100" width="100px;" alt="wirsbf"/><br /><sub><b>wirsbf</b></sub></a><br /><a href="https://github.com/alvinunreal/oh-my-opencode-slim/commits?author=wirsbf" title="Code">💻</a></td>
       <td align="center" valign="top" width="16.66%"><a href="https://github.com/maqifrnswa"><img src="https://avatars.githubusercontent.com/u/424153?v=4?s=100" width="100px;" alt="Scott Howard"/><br /><sub><b>Scott Howard</b></sub></a><br /><a href="https://github.com/alvinunreal/oh-my-opencode-slim/commits?author=maqifrnswa" title="Code">💻</a></td>
+      <td align="center" valign="top" width="16.66%"><a href="https://github.com/ananas-wonders"><img src="https://avatars.githubusercontent.com/u/7282452?v=4?s=100" width="100px;" alt="Ananas"/><br /><sub><b>Ananas</b></sub></a><br /><a href="https://github.com/alvinunreal/oh-my-opencode-slim/commits?author=ananas-wonders" title="Code">💻</a></td>
     </tr>
   </tbody>
 </table>

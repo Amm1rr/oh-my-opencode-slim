@@ -1109,6 +1109,15 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "ananas-wonders",
+      "name": "Ananas",
+      "avatar_url": "https://avatars.githubusercontent.com/u/7282452?v=4",
+      "profile": "https://github.com/ananas-wonders",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "commitConvention": "angular"
