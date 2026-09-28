@@ -1,13 +1,24 @@
+import { stripFrontmatter } from '../../cli/custom-skills';
+import skillMarkdown from '../../skills/deepwork/SKILL.md' with {
+  type: 'text',
+};
 import { createInternalAgentTextPart } from '../../utils';
 import { registerCommandHook } from '../command-hook-utils';
 
 const COMMAND_NAME = 'deepwork';
 
+// SKILL.md is the single contract source. The /deepwork command is
+// self-contained: it injects the full body (bundled at build time) plus the
+// pinned per-session path, so it works regardless of whether the resident
+// skill is registered — listing `deepwork` in disabled_skills removes the
+// resident listing without losing the command (#1332).
+const instructions = stripFrontmatter(skillMarkdown).trim();
+
 function activationPrompt(task: string, sessionID: string): string {
   return [
-    'Use the deepwork skill for this task. Treat it as a heavy coding session.',
+    instructions,
     '',
-    `Your deepwork state file is \`.slim/deepwork/${sessionID}.md\` — create/update only this file; the skill covers setup, planning, gates, and state rules.`,
+    `Your deepwork state file is \`.slim/deepwork/${sessionID}.md\` — create/update only this file.`,
     '',
     'Task:',
     task,
