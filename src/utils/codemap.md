@@ -25,6 +25,7 @@ Centralized utilities and shared abstractions used across the oh-my-opencode-sli
 - **Runtime Session Status** (`session-runtime-status.ts`): Reads and validates the in-process OpenCode session-status map with absent/unknown distinction
 - **Session Metadata** (`session-metadata.ts`): Bounded session → agent/directory map with LRU eviction and active orchestrator protection
 - **Session Selection** (`session-selection.ts`): Session selection resolution with provenance tracking (host-persisted, observed-external, unknown)
+- **V1 Fallback Agent Aliases** (`v1-fallback-agent-aliases.ts`): Collision-safe hidden-agent allocation for delegated fallback-chain entries
 - **Child Transcript** (`child-transcript.ts`): Child session transcript evidence extraction and terminal evidence classification
 - **BackgroundJobTerminalGate** (`background-job-terminal-gate.ts`): Terminal evidence verification with host outcome attribution, evidence deadlines, and reading leases
 - **BackgroundJobPersistence** (`background-job-persistence.ts`): Persistence layer for lifecycle state with tombstone and epoch tracking across host restarts

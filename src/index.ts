@@ -142,6 +142,7 @@ import {
   looksLikeMainChatRequest,
 } from './utils/system-collapse';
 import { createTuiReusableProjection } from './utils/tui-reusable-projection';
+import { installV1FallbackAgentAliases } from './utils/v1-fallback-agent-aliases';
 import { createV2Setup } from './v2';
 import { delegationWording } from './v2/delegation';
 import {
@@ -176,8 +177,6 @@ async function appLog(
 const lastImageSkippedToastByDir = new Map<string, number>();
 const IMAGE_SKIPPED_DEBOUNCE_MS = 60_000;
 
-const V1_FALLBACK_AGENT_PREFIX = 'slim-internal-fallback';
-
 type ModelChainEntry = { id: string; variant?: string };
 
 type DelegatedModelSelection = {
@@ -189,11 +188,6 @@ type DelegatedModelSelection = {
 function modelProvider(model: string): string | undefined {
   const separator = model.indexOf('/');
   return separator > 0 ? model.slice(0, separator) : undefined;
-}
-
-function v1FallbackAgentAlias(agentName: string, index: number): string {
-  const safeName = agentName.replace(/[^a-zA-Z0-9_-]/g, '_');
-  return `${V1_FALLBACK_AGENT_PREFIX}-${safeName}-${index}`;
 }
 
 /**
@@ -266,44 +260,6 @@ function selectDelegatedModel(input: {
   return viable >= 0
     ? { agentName, entry: childChain[viable], index: viable }
     : undefined;
-}
-
-/**
- * OpenCode v1's task tool has no per-call model argument. Register hidden
- * aliases for secondary chain entries; the before-hook can select one while
- * the child session itself still records the canonical agent name.
- */
-function installV1FallbackAgentAliases(
-  configAgent: Record<string, unknown>,
-  modelArrays: Record<string, ModelChainEntry[]>,
-): Map<string, string> {
-  const aliases = new Map<string, string>();
-  for (const [agentName, chain] of Object.entries(modelArrays)) {
-    const canonical = configAgent[agentName];
-    if (
-      canonical === null ||
-      typeof canonical !== 'object' ||
-      Array.isArray(canonical)
-    ) {
-      continue;
-    }
-    for (let index = 1; index < chain.length; index += 1) {
-      const entry = chain[index];
-      const alias = v1FallbackAgentAlias(agentName, index);
-      const aliasConfig: Record<string, unknown> = {
-        ...(canonical as Record<string, unknown>),
-        name: agentName,
-        mode: 'subagent',
-        hidden: true,
-        model: entry.id,
-      };
-      if (entry.variant) aliasConfig.variant = entry.variant;
-      else delete aliasConfig.variant;
-      configAgent[alias] = aliasConfig;
-      aliases.set(`${agentName}\0${entry.id}`, alias);
-    }
-  }
-  return aliases;
 }
 
 // Module-level runtime preset tracking. Survives plugin re-inits triggered
