@@ -50,12 +50,6 @@ export type ViewerFlavor = 'v1' | 'v2-shared' | 'v2-remote';
 export interface ViewerCommandOptions {
   /** Absolute host binary; defaults to the bare `opencode` name. */
   executable?: string;
-  /**
-   * `v2-remote` only: password for the explicit server. A pane shell does not
-   * inherit the parent client's environment, so the value travels in the
-   * command line (documented trade-off; see the integration docs).
-   */
-  password?: string;
 }
 
 /**
@@ -65,10 +59,10 @@ export interface ViewerCommandOptions {
  * - `v1`: `opencode attach <url> --session <id> --dir <dir>` (unchanged)
  * - `v2-shared`: `opencode --session <id> <dir>` — the viewer discovers the
  *   same shared background service by itself; no URL is passed.
- * - `v2-remote`: `env OPENCODE_PASSWORD=<pw> opencode --server <url> --session <id> <dir>`
- *
- * The `env` prefix keeps the assignment portable across POSIX and fish-style
- * shells, matching the existing `OPENCODE_DISABLE_TERMINAL_TITLE` usage.
+ * - `v2-remote`: `opencode --server <url> --session <id> <dir>` — the
+ *   `OPENCODE_PASSWORD` secret is never part of the command text; adapters
+ *   inject it at pane creation through their native spawn-time environment
+ *   mechanism, or through `withParentEnvPassword` where none exists.
  */
 export function buildViewCommand(
   flavor: ViewerFlavor,
@@ -97,12 +91,7 @@ export function buildViewCommand(
       quoteShellArg(viewDir),
     ].join(' ');
   }
-  const envPrefix =
-    options.password === undefined
-      ? []
-      : ['env', `OPENCODE_PASSWORD=${quoteShellArg(options.password)}`];
   return [
-    ...envPrefix,
     exe,
     '--server',
     quoteShellArg(serverUrl),
@@ -110,6 +99,62 @@ export function buildViewCommand(
     quoteShellArg(sessionId),
     quoteShellArg(viewDir),
   ].join(' ');
+}
+
+/** Shells whose `-c` argument is a POSIX script. */
+const POSIX_SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh']);
+
+/**
+ * Whether the resolved shell can run a POSIX script. Used to gate the
+ * `/proc`-based viewer-secret bridge (cmux-tui): unknown and Windows shells
+ * count as non-POSIX, so the caller fails closed instead of feeding a
+ * command-substitution script to a shell that cannot parse it.
+ */
+export function isPosixShell(shell: string): boolean {
+  return POSIX_SHELLS.has(shellName(shell));
+}
+
+/**
+ * Wraps `command` in a POSIX script that recovers the viewer password from
+ * this process's own `/proc/<pid>/environ` (readable by the owning user only)
+ * and exports it as `OPENCODE_PASSWORD` before running the command. Adapters
+ * whose CLI has no spawn-time env mechanism (zellij, cmux-tui) use this so
+ * the secret never appears in command text or argv — it exists only in the
+ * pane's environment at viewer start.
+ *
+ * Precedence matches the v2 host wiring: `OPENCODE_PASSWORD` first, then
+ * `OPENCODE_SERVER_PASSWORD`. `/proc/<pid>/environ` is NUL-separated and is
+ * split with `tr`, so the value is read line-wise: a password containing
+ * newlines is recovered only up to its first line (documented limitation).
+ */
+export function withParentEnvPassword(command: string): string {
+  const environ = `/proc/${process.pid}/environ`;
+  const read = (name: string): string =>
+    `$(tr '\\0' '\\n' < ${environ} 2>/dev/null | sed -n 's/^${name}=//p' | head -n 1)`;
+  return [
+    `_omo_pw=${read('OPENCODE_PASSWORD')}`,
+    `[ -n "$_omo_pw" ] || _omo_pw=${read('OPENCODE_SERVER_PASSWORD')}`,
+    'if [ -n "$_omo_pw" ]; then export OPENCODE_PASSWORD="$_omo_pw"; fi',
+    'unset _omo_pw',
+    command,
+  ].join('\n');
+}
+
+/**
+ * Masks the viewer secret in spawn argv before it reaches a log payload.
+ * The secret travels as a spawn-time environment entry (`-e` / `--env`), so
+ * masking `OPENCODE_PASSWORD=…` / `OPENCODE_SERVER_PASSWORD=…` values keeps
+ * every log line secret-free; viewer commands never contain it.
+ */
+export function redactViewerSecretArgs(args: readonly string[]): string[] {
+  return args.map((arg) => {
+    const separator = arg.indexOf('=');
+    if (separator === -1) return arg;
+    const name = arg.slice(0, separator);
+    return name === 'OPENCODE_PASSWORD' || name === 'OPENCODE_SERVER_PASSWORD'
+      ? `${name}=<redacted>`
+      : arg;
+  });
 }
 
 /**

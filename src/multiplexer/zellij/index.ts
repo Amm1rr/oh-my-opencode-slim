@@ -32,7 +32,13 @@
 
 import type { MultiplexerLayout } from '../../config/schema';
 import { crossSpawn } from '../../utils/compat';
-import { buildViewCommand, findBinary, gracefulClosePane } from '../shared';
+import { log } from '../../utils/logger';
+import {
+  buildViewCommand,
+  findBinary,
+  gracefulClosePane,
+  withParentEnvPassword,
+} from '../shared';
 import type { Multiplexer, PaneResult, PaneSpawnOptions } from '../types';
 
 interface ZellijPaneInfo {
@@ -44,6 +50,23 @@ interface ZellijPaneInfo {
 }
 
 type ZellijPaneDirection = 'right' | 'down';
+
+/**
+ * One structured diagnostic per process for the viewer-secret bridge gate:
+ * the gate fails closed on hosts where the password cannot be injected
+ * without exposing it in command text or argv.
+ */
+let viewerSecretGateLogged = false;
+
+function logViewerSecretGateFailure(reason: string): void {
+  if (viewerSecretGateLogged) return;
+  viewerSecretGateLogged = true;
+  log('[zellij] spawnPane: viewer password bridge unavailable', {
+    stage: 'viewer-secret',
+    reason,
+    platform: process.platform,
+  });
+}
 
 export class ZellijMultiplexer implements Multiplexer {
   readonly type = 'zellij' as const;
@@ -158,13 +181,28 @@ export class ZellijMultiplexer implements Multiplexer {
     description: string,
     options?: PaneSpawnOptions,
   ): Promise<PaneResult> {
-    const opencodeCmd = buildViewCommand(
+    // v2 remote hosts: the viewer must authenticate with
+    // OPENCODE_PASSWORD. Zellij's `new-pane` has no env flag, so the pane
+    // script reads the secret from this process's own /proc environ
+    // (`withParentEnvPassword`). That bridge is Linux-only: anywhere else no
+    // pane is created rather than exposing the secret.
+    const needsSecretBridge =
+      options?.viewerFlavor === 'v2-remote' &&
+      options.viewerPassword !== undefined;
+    if (needsSecretBridge && process.platform !== 'linux') {
+      logViewerSecretGateFailure('password-bridge-requires-linux');
+      return { success: false, error: 'unavailable' };
+    }
+
+    const viewerCommand = buildViewCommand(
       options?.viewerFlavor ?? 'v1',
       sessionId,
       serverUrl,
       directory,
-      { password: options?.viewerPassword },
     );
+    const opencodeCmd = needsSecretBridge
+      ? withParentEnvPassword(viewerCommand)
+      : viewerCommand;
     // The name doubles as the pane title; the description is the FR-8
     // metadata (owner pid + child session id) and must survive intact.
     const paneName = description.replace(/"/g, '\\"');

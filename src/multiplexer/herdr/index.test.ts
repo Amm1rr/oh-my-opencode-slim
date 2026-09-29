@@ -179,7 +179,7 @@ describe('HerdrMultiplexer', () => {
     ]);
   });
 
-  test('pane run builds the viewer command for the requested v2 flavor', async () => {
+  test('pane split carries the v2 remote secret; pane run never does', async () => {
     const { HerdrMultiplexer } = await importFreshHerdr();
     const herdr = new HerdrMultiplexer('main-vertical', 60);
 
@@ -197,10 +197,20 @@ describe('HerdrMultiplexer', () => {
       { viewerFlavor: 'v2-remote', viewerPassword: 'pw' },
     );
 
+    // The secret travels as a spawn-time herdr environment entry (`--env`),
+    // never in the `pane run` command text (which herdr types into the shell).
+    const split = commands().find((command) => command.includes('split'));
+    const envIndex = split?.indexOf('--env') ?? -1;
+    expect(envIndex).toBeGreaterThan(-1);
+    expect(split?.[envIndex + 1]).toBe('OPENCODE_PASSWORD=pw');
+    expect((split ?? []).filter((arg) => arg.includes('pw'))).toEqual([
+      'OPENCODE_PASSWORD=pw',
+    ]);
+
     const remote = runCommand();
-    expect(remote).toContain("env OPENCODE_PASSWORD='pw'");
     expect(remote).toContain('--server');
     expect(remote).not.toContain('attach');
+    expect(remote).not.toContain('pw');
 
     crossSpawnMock.mockClear();
     await herdr.spawnPane(
@@ -210,6 +220,11 @@ describe('HerdrMultiplexer', () => {
       '/repo',
       { viewerFlavor: 'v2-shared' },
     );
+
+    // No password environment is injected outside v2-remote.
+    const sharedSplit = commands().find((command) => command.includes('split'));
+    expect(sharedSplit).not.toContain('--env');
+    expect(sharedSplit).not.toContain('OPENCODE_PASSWORD');
 
     const shared = runCommand();
     expect(shared).toContain('--session');

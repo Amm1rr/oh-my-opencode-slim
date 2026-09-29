@@ -30,9 +30,11 @@ export interface PaneSpawnOptions {
    */
   viewerFlavor?: ViewerFlavor;
   /**
-   * `v2-remote` only: password injected into the viewer command. A pane shell
-   * does not inherit the parent client's environment, so the wiring forwards
-   * the value it read from its own environment.
+   * `v2-remote` only: password injected into the viewer's environment at
+   * pane creation. It is forwarded in-process from the wiring's own
+   * environment and must never enter command text or argv; adapters use
+   * their native spawn-time env mechanism, or a `/proc`-based bridge where
+   * none exists.
    */
   viewerPassword?: string;
 }

@@ -40,6 +40,7 @@ import {
   findBinary,
   gracefulClosePane,
   normalizePathForShell,
+  redactViewerSecretArgs,
   resolveOpencodeExecutable,
 } from '../shared';
 import type { Multiplexer, PaneResult, PaneSpawnOptions } from '../types';
@@ -133,10 +134,7 @@ export class KittyMultiplexer implements Multiplexer {
         sessionId,
         serverUrl,
         directory,
-        {
-          executable: resolveOpencodeExecutable(),
-          password: options?.viewerPassword,
-        },
+        { executable: resolveOpencodeExecutable() },
       );
 
       // Normalize for Windows/MSYS2/Git Bash (backslashes would be treated as
@@ -147,6 +145,15 @@ export class KittyMultiplexer implements Multiplexer {
       // command resolves correctly — a hardcoded `sh -c` breaks under fish
       // and misses login startup files where `opencode` may live on PATH.
       const shellArgs = buildShellLaunchArgs(opencodeCmd);
+
+      // v2 remote hosts: the viewer must authenticate with
+      // OPENCODE_PASSWORD. Inject it through kitty's native `--env`
+      // mechanism at launch time, never through the shell command.
+      const viewerSecretArgs =
+        options?.viewerFlavor === 'v2-remote' &&
+        options.viewerPassword !== undefined
+          ? ['--env', `OPENCODE_PASSWORD=${options.viewerPassword}`]
+          : [];
 
       const args = [
         '@',
@@ -160,11 +167,15 @@ export class KittyMultiplexer implements Multiplexer {
         `--title=${description}`,
         `--cwd=${attachDir}`,
         '--keep-focus',
+        ...viewerSecretArgs,
         '--',
         ...shellArgs,
       ];
 
-      log('[kitty] spawnPane: executing', { kitten, args });
+      log('[kitty] spawnPane: executing', {
+        kitten,
+        args: redactViewerSecretArgs(args),
+      });
 
       const proc = crossSpawn([kitten, ...args], {
         stdout: 'pipe',
@@ -295,7 +306,7 @@ export class KittyMultiplexer implements Multiplexer {
     if (exitCode !== 0) {
       log('[kitty] command failed', {
         command: args[1],
-        args: [kitten, ...args],
+        args: redactViewerSecretArgs([kitten, ...args]),
         exitCode,
         stderr: stderr.trim(),
       });

@@ -38,8 +38,10 @@ import {
   buildShellLaunchArgs,
   buildViewCommand,
   findBinary,
+  isPosixShell,
   resolveHostOpencodeBinary,
   shellSupportsHashComments,
+  withParentEnvPassword,
 } from '../shared';
 import type { Multiplexer, PaneResult, PaneSpawnOptions } from '../types';
 import { childName, displayName, parentName } from './names';
@@ -165,6 +167,24 @@ export interface CmuxOptions {
   pathExists?: (path: string) => boolean;
 }
 
+/**
+ * One structured diagnostic per process for the viewer-secret bridge gate:
+ * the gate fails closed on hosts where the password cannot be injected
+ * without exposing it in command text or argv.
+ */
+let viewerSecretGateLogged = false;
+
+function logViewerSecretGateFailure(reason: string, shell: string): void {
+  if (viewerSecretGateLogged) return;
+  viewerSecretGateLogged = true;
+  log('[cmux-tui] spawnPane: viewer password bridge unavailable', {
+    stage: 'viewer-secret',
+    reason,
+    shell,
+    platform: process.platform,
+  });
+}
+
 export class CmuxMultiplexer implements Multiplexer {
   readonly type = 'cmux-tui' as const;
 
@@ -281,6 +301,11 @@ export class CmuxMultiplexer implements Multiplexer {
       directory,
       options,
     );
+    if (attachArgv === null) {
+      // Fail closed: the viewer-secret gate rejected this host/shell, and
+      // the structured diagnostic was already emitted (once per process).
+      return { success: false, error: 'unavailable' };
+    }
     const created = await this.client.runInPane(
       target,
       anchor.value.paneId,
@@ -456,23 +481,51 @@ export class CmuxMultiplexer implements Multiplexer {
     return active?.tabId ?? anchor.tabId;
   }
 
+  /**
+   * Builds the `pane run` argv, or returns null when the viewer-secret gate
+   * fails closed (the structured diagnostic was already emitted, once per
+   * process).
+   *
+   * v2 remote hosts authenticate the viewer with OPENCODE_PASSWORD, and
+   * cmux's `pane run` has no env flag, so the secret is read from this
+   * process's own /proc environ by the launch script
+   * (`withParentEnvPassword`). That bridge needs Linux and a POSIX shell,
+   * resolved exactly as `buildShellLaunchArgs` resolves it; anything else
+   * creates no pane rather than exposing the secret.
+   */
   private buildAttachArgv(
     sessionId: string,
     description: string,
     serverUrl: string,
     directory: string,
     options?: PaneSpawnOptions,
-  ): string[] {
-    const command = buildViewCommand(
+  ): string[] | null {
+    const needsSecretBridge =
+      options?.viewerFlavor === 'v2-remote' &&
+      options.viewerPassword !== undefined;
+    if (needsSecretBridge) {
+      const shell = process.env.SHELL || '/bin/sh';
+      if (process.platform !== 'linux' || !isPosixShell(shell)) {
+        logViewerSecretGateFailure(
+          process.platform !== 'linux'
+            ? 'password-bridge-requires-linux'
+            : 'password-bridge-requires-posix-shell',
+          shell,
+        );
+        return null;
+      }
+    }
+
+    const viewerCommand = buildViewCommand(
       options?.viewerFlavor ?? 'v1',
       sessionId,
       serverUrl,
       directory,
-      {
-        executable: this.opencodeBinary,
-        password: options?.viewerPassword,
-      },
+      { executable: this.opencodeBinary },
     );
+    const command = needsSecretBridge
+      ? withParentEnvPassword(viewerCommand)
+      : viewerCommand;
     // FR-8 carrier: a POSIX comment data marker in the launch script. The
     // `cmd` branch has no `#` comments, so the marker is omitted there and
     // the cmux sweep cannot identify those views (documented limitation).
@@ -480,6 +533,8 @@ export class CmuxMultiplexer implements Multiplexer {
     // turn the remainder into executable script. (names.ts sanitizes display
     // names with its own control-char stripper; the marker only needs the
     // line-break guarantee, since nothing else terminates a shell comment.)
+    // The marker stays the FIRST script line; the /proc extraction lines
+    // that follow it run before the viewer command.
     const marker = shellSupportsHashComments()
       ? `# ${description.replace(/[\r\n]/g, ' ')}\n`
       : '';

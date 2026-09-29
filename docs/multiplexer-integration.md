@@ -88,7 +88,7 @@ Pane behavior is fixed per host mode:
 | `opencode run` | no TUI host | — | No pane (child runs in the host's native background mode) |
 | `opencode --mini` | TUI host does not load plugins | — | No pane |
 | v2 host, shared background service (default) | TUI client of the user-level shared service | discovered via the service registration | Supported: viewers run `opencode --session <id> <dir>` and rediscover the same service |
-| v2 host, `--server <url>` | TUI client of an explicit server | `--server` URL | Supported: viewers run `env OPENCODE_PASSWORD=<pw> opencode --server <url> --session <id> <dir>`; the password comes from the parent process environment and is visible in the viewer's command line |
+| v2 host, `--server <url>` | TUI client of an explicit server | `--server` URL | Supported: viewers run `opencode --server <url> --session <id> <dir>`; the `OPENCODE_PASSWORD` secret comes from the parent process environment and is injected at pane creation through the multiplexer's spawn-time environment mechanism (see [Secret handling](#known-limitations)), never through the viewer's command line |
 | v2 host, `--standalone` | private stdio server (no registration, random password, exits with the parent) | ephemeral loopback | **Not supported**: fail-closed + exactly one diagnostic; the fallback is v2's native subagent surfaces (`/subagent` opens the latest child session in a tab without moving focus — the tab is a salience and quick-switch affordance, and the displayed session stays the interaction surface) |
 
 On v2 hosts the event source is the TUI's own `data` feed
@@ -369,7 +369,7 @@ a structured, distinguishable reason:
 | `not-our-child` | The child's `parentID` is not the session this client currently displays |
 | `host-unreachable` | Embedded host (no listener / sentinel URL) or the server probe failed |
 | `readiness-timeout` | The child did not appear in `/session/status` within the bounded retry budget |
-| `adapter-unavailable` | The adapter cannot run here (binary missing, old version, protocol self-check failed, no control plane) |
+| `adapter-unavailable` | The adapter cannot run here (binary missing, old version, protocol self-check failed, no control plane, or the platform/shell cannot support the viewer-secret bridge) |
 | `adapter-not-found` | The adapter could not resolve its anchor target; **no multiplexer command is issued** |
 | `adapter-hard` | The multiplexer command failed for another reason |
 | `backfill-skipped` | Reconnect compensation found this client already holds that child's pane |
@@ -457,6 +457,27 @@ produces one `multiplexer.host-unsupported` record per process; shared and
   the child session — there is no read-only mode. Opening a session replaces
   the process environment its shell commands use (the last client to open it
   wins), and unread/attention state is shared across clients by the server.
+- **Secret handling (v2 `--server` hosts).** The viewer authenticates with
+  `OPENCODE_PASSWORD`. Where the multiplexer CLI has a spawn-time env flag,
+  the secret is injected there and exists only in the new pane's environment:
+  tmux `split-window -e OPENCODE_PASSWORD=…`, herdr `pane split --env …`,
+  kitty `kitten @ launch --env …`. Zellij and cmux-tui have no such flag, so
+  the pane launch script reads the value from the plugin process's own
+  `/proc/<pid>/environ` (readable by the owning user only) and exports it
+  before the viewer starts; the secret never enters command text or argv.
+  Residual exposure: the value is visible in the multiplexer client's argv
+  for the duration of the spawn call (millisecond-scale), and — like any
+  environment entry — is readable by same-user processes inspecting the
+  viewer's environment; it never appears in the viewer's command line, shell
+  history, or pane scrollback. Limitation: the `/proc` bridge reads the
+  value line-wise, so a password containing newlines is recovered only up to
+  its first line — use a single-line password. The bridge is gated and fails
+  closed: no pane is created, the adapter emits one structured diagnostic per
+  process with the reason code below, and the lifecycle additionally records
+  its per-attempt `adapter-unavailable` outcome. Zellij requires Linux
+  (`password-bridge-requires-linux`); cmux-tui requires Linux **and** a
+  POSIX shell — sh/bash/zsh/dash/ksh
+  (`password-bridge-requires-linux` / `password-bridge-requires-posix-shell`).
 - **Nested multiplexer detection priority is unchanged** (for example, kitty
   inside herdr), and a client only opens panes for children of the session it
   currently displays.
