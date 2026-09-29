@@ -2157,7 +2157,9 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       };
       try {
         if (typeof ctx.mcp?.transform !== 'function') {
-          log('[v2] ctx.mcp.transform unavailable; skipping MCP snapshot (v1 host embedded v2 core)');
+          log(
+            '[v2] ctx.mcp.transform unavailable; skipping MCP snapshot (v1 host embedded v2 core)',
+          );
           // Degrade gracefully: v1 hosts with embedded v2 core don't provide
           // full v2 context. This is expected and non-fatal.
           hostMcpSnapshot = {};
@@ -2474,7 +2476,9 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       // embedded v2 core with limited context). On full v2 contexts, session
       // hooks are required and registration failures fail setup.
       if (!ctx.session) {
-        log('[v2] ctx.session unavailable; skipping session hooks (v1 host embedded v2 core)');
+        log(
+          '[v2] ctx.session unavailable; skipping session hooks (v1 host embedded v2 core)',
+        );
       } else {
         // Native per-admission prompt hook (v2): `session.prompt` fires once
         // per admitted input with the eventual inbox User messageID — the
@@ -2486,276 +2490,283 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
           const bridge = createSessionPromptBridge(chatMessage);
           promptBridge = bridge;
           const promptReg = await ctx.session.hook('prompt', async (event) => {
-          if (!permissionSnapshotReady) {
-            await withTimeout(
-              permissionSnapshotReadiness,
-              PERMISSION_RULES_OPERATION_TIMEOUT_MS,
-              'Agent permission snapshot readiness timed out',
-            );
-          }
-          if (permissionSnapshotFailure) {
-            if (
-              permissionSnapshotFailure.message.startsWith(
-                'Marketplace agents require ctx.session.update',
-              )
-            ) {
-              throw permissionSnapshotFailure;
+            if (!permissionSnapshotReady) {
+              await withTimeout(
+                permissionSnapshotReadiness,
+                PERMISSION_RULES_OPERATION_TIMEOUT_MS,
+                'Agent permission snapshot readiness timed out',
+              );
             }
-            throw new Error('Agent permission snapshot finalization failed', {
-              cause: permissionSnapshotFailure,
-            });
-          }
-          const permissionBridge = permissionRulesBridge;
-          if (permissionBridge) {
-            if (permissionReadiness) await permissionReadiness;
-            await permissionBridge.ensurePromptPermission(event.sessionID);
-          }
-          // Freeze and switch the inference profile before the admitted
-          // input's first model request; the event stream is only a prewarm.
-          await sessionProfileBridge.ensureSessionProfile(event.sessionID);
-          await bridge.handlePrompt(event);
-        });
-        stopPermissionPromptAdmission = boundedPermissionStop(
-          () => promptReg.dispose(),
-          'Permission prompt hook disposal timed out',
-        );
-        disposers.push(stopPermissionPromptAdmission);
-        log('[v2] native session prompt hook registered');
-      }
-
-      const handler = createSessionContextHandler({
-        interviewHandleContext: (event) => interviewBridge.handleContext(event),
-        commandBefore,
-        chatMessage: undefined,
-        observeContextAgent: promptBridge?.observeContext,
-        // chat.headers: trailing user-message marker state for the
-        // model.request bridge below.
-        ...(chatHeadersHook
-          ? {
-              observeChatHeaders: (event: V2SessionContextEvent) =>
-                observeChatHeaderState(chatHeaderStates, event),
+            if (permissionSnapshotFailure) {
+              if (
+                permissionSnapshotFailure.message.startsWith(
+                  'Marketplace agents require ctx.session.update',
+                )
+              ) {
+                throw permissionSnapshotFailure;
+              }
+              throw new Error('Agent permission snapshot finalization failed', {
+                cause: permissionSnapshotFailure,
+              });
             }
-          : {}),
-        // Transcript user-message enrichment falls back to the agent the
-        // prompt bridge learned when the context event carries none.
-        knownAgentForSession: (sessionID) =>
-          promptBridge?.agentForSession(sessionID),
-        systemTransform,
-        messagesTransform,
-        // Captured child sessions get their frozen temperature/provider
-        // options on the request options record only.
-        applyRuntimeProfile: (event) =>
-          applyRuntimeProfileOptions(
-            event,
-            sessionProfileBridge.profileForSession(event.sessionID),
-          ),
-      });
-      const reg = await ctx.session.hook('context', handler);
-      disposers.push(() => reg.dispose());
-      log('[v2] session context hook registered');
-
-      // v1 chat.headers → v2 session.model.request (per-provider-request
-      // HTTP headers; registered unconditionally when the v1
-      // hook exists — a failure fails setup rather than silently skipping
-      // the Copilot initiator header).
-      if (chatHeadersHook) {
-        const headerReg = await ctx.session.hook(
-          'model.request',
-          createChatHeadersBridge(chatHeaderStates),
-        );
-        disposers.push(() => headerReg.dispose());
-        log('[v2] chat.headers bridge registered (session.model.request)');
-      }
-
-      // v2 native compaction hook: strip the plugin's tagged
-      // synthetic injections from the host's summarization request so
-      // the compacted transcript never bakes volatile board/status
-      // content. Registered unconditionally — a failure
-      // fails setup (tagged content baking into the compacted transcript
-      // is a correctness issue, not a summary-quality nicety).
-      const compactionReg = await ctx.session.hook(
-        'compaction',
-        createSessionCompactionBridge(),
-      );
-      disposers.push(() => compactionReg.dispose());
-      log('[v2] compaction bridge registered (session.compaction)');
-
-      const retryHook = v1Hooks['v2.session.retry'] as
-        | ForegroundFallbackManager['handleV2Retry']
-        | undefined;
-      const switchModel = ctx.session.switchModel;
-      // Without switchModel the retry hook must not register: it would mask
-      // the deferred fallback path on hosts that can't switch in place.
-      if (
-        typeof retryHook === 'function' &&
-        typeof switchModel === 'function'
-      ) {
-        try {
-          const reg = await (
-            ctx.session.hook as unknown as (
-              name: 'retry',
-              cb: (event: never) => Promise<void>,
-            ) => ReturnType<V2Context['session']['hook']>
-          )('retry', (event) =>
-            retryHook(event, (id, model) =>
-              switchModel.call(ctx.session, { sessionID: id, model }),
-            ),
+            const permissionBridge = permissionRulesBridge;
+            if (permissionBridge) {
+              if (permissionReadiness) await permissionReadiness;
+              await permissionBridge.ensurePromptPermission(event.sessionID);
+            }
+            // Freeze and switch the inference profile before the admitted
+            // input's first model request; the event stream is only a prewarm.
+            await sessionProfileBridge.ensureSessionProfile(event.sessionID);
+            await bridge.handlePrompt(event);
+          });
+          stopPermissionPromptAdmission = boundedPermissionStop(
+            () => promptReg.dispose(),
+            'Permission prompt hook disposal timed out',
           );
-          disposers.push(() => reg.dispose());
-          log('[v2] retry hook registered');
+          disposers.push(stopPermissionPromptAdmission);
+          log('[v2] native session prompt hook registered');
+        }
+
+        const handler = createSessionContextHandler({
+          interviewHandleContext: (event) =>
+            interviewBridge.handleContext(event),
+          commandBefore,
+          chatMessage: undefined,
+          observeContextAgent: promptBridge?.observeContext,
+          // chat.headers: trailing user-message marker state for the
+          // model.request bridge below.
+          ...(chatHeadersHook
+            ? {
+                observeChatHeaders: (event: V2SessionContextEvent) =>
+                  observeChatHeaderState(chatHeaderStates, event),
+              }
+            : {}),
+          // Transcript user-message enrichment falls back to the agent the
+          // prompt bridge learned when the context event carries none.
+          knownAgentForSession: (sessionID) =>
+            promptBridge?.agentForSession(sessionID),
+          systemTransform,
+          messagesTransform,
+          // Captured child sessions get their frozen temperature/provider
+          // options on the request options record only.
+          applyRuntimeProfile: (event) =>
+            applyRuntimeProfileOptions(
+              event,
+              sessionProfileBridge.profileForSession(event.sessionID),
+            ),
+        });
+        const reg = await ctx.session.hook('context', handler);
+        disposers.push(() => reg.dispose());
+        log('[v2] session context hook registered');
+
+        // v1 chat.headers → v2 session.model.request (per-provider-request
+        // HTTP headers; registered unconditionally when the v1
+        // hook exists — a failure fails setup rather than silently skipping
+        // the Copilot initiator header).
+        if (chatHeadersHook) {
+          const headerReg = await ctx.session.hook(
+            'model.request',
+            createChatHeadersBridge(chatHeaderStates),
+          );
+          disposers.push(() => headerReg.dispose());
+          log('[v2] chat.headers bridge registered (session.model.request)');
+        }
+
+        // v2 native compaction hook: strip the plugin's tagged
+        // synthetic injections from the host's summarization request so
+        // the compacted transcript never bakes volatile board/status
+        // content. Registered unconditionally — a failure
+        // fails setup (tagged content baking into the compacted transcript
+        // is a correctness issue, not a summary-quality nicety).
+        const compactionReg = await ctx.session.hook(
+          'compaction',
+          createSessionCompactionBridge(),
+        );
+        disposers.push(() => compactionReg.dispose());
+        log('[v2] compaction bridge registered (session.compaction)');
+
+        const retryHook = v1Hooks['v2.session.retry'] as
+          | ForegroundFallbackManager['handleV2Retry']
+          | undefined;
+        const switchModel = ctx.session.switchModel;
+        // Without switchModel the retry hook must not register: it would mask
+        // the deferred fallback path on hosts that can't switch in place.
+        if (
+          typeof retryHook === 'function' &&
+          typeof switchModel === 'function'
+        ) {
+          try {
+            const reg = await (
+              ctx.session.hook as unknown as (
+                name: 'retry',
+                cb: (event: never) => Promise<void>,
+              ) => ReturnType<V2Context['session']['hook']>
+            )('retry', (event) =>
+              retryHook(event, (id, model) =>
+                switchModel.call(ctx.session, { sessionID: id, model }),
+              ),
+            );
+            disposers.push(() => reg.dispose());
+            log('[v2] retry hook registered');
+          } catch (err) {
+            log('[v2] retry hook registration failed', String(err));
+          }
+        }
+
+        // ── Tool execute hooks ──
+        try {
+          const before = v1Hooks['tool.execute.before'] as
+            | ((
+                i: { tool: string; sessionID: string; callID: string },
+                o: { args: unknown },
+              ) => Promise<void>)
+            | undefined;
+          const after = v1Hooks['tool.execute.after'] as
+            | ((i: unknown, o: unknown) => Promise<void>)
+            | undefined;
+          const bridges = createToolExecuteBridges(before, after);
+          if (before) {
+            const reg = await ctx.tool.hook('execute.before', async (event) => {
+              try {
+                await bridges.beforeBridge(event as never);
+              } catch (err) {
+                log('[v2] tool.execute.before rejected call', String(err));
+                throw err; // v2 refuses the call (see createToolExecuteBridges)
+              }
+            });
+            disposers.push(() => reg.dispose());
+          }
+          if (after) {
+            const reg = await ctx.tool.hook('execute.after', async (event) => {
+              try {
+                await bridges.afterBridge(event as never);
+              } catch (err) {
+                log('[v2] tool.execute.after bridge failed', String(err));
+              }
+            });
+            disposers.push(() => reg.dispose());
+          }
+          log('[v2] tool hooks registered', {
+            before: !!before,
+            after: !!after,
+          });
         } catch (err) {
-          log('[v2] retry hook registration failed', String(err));
+          log('[v2] tool.hook registration failed', String(err));
         }
-      }
 
-      // ── Tool execute hooks ──
-      try {
-        const before = v1Hooks['tool.execute.before'] as
-          | ((
-              i: { tool: string; sessionID: string; callID: string },
-              o: { args: unknown },
-            ) => Promise<void>)
-          | undefined;
-        const after = v1Hooks['tool.execute.after'] as
-          | ((i: unknown, o: unknown) => Promise<void>)
-          | undefined;
-        const bridges = createToolExecuteBridges(before, after);
-        if (before) {
-          const reg = await ctx.tool.hook('execute.before', async (event) => {
-            try {
-              await bridges.beforeBridge(event as never);
-            } catch (err) {
-              log('[v2] tool.execute.before rejected call', String(err));
-              throw err; // v2 refuses the call (see createToolExecuteBridges)
-            }
-          });
-          disposers.push(() => reg.dispose());
-        }
-        if (after) {
-          const reg = await ctx.tool.hook('execute.after', async (event) => {
-            try {
-              await bridges.afterBridge(event as never);
-            } catch (err) {
-              log('[v2] tool.execute.after bridge failed', String(err));
-            }
-          });
-          disposers.push(() => reg.dispose());
-        }
-        log('[v2] tool hooks registered', { before: !!before, after: !!after });
-      } catch (err) {
-        log('[v2] tool.hook registration failed', String(err));
-      }
-
-      // ── Event stream ──
-      try {
-        const eventHook = v1Hooks.event as
-          | ((i: { event: Record<string, unknown> }) => Promise<void>)
-          | undefined;
-        if (eventHook || interviewBridge) {
-          // ── Per-session permission rules (ctx.session.update) ──
-          // Plugin-managed child sessions get their agent's task-policy
-          // installed as ordered session-scoped rules at creation
-          // (session.update's `permissions` REPLACES the session-scoped
-          // list). Fail-soft inside the bridge; the v1 event dispatch
-          // below never depends on it (capability-absent hosts degrade
-          // with a one-time deterministic warning).
-          if (permissionRulesBridgeEnabled) {
-            permissionRulesBridge = createPermissionRulesBridge(ctx.session, {
-              permissionForAgent: (agent) => {
-                return finalizedRegistry?.nativePolicies[agent]?.rules;
-              },
-              pluginAgents,
-              requireKnownIdentity: () => marketplaceAgentsRequirePromptPolicy,
-              marketplaceAgentNames: () => {
-                const registry = finalizedRegistry;
-                if (!registry) return new Set();
-                return new Set(
-                  registry.marketplaceAgentNames.flatMap((name) => [
-                    name,
-                    registry.identities[name] ?? name,
-                  ]),
-                );
-              },
-              knownAgentNames: () => {
-                const names = new Set<string>(pluginAgents);
-                for (const [name, config] of Object.entries(
-                  nativeAgentSnapshot?.agents ?? {},
-                )) {
-                  names.add(name);
-                  if (typeof config.displayName === 'string') {
-                    names.add(config.displayName);
-                  }
-                }
-                const registry = finalizedRegistry;
-                if (registry) {
-                  for (const [name, identity] of Object.entries(
-                    registry.identities,
+        // ── Event stream ──
+        try {
+          const eventHook = v1Hooks.event as
+            | ((i: { event: Record<string, unknown> }) => Promise<void>)
+            | undefined;
+          if (eventHook || interviewBridge) {
+            // ── Per-session permission rules (ctx.session.update) ──
+            // Plugin-managed child sessions get their agent's task-policy
+            // installed as ordered session-scoped rules at creation
+            // (session.update's `permissions` REPLACES the session-scoped
+            // list). Fail-soft inside the bridge; the v1 event dispatch
+            // below never depends on it (capability-absent hosts degrade
+            // with a one-time deterministic warning).
+            if (permissionRulesBridgeEnabled) {
+              permissionRulesBridge = createPermissionRulesBridge(ctx.session, {
+                permissionForAgent: (agent) => {
+                  return finalizedRegistry?.nativePolicies[agent]?.rules;
+                },
+                pluginAgents,
+                requireKnownIdentity: () =>
+                  marketplaceAgentsRequirePromptPolicy,
+                marketplaceAgentNames: () => {
+                  const registry = finalizedRegistry;
+                  if (!registry) return new Set();
+                  return new Set(
+                    registry.marketplaceAgentNames.flatMap((name) => [
+                      name,
+                      registry.identities[name] ?? name,
+                    ]),
+                  );
+                },
+                knownAgentNames: () => {
+                  const names = new Set<string>(pluginAgents);
+                  for (const [name, config] of Object.entries(
+                    nativeAgentSnapshot?.agents ?? {},
                   )) {
                     names.add(name);
-                    names.add(identity);
-                  }
-                }
-                return names;
-              },
-            });
-            const permissionBridge = permissionRulesBridge;
-            disposers.push(() => permissionBridge.dispose());
-          }
-          const iter = ctx.event.subscribe();
-          const eventIterator = iter[Symbol.asyncIterator]();
-          let eventStopped = false;
-          void (async () => {
-            try {
-              while (!eventStopped) {
-                const next = await eventIterator.next();
-                if (next.done) break;
-                try {
-                  // Token-stream deltas: the interview bridge already
-                  // gates to managed sessions. Skip permission rules and
-                  // v1 synthesis; still deliver the raw event so the
-                  // multiplexer heartbeat in the v1 event hook can run.
-                  const rawType =
-                    typeof next.value?.type === 'string' ? next.value.type : '';
-                  const isStreamDelta =
-                    rawType === 'session.next.text.delta' ||
-                    rawType === 'session.next.reasoning.delta' ||
-                    rawType === 'message.part.delta';
-                  await interviewBridge.handleEvent(next.value);
-                  if (isStreamDelta) {
-                    if (eventHook) await eventHook({ event: next.value });
-                    continue;
-                  }
-                  // Child-session permission projection sees the same RAW
-                  // event (before v1-shape synthesis) so it is independent
-                  // of v1 event-hook presence. Profile prewarm runs first so
-                  // a held permission update cannot delay identity capture
-                  // and force the awaited prompt path into another session
-                  // lookup for the same child.
-                  await sessionProfileBridge.observeEvent(next.value);
-                  await permissionRulesBridge?.observeEvent(next.value);
-                  if (eventHook) {
-                    for (const ev of mapV2EventToV1(next.value)) {
-                      await eventHook({ event: ev });
+                    if (typeof config.displayName === 'string') {
+                      names.add(config.displayName);
                     }
                   }
-                } catch (err) {
-                  log('[v2] event handler failed', String(err));
-                }
-              }
-            } catch (err) {
-              log('[v2] event stream ended', String(err));
+                  const registry = finalizedRegistry;
+                  if (registry) {
+                    for (const [name, identity] of Object.entries(
+                      registry.identities,
+                    )) {
+                      names.add(name);
+                      names.add(identity);
+                    }
+                  }
+                  return names;
+                },
+              });
+              const permissionBridge = permissionRulesBridge;
+              disposers.push(() => permissionBridge.dispose());
             }
-          })();
-          stopPermissionEventIntake = boundedPermissionStop(async () => {
-            eventStopped = true;
-            await eventIterator.return?.();
-          }, 'Permission event intake stop timed out');
-          disposers.push(stopPermissionEventIntake);
-          log('[v2] event stream subscribed');
+            const iter = ctx.event.subscribe();
+            const eventIterator = iter[Symbol.asyncIterator]();
+            let eventStopped = false;
+            void (async () => {
+              try {
+                while (!eventStopped) {
+                  const next = await eventIterator.next();
+                  if (next.done) break;
+                  try {
+                    // Token-stream deltas: the interview bridge already
+                    // gates to managed sessions. Skip permission rules and
+                    // v1 synthesis; still deliver the raw event so the
+                    // multiplexer heartbeat in the v1 event hook can run.
+                    const rawType =
+                      typeof next.value?.type === 'string'
+                        ? next.value.type
+                        : '';
+                    const isStreamDelta =
+                      rawType === 'session.next.text.delta' ||
+                      rawType === 'session.next.reasoning.delta' ||
+                      rawType === 'message.part.delta';
+                    await interviewBridge.handleEvent(next.value);
+                    if (isStreamDelta) {
+                      if (eventHook) await eventHook({ event: next.value });
+                      continue;
+                    }
+                    // Child-session permission projection sees the same RAW
+                    // event (before v1-shape synthesis) so it is independent
+                    // of v1 event-hook presence. Profile prewarm runs first so
+                    // a held permission update cannot delay identity capture
+                    // and force the awaited prompt path into another session
+                    // lookup for the same child.
+                    await sessionProfileBridge.observeEvent(next.value);
+                    await permissionRulesBridge?.observeEvent(next.value);
+                    if (eventHook) {
+                      for (const ev of mapV2EventToV1(next.value)) {
+                        await eventHook({ event: ev });
+                      }
+                    }
+                  } catch (err) {
+                    log('[v2] event handler failed', String(err));
+                  }
+                }
+              } catch (err) {
+                log('[v2] event stream ended', String(err));
+              }
+            })();
+            stopPermissionEventIntake = boundedPermissionStop(async () => {
+              eventStopped = true;
+              await eventIterator.return?.();
+            }, 'Permission event intake stop timed out');
+            disposers.push(stopPermissionEventIntake);
+            log('[v2] event stream subscribed');
+          }
+        } catch (err) {
+          log('[v2] event.subscribe failed', String(err));
         }
-      } catch (err) {
-        log('[v2] event.subscribe failed', String(err));
-      }
       } // end if (ctx.session) check
 
       // ── Health check: surface silent zero-registration failures ──
