@@ -71,6 +71,27 @@ describe('PluginConfigSchema ACP wrapper models', () => {
   });
 });
 
+describe('PluginConfigSchema fallback continuation policy', () => {
+  it('defaults to retrying the primary and accepts sticky fallback mode', () => {
+    expect(PluginConfigSchema.parse({ fallback: {} }).fallback).toMatchObject({
+      continuationPolicy: 'retry-primary',
+    });
+    expect(
+      PluginConfigSchema.parse({
+        fallback: { continuationPolicy: 'stick-to-fallback' },
+      }).fallback,
+    ).toMatchObject({ continuationPolicy: 'stick-to-fallback' });
+  });
+
+  it('rejects unknown continuation policies', () => {
+    expect(
+      PluginConfigSchema.safeParse({
+        fallback: { continuationPolicy: 'sometimes' },
+      }).success,
+    ).toBe(false);
+  });
+});
+
 describe('PluginConfigSchema preset syntax', () => {
   it('validates marketplace activation replacements and directives', () => {
     expect(

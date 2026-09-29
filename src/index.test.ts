@@ -2330,7 +2330,7 @@ describe('background task admission model resolution', () => {
     await expectSecondTaskQueued('orchestrator-1');
   });
 
-  test('v1 native background completion continues on the parent fallback model', async () => {
+  test('v1 retry-primary continuation restores the last external model', async () => {
     const sessionID = 'orchestrator-fallback';
     await hooks?.['chat.message']?.(
       {
@@ -2931,6 +2931,100 @@ describe('plugin config model inheritance', () => {
       await hooks.dispose?.();
     }
   });
+
+  test.each([
+    ['retry-primary', 'openrouter', 'openrouter/auto'],
+    ['stick-to-fallback', 'openai', 'gpt-6-luna'],
+  ] as const)(
+    'v1 %s policy selects the completion model after a confirmed fallback',
+    async (continuationPolicy, expectedProvider, expectedModel) => {
+      const hooks = await loadConfiguredPlugin(
+        {
+          fallback: { maxRetries: 0, continuationPolicy },
+          agents: {
+            orchestrator: {
+              model: ['openrouter/openrouter/auto', 'openai/gpt-6-luna'],
+            },
+          },
+        },
+        [
+          {
+            info: { id: 'msg-original', role: 'user' },
+            parts: [{ type: 'text', text: 'continue after fallback' }],
+          },
+        ],
+      );
+      const sessionID = `continuation-${continuationPolicy}`;
+
+      try {
+        await hooks.config?.({ agent: {} });
+        await hooks['chat.message']?.(
+          {
+            sessionID,
+            agent: 'orchestrator',
+            model: {
+              providerID: 'openrouter',
+              modelID: 'openrouter/auto',
+            },
+          } as never,
+          {} as never,
+        );
+        await hooks.event?.({
+          event: {
+            type: 'message.updated',
+            properties: {
+              info: {
+                id: `msg-primary-error-${continuationPolicy}`,
+                sessionID,
+                role: 'assistant',
+                agent: 'orchestrator',
+                providerID: 'openrouter',
+                modelID: 'openrouter/auto',
+              },
+            },
+          },
+        } as never);
+        await hooks.event?.({
+          event: {
+            type: 'session.error',
+            properties: {
+              sessionID,
+              error: { statusCode: 403, message: 'Key limit exceeded' },
+            },
+          },
+        } as never);
+
+        const output = {
+          message: {
+            id: `msg-completion-${continuationPolicy}`,
+            role: 'user',
+            sessionID,
+            agent: 'orchestrator',
+            model: {
+              providerID: 'openrouter',
+              modelID: 'openrouter/auto',
+            },
+          },
+          parts: [createInternalAgentTextPart('background task completed')],
+        };
+        await hooks['chat.message']?.(
+          {
+            sessionID,
+            agent: 'orchestrator',
+            messageID: output.message.id,
+          } as never,
+          output as never,
+        );
+
+        expect(output.message.model).toEqual({
+          providerID: expectedProvider,
+          modelID: expectedModel,
+        });
+      } finally {
+        await hooks.dispose?.();
+      }
+    },
+  );
 
   test('preset inheritance clears a stale host model in the final config', async () => {
     const hooks = await loadConfiguredPlugin({

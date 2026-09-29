@@ -372,7 +372,15 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   let hostFlavor: string | undefined;
   let v1FallbackAgentAliases = new Map<string, string>();
   let autoUpdateChecker: ReturnType<typeof createAutoUpdateCheckerHook>;
-  const v1InternalSelectionOverrides = new Set<string>();
+  const v1InternalSelectionOverrides = new Map<
+    string,
+    {
+      agent?: string;
+      model?: { providerID: string; modelID: string };
+      modelText?: string;
+      variant?: string;
+    }
+  >();
   const sessionMetadata = new SessionMetadataStore({
     maxEntries: DEFAULT_MAX_SESSION_METADATA_ENTRIES,
     onEvict: (sessionID) => {
@@ -389,8 +397,8 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   // notifications) resolve the session's CURRENT agent/model at send
   // time instead of hardcoding `orchestrator`. Host-persisted selection
   // normally wins; when a v1 unpinned internal continuation has temporarily
-  // overwritten it, Slim's externally observed metadata wins until the next
-  // real operator admission.
+  // overwritten it, preserve the exact policy-selected continuation until
+  // the next real operator admission.
   const lifecycleSelectionReader = createSessionSelectionReader(
     ctx.client,
     ctx.directory,
@@ -401,24 +409,27 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       lifecycleSelectionReader,
       sessionMetadata,
     );
-    if (!v1InternalSelectionOverrides.has(sessionID)) return resolved;
+    const internalOverride = v1InternalSelectionOverrides.get(sessionID);
+    if (!internalOverride) return resolved;
 
     // v1 computes an unpinned synthetic continuation from the static agent
     // primary and persists that choice before chat.message runs. While that
-    // host selection is known to be internal, prefer the last real operator
-    // selection retained by Slim. A later external admission clears the
+    // host selection is known to be internal, preserve the exact selection
+    // chosen for that continuation. A later external admission clears the
     // override and makes the host authoritative again.
-    const agent = sessionMetadata.getAgent(sessionID) ?? resolved.agent;
-    const modelText = sessionMetadata.getModel(sessionID);
-    const model = modelFromMetadataString(modelText) ?? resolved.model;
+    const agent = internalOverride.agent ?? resolved.agent;
+    const modelText = internalOverride.modelText;
+    const model = internalOverride.model ?? resolved.model;
     return {
       ...(agent ? { agent } : {}),
       ...(model ? { model } : {}),
-      ...(modelText && agent
-        ? { variant: resolveTuiVariantForModel(agent, modelText) }
-        : resolved.variant
-          ? { variant: resolved.variant }
-          : {}),
+      ...(internalOverride.variant
+        ? { variant: internalOverride.variant }
+        : modelText && agent
+          ? { variant: resolveTuiVariantForModel(agent, modelText) }
+          : resolved.variant
+            ? { variant: resolved.variant }
+            : {}),
       provenance: 'observed-external' as const,
     };
   };
@@ -2325,16 +2336,19 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       // host therefore constructs (and persists) this synthetic message on
       // the agent's static primary before exposing chat.message, even when
       // the parent is already running on a fallback. Rewrite the message to
-      // the last externally selected model so this continuation executes on
-      // the live fallback. Remember that the host-side selection is stale so
-      // later Slim lifecycle continuations also prefer external metadata.
+      // the policy-selected model: either retry the last external selection
+      // or retain the confirmed fallback. Remember the exact selection so
+      // later Slim lifecycle continuations use the same policy decision.
       const unpinnedV1InternalContinuation =
         hostFlavor !== 'v2' && internalAdmission && input.model === undefined;
       const trackedAgent = unpinnedV1InternalContinuation
         ? sessionMetadata.getAgent(input.sessionID)
         : undefined;
       const trackedModelText = unpinnedV1InternalContinuation
-        ? sessionMetadata.getModel(input.sessionID)
+        ? runtime.fallback.continuationPolicy === 'stick-to-fallback'
+          ? (foregroundFallback.getActiveFallbackModel(input.sessionID) ??
+            sessionMetadata.getModel(input.sessionID))
+          : sessionMetadata.getModel(input.sessionID)
         : undefined;
       const trackedModel = modelFromMetadataString(trackedModelText);
       let rewroteInternalSelection = false;
@@ -2359,11 +2373,19 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         }
       }
       if (rewroteInternalSelection) {
-        v1InternalSelectionOverrides.add(input.sessionID);
-        log('[fallback] kept v1 internal continuation on live selection', {
+        v1InternalSelectionOverrides.set(input.sessionID, {
+          ...(trackedAgent ? { agent: trackedAgent } : {}),
+          ...(trackedModel ? { model: trackedModel } : {}),
+          ...(trackedModelText ? { modelText: trackedModelText } : {}),
+          ...(output?.message?.model?.variant
+            ? { variant: output.message.model.variant }
+            : {}),
+        });
+        log('[fallback] applied v1 internal continuation model policy', {
           sessionID: input.sessionID,
           agent: trackedAgent,
           model: trackedModelText,
+          policy: runtime.fallback.continuationPolicy,
         });
       } else if (!internalAdmission) {
         v1InternalSelectionOverrides.delete(input.sessionID);

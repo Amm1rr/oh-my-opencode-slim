@@ -18,6 +18,9 @@ Runtime model fallback system for foreground (interactive) agent sessions. When 
   - `activeFallbackModel`: Maps sessionID → the model selected by a
     confirmed fallback for the current external turn. Synthetic admissions
     cannot overwrite it; a genuine new external turn clears it.
+    OpenCode v1 internal continuation and lifecycle selection consults
+    `fallback.continuationPolicy`: retry the primary by default or retain this
+    confirmed fallback until that external turn boundary.
   - `sessionAgent`: Maps sessionID → agent name
   - `sessionTried`: Maps sessionID → Set of models already attempted
   - `sessionRetries`: Maps sessionID → absorbed host retry count for the entire descent (not per model)

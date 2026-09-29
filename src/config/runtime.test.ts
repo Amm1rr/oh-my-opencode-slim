@@ -163,6 +163,7 @@ describe('RuntimeConfig', () => {
       maxRetries: 3,
       initialRetryDelayMs: 0,
       retryDelayMs: 500,
+      continuationPolicy: 'retry-primary',
     });
     expect(runtime.webfetch.enabled).toBe(true);
     expect(runtime.acpAgents).toEqual({});

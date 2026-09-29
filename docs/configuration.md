@@ -221,6 +221,7 @@ an MCP tool remains authoritative.
 | `fallback.maxRetries` | number | `3` | Number of host retry events Slim absorbs before advancing the foreground model chain. The budget stays spent across model switches; a completed successful assistant response, an observed return to the configured primary for a fresh descent, or session deletion re-arms it. Terminal `session.error` and `message.updated` failures advance immediately without charging it. `0` advances on the first retry event. This does not configure OpenCode provider or background subagent retries. |
 | `fallback.initialRetryDelayMs` | number | `0` | Delay in milliseconds before triggering the first fallback on a failover-worthy error. Gives intercepting plugins time to recover the current model before the fallback chain advances. 0 disables. |
 | `fallback.retryDelayMs` | number | `500` | Delay in milliseconds between consecutive fallback attempts after the initial trigger. 0 disables. |
+| `fallback.continuationPolicy` | `"retry-primary"` \| `"stick-to-fallback"` | `"retry-primary"` | OpenCode v1 policy for unpinned internal continuations after a confirmed fallback. `"retry-primary"` lets background-completion and lifecycle turns try the configured primary again; `"stick-to-fallback"` keeps them on the confirmed fallback until the next external user turn. |
 | `council.presets` | object | - | **Required if using council.** Named councillor presets See [Council configuration note](#council-configuration-note). |
 | `council.presets.<name>.<councillor>.model` | string | - | Councillor model See [Council configuration note](#council-configuration-note). |
 | `council.presets.<name>.<councillor>.variant` | string | - | Councillor variant See [Council configuration note](#council-configuration-note). |
@@ -597,9 +598,13 @@ first entry on the working parent provider, then the first entry outside the
 providers exhausted by the parent. OpenCode v2 uses the native per-call
 subagent model override; OpenCode v1 uses hidden internal agent routes because
 its `task` tool has no model argument. The child session still records the
-canonical specialist name in both cases. On v1, native background-completion
-turns also retain the parent's live fallback instead of silently returning the
-parent to its configured primary while collecting the child result.
+canonical specialist name in both cases. On v1,
+`fallback.continuationPolicy` controls what happens when an unpinned native
+background-completion or lifecycle turn follows a confirmed fallback. The
+default, `"retry-primary"`, lets the host try the configured primary again,
+which is useful after a quota or provider outage is repaired. Set it to
+`"stick-to-fallback"` to keep those internal continuations on the confirmed
+fallback until the next external user turn.
 
 Model selection follows these rules:
 
