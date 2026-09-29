@@ -23,7 +23,13 @@ import {
 import {
   createTuiPaneWiring,
   initClientLogging,
+  type TuiPaneWiring,
 } from './multiplexer/client/tui-wiring';
+import {
+  buildV2PaneWiringOptions,
+  describeV2HostMode,
+  detectV2HostMode,
+} from './multiplexer/client/v2-host';
 import {
   KILL_ALL_KEYBIND,
   killAllRunningSubagents,
@@ -84,11 +90,12 @@ const v2HostUnsupportedGate = createOnceGate();
  */
 function warnV2HostUnsupportedMultiplexer(
   configuredType: MultiplexerType,
+  detail: { mode: string; reason?: string },
 ): void {
   if (configuredType === 'none') return;
   if (!v2HostUnsupportedGate('v2-host-unsupported')) return;
   initClientLogging();
-  logHostUnsupported(PLUGIN_LOG_SINK, configuredType);
+  logHostUnsupported(PLUGIN_LOG_SINK, configuredType, detail);
 }
 
 type Child =
@@ -1571,6 +1578,9 @@ interface V2TuiSlotClaim {
 interface V2TuiContext extends V2PresetManagerContext {
   location?: { directory: string };
   client?: unknown;
+  data?: V2PresetManagerContext['data'] & {
+    on?: (type: string, handler: (event: unknown) => void) => unknown;
+  };
   renderer: { requestRender: () => void; getSelection?: () => unknown };
   theme: V2TuiThemeTokens;
   ui: V2PresetUiSurface & {
@@ -1789,8 +1799,102 @@ async function setup(ctx: V2TuiContext): Promise<undefined | (() => void)> {
       notifyConfigChanged(directory, 'preset-manager');
     return augmented;
   };
+  // Tracks the runtime's effective `multiplexer.type` (onMultiplexerConfig).
+  let multiplexerType: MultiplexerType = 'none';
+  // Client-side pane lifecycle: the v2 host adapter classifies this process's
+  // access mode (shared service / explicit server / standalone) and supplies
+  // the lifecycle seams. Standalone and malformed modes cannot host panes —
+  // their private server has no joinable address — so they get the
+  // once-per-process diagnostic (pointing at the native-surface fallback)
+  // instead of a wiring. The mode is constant per process, which keeps the
+  // diagnostic well-defined across directory changes.
+  const v2HostMode = detectV2HostMode(process.argv);
+  let hostFailureDetail: { mode: string; reason?: string } | null =
+    v2HostMode.mode === 'standalone' || v2HostMode.mode === 'invalid'
+      ? describeV2HostMode(v2HostMode)
+      : null;
+  let paneWiring: TuiPaneWiring | null = null;
+  let paneWiringSetting: string | null = null;
+  // Set by the setup teardown. A config-triggered rebuild can be waiting on
+  // the host or the reachability probe when the TUI closes; this flag makes
+  // such a rebuild self-dispose instead of going live after teardown.
+  let paneWiringClosed = false;
+  const disposePaneWiring = async (): Promise<void> => {
+    const stale = paneWiring;
+    if (stale === null) return;
+    paneWiring = null;
+    paneWiringSetting = null;
+    await stale.dispose().catch(() => {
+      // Best-effort teardown; pane leftovers fall to the FR-8 sweep.
+    });
+  };
+  const createPaneWiring = async (): Promise<void> => {
+    try {
+      const paneHost = await buildV2PaneWiringOptions({
+        location: ctx.location,
+        client: ctx.client,
+        data: ctx.data,
+        ui: ctx.ui,
+        env: process.env,
+        argv: process.argv,
+      });
+      if (paneHost.options !== null) {
+        const wiring = await createTuiPaneWiring({
+          ...paneHost.options,
+          client: ctx.client,
+        });
+        if (paneWiringClosed) {
+          await wiring.dispose().catch(() => {
+            // Best-effort teardown; pane leftovers fall to the FR-8 sweep.
+          });
+          return;
+        }
+        paneWiring = wiring;
+        paneWiringSetting = multiplexerType;
+      } else {
+        hostFailureDetail = describeV2HostMode(paneHost.mode);
+      }
+    } catch (error) {
+      log('[pane-lifecycle] v2 wiring failed', {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
+  /**
+   * v2 hosts hot-reload config, so the pane wiring must follow the effective
+   * `multiplexer.type` (FR-9) for the whole process lifetime: disabling
+   * disposes the wiring, enabling or switching adapters rebuilds it, and an
+   * unchanged setting keeps it (its directory accessor follows the route).
+   * Rebuilds are serialized; every run re-reads the latest state.
+   */
+  let paneWiringSync: Promise<void> = Promise.resolve();
+  const reconcilePaneWiring = (): Promise<void> => {
+    paneWiringSync = paneWiringSync
+      .then(async () => {
+        if (paneWiringClosed) return;
+        if (hostFailureDetail !== null || multiplexerType === 'none') {
+          await disposePaneWiring();
+          return;
+        }
+        if (paneWiring !== null && paneWiringSetting === multiplexerType)
+          return;
+        await disposePaneWiring();
+        await createPaneWiring();
+      })
+      .catch((error) => {
+        log('[pane-lifecycle] v2 wiring reconcile failed', {
+          message: error instanceof Error ? error.message : String(error),
+        });
+      });
+    return paneWiringSync;
+  };
+  const warnPaneUnsupported = () => {
+    if (hostFailureDetail === null) return;
+    warnV2HostUnsupportedMultiplexer(multiplexerType, hostFailureDetail);
+  };
+  const version = (await readPackageVersion()) ?? 'dev';
   const runtime = createSidebarRuntime({
-    version: (await readPackageVersion()) ?? 'dev',
+    version,
     getDirectory: () => ctx.location?.directory ?? process.cwd(),
     getVisibleSession: () => resolveRouteSessionId(ctx.ui.router.current()),
     client: ctx.client,
@@ -1801,7 +1905,11 @@ async function setup(ctx: V2TuiContext): Promise<undefined | (() => void)> {
       ctx.ui.slot({ append: 'sidebar.content', render }),
     subscribeConfigChanges: (directory, listener) =>
       registerConfigChangeListener(directory, listener),
-    onMultiplexerConfig: warnV2HostUnsupportedMultiplexer,
+    onMultiplexerConfig: (type) => {
+      multiplexerType = type;
+      warnPaneUnsupported();
+      void reconcilePaneWiring();
+    },
     getPresetRow: (directory, presetName) => {
       if (presetName === undefined) return undefined;
       if (!canOpenPresetManagerV2(ctx)) return { name: presetName };
@@ -1813,7 +1921,23 @@ async function setup(ctx: V2TuiContext): Promise<undefined | (() => void)> {
       };
     },
   });
-  return runtime.dispose;
+  // The runtime reports the initial setting synchronously; let the first
+  // wiring settle before setup returns.
+  await paneWiringSync;
+
+  return () => {
+    paneWiringClosed = true;
+    runtime.dispose();
+    // Release what is live now (the wiring's unsubscribe loop runs
+    // synchronously), then settle any in-flight rebuild: it self-disposes
+    // when it sees `paneWiringClosed`, so a wiring created during the
+    // teardown window cannot outlive the TUI.
+    void disposePaneWiring();
+    void (async () => {
+      await paneWiringSync;
+      await disposePaneWiring();
+    })();
+  };
 }
 
 /**

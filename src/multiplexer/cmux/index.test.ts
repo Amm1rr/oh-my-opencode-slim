@@ -187,6 +187,125 @@ describe('CmuxMultiplexer', () => {
     expect(calls[5]).toEqual(cmux(['terminal', 'term_child', 'close']));
   });
 
+  test('bridges the v2 remote secret from the parent environ, never the command', async () => {
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, 'platform', {
+      value: 'linux',
+      configurable: true,
+    });
+    try {
+      const { runner, calls } = recorder();
+      const instance = mux({ runner });
+      const runScript = (): string =>
+        calls.find((argv) => argv.includes('run'))?.at(-1) ?? '';
+
+      expect(
+        await instance.spawnPane(
+          CHILD_ID,
+          DESCRIPTION,
+          'http://127.0.0.1:7777',
+          '/repo',
+          { viewerFlavor: 'v2-remote', viewerPassword: 'pw-9-secret' },
+        ),
+      ).toEqual({ success: true, paneId: 'term_child' });
+
+      const remote = runScript();
+      expect(remote).toContain('--server');
+      expect(remote).not.toContain('attach');
+      // The secret is read from the parent process's /proc environ by the
+      // launch script: no literal value appears in the argv.
+      expect(remote).not.toContain('pw-9-secret');
+      expect(remote).toContain(`/proc/${process.pid}/environ`);
+      expect(remote).toContain('s/^OPENCODE_PASSWORD=//p');
+      expect(remote).toContain('s/^OPENCODE_SERVER_PASSWORD=//p');
+
+      // The FR-8 marker stays the first script line; the extraction runs
+      // between the marker and the viewer command.
+      const markerIndex = remote.indexOf(MARKER.trimEnd());
+      const procIndex = remote.indexOf('/proc/');
+      const commandIndex = remote.indexOf('opencode');
+      expect(markerIndex).toBeGreaterThan(-1);
+      expect(procIndex).toBeGreaterThan(markerIndex);
+      expect(commandIndex).toBeGreaterThan(procIndex);
+
+      calls.length = 0;
+      expect(
+        await instance.spawnPane(
+          CHILD_ID,
+          DESCRIPTION,
+          'http://127.0.0.1:7777',
+          '/repo',
+          { viewerFlavor: 'v2-shared' },
+        ),
+      ).toEqual({ success: true, paneId: 'term_child' });
+
+      const shared = runScript();
+      expect(shared).toContain('--session');
+      expect(shared).not.toContain('--server');
+      expect(shared).not.toContain('attach');
+      // No /proc bridge outside v2-remote.
+      expect(shared).not.toContain('/proc/');
+    } finally {
+      Object.defineProperty(process, 'platform', {
+        value: originalPlatform,
+        configurable: true,
+      });
+    }
+  });
+
+  test('fails closed with one diagnostic when the shell cannot run the /proc bridge', async () => {
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, 'platform', {
+      value: 'linux',
+      configurable: true,
+    });
+    process.env.SHELL = '/usr/bin/fish';
+    try {
+      const { runner, calls } = recorder();
+      const instance = mux({ runner });
+
+      const first = await instance.spawnPane(
+        CHILD_ID,
+        DESCRIPTION,
+        'http://127.0.0.1:7777',
+        '/repo',
+        { viewerFlavor: 'v2-remote', viewerPassword: 'pw' },
+      );
+      const second = await instance.spawnPane(
+        CHILD_ID,
+        DESCRIPTION,
+        'http://127.0.0.1:7777',
+        '/repo',
+        { viewerFlavor: 'v2-remote', viewerPassword: 'pw' },
+      );
+
+      expect(first).toEqual({ success: false, error: 'unavailable' });
+      expect(second).toEqual({ success: false, error: 'unavailable' });
+      // Fail closed: no `pane run` is issued.
+      expect(calls.some((argv) => argv.includes('run'))).toBe(false);
+
+      // Exactly one structured diagnostic per process, carrying the reason.
+      const diagnostics = logMock.mock.calls.filter((call: unknown[]) =>
+        JSON.stringify(call).includes('password-bridge-requires-posix-shell'),
+      );
+      expect(diagnostics).toHaveLength(1);
+      expect(diagnostics[0]?.[0]).toBe(
+        '[cmux-tui] spawnPane: viewer password bridge unavailable',
+      );
+      expect(diagnostics[0]?.[1]).toEqual({
+        stage: 'viewer-secret',
+        reason: 'password-bridge-requires-posix-shell',
+        shell: '/usr/bin/fish',
+        platform: 'linux',
+      });
+    } finally {
+      Object.defineProperty(process, 'platform', {
+        value: originalPlatform,
+        configurable: true,
+      });
+    }
+  });
+
   test('keeps the child view when the focus restore fails (diagnostic only)', async () => {
     const { runner, calls } = recorder((argv) => {
       if (argv.includes('focus')) {

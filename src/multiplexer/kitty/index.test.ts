@@ -193,6 +193,55 @@ describe('KittyMultiplexer', () => {
     }
   });
 
+  test('launch carries the v2 remote secret in --env, not the shell command', async () => {
+    const { KittyMultiplexer } = await importFreshKitty();
+    const kitty = new KittyMultiplexer();
+
+    await kitty.spawnPane(
+      'session-1',
+      'Remote worker',
+      'http://localhost:4096',
+      '/repo',
+      { viewerFlavor: 'v2-remote', viewerPassword: 'pw' },
+    );
+
+    const remoteLaunch = commandContaining('launch');
+    // The shell command is the last launch argv element.
+    const remote = remoteLaunch?.at(-1) ?? '';
+    expect(remote).toContain('--server');
+    expect(remote).not.toContain('attach');
+    expect(remote).not.toContain('pw');
+
+    // The secret travels as a spawn-time launch environment entry (`--env`,
+    // before the `--` argv separator), never in the shell command.
+    const envIndex = remoteLaunch?.indexOf('--env') ?? -1;
+    expect(envIndex).toBeGreaterThan(-1);
+    expect(remoteLaunch?.[envIndex + 1]).toBe('OPENCODE_PASSWORD=pw');
+    expect(envIndex).toBeLessThan(remoteLaunch?.indexOf('--') ?? -1);
+    expect((remoteLaunch ?? []).filter((arg) => arg.includes('pw'))).toEqual([
+      'OPENCODE_PASSWORD=pw',
+    ]);
+
+    crossSpawnMock.mockClear();
+    await kitty.spawnPane(
+      'session-2',
+      'Shared worker',
+      'http://localhost:4096',
+      '/repo',
+      { viewerFlavor: 'v2-shared' },
+    );
+
+    // No password environment is injected outside v2-remote.
+    const sharedLaunch = commandContaining('launch');
+    expect(sharedLaunch).not.toContain('--env');
+    expect(sharedLaunch).not.toContain('OPENCODE_PASSWORD');
+
+    const shared = sharedLaunch?.at(-1) ?? '';
+    expect(shared).toContain('--session');
+    expect(shared).not.toContain('--server');
+    expect(shared).not.toContain('attach');
+  });
+
   test('spawnPane parses integer window id from launch stdout', async () => {
     const { KittyMultiplexer } = await importFreshKitty();
     const kitty = new KittyMultiplexer();

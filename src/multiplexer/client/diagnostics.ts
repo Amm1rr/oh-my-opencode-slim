@@ -61,22 +61,29 @@ export function logPaneCreated(
 }
 
 /**
- * Records the v2-host diagnostic: pane creation is wired only in the v1 TUI
- * entry (NFR-6), so a multiplexer configured on a v2 host is ignored. Logs
- * nothing when no multiplexer is configured; the caller owns the
- * once-per-process gate, like every other diagnostic here.
+ * Records the v2-host diagnostic: this host cannot serve panes (a standalone
+ * private server no second client can join, or a malformed launch mode), so a
+ * configured `multiplexer.type` is ignored. The message points at the
+ * fallback surfaces: the host's native subagent picker, or `/subagent` to
+ * open a child session in a host tab. Logs nothing when no multiplexer is
+ * configured; the caller owns the once-per-process gate, like every other
+ * diagnostic here.
  */
 export function logHostUnsupported(
   logger: DiagnosticLogger,
   configuredType: MultiplexerType,
+  detail: { mode: string; reason?: string } = { mode: 'unknown' },
 ): boolean {
   if (configuredType === 'none') return false;
   logger.log(
-    "[multiplexer] unavailable on v2 hosts (by design): configured multiplexer.type is ignored; panes are a v1-TUI feature and v2's native subagent UX replaces them",
+    `[multiplexer] no pane: host-unsupported (v2 ${detail.mode} host): configured multiplexer.type is ignored; use the host's native subagent picker, or /subagent to open a child session in a tab`,
     {
       event: DIAGNOSTIC_EVENT_HOST_UNSUPPORTED,
+      reason: 'host-unsupported',
       host: 'v2',
       configuredType,
+      mode: detail.mode,
+      ...(detail.reason === undefined ? {} : { modeReason: detail.reason }),
     },
   );
   return true;

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, mock, test } from 'bun:test';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 
 type SpawnResult = {
   exited: Promise<number>;
@@ -273,5 +274,238 @@ describe('findBinaryLogPrefix', () => {
     // The legacy `cmux` fallback must log under `[cmux-tui]`, never `[cmux]`.
     expect(findBinaryLogPrefix('cmux-tui', 'cmux-tui')).toBe('[cmux-tui]');
     expect(findBinaryLogPrefix('cmux', 'cmux-tui')).toBe('[cmux-tui]');
+  });
+});
+
+describe('buildViewCommand', () => {
+  test('v1 flavor is byte-identical to the legacy attach command', async () => {
+    const { buildOpencodeAttachCommand, buildViewCommand } =
+      await importShared();
+    const legacy = buildOpencodeAttachCommand('sess', 'http://x', '/repo');
+    expect(buildViewCommand('v1', 'sess', 'http://x', '/repo')).toBe(legacy);
+  });
+
+  test('v2-shared omits URL and secret (the viewer discovers the service)', async () => {
+    const { buildViewCommand } = await importShared();
+    expect(
+      buildViewCommand('v2-shared', 'ses_abc', 'http://unused', '/repo'),
+    ).toBe("opencode --session 'ses_abc' '/repo'");
+  });
+
+  test('v2-remote carries server URL, session and directory — never the secret', async () => {
+    const { buildViewCommand } = await importShared();
+    expect(
+      buildViewCommand(
+        'v2-remote',
+        'ses_abc',
+        'http://192.168.5.212:8192',
+        '/repo',
+      ),
+    ).toBe(
+      "opencode --server 'http://192.168.5.212:8192' --session 'ses_abc' '/repo'",
+    );
+  });
+
+  test('v2-remote ignores a stray password option (no secret in command text)', async () => {
+    const { buildViewCommand } = await importShared();
+    // Regression guard: the old interface accepted a password and embedded
+    // it as `env OPENCODE_PASSWORD=…`. Any leftover caller must not leak.
+    const options = { password: 'pw-123' } as unknown as Parameters<
+      typeof buildViewCommand
+    >[4];
+    const cmd = buildViewCommand(
+      'v2-remote',
+      'ses_abc',
+      'http://x',
+      '/repo',
+      options,
+    );
+    expect(cmd).toBe(
+      "opencode --server 'http://x' --session 'ses_abc' '/repo'",
+    );
+    expect(cmd).not.toContain('pw-123');
+    expect(cmd).not.toContain('OPENCODE_PASSWORD');
+  });
+
+  test('v2 flavors quote directories, session ids and executables', async () => {
+    const { buildViewCommand } = await importShared();
+    expect(
+      buildViewCommand('v2-shared', "s'es s", 'http://x', "/tmp/a b's", {
+        executable: "/opt/King's/opencode",
+      }),
+    ).toBe(
+      "'/opt/King'\\''s/opencode' --session 's'\\''es s' '/tmp/a b'\\''s'",
+    );
+  });
+
+  test('v2-remote normalizes Windows backslash paths', async () => {
+    const original = process.platform;
+    Object.defineProperty(process, 'platform', {
+      value: 'win32',
+      configurable: true,
+    });
+    try {
+      const { buildViewCommand } = await importShared();
+      const cmd = buildViewCommand(
+        'v2-remote',
+        'ses',
+        'http://x',
+        'C:\\Users\\foo\\repo',
+      );
+      expect(cmd).toContain('C:/Users/foo/repo');
+    } finally {
+      Object.defineProperty(process, 'platform', {
+        value: original,
+        configurable: true,
+      });
+    }
+  });
+});
+
+describe('isPosixShell', () => {
+  test('accepts POSIX-family shells by basename', async () => {
+    const { isPosixShell } = await importShared();
+    for (const shell of [
+      '/bin/sh',
+      '/bin/bash',
+      '/usr/bin/zsh',
+      '/usr/bin/dash',
+      '/usr/bin/ksh',
+      'bash',
+    ]) {
+      expect(isPosixShell(shell)).toBe(true);
+    }
+  });
+
+  test('rejects non-POSIX and unknown shells (fail closed)', async () => {
+    const { isPosixShell } = await importShared();
+    for (const shell of [
+      '/usr/bin/fish',
+      '/usr/bin/nu',
+      '/usr/bin/pwsh',
+      '/usr/bin/powershell',
+      'C:\\Windows\\System32\\cmd.exe',
+      '/usr/bin/elvish',
+      '/usr/bin/xonsh',
+      '',
+    ]) {
+      expect(isPosixShell(shell)).toBe(false);
+    }
+  });
+});
+
+describe('withParentEnvPassword', () => {
+  test('reads OPENCODE_PASSWORD first and falls back to OPENCODE_SERVER_PASSWORD', async () => {
+    const { withParentEnvPassword } = await importShared();
+    const script = withParentEnvPassword('opencode --server u');
+
+    expect(script).toContain(`/proc/${process.pid}/environ`);
+    expect(script).toContain('s/^OPENCODE_PASSWORD=//p');
+    expect(script).toContain('s/^OPENCODE_SERVER_PASSWORD=//p');
+    // Precedence: the primary probe runs before the fallback probe.
+    const primary = script.indexOf('OPENCODE_PASSWORD=');
+    const fallback = script.indexOf('OPENCODE_SERVER_PASSWORD=');
+    expect(primary).toBeGreaterThan(-1);
+    expect(fallback).toBeGreaterThan(primary);
+    expect(script).toContain('export OPENCODE_PASSWORD');
+    expect(script).toContain('unset _omo_pw');
+    // The wrapper takes no secret argument, so no secret can be embedded,
+    // and the original command is the last line.
+    expect(script).not.toContain('pw-');
+    expect(script.endsWith('\nopencode --server u')).toBe(true);
+  });
+
+  test('exports the primary value read from the parent environ', async () => {
+    await expectExtractedPassword(
+      'PATH=/usr/bin\0OPENCODE_PASSWORD=from-primary\0OPENCODE_SERVER_PASSWORD=from-fallback\0',
+      'from-primary',
+    );
+  });
+
+  test('falls back to OPENCODE_SERVER_PASSWORD when the primary is absent', async () => {
+    await expectExtractedPassword(
+      'PATH=/usr/bin\0OPENCODE_SERVER_PASSWORD=from-fallback\0',
+      'from-fallback',
+    );
+  });
+
+  test('runs the command with an empty value when neither is present', async () => {
+    await expectExtractedPassword('PATH=/usr/bin\0', '');
+  });
+
+  test('runs the wrapped command in a POSIX shell', async () => {
+    const { withParentEnvPassword } = await importShared();
+    const script = withParentEnvPassword('printf ok');
+    const proc = Bun.spawn(['/bin/sh', '-c', script], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    expect(await proc.exited).toBe(0);
+    expect(await new Response(proc.stdout).text()).toBe('ok');
+  });
+});
+
+/**
+ * Executes the generated wrapper against a fake `/proc/<pid>/environ` file
+ * (only the path is substituted) and returns the value the wrapped command
+ * observes as `OPENCODE_PASSWORD`.
+ */
+async function expectExtractedPassword(
+  environContents: string,
+  expected: string,
+): Promise<void> {
+  const { withParentEnvPassword } = await importShared();
+  const dir = `/tmp/opencode/omo-shared-test-${process.pid}`;
+  mkdirSync(dir, { recursive: true });
+  const environPath = `${dir}/environ`;
+  writeFileSync(environPath, environContents);
+  try {
+    const script = withParentEnvPassword(
+      'printf %s "$OPENCODE_PASSWORD"',
+    ).replaceAll(`/proc/${process.pid}/environ`, environPath);
+    const proc = Bun.spawn(['/bin/sh', '-c', script], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    expect(await proc.exited).toBe(0);
+    expect(await new Response(proc.stdout).text()).toBe(expected);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+describe('redactViewerSecretArgs', () => {
+  test('masks viewer-secret env entries in spawn argv', async () => {
+    const { redactViewerSecretArgs } = await importShared();
+    expect(
+      redactViewerSecretArgs([
+        '-e',
+        'OPENCODE_PASSWORD=hunter2',
+        '--env',
+        'OPENCODE_SERVER_PASSWORD=hunter3',
+      ]),
+    ).toEqual([
+      '-e',
+      'OPENCODE_PASSWORD=<redacted>',
+      '--env',
+      'OPENCODE_SERVER_PASSWORD=<redacted>',
+    ]);
+  });
+
+  test('leaves unrelated entries and viewer commands untouched', async () => {
+    const { redactViewerSecretArgs } = await importShared();
+    expect(
+      redactViewerSecretArgs([
+        'env',
+        'OPENCODE_DISABLE_TERMINAL_TITLE=1',
+        'opencode --server http://127.0.0.1:1 --session ses_x /tmp/a b',
+        'OPENCODE_PASSWORDX=keep',
+      ]),
+    ).toEqual([
+      'env',
+      'OPENCODE_DISABLE_TERMINAL_TITLE=1',
+      'opencode --server http://127.0.0.1:1 --session ses_x /tmp/a b',
+      'OPENCODE_PASSWORDX=keep',
+    ]);
   });
 });

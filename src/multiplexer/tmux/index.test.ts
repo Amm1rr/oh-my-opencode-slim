@@ -147,6 +147,52 @@ describe('TmuxMultiplexer', () => {
     );
   });
 
+  test('spawnPane builds the viewer command for the requested v2 flavor', async () => {
+    const { TmuxMultiplexer } = await importFreshTmux();
+    const tmux = new TmuxMultiplexer('main-vertical', 60);
+
+    await tmux.spawnPane(
+      'session-1',
+      'Remote worker',
+      'http://localhost:4096',
+      '/repo',
+      { viewerFlavor: 'v2-remote', viewerPassword: 'pw' },
+    );
+
+    const remoteSplit = commandContaining('split-window');
+    const remote = remoteSplit?.at(-1) ?? '';
+    expect(remote).toContain('--server');
+    expect(remote).not.toContain('attach');
+
+    // The secret travels as a spawn-time tmux environment entry (`-e`),
+    // never in the shell command text.
+    const envIndex = remoteSplit?.indexOf('-e') ?? -1;
+    expect(envIndex).toBeGreaterThan(-1);
+    expect(remoteSplit?.[envIndex + 1]).toBe('OPENCODE_PASSWORD=pw');
+    expect(remote).not.toContain('pw');
+    expect((remoteSplit ?? []).filter((arg) => arg.includes('pw'))).toEqual([
+      'OPENCODE_PASSWORD=pw',
+    ]);
+
+    crossSpawnMock.mockClear();
+    await tmux.spawnPane(
+      'session-2',
+      'Shared worker',
+      'http://localhost:4096',
+      '/repo',
+      { viewerFlavor: 'v2-shared' },
+    );
+
+    const sharedSplit = commandContaining('split-window');
+    const shared = sharedSplit?.at(-1) ?? '';
+    expect(shared).toContain('--session');
+    expect(shared).not.toContain('--server');
+    expect(shared).not.toContain('attach');
+    // No password environment is injected outside v2-remote.
+    expect(sharedSplit).not.toContain('-e');
+    expect(sharedSplit).not.toContain('OPENCODE_PASSWORD');
+  });
+
   test('spawnPane re-resolves the anchor from the environment at spawn time', async () => {
     const { TmuxMultiplexer } = await importFreshTmux();
     // Construction-time TMUX_PANE is %1; the spawn-time value must win.

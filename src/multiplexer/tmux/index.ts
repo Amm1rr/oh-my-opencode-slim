@@ -15,9 +15,10 @@ import type { MultiplexerLayout } from '../../config/schema';
 import { crossSpawn } from '../../utils/compat';
 import { log } from '../../utils/logger';
 import {
-  buildOpencodeAttachCommand,
+  buildViewCommand,
   findBinary,
   gracefulClosePane,
+  redactViewerSecretArgs,
 } from '../shared';
 import type { Multiplexer, PaneResult, PaneSpawnOptions } from '../types';
 
@@ -58,7 +59,7 @@ export class TmuxMultiplexer implements Multiplexer {
     description: string,
     serverUrl: string,
     directory: string,
-    _options?: PaneSpawnOptions,
+    options?: PaneSpawnOptions,
   ): Promise<PaneResult> {
     // Multi-instance hardening: resolve the server socket and the anchor from
     // this client's own environment at spawn time. When either is missing the
@@ -81,11 +82,21 @@ export class TmuxMultiplexer implements Multiplexer {
     }
 
     try {
-      const opencodeCmd = `env OPENCODE_DISABLE_TERMINAL_TITLE=1 ${buildOpencodeAttachCommand(
+      const opencodeCmd = `env OPENCODE_DISABLE_TERMINAL_TITLE=1 ${buildViewCommand(
+        options?.viewerFlavor ?? 'v1',
         sessionId,
         serverUrl,
         directory,
       )}`;
+
+      // v2 remote hosts: the viewer must authenticate with
+      // OPENCODE_PASSWORD. Inject it as a spawn-time tmux environment entry
+      // (`-e`), never through the shell command text.
+      const viewerSecretArgs =
+        options?.viewerFlavor === 'v2-remote' &&
+        options.viewerPassword !== undefined
+          ? ['-e', `OPENCODE_PASSWORD=${options.viewerPassword}`]
+          : [];
 
       const result = await this.splitPane(
         tmux,
@@ -93,6 +104,7 @@ export class TmuxMultiplexer implements Multiplexer {
         anchor,
         this.storedLayout,
         opencodeCmd,
+        viewerSecretArgs,
       );
       const paneId = result.stdout.trim();
 
@@ -316,7 +328,7 @@ export class TmuxMultiplexer implements Multiplexer {
     if (exitCode !== 0) {
       log('[tmux] command failed', {
         command: args[0],
-        args: [tmux, '-S', socket, ...args],
+        args: redactViewerSecretArgs([tmux, '-S', socket, ...args]),
         exitCode,
         stderr: stderr.trim(),
       });
@@ -336,6 +348,7 @@ export class TmuxMultiplexer implements Multiplexer {
     targetPane: string,
     layout: MultiplexerLayout,
     opencodeCmd: string,
+    viewerSecretArgs: string[] = [],
   ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
     const args = [
       '-S',
@@ -347,9 +360,13 @@ export class TmuxMultiplexer implements Multiplexer {
       '-F',
       '#{pane_id}',
       ...this.targetArgs(targetPane),
+      ...viewerSecretArgs,
       opencodeCmd,
     ];
-    log('[tmux] spawnPane: executing', { tmux, args });
+    log('[tmux] spawnPane: executing', {
+      tmux,
+      args: redactViewerSecretArgs(args),
+    });
 
     const proc = crossSpawn([tmux, ...args], {
       stdout: 'pipe',

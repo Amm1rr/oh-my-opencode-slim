@@ -9,7 +9,12 @@ type SpawnResult = {
   proc: never;
 };
 
+const logMock = mock(() => {});
 const crossSpawnMock = mock((_command: string[]) => createSpawnResult());
+
+mock.module('../../utils/logger', () => ({
+  log: logMock,
+}));
 
 mock.module('../../utils/compat', () => ({
   crossSpawn: crossSpawnMock,
@@ -98,6 +103,7 @@ describe('ZellijMultiplexer', () => {
     process.env.ZELLIJ_PANE_ID = '0';
     process.env.ZELLIJ_SESSION_NAME = SESSION_NAME;
 
+    logMock.mockClear();
     crossSpawnMock.mockReset();
     mockStandardImpl('0.44.3');
   });
@@ -374,6 +380,111 @@ describe('ZellijMultiplexer', () => {
     expect(allCommands.some((command) => command.includes('focus-pane'))).toBe(
       false,
     );
+  });
+
+  test('new-pane bridges the v2 remote secret from the parent environ, never the command', async () => {
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, 'platform', {
+      value: 'linux',
+      configurable: true,
+    });
+    try {
+      const { ZellijMultiplexer } = await importFreshZellij();
+      const zellij = new ZellijMultiplexer('main-vertical', 60);
+
+      await zellij.spawnPane(
+        'session-1',
+        'Remote worker',
+        'http://localhost:4096',
+        '/repo',
+        { viewerFlavor: 'v2-remote', viewerPassword: 'pw-9-secret' },
+      );
+
+      const remote = newPaneCommands()[0]?.at(-1) ?? '';
+      expect(remote).toContain('--server');
+      expect(remote).not.toContain('attach');
+      // The secret is read from the parent process's /proc environ by the
+      // pane script (`sh -lc`): no literal value appears in the command.
+      expect(remote).not.toContain('pw-9-secret');
+      expect(remote).toContain(`/proc/${process.pid}/environ`);
+      expect(remote).toContain('s/^OPENCODE_PASSWORD=//p');
+      expect(remote).toContain('s/^OPENCODE_SERVER_PASSWORD=//p');
+      expect(remote.indexOf('/proc/')).toBeLessThan(
+        remote.indexOf('opencode --server'),
+      );
+
+      crossSpawnMock.mockClear();
+      await zellij.spawnPane(
+        'session-2',
+        'Shared worker',
+        'http://localhost:4096',
+        '/repo',
+        { viewerFlavor: 'v2-shared' },
+      );
+
+      const shared = newPaneCommands()[0]?.at(-1) ?? '';
+      expect(shared).toContain('--session');
+      expect(shared).not.toContain('--server');
+      expect(shared).not.toContain('attach');
+      // No /proc bridge outside v2-remote.
+      expect(shared).not.toContain('/proc/');
+    } finally {
+      Object.defineProperty(process, 'platform', {
+        value: originalPlatform,
+        configurable: true,
+      });
+    }
+  });
+
+  test('fails closed with one diagnostic when the password bridge cannot run (non-Linux)', async () => {
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, 'platform', {
+      value: 'darwin',
+      configurable: true,
+    });
+    try {
+      const { ZellijMultiplexer } = await importFreshZellij();
+      const zellij = new ZellijMultiplexer('main-vertical', 60);
+
+      const first = await zellij.spawnPane(
+        'session-1',
+        'Remote worker',
+        'http://localhost:4096',
+        '/repo',
+        { viewerFlavor: 'v2-remote', viewerPassword: 'pw' },
+      );
+      const second = await zellij.spawnPane(
+        'session-2',
+        'Remote worker 2',
+        'http://localhost:4096',
+        '/repo',
+        { viewerFlavor: 'v2-remote', viewerPassword: 'pw' },
+      );
+
+      expect(first).toEqual({ success: false, error: 'unavailable' });
+      expect(second).toEqual({ success: false, error: 'unavailable' });
+      // Fail closed: no pane is created.
+      expect(newPaneCommands()).toHaveLength(0);
+
+      // Exactly one structured diagnostic per process, carrying the reason.
+      const diagnostics = logMock.mock.calls.filter((call: unknown[]) =>
+        JSON.stringify(call).includes('password-bridge-requires-linux'),
+      );
+      expect(diagnostics).toHaveLength(1);
+      expect(diagnostics[0]?.[0]).toBe(
+        '[zellij] spawnPane: viewer password bridge unavailable',
+      );
+      expect(diagnostics[0]?.[1]).toEqual({
+        stage: 'viewer-secret',
+        reason: 'password-bridge-requires-linux',
+        platform: 'darwin',
+      });
+    } finally {
+      Object.defineProperty(process, 'platform', {
+        value: originalPlatform,
+        configurable: true,
+      });
+    }
   });
 
   test('reports failure when zellij does not return a terminal pane id', async () => {

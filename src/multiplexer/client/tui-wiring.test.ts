@@ -11,7 +11,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { MultiplexerConfig } from '../../config/schema';
-import type { Multiplexer, PaneResult } from '../types';
+import type { Multiplexer, PaneResult, PaneSpawnOptions } from '../types';
 import {
   createOnceGate,
   DIAGNOSTIC_EVENT_PANE_CREATED,
@@ -39,7 +39,8 @@ import {
   resolveAnchoredTarget,
   type TuiPaneWiring,
 } from './tui-wiring';
-import type { AdapterType } from './types';
+import type { AdapterType, SessionLifecycleEvent } from './types';
+import { subscribeV2SessionEvents } from './v2-host';
 
 const DIRECTORY = '/project';
 const PARENT = 'parent-1';
@@ -146,6 +147,8 @@ class FakeAdapter implements Multiplexer {
     directory: string;
     parentSessionId?: string;
     subagentType?: string;
+    viewerFlavor?: string;
+    viewerPassword?: string;
   }> = [];
   readonly closes: string[] = [];
   /** FR-8 sweep capability: panes this fake multiplexer reports. */
@@ -171,7 +174,7 @@ class FakeAdapter implements Multiplexer {
     description: string,
     serverUrl: string,
     directory: string,
-    options?: { parentSessionId?: string; subagentType?: string },
+    options?: PaneSpawnOptions,
   ): Promise<PaneResult> {
     this.spawns.push({
       sessionId,
@@ -180,6 +183,8 @@ class FakeAdapter implements Multiplexer {
       directory,
       parentSessionId: options?.parentSessionId,
       subagentType: options?.subagentType,
+      viewerFlavor: options?.viewerFlavor,
+      viewerPassword: options?.viewerPassword,
     });
     return this.spawnResult;
   }
@@ -382,6 +387,19 @@ async function createHarness(
     isSessionTerminal?: (childSessionId: string) => Promise<boolean>;
     getDisplayedSessionId?: () => string | null | undefined;
     getDirectory?: () => string;
+    /** v2 seam: an already-projected event feed replaces the v1 bus. */
+    sessionEvents?: (
+      handler: (event: SessionLifecycleEvent) => void,
+    ) => () => void;
+    /** v2 seam: pre-resolved base URL (skips SDK reflection). */
+    baseUrl?: string;
+    /** v2 seam: host reachability probe. */
+    probeHost?: (directory: string) => Promise<boolean>;
+    /** v2 seam: viewer command flavor + password forwarded to adapters. */
+    viewers?: {
+      flavor: 'v1' | 'v2-shared' | 'v2-remote';
+      password?: string;
+    };
   } = {},
 ): Promise<Harness> {
   const state = options.state ?? createClientState();
@@ -413,9 +431,23 @@ async function createHarness(
     directory: DIRECTORY,
     getDisplayedSessionId: options.getDisplayedSessionId ?? (() => PARENT),
     getDirectory: options.getDirectory,
-    eventBus: bus,
+    ...(options.sessionEvents === undefined
+      ? { eventBus: bus }
+      : { sessionEvents: options.sessionEvents }),
     client: options.client ?? fakeHostClient(state),
     env: options.env ?? { TMUX_PANE: '%1' },
+    ...(options.baseUrl === undefined ? {} : { baseUrl: options.baseUrl }),
+    ...(options.probeHost === undefined
+      ? {}
+      : { probeHost: options.probeHost }),
+    ...(options.viewers === undefined
+      ? {}
+      : {
+          viewerFlavor: options.viewers.flavor,
+          ...(options.viewers.password === undefined
+            ? {}
+            : { viewerPassword: options.viewers.password }),
+        }),
     loadConfig:
       options.loadConfig ?? (() => options.config ?? defaultConfig('auto')),
     adapterFactory,
@@ -435,6 +467,148 @@ async function createHarness(
 
   return { wiring, logger, bus, clock, state, adapters, createdTypes };
 }
+
+/**
+ * v2 host seams: the v2 adapter feeds already-projected events and supplies
+ * the authenticated probe/URL. Wiring behavior must match the v1 bus path.
+ *
+ * Idle-edge composition was calibrated against a live 2.0.18 tmux host
+ * (2026-09-29): `execution.*` terminal states + `session.idle` drive the
+ * stable-idle close; see the projector doc in `v2-host.ts` for the evidence
+ * path. Re-check on host updates.
+ */
+function createV2EventFeed(): {
+  data: { on: (type: string, handler: (event: unknown) => void) => () => void };
+  emit: (type: string, payload: unknown) => void;
+  unsubscribed: string[];
+} {
+  const handlers = new Map<string, (event: unknown) => void>();
+  const unsubscribed: string[] = [];
+  return {
+    data: {
+      on: (type, handler) => {
+        handlers.set(type, handler);
+        return () => {
+          unsubscribed.push(type);
+        };
+      },
+    },
+    emit: (type, payload) => {
+      handlers.get(type)?.(payload);
+    },
+    unsubscribed,
+  };
+}
+
+function v2Created(
+  childSessionId = CHILD,
+  directory = DIRECTORY,
+  agent?: string,
+): unknown {
+  return {
+    data: {
+      sessionID: childSessionId,
+      parentID: PARENT,
+      ...(agent === undefined ? {} : { agent }),
+    },
+    location: { directory },
+  };
+}
+
+function v2Execution(sessionId = CHILD): unknown {
+  return { data: { sessionID: sessionId } };
+}
+
+describe('v2 host seams (FR-2/FR-3)', () => {
+  test('v2 created events open panes and directory-less execution events stay attributed', async () => {
+    const feed = createV2EventFeed();
+    const h = await createHarness({
+      baseUrl: SERVER_URL,
+      sessionEvents: (handler) => subscribeV2SessionEvents(feed.data, handler),
+    });
+
+    feed.emit('session.created', v2Created(CHILD, DIRECTORY, 'oracle'));
+    await flush();
+
+    const adapter = h.adapters.get('tmux');
+    expect(adapter?.spawns).toHaveLength(1);
+    expect(adapter?.spawns[0]?.parentSessionId).toBe(PARENT);
+    expect(adapter?.spawns[0]?.subagentType).toBe('oracle');
+
+    // Stable-idle close, then rebuild from a location-less busy edge: the
+    // directory comes from the record made at `session.created`.
+    h.state.statuses[CHILD] = { type: 'idle' };
+    feed.emit('session.execution.succeeded', v2Execution());
+    await flush();
+    h.clock.advance(40);
+    await flush();
+    expect(adapter?.closes).toEqual([PANE_ID]);
+
+    h.state.statuses[CHILD] = { type: 'busy' };
+    feed.emit('session.execution.started', v2Execution());
+    await flush();
+    expect(adapter?.spawns).toHaveLength(2);
+    expect(adapter?.spawns[1]?.subagentType).toBe('oracle');
+
+    await h.wiring.dispose();
+  });
+
+  test('v2 events from another location never create panes', async () => {
+    const feed = createV2EventFeed();
+    const h = await createHarness({
+      baseUrl: SERVER_URL,
+      sessionEvents: (handler) => subscribeV2SessionEvents(feed.data, handler),
+    });
+
+    feed.emit('session.created', v2Created(CHILD, '/elsewhere'));
+    await flush();
+    expect(h.adapters.get('tmux')?.spawns).toEqual([]);
+
+    await h.wiring.dispose();
+  });
+
+  test('an unreachable v2 probe records host-unreachable without spawning', async () => {
+    const feed = createV2EventFeed();
+    const h = await createHarness({
+      baseUrl: SERVER_URL,
+      probeHost: async () => false,
+      sessionEvents: (handler) => subscribeV2SessionEvents(feed.data, handler),
+    });
+
+    feed.emit('session.created', v2Created());
+    await flush();
+    expect(h.adapters.get('tmux')?.spawns).toEqual([]);
+    expect(h.logger.reasons()).toContain('host-unreachable');
+
+    await h.wiring.dispose();
+  });
+
+  test('the wiring hands the viewer flavor and password to the adapter', async () => {
+    const feed = createV2EventFeed();
+    const h = await createHarness({
+      baseUrl: SERVER_URL,
+      sessionEvents: (handler) => subscribeV2SessionEvents(feed.data, handler),
+      viewers: { flavor: 'v2-remote', password: 'pw-1' },
+    });
+
+    feed.emit('session.created', v2Created());
+    await flush();
+    expect(h.adapters.get('tmux')?.spawns[0]?.viewerFlavor).toBe('v2-remote');
+    expect(h.adapters.get('tmux')?.spawns[0]?.viewerPassword).toBe('pw-1');
+
+    await h.wiring.dispose();
+  });
+
+  test('feed disposal releases every v2 subscription', async () => {
+    const feed = createV2EventFeed();
+    const h = await createHarness({
+      baseUrl: SERVER_URL,
+      sessionEvents: (handler) => subscribeV2SessionEvents(feed.data, handler),
+    });
+    await h.wiring.dispose();
+    expect(feed.unsubscribed).toHaveLength(7);
+  });
+});
 
 describe('client adapter detection (FR-9)', () => {
   test('detects each adapter from its client-local signal', () => {

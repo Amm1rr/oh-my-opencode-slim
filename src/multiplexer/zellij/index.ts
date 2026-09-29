@@ -32,12 +32,14 @@
 
 import type { MultiplexerLayout } from '../../config/schema';
 import { crossSpawn } from '../../utils/compat';
+import { log } from '../../utils/logger';
 import {
-  buildOpencodeAttachCommand,
+  buildViewCommand,
   findBinary,
   gracefulClosePane,
+  withParentEnvPassword,
 } from '../shared';
-import type { Multiplexer, PaneResult } from '../types';
+import type { Multiplexer, PaneResult, PaneSpawnOptions } from '../types';
 
 interface ZellijPaneInfo {
   id: number;
@@ -48,6 +50,23 @@ interface ZellijPaneInfo {
 }
 
 type ZellijPaneDirection = 'right' | 'down';
+
+/**
+ * One structured diagnostic per process for the viewer-secret bridge gate:
+ * the gate fails closed on hosts where the password cannot be injected
+ * without exposing it in command text or argv.
+ */
+let viewerSecretGateLogged = false;
+
+function logViewerSecretGateFailure(reason: string): void {
+  if (viewerSecretGateLogged) return;
+  viewerSecretGateLogged = true;
+  log('[zellij] spawnPane: viewer password bridge unavailable', {
+    stage: 'viewer-secret',
+    reason,
+    platform: process.platform,
+  });
+}
 
 export class ZellijMultiplexer implements Multiplexer {
   readonly type = 'zellij' as const;
@@ -128,6 +147,7 @@ export class ZellijMultiplexer implements Multiplexer {
     description: string,
     serverUrl: string,
     directory: string,
+    options?: PaneSpawnOptions,
   ): Promise<PaneResult> {
     // Fail closed without issuing any zellij command when the client
     // environment cannot resolve the anchor: the session to address or the
@@ -146,6 +166,7 @@ export class ZellijMultiplexer implements Multiplexer {
         serverUrl,
         directory,
         description,
+        options,
       );
     } catch {
       return { success: false, error: 'hard' };
@@ -158,12 +179,30 @@ export class ZellijMultiplexer implements Multiplexer {
     serverUrl: string,
     directory: string,
     description: string,
+    options?: PaneSpawnOptions,
   ): Promise<PaneResult> {
-    const opencodeCmd = buildOpencodeAttachCommand(
+    // v2 remote hosts: the viewer must authenticate with
+    // OPENCODE_PASSWORD. Zellij's `new-pane` has no env flag, so the pane
+    // script reads the secret from this process's own /proc environ
+    // (`withParentEnvPassword`). That bridge is Linux-only: anywhere else no
+    // pane is created rather than exposing the secret.
+    const needsSecretBridge =
+      options?.viewerFlavor === 'v2-remote' &&
+      options.viewerPassword !== undefined;
+    if (needsSecretBridge && process.platform !== 'linux') {
+      logViewerSecretGateFailure('password-bridge-requires-linux');
+      return { success: false, error: 'unavailable' };
+    }
+
+    const viewerCommand = buildViewCommand(
+      options?.viewerFlavor ?? 'v1',
       sessionId,
       serverUrl,
       directory,
     );
+    const opencodeCmd = needsSecretBridge
+      ? withParentEnvPassword(viewerCommand)
+      : viewerCommand;
     // The name doubles as the pane title; the description is the FR-8
     // metadata (owner pid + child session id) and must survive intact.
     const paneName = description.replace(/"/g, '\\"');
