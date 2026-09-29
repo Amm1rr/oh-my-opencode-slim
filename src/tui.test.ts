@@ -2170,6 +2170,15 @@ describe('clickable sidebar sessions', () => {
       expect(lines[stoppedRow]).toContain('⚰ ora-2');
       expect(lines[oracleRow]).toContain('✦');
       expect(lines[oracleRow]).not.toContain('⚰');
+      const spans = setup.captureSpans().lines;
+      const glyphColor = (row: number, glyph: string) =>
+        spans[row]?.spans
+          .find((span) => span.text.includes(glyph))
+          ?.fg.toInts();
+      expect(glyphColor(completedRow, STATUS_DOT_GLYPH)).toBeDefined();
+      expect(glyphColor(stoppedRow, STATUS_STOPPED_GLYPH)).toEqual(
+        glyphColor(completedRow, STATUS_DOT_GLYPH),
+      );
       await setup.mockMouse.click(
         lines[stoppedRow].indexOf('ora-2'),
         stoppedRow,

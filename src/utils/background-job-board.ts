@@ -1274,14 +1274,14 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     return this.list(parent).filter((j) => isReusable(j, this.maxContextLines));
   }
 
-  /** Finished sessions the sidebar may surface as reusable destinations.
-   *  Independent of parent acknowledgment: a child that has reached a
-   *  canonical terminal state is history even while still unreconciled. */
+  /** Sessions the sidebar may surface as navigation destinations: canonical
+   *  terminal or stopped. Independent of parent acknowledgment: such a child
+   *  is history even while still unreconciled. */
   private listSidebarHistory(parent?: string): BackgroundJobRecord[] {
     return this.list(parent).filter(isSidebarHistory);
   }
 
-  /** Every accessible terminal session, grouped for TUI navigation. */
+  /** Accessible terminal and stopped sessions, grouped for TUI navigation. */
   sidebarHistoryByParentAgent() {
     const byParent = new Map<string, Map<string, ReusableSessionSelection[]>>();
     for (const job of this.listSidebarHistory()) {
