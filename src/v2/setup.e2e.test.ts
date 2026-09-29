@@ -21,8 +21,8 @@
  *   (`OPENCODE_LOG_DIR` fixture + `flushLoggerForTesting`).
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { readdirSync as readDirSync, readFileSync } from 'node:fs';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { existsSync, readdirSync as readDirSync, readFileSync } from 'node:fs';
+import { chmod, mkdir, mkdtemp, rm } from 'node:fs/promises';
 import * as path from 'node:path';
 import type { BundledSkillInfo } from '../cli/custom-skills';
 import { MarketplaceStore } from '../marketplace/store';
@@ -434,6 +434,37 @@ describe('createV2Setup e2e', () => {
 
     await cleanup();
     expect(calls.disposed).toContain('skill.transform');
+  }, 20_000);
+
+  test('retries a throwing legacy skill cleanup but latches after it succeeds', async () => {
+    const legacyDir = path.join(configDir, '.oh-my-opencode-slim');
+    await mkdir(legacyDir, { recursive: true });
+    await Bun.write(
+      path.join(legacyDir, 'skills-manifest.json'),
+      JSON.stringify({ skills: {} }),
+    );
+    // A read-only config dir makes the trailing directory removal throw.
+    await chmod(configDir, 0o555);
+    const { ctx, calls } = makeMockV2Context(projectDir);
+    const cleanup = await createV2Setup()(ctx);
+
+    calls.rebuildSkills();
+    await flushLoggerForTesting();
+    expect(readPluginLog().match(/legacy skill cleanup failed/g)).toHaveLength(
+      1,
+    );
+    expect(existsSync(legacyDir)).toBe(true);
+
+    // The guard must not latch on failure: a later rebuild retries.
+    await chmod(configDir, 0o755);
+    calls.rebuildSkills();
+    await flushLoggerForTesting();
+    expect(existsSync(legacyDir)).toBe(false);
+    expect(readPluginLog().match(/legacy skill cleanup failed/g)).toHaveLength(
+      1,
+    );
+
+    await cleanup();
   }, 20_000);
 
   test('does not migrate legacy skills when the deferred draft lacks add()', async () => {

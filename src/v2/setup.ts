@@ -2389,12 +2389,15 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
                 disabled: disabled.length,
               });
               if (!legacyMigrated) {
-                legacyMigrated = true;
                 try {
                   const legacy = removeLegacySkillSyncState(
                     undefined,
                     disabled,
                   );
+                  // Latch only on success: a throwing cleanup is transient and
+                  // must be retried by a later rebuild. An unreadable manifest
+                  // returns normally, so it still latches and is not retried.
+                  legacyMigrated = true;
                   if (legacy.kept.length > 0 || legacy.backedUp.length > 0) {
                     log(
                       '[v2] legacy skill copies: kept customized (shadow the in-process registration), backed up disabled',
