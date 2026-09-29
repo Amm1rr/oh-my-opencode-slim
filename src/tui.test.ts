@@ -2370,6 +2370,13 @@ describe('clickable sidebar sessions', () => {
   });
 
   test('sidebar frame text and colors remain byte-identical (v2)', async () => {
+    const { version } = (await Bun.file(
+      new URL('../package.json', import.meta.url),
+    ).json()) as { version: string };
+    const versionPattern = new RegExp(
+      ` *v${version.replace(/[.+]/g, '\\$&')} *`,
+      'g',
+    );
     const hashes: Record<string, string> = {};
     for (const compactSidebar of [false, true]) {
       for (const state of ['active', 'retry', 'history', 'idle'] as const) {
@@ -2436,14 +2443,18 @@ describe('clickable sidebar sessions', () => {
               await setup.mockMouse.moveTo(0, 0);
               await setup.renderOnce();
             }
+            // The header right-aligns the package version; mask it and the
+            // padding around it so release bumps don't invalidate the hashes.
             const normalize = (value: string) =>
-              value.replace(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/g, '⠋');
+              value
+                .replace(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/g, '⠋')
+                .replace(versionPattern, ' vX.Y.Z');
             const frame = normalize(setup.captureCharFrame());
             const spans = setup
               .captureSpans()
               .lines.map((line) =>
                 line.spans.map((span) => [
-                  normalize(span.text),
+                  normalize(span.text).trimEnd(),
                   span.fg.toInts(),
                   span.bg.toInts(),
                 ]),
