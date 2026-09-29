@@ -2431,6 +2431,9 @@ describe('clickable sidebar sessions', () => {
                 lines[row].indexOf('oracle') + 1,
                 row,
               );
+              // Keep the final snapshot independent of the transient hover
+              // paint caused by the disclosure click.
+              await setup.mockMouse.moveTo(0, 0);
               await setup.renderOnce();
             }
             const normalize = (value: string) =>
