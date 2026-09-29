@@ -89,7 +89,7 @@ Pane behavior is fixed per host mode:
 | `opencode --mini` | TUI host does not load plugins | — | No pane |
 | v2 host, shared background service (default) | TUI client of the user-level shared service | discovered via the service registration | Supported: viewers run `opencode --session <id> <dir>` and rediscover the same service |
 | v2 host, `--server <url>` | TUI client of an explicit server | `--server` URL | Supported: viewers run `env OPENCODE_PASSWORD=<pw> opencode --server <url> --session <id> <dir>`; the password comes from the parent process environment and is visible in the viewer's command line |
-| v2 host, `--standalone` | private stdio server (no registration, random password, exits with the parent) | ephemeral loopback | **Not supported**: fail-closed + exactly one diagnostic; the fallback is v2's native subagent surfaces (`/subagent` opens the latest child session in a tab) |
+| v2 host, `--standalone` | private stdio server (no registration, random password, exits with the parent) | ephemeral loopback | **Not supported**: fail-closed + exactly one diagnostic; the fallback is v2's native subagent surfaces (`/subagent` opens the latest child session in a tab without moving focus — the tab is a salience and quick-switch affordance, and the displayed session stays the interaction surface) |
 
 On v2 hosts the event source is the TUI's own `data` feed
 (`session.created` / `session.execution.*` / `session.idle` /
@@ -450,7 +450,9 @@ produces one `multiplexer.host-unsupported` record per process; shared and
 - **Embedded hosts and v2 `--standalone` hosts have no pane feature** (see
   [Deployment Modes](#deployment-modes)). On v2 `--standalone`, a configured
   `multiplexer.type` is ignored and one diagnostic per process is logged; use
-  `/subagent` or the host's subagent picker instead.
+  `/subagent` or the host's subagent picker instead. Opening the child tab is
+  deliberately a salience and quick-switch affordance: it does not move focus,
+  because the displayed session stays the interaction surface.
 - **v2 viewers are full clients.** A pane opens a regular `opencode` TUI on
   the child session — there is no read-only mode. Opening a session replaces
   the process environment its shell commands use (the last client to open it

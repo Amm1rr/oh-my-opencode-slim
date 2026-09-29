@@ -1632,7 +1632,17 @@ async function setup(ctx: V2TuiContext): Promise<undefined | (() => void)> {
       ? describeV2HostMode(v2HostMode)
       : null;
   let paneWiring: TuiPaneWiring | null = null;
-  if (multiplexerType !== 'none' && hostFailureDetail === null) {
+  let paneWiringSetting: string | null = null;
+  const disposePaneWiring = async (): Promise<void> => {
+    const stale = paneWiring;
+    if (stale === null) return;
+    paneWiring = null;
+    paneWiringSetting = null;
+    await stale.dispose().catch(() => {
+      // Best-effort teardown; pane leftovers fall to the FR-8 sweep.
+    });
+  };
+  const createPaneWiring = async (): Promise<void> => {
     try {
       const paneHost = await buildV2PaneWiringOptions({
         location: ctx.location,
@@ -1647,6 +1657,7 @@ async function setup(ctx: V2TuiContext): Promise<undefined | (() => void)> {
           ...paneHost.options,
           client: ctx.client,
         });
+        paneWiringSetting = multiplexerType;
       } else {
         hostFailureDetail = describeV2HostMode(paneHost.mode);
       }
@@ -1655,7 +1666,37 @@ async function setup(ctx: V2TuiContext): Promise<undefined | (() => void)> {
         message: error instanceof Error ? error.message : String(error),
       });
     }
+  };
+  if (multiplexerType !== 'none' && hostFailureDetail === null) {
+    await createPaneWiring();
   }
+  /**
+   * v2 hosts hot-reload config, so the pane wiring must follow the effective
+   * `multiplexer.type` (FR-9) for the whole process lifetime: disabling
+   * disposes the wiring, enabling or switching adapters rebuilds it, and an
+   * unchanged setting keeps it (its directory accessor follows the route).
+   * Rebuilds are serialized; every run re-reads the latest state.
+   */
+  let paneWiringSync: Promise<void> = Promise.resolve();
+  const reconcilePaneWiring = (): Promise<void> => {
+    paneWiringSync = paneWiringSync
+      .then(async () => {
+        if (hostFailureDetail !== null || multiplexerType === 'none') {
+          await disposePaneWiring();
+          return;
+        }
+        if (paneWiring !== null && paneWiringSetting === multiplexerType)
+          return;
+        await disposePaneWiring();
+        await createPaneWiring();
+      })
+      .catch((error) => {
+        log('[pane-lifecycle] v2 wiring reconcile failed', {
+          message: error instanceof Error ? error.message : String(error),
+        });
+      });
+    return paneWiringSync;
+  };
   const warnPaneUnsupported = () => {
     if (hostFailureDetail === null) return;
     warnV2HostUnsupportedMultiplexer(multiplexerType, hostFailureDetail);
@@ -1679,6 +1720,7 @@ async function setup(ctx: V2TuiContext): Promise<undefined | (() => void)> {
       multiplexerType = next.multiplexerType;
       presetName = next.presetName;
       warnPaneUnsupported();
+      void reconcilePaneWiring();
     }
     return changed;
   };
@@ -1701,6 +1743,7 @@ async function setup(ctx: V2TuiContext): Promise<undefined | (() => void)> {
       ({ configInvalid, compactSidebar, multiplexerType, presetName } =
         readConfigState(configDirectory));
       warnPaneUnsupported();
+      void reconcilePaneWiring();
       // Never carry one project's last-good config state into another.
       bindConfigListener();
       stateChanged = true;

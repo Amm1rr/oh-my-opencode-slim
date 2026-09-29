@@ -45,6 +45,19 @@ function readUserConfig(): Record<string, unknown> {
   >;
 }
 
+/** Polls a predicate until it holds; fails loudly on timeout. */
+async function waitFor(
+  predicate: () => boolean,
+  timeoutMs = 5000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error('waitFor timed out');
+}
+
 describe('v2 tui preset plugin', () => {
   let configHome: string;
   let projectDir: string;
@@ -897,6 +910,140 @@ describe('v2 tui preset plugin', () => {
         expect(subscriptions).toEqual([]);
       } finally {
         cleanup?.();
+      }
+    });
+
+    test('rebuilds the pane wiring when multiplexer.type is enabled (hot reload)', async () => {
+      const stub = makeSetupCtx();
+      const projectConfigDir = path.join(projectDir, '.opencode');
+      fs.mkdirSync(projectConfigDir, { recursive: true });
+      const configPath = path.join(
+        projectConfigDir,
+        'oh-my-opencode-slim.json',
+      );
+      fs.writeFileSync(
+        configPath,
+        JSON.stringify({ multiplexer: { type: 'none' } }),
+      );
+      process.env.TMUX_PANE = '%1';
+
+      const subscriptions = new Map<string, unknown>();
+      const unsubscribed: string[] = [];
+      let infoCalls = 0;
+      stub.ctx.data = {
+        on: (type: string, handler: (event: unknown) => void) => {
+          subscriptions.set(type, handler);
+          return () => {
+            unsubscribed.push(type);
+          };
+        },
+      };
+      stub.ctx.client = {
+        server: {
+          info: async () => {
+            infoCalls += 1;
+            if (infoCalls === 1) return { urls: ['http://127.0.0.1:1'] };
+            throw new Error('probe down');
+          },
+        },
+      };
+
+      const expectedEvents = [
+        'session.created',
+        'session.deleted',
+        'session.execution.failed',
+        'session.execution.interrupted',
+        'session.execution.started',
+        'session.execution.succeeded',
+        'session.idle',
+      ];
+
+      let cleanup: (() => void) | undefined;
+      try {
+        cleanup = (await tui2Plugin.setup(
+          stub.ctx as unknown as V2TuiPluginContext,
+        )) as (() => void) | undefined;
+        // Disabled at startup: no wiring and no host subscriptions.
+        expect(subscriptions.size).toBe(0);
+
+        // v2 hot-reloads config; enabling panes must rebuild the wiring on the
+        // next sidebar poll instead of staying unavailable until restart.
+        fs.writeFileSync(
+          configPath,
+          JSON.stringify({ multiplexer: { type: 'tmux' } }),
+        );
+        await waitFor(() => subscriptions.size > 0);
+        expect([...subscriptions.keys()].sort()).toEqual(expectedEvents);
+      } finally {
+        cleanup?.();
+        cleanup = undefined;
+      }
+      expect([...unsubscribed].sort()).toEqual(expectedEvents);
+    });
+
+    test('disposes the pane wiring when multiplexer.type is disabled (hot reload)', async () => {
+      const stub = makeSetupCtx();
+      const projectConfigDir = path.join(projectDir, '.opencode');
+      fs.mkdirSync(projectConfigDir, { recursive: true });
+      const configPath = path.join(
+        projectConfigDir,
+        'oh-my-opencode-slim.json',
+      );
+      fs.writeFileSync(
+        configPath,
+        JSON.stringify({ multiplexer: { type: 'tmux' } }),
+      );
+      process.env.TMUX_PANE = '%1';
+
+      const subscriptions = new Map<string, unknown>();
+      const unsubscribed: string[] = [];
+      let infoCalls = 0;
+      stub.ctx.data = {
+        on: (type: string, handler: (event: unknown) => void) => {
+          subscriptions.set(type, handler);
+          return () => {
+            unsubscribed.push(type);
+          };
+        },
+      };
+      stub.ctx.client = {
+        server: {
+          info: async () => {
+            infoCalls += 1;
+            if (infoCalls === 1) return { urls: ['http://127.0.0.1:1'] };
+            throw new Error('probe down');
+          },
+        },
+      };
+
+      const expectedEvents = [
+        'session.created',
+        'session.deleted',
+        'session.execution.failed',
+        'session.execution.interrupted',
+        'session.execution.started',
+        'session.execution.succeeded',
+        'session.idle',
+      ];
+
+      let cleanup: (() => void) | undefined;
+      try {
+        cleanup = (await tui2Plugin.setup(
+          stub.ctx as unknown as V2TuiPluginContext,
+        )) as (() => void) | undefined;
+        expect([...subscriptions.keys()].sort()).toEqual(expectedEvents);
+
+        // Disabling panes must dispose the live wiring instead of leaving it
+        // creating panes for the rest of the process lifetime.
+        fs.writeFileSync(
+          configPath,
+          JSON.stringify({ multiplexer: { type: 'none' } }),
+        );
+        await waitFor(() => unsubscribed.length >= expectedEvents.length);
+        expect([...unsubscribed].sort()).toEqual(expectedEvents);
+      } finally {
+        cleanup?.();
+        cleanup = undefined;
       }
     });
   });
