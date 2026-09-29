@@ -1633,6 +1633,10 @@ async function setup(ctx: V2TuiContext): Promise<undefined | (() => void)> {
       : null;
   let paneWiring: TuiPaneWiring | null = null;
   let paneWiringSetting: string | null = null;
+  // Set by the setup teardown. A config-triggered rebuild can be waiting on
+  // the host or the reachability probe when the TUI closes; this flag makes
+  // such a rebuild self-dispose instead of going live after teardown.
+  let paneWiringClosed = false;
   const disposePaneWiring = async (): Promise<void> => {
     const stale = paneWiring;
     if (stale === null) return;
@@ -1653,10 +1657,17 @@ async function setup(ctx: V2TuiContext): Promise<undefined | (() => void)> {
         argv: process.argv,
       });
       if (paneHost.options !== null) {
-        paneWiring = await createTuiPaneWiring({
+        const wiring = await createTuiPaneWiring({
           ...paneHost.options,
           client: ctx.client,
         });
+        if (paneWiringClosed) {
+          await wiring.dispose().catch(() => {
+            // Best-effort teardown; pane leftovers fall to the FR-8 sweep.
+          });
+          return;
+        }
+        paneWiring = wiring;
         paneWiringSetting = multiplexerType;
       } else {
         hostFailureDetail = describeV2HostMode(paneHost.mode);
@@ -1681,6 +1692,7 @@ async function setup(ctx: V2TuiContext): Promise<undefined | (() => void)> {
   const reconcilePaneWiring = (): Promise<void> => {
     paneWiringSync = paneWiringSync
       .then(async () => {
+        if (paneWiringClosed) return;
         if (hostFailureDetail !== null || multiplexerType === 'none') {
           await disposePaneWiring();
           return;
@@ -1879,16 +1891,20 @@ async function setup(ctx: V2TuiContext): Promise<undefined | (() => void)> {
 
   return () => {
     disposed = true;
+    paneWiringClosed = true;
     unregisterConfigListener();
     disposeSlot();
     clearInterval(renderTimer);
     clearInterval(animationTimer);
-    const wiring = paneWiring;
-    if (wiring !== null) {
-      void wiring.dispose().catch(() => {
-        // Best-effort teardown; pane leftovers fall to the FR-8 sweep.
-      });
-    }
+    // Release what is live now (the wiring's unsubscribe loop runs
+    // synchronously), then settle any in-flight rebuild: it self-disposes
+    // when it sees `paneWiringClosed`, so a wiring created during the
+    // teardown window cannot outlive the TUI.
+    void disposePaneWiring();
+    void (async () => {
+      await paneWiringSync;
+      await disposePaneWiring();
+    })();
   };
 }
 

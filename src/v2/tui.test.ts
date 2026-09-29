@@ -1046,5 +1046,82 @@ describe('v2 tui preset plugin', () => {
         cleanup = undefined;
       }
     });
+
+    test('does not leave live pane wiring behind when teardown races a rebuild', async () => {
+      const stub = makeSetupCtx();
+      const projectConfigDir = path.join(projectDir, '.opencode');
+      fs.mkdirSync(projectConfigDir, { recursive: true });
+      const configPath = path.join(
+        projectConfigDir,
+        'oh-my-opencode-slim.json',
+      );
+      fs.writeFileSync(
+        configPath,
+        JSON.stringify({ multiplexer: { type: 'none' } }),
+      );
+      process.env.TMUX_PANE = '%1';
+
+      const subscriptions = new Map<string, unknown>();
+      const unsubscribed: string[] = [];
+      let releaseResolve: ((value: { urls: string[] }) => void) | undefined;
+      let infoCalls = 0;
+      stub.ctx.data = {
+        on: (type: string, handler: (event: unknown) => void) => {
+          subscriptions.set(type, handler);
+          return () => {
+            unsubscribed.push(type);
+          };
+        },
+      };
+      stub.ctx.client = {
+        server: {
+          info: async () => {
+            infoCalls += 1;
+            if (infoCalls === 1) {
+              return await new Promise<{ urls: string[] }>((resolve) => {
+                releaseResolve = resolve;
+              });
+            }
+            throw new Error('probe down');
+          },
+        },
+      };
+
+      const expectedEvents = [
+        'session.created',
+        'session.deleted',
+        'session.execution.failed',
+        'session.execution.interrupted',
+        'session.execution.started',
+        'session.execution.succeeded',
+        'session.idle',
+      ];
+
+      let cleanup: (() => void) | undefined;
+      try {
+        cleanup = (await tui2Plugin.setup(
+          stub.ctx as unknown as V2TuiPluginContext,
+        )) as (() => void) | undefined;
+        expect(subscriptions.size).toBe(0);
+
+        // Start a rebuild, let it park on the host probe, then tear down
+        // while it is still waiting.
+        fs.writeFileSync(
+          configPath,
+          JSON.stringify({ multiplexer: { type: 'tmux' } }),
+        );
+        await waitFor(() => infoCalls >= 1);
+        cleanup();
+        cleanup = undefined;
+        releaseResolve?.({ urls: ['http://127.0.0.1:1'] });
+
+        // The late wiring must dispose itself instead of staying subscribed
+        // (and creating panes) for a closed TUI.
+        await waitFor(() => unsubscribed.length >= expectedEvents.length);
+        expect([...unsubscribed].sort()).toEqual(expectedEvents);
+      } finally {
+        cleanup?.();
+      }
+    });
   });
 });
