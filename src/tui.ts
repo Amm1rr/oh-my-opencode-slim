@@ -430,7 +430,7 @@ export interface SidebarSessionTarget {
   sessionID: string;
   agentName: string;
   alias?: string;
-  status?: 'busy' | 'retry' | 'reusable';
+  status?: 'busy' | 'retry' | 'reusable' | 'stopped';
 }
 
 export interface SidebarAgentTargets {
@@ -507,6 +507,7 @@ export interface SidebarReusableTarget {
   completedAt?: number;
   lastUsedAt?: number;
   running?: true;
+  stopped?: true;
 }
 
 /**
@@ -536,6 +537,9 @@ export function getSidebarReusableTargets(
           taskID: entry.taskID,
           alias: entry.alias,
           ...(entry.running === true ? { running: true as const } : {}),
+          ...(entry.terminalState === 'stopped'
+            ? { stopped: true as const }
+            : {}),
           ...(entry.completedAt !== undefined
             ? { completedAt: entry.completedAt }
             : {}),
@@ -850,10 +854,14 @@ function decorateInteractiveRow(
     setProp(node as never, 'onMouseOver', () => {
       applyHover(true);
     });
-    setProp(node as never, 'onMouseOut', (event?: { x?: number; y?: number }) => {
-      if (isPointerInsideRow(row, event)) return;
-      applyHover(false);
-    });
+    setProp(
+      node as never,
+      'onMouseOut',
+      (event?: { x?: number; y?: number }) => {
+        if (isPointerInsideRow(row, event)) return;
+        applyHover(false);
+      },
+    );
   }
   if (opts.onActivate) {
     setProp(node as never, 'onMouseUp', (event?: { button?: number }) => {
@@ -865,6 +873,7 @@ function decorateInteractiveRow(
 }
 
 export const STATUS_DOT_GLYPH = '•';
+export const STATUS_STOPPED_GLYPH = '⚰';
 
 function statusDot(
   active: boolean,
@@ -1040,11 +1049,13 @@ function sessionTargetRow(
 ): JSX.Element {
   const label = target.alias ?? shortSessionID(target.sessionID);
   const reusable = target.status === 'reusable';
-  const indicatorColor = reusable
-    ? theme.textMuted
-    : target.status === 'retry'
-      ? (theme.warning ?? STATUS_RETRY_COLOR)
-      : (theme.success ?? STATUS_ACTIVE_COLOR);
+  const stopped = target.status === 'stopped';
+  const indicatorColor =
+    reusable || stopped
+      ? theme.textMuted
+      : target.status === 'retry'
+        ? (theme.warning ?? STATUS_RETRY_COLOR)
+        : (theme.success ?? STATUS_ACTIVE_COLOR);
   const row = box(
     {
       width: '100%',
@@ -1063,7 +1074,9 @@ function sessionTargetRow(
         [
           reusable
             ? `${STATUS_DOT_GLYPH} `
-            : () => `${getSidebarActivityIndicator(now())} `,
+            : stopped
+              ? `${STATUS_STOPPED_GLYPH} `
+              : () => `${getSidebarActivityIndicator(now())} `,
         ],
       ),
       text(
@@ -1238,12 +1251,18 @@ function renderSidebar(
                   sessionID: target.taskID,
                   agentName,
                   alias: target.alias,
-                  status: target.running === true ? 'busy' : 'reusable',
+                  status:
+                    target.running === true
+                      ? 'busy'
+                      : target.stopped === true
+                        ? 'stopped'
+                        : 'reusable',
                 }),
               );
             const allTargets = [...sessions, ...reusableTargets];
             const history = reusableTargets.some(
-              (target) => target.status === 'reusable',
+              (target) =>
+                target.status === 'reusable' || target.status === 'stopped',
             );
             const clickable =
               interaction?.navigate !== undefined && allTargets.length > 0;

@@ -59,7 +59,7 @@ export interface BackgroundJobPromptMetadata {
 export interface ReusableSessionSelection {
   taskID: string;
   alias: string;
-  terminalState: TaskOutputState;
+  terminalState: TaskOutputState | 'stopped';
   completedAt?: number;
   lastUsedAt: number;
 }
@@ -1295,7 +1295,9 @@ export class BackgroundJobBoard implements BackgroundJobStore {
         taskID: job.taskID,
         alias: job.alias,
         terminalState:
-          job.terminalState ?? terminalStateOf(job.state) ?? 'completed',
+          job.state === 'stopped'
+            ? 'stopped'
+            : (job.terminalState ?? terminalStateOf(job.state) ?? 'completed'),
         completedAt: job.completedAt,
         lastUsedAt: job.lastUsedAt,
       });
@@ -1517,9 +1519,8 @@ export class BackgroundJobBoard implements BackgroundJobStore {
 
   private formatRetainedJob(job: BackgroundJobRecord): string {
     const lines = [
-      `- ${promptSafe(job.alias)} / ${promptSafe(job.taskID)} / ${promptSafe(job.agent)} / stopped, retained`,
+      `- ${promptSafe(job.alias)} / ${promptSafe(job.taskID)} / ${promptSafe(job.agent)} / stopped, ${REVIVE_ONLY}`,
       `  Objective: ${promptSafe(job.description || job.objective || '')}`,
-      '  Recovery: no terminal result; recoverable with task_revive, not task()',
     ];
     const context = formatContextFiles(
       job.contextFiles,
@@ -1606,15 +1607,15 @@ function isReusable(
   return sumContextLines(job) <= maxContextLines;
 }
 
-/** Sidebar history: canonical terminal (completed/error/cancelled), not
- *  running, not status-uncertain, not stopped-retained. Parent
- *  acknowledgment is NOT required — the transcript exists as soon as
- *  the child finishes. */
+/** Sidebar history: canonical terminal or stopped, not running or
+ *  status-uncertain. Parent acknowledgment is NOT required — the transcript
+ *  exists as soon as the child stops. */
 function isSidebarHistory(job: BackgroundJobRecord): boolean {
   // Unattributed placeholders stay out of advertised surfaces until
   // attribution (same exclusion as the prompt's reusable section).
   if (job.provisional) return false;
   if (job.statusUncertain) return false;
+  if (job.state === 'stopped') return true;
   const terminal = job.terminalState ?? terminalStateOf(job.state);
   return (
     terminal === 'completed' || terminal === 'error' || terminal === 'cancelled'
@@ -1666,6 +1667,8 @@ function timeoutSummary(state: TaskOutputState): string {
   return `Background task exceeded its wall-clock deadline; abort was observed with child state ${state}.`;
 }
 
+const REVIVE_ONLY = 'task_revive only';
+
 function formatJob(job: BackgroundJobRecord): string {
   const isResume = job.lastLaunchedAt !== job.launchedAt;
   // Exclude wall-clock age labels so prompts remain stable between job-state transitions for cache reuse.
@@ -1681,7 +1684,7 @@ function formatJob(job: BackgroundJobRecord): string {
         ? `${job.state}, timed out`
         : displayState;
   const lines = [
-    `- ${promptSafe(job.alias)} / ${promptSafe(job.taskID)} / ${promptSafe(job.agent)} / ${promptSafe(status)}`,
+    `- ${promptSafe(job.alias)} / ${promptSafe(job.taskID)} / ${promptSafe(job.agent)} / ${promptSafe(job.state === 'stopped' ? `${status}, ${REVIVE_ONLY}` : status)}`,
     `  Objective: ${promptSafe(job.description || job.objective || '')}`,
   ];
 

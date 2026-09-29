@@ -476,6 +476,23 @@ describe('tui-state persistence', () => {
                 completedAt: 200,
                 lastUsedAt: 300,
               },
+              {
+                taskID: 'ses_2',
+                alias: 'ora-2',
+                terminalState: 'stopped',
+                lastUsedAt: 400,
+              },
+              {
+                taskID: 'ses_invalid',
+                alias: 'ora-3',
+                terminalState: 'unknown',
+                lastUsedAt: 500,
+              },
+              {
+                taskID: 'ses_no_timestamp',
+                alias: 'ora-4',
+                terminalState: 'stopped',
+              },
             ],
           },
         },
@@ -490,6 +507,12 @@ describe('tui-state persistence', () => {
         terminalState: 'completed',
         completedAt: 200,
         lastUsedAt: 300,
+      },
+      {
+        taskID: 'ses_2',
+        alias: 'ora-2',
+        terminalState: 'stopped',
+        lastUsedAt: 400,
       },
     ]);
   });

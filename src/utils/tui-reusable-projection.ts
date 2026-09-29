@@ -7,7 +7,7 @@ import type { BackgroundJobBoard } from './background-job-board';
 
 /**
  * Board → tui-state projection for sidebar session destinations and live
- * spinners. On every board mutation, publish all canonical terminal sessions
+ * spinners. On every board mutation, publish terminal and stopped sessions
  * and attributed, certain running jobs (running entries contain only stable
  * taskID/alias plus a marker). The TUI is a pure reader of this section.
  *

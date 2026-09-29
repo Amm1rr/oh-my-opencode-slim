@@ -588,7 +588,7 @@ describe('BackgroundJobBoard', () => {
 
     const unreconciled = board.formatForPrompt('parent-1');
     expect(unreconciled).toContain(
-      'ora-1 / ses_stopped / oracle / stopped, unreconciled',
+      'ora-1 / ses_stopped / oracle / stopped, unreconciled, task_revive only',
     );
     expect(unreconciled).not.toContain('#### Retained / Recovery');
     expect(
@@ -600,11 +600,9 @@ describe('BackgroundJobBoard', () => {
     const prompt = board.formatForPrompt('parent-1');
     expect(prompt).toContain('#### Retained / Recovery');
     expect(prompt).toContain(
-      'ora-1 / ses_stopped / oracle / stopped, retained',
+      'ora-1 / ses_stopped / oracle / stopped, task_revive only',
     );
-    expect(prompt).toContain(
-      'Recovery: no terminal result; recoverable with task_revive, not task()',
-    );
+    expect(prompt).not.toContain('  Recovery:');
     expect(prompt).toContain(
       'Stopped sessions without a terminal result are retained for task_revive, not task().',
     );
@@ -2342,7 +2340,7 @@ describe('BackgroundJobBoard', () => {
       );
     });
 
-    test('excludes running, statusUncertain, and stopped-retained jobs', () => {
+    test('includes both stopped phases but excludes running, uncertain, and provisional jobs', () => {
       const board = new BackgroundJobBoard();
       seedReconciled(board, 'ses_ok');
 
@@ -2380,10 +2378,40 @@ describe('BackgroundJobBoard', () => {
         now: 100,
       });
       board.markStopped('ses_stopped', 'no native result', 110, undefined, 110);
+      board.registerLaunch({
+        taskID: 'ses_provisional',
+        parentSessionID: 'parent-1',
+        agent: 'oracle',
+        provisional: true,
+        now: 100,
+      });
+      board.markStopped(
+        'ses_provisional',
+        'no native result',
+        110,
+        undefined,
+        110,
+      );
+
+      expect(
+        sidebarHistory(board, 'parent-1')
+          .get('oracle')
+          ?.map((entry) => [entry.taskID, entry.terminalState]),
+      ).toEqual([
+        ['ses_ok', 'completed'],
+        ['ses_stopped', 'stopped'],
+      ]);
       board.markReconciled('ses_stopped', 300);
 
       const latest = sidebarHistory(board, 'parent-1');
-      expect(latest.get('oracle')?.[0]?.taskID).toBe('ses_ok');
+      expect(
+        latest
+          .get('oracle')
+          ?.map((entry) => [entry.taskID, entry.terminalState]),
+      ).toEqual([
+        ['ses_stopped', 'stopped'],
+        ['ses_ok', 'completed'],
+      ]);
       expect(new Set(latest.keys())).toEqual(new Set(['oracle']));
     });
 

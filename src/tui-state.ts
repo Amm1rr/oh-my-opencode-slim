@@ -16,7 +16,7 @@ export interface TuiSessionDetails {
 }
 
 /** Host-board sidebar sessions. Running entries carry only stable identity;
- * terminal entries retain their reusable destination metadata. */
+ * terminal and stopped entries retain their destination metadata. */
 export type TuiReusableSession =
   | (ReusableSessionSelection & { running?: never })
   | {
@@ -51,7 +51,7 @@ export interface TuiSnapshot {
   /** Per-active-session details (alias/status) for the sidebar. */
   sessionDetails: Record<string, TuiSessionDetails>;
   /**
-   * Accessible terminal and running sessions per agent, keyed by parent
+   * Accessible terminal, stopped and running sessions per agent, keyed by parent
    * sessionID. The board owns this process-local projection.
    */
   reusableByAgent: Record<string, Record<string, TuiReusableSession[]>>;
@@ -186,7 +186,8 @@ function parseReusableByAgent(
         if (
           (rec.terminalState !== 'completed' &&
             rec.terminalState !== 'error' &&
-            rec.terminalState !== 'cancelled') ||
+            rec.terminalState !== 'cancelled' &&
+            rec.terminalState !== 'stopped') ||
           typeof rec.lastUsedAt !== 'number'
         ) {
           continue;

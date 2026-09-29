@@ -170,7 +170,7 @@ describe('tui-reusable-projection', () => {
     }
   });
 
-  test('board mutation projects the latest reconciled session into the snapshot', () => {
+  test('board mutation projects reconciled and stopped sessions into the snapshot', () => {
     const board = new BackgroundJobBoard();
     const projection = createTuiReusableProjection({ board, projectDir });
 
@@ -183,6 +183,20 @@ describe('tui-reusable-projection', () => {
         alias: 'ora-1',
         terminalState: 'completed',
       });
+      board.registerLaunch({
+        taskID: 'ses_stopped',
+        parentSessionID: 'parent-1',
+        agent: 'oracle',
+        now: 300,
+      });
+      board.markStopped('ses_stopped', 'no native result', 310, undefined, 310);
+      expect(
+        readTuiSnapshot(projectDir).reusableByAgent['parent-1']?.oracle?.[0],
+      ).toMatchObject({ taskID: 'ses_stopped', terminalState: 'stopped' });
+      board.markReconciled('ses_stopped', 400);
+      expect(
+        readTuiSnapshot(projectDir).reusableByAgent['parent-1']?.oracle?.[0],
+      ).toMatchObject({ taskID: 'ses_stopped', terminalState: 'stopped' });
     } finally {
       projection.dispose();
     }

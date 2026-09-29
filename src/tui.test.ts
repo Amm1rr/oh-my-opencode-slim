@@ -27,6 +27,7 @@ import {
   resolveSidebarSlotOrder,
   resolveTuiPaneDirectory,
   STATUS_DOT_GLYPH,
+  STATUS_STOPPED_GLYPH,
   selectionGuard,
   shortSessionID,
   splitSidebarModelId,
@@ -1652,7 +1653,9 @@ describe('clickable sidebar sessions', () => {
   });
 
   test('sidebar heading never highlights on hover but still toggles on click', async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-sidebar-nohover-'));
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'omos-sidebar-nohover-'),
+    );
     const projectDir = path.join(root, 'project');
     fs.mkdirSync(path.join(projectDir, '.opencode'), { recursive: true });
     fs.writeFileSync(
@@ -2075,6 +2078,106 @@ describe('clickable sidebar sessions', () => {
 
       await setup.mockMouse.click(nameCol + 1, oracleRow);
       expect(navigated).toEqual([['session', { sessionID: 'ora-latest' }]]);
+    } finally {
+      setup?.renderer.destroy();
+      for (const dispose of mounted?.disposers ?? []) dispose();
+      restoreDataHome();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('mounted sidebar marks only the stopped session row with ⚰', async () => {
+    expect(Bun.stringWidth(STATUS_STOPPED_GLYPH)).toBe(1);
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-stopped-'));
+    const projectDir = path.join(root, 'project');
+    fs.mkdirSync(projectDir, { recursive: true });
+    const restoreDataHome = withIsolatedDataHome(root);
+    const navigated: unknown[] = [];
+    let setup: Awaited<ReturnType<typeof testRender>> | undefined;
+    let mounted: Awaited<ReturnType<typeof mountClickableSidebar>> | undefined;
+
+    try {
+      recordTuiAgentModels(
+        { agentModels: { oracle: 'openai/gpt-6', fixer: 'openai/gpt-6' } },
+        projectDir,
+      );
+      updateSnapshot(projectDir, (snapshot) => {
+        snapshot.reusableByAgent = {
+          'conv-1': {
+            oracle: [
+              {
+                taskID: 'ses_stopped',
+                alias: 'ora-2',
+                terminalState: 'stopped',
+                lastUsedAt: 400,
+              },
+              {
+                taskID: 'ses_completed',
+                alias: 'ora-1',
+                terminalState: 'completed',
+                lastUsedAt: 300,
+              },
+            ],
+            fixer: [
+              {
+                taskID: 'ses_only_stopped',
+                alias: 'fix-1',
+                terminalState: 'stopped',
+                lastUsedAt: 500,
+              },
+            ],
+          },
+        };
+      });
+      mounted = await mountClickableSidebar({
+        projectDir,
+        sessionID: 'conv-1',
+        navigate: (...args) => navigated.push(args),
+      });
+      setup = await testRender(
+        () => mounted?.slotPlugin?.slots.sidebar_content() as never,
+        { width: 52, height: 16 },
+      );
+      await setup.renderOnce();
+      let lines = setup.captureCharFrame().split('\n');
+      const oracleRow = lines.findIndex((line) => line.includes('oracle'));
+      const fixerRow = lines.findIndex((line) => line.includes('fixer'));
+      expect(oracleRow).toBeGreaterThan(-1);
+      expect(fixerRow).toBeGreaterThan(-1);
+      expect(lines[fixerRow]).toContain('✦');
+      expect(lines[fixerRow]).not.toContain('⚰');
+      expect(lines[oracleRow]).toContain('✦');
+      expect(lines[oracleRow]).not.toContain('⚰');
+      expect(setup.captureCharFrame()).not.toContain('⚰');
+      await setup.mockMouse.click(
+        lines[fixerRow].indexOf('fixer') + 1,
+        fixerRow,
+      );
+      expect(navigated).toEqual([
+        ['session', { sessionID: 'ses_only_stopped' }],
+      ]);
+      await setup.mockMouse.click(
+        lines[oracleRow].indexOf('oracle') + 1,
+        oracleRow,
+      );
+      await setup.renderOnce();
+      lines = setup.captureCharFrame().split('\n');
+      const completedRow = lines.findIndex((line) => line.includes('ora-1'));
+      const stoppedRow = lines.findIndex((line) => line.includes('ora-2'));
+      expect(completedRow).toBeGreaterThan(-1);
+      expect(stoppedRow).toBeGreaterThan(-1);
+      expect(lines[completedRow]).toContain('• ora-1');
+      expect(lines[stoppedRow]).toContain('⚰ ora-2');
+      expect(lines[oracleRow]).toContain('✦');
+      expect(lines[oracleRow]).not.toContain('⚰');
+      await setup.mockMouse.click(
+        lines[stoppedRow].indexOf('ora-2'),
+        stoppedRow,
+      );
+      expect(navigated.at(-1)).toEqual([
+        'session',
+        { sessionID: 'ses_stopped' },
+      ]);
     } finally {
       setup?.renderer.destroy();
       for (const dispose of mounted?.disposers ?? []) dispose();
