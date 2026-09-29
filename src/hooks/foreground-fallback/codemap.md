@@ -17,7 +17,9 @@ Runtime model fallback system for foreground (interactive) agent sessions. When 
   - `sessionModel`: Maps sessionID → current model string ("providerID/modelID")
   - `activeFallbackModel`: Maps sessionID → the model selected by a
     confirmed fallback for the current external turn. Synthetic admissions
-    cannot overwrite it; a genuine new external turn clears it.
+    cannot overwrite it implicitly; a genuine new external turn clears it,
+    and an explicit `retry-primary` continuation reconciles it to the primary
+    before subsequent delegation.
     OpenCode v1 internal continuation and lifecycle selection consults
     `fallback.continuationPolicy`: retry the primary by default or retain this
     confirmed fallback until that external turn boundary.

@@ -922,6 +922,20 @@ export class ForegroundFallbackManager {
     return this.activeFallbackModel.get(sessionID);
   }
 
+  /** Reconcile an internal continuation that explicitly selected a model.
+   *  Returning to the configured primary ends the previous fallback episode,
+   *  while retaining the confirmed fallback keeps its delegation hint live. */
+  observeContinuationModel(sessionID: string, model: string): void {
+    const previousModel = this.sessionModel.get(sessionID);
+    this.sessionModel.set(sessionID, model);
+    if (this.activeFallbackModel.get(sessionID) !== model) {
+      this.activeFallbackModel.delete(sessionID);
+    }
+    if (previousModel !== model) {
+      this.onSessionModelChanged?.(sessionID, model);
+    }
+  }
+
   /** A genuine external turn starts from the host-selected model again;
    *  promptAsync model overrides are per-message and do not persist. */
   observeExternalTurn(sessionID: string): void {

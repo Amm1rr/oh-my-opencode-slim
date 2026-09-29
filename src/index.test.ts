@@ -2945,6 +2945,9 @@ describe('plugin config model inheritance', () => {
             orchestrator: {
               model: ['openrouter/openrouter/auto', 'openai/gpt-6-luna'],
             },
+            operator: {
+              model: ['openrouter/openrouter/auto', 'openai/gpt-6-luna'],
+            },
           },
         },
         [
@@ -2955,9 +2958,10 @@ describe('plugin config model inheritance', () => {
         ],
       );
       const sessionID = `continuation-${continuationPolicy}`;
+      const hostConfig: Record<string, unknown> = { agent: {} };
 
       try {
-        await hooks.config?.({ agent: {} });
+        await hooks.config?.(hostConfig);
         await hooks['chat.message']?.(
           {
             sessionID,
@@ -3020,6 +3024,37 @@ describe('plugin config model inheritance', () => {
           providerID: expectedProvider,
           modelID: expectedModel,
         });
+
+        const taskOutput = {
+          args: {
+            subagent_type: 'operator',
+            description: 'verify continuation delegation routing',
+            prompt: 'return ok',
+          },
+        };
+        await hooks['tool.execute.before']?.(
+          {
+            tool: 'task',
+            sessionID,
+            callID: `call-continuation-${continuationPolicy}`,
+          } as never,
+          taskOutput as never,
+        );
+
+        if (continuationPolicy === 'retry-primary') {
+          expect(taskOutput.args.subagent_type).toBe('operator');
+        } else {
+          expect(taskOutput.args.subagent_type).toStartWith(
+            'slim-internal-fallback-operator-',
+          );
+          const agents = hostConfig.agent as Record<
+            string,
+            Record<string, unknown>
+          >;
+          expect(agents[taskOutput.args.subagent_type]?.model).toBe(
+            'openai/gpt-6-luna',
+          );
+        }
       } finally {
         await hooks.dispose?.();
       }

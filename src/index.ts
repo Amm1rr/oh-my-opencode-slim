@@ -2328,6 +2328,22 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           rewroteInternalSelection = true;
         }
       }
+      if (
+        output?.message &&
+        trackedModel &&
+        trackedModelText &&
+        output.message.model?.providerID === trackedModel.providerID &&
+        output.message.model?.modelID === trackedModel.modelID
+      ) {
+        // The continuation policy changed (or confirmed) the model actually
+        // serving this turn. Keep fallback state in sync so a task delegated
+        // before the next external admission follows that model rather than
+        // a stale fallback from the preceding turn.
+        foregroundFallback.observeContinuationModel(
+          input.sessionID,
+          trackedModelText,
+        );
+      }
       if (rewroteInternalSelection) {
         v1InternalSelectionOverrides.set(input.sessionID, {
           ...(trackedAgent ? { agent: trackedAgent } : {}),
