@@ -2662,7 +2662,7 @@ describe('plugin config model inheritance', () => {
     }
   });
 
-  test('orchestrator inheritance uses the host orchestrator model in the final config', async () => {
+  test('orchestrator inheritance leaves the child model-less for live parent selection', async () => {
     const hooks = await loadConfiguredPlugin({
       agents: {
         librarian: { inheritModelFrom: 'orchestrator' },
@@ -2682,7 +2682,7 @@ describe('plugin config model inheritance', () => {
         string,
         Record<string, unknown>
       >;
-      expect(agents.librarian?.model).toBe('host/orchestrator');
+      expect(agents.librarian?.model).toBeUndefined();
     } finally {
       await hooks.dispose?.();
     }

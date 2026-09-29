@@ -2624,7 +2624,17 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
           const after = v1Hooks['tool.execute.after'] as
             | ((i: unknown, o: unknown) => Promise<void>)
             | undefined;
-          const bridges = createToolExecuteBridges(before, after);
+          const resolveDelegatedModel = v1Hooks['v2.resolveDelegatedModel'] as
+            | ((input: {
+                agentType: string;
+                parentSessionID: string;
+              }) => string | undefined)
+            | undefined;
+          const bridges = createToolExecuteBridges(
+            before,
+            after,
+            resolveDelegatedModel,
+          );
           if (before) {
             const reg = await ctx.tool.hook('execute.before', async (event) => {
               try {

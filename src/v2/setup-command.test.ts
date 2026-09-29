@@ -969,6 +969,40 @@ describe('tool execute bridge normalization', () => {
     ).rejects.toThrow('duplicate spawn refused');
   });
 
+  test('before bridge carries the parent fallback model into delegated children', async () => {
+    let seenArgs: Record<string, unknown> | undefined;
+    const before = async (
+      _i: { tool: string; sessionID: string; callID: string },
+      o: { args: unknown },
+    ) => {
+      seenArgs = { ...(o.args as Record<string, unknown>) };
+    };
+    const { beforeBridge } = createToolExecuteBridges(
+      before,
+      undefined,
+      () => 'openai/gpt-6-luna',
+    );
+    const event = {
+      tool: 'subagent',
+      sessionID: 'ses_parent',
+      agent: 'orchestrator',
+      messageID: 'msg_1',
+      id: 'call_1',
+      input: { agent: 'operator', prompt: 'continue' },
+    };
+
+    await beforeBridge(event);
+
+    expect(seenArgs).toMatchObject({
+      subagent_type: 'operator',
+      model: 'openai/gpt-6-luna',
+    });
+    expect(event.input).toMatchObject({
+      agent: 'operator',
+      model: 'openai/gpt-6-luna',
+    });
+  });
+
   test('after bridge presents subagent output under task name', async () => {
     const seen: Array<{ tool: string; output: unknown }> = [];
     const after = async (_i: unknown, o: { output: unknown }) => {

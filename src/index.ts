@@ -821,16 +821,32 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       backgroundJobSupervisor,
       backgroundTaskConcurrency,
       pendingCallTracker: admissionRuntimeLease.pendingCallTracker,
-      getModelForAgent: (agentType: string, parentSessionID?: string) =>
-        // Admission must use the config after the host has merged all of its
-        // agent layers. The direct lookup preserves display-name keys; the
-        // resolved lookup handles canonical names and legacy aliases. A
-        // parent model is only an inheritance fallback when neither final
-        // agent entry carries one.
-        resolvePrimaryModelFromFinalHostConfig(agentType) ??
-        (parentSessionID
+      getModelForAgent: (agentType: string, parentSessionID?: string) => {
+        // A delegated child follows the parent's active fallback when that
+        // model belongs to the child's chain. Otherwise an orchestrator that
+        // already escaped a failed provider would send each specialist back
+        // through the same avoidable failure.
+        const parentModel = parentSessionID
           ? sessionMetadata.getModel(parentSessionID)
-          : undefined),
+          : undefined;
+        const resolvedName = resolveRuntimeAgentName(runtime, agentType);
+        const chain =
+          runtime.modelArrays[resolvedName] ?? runtime.modelArrays[agentType];
+        const followsParent =
+          runtime.agent(agentType)?.inheritModelFrom === 'orchestrator' ||
+          runtime.agent(agentType)?.inheritModelFrom === 'session';
+        if (
+          parentModel &&
+          (followsParent || chain?.some((entry) => entry.id === parentModel))
+        ) {
+          return parentModel;
+        }
+
+        // Admission otherwise uses the config after the host merged all of
+        // its agent layers. The direct lookup preserves display-name keys;
+        // the resolved lookup handles canonical names and legacy aliases.
+        return resolvePrimaryModelFromFinalHostConfig(agentType) ?? parentModel;
+      },
       sameProviderPolicy: runtime.backgroundJobs.sameProviderPolicy,
       getSessionModel: (sessionID) => sessionMetadata.getModel(sessionID),
       hostFlavor,
@@ -1536,6 +1552,29 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // inference/runtime profiles for new child sessions + the sidebar.
     // Unknown to v1 hosts, consumed by src/v2/setup.ts.
     'v2.refreshProfiles': refreshProfilesFromDisk,
+    // v2's native subagent tool accepts a per-call model override. Keep a
+    // delegated child on the parent's active fallback model when that model
+    // belongs to the child's own ordered chain. v1 task() has no model field,
+    // so this capability is consumed only by the v2 bridge.
+    'v2.resolveDelegatedModel': ({
+      agentType,
+      parentSessionID,
+    }: {
+      agentType: string;
+      parentSessionID: string;
+    }) => {
+      const parentModel = sessionMetadata.getModel(parentSessionID);
+      if (!parentModel) return undefined;
+      const resolvedName = resolveRuntimeAgentName(runtime, agentType);
+      const chain =
+        runtime.modelArrays[resolvedName] ?? runtime.modelArrays[agentType];
+      const followsParent =
+        runtime.agent(agentType)?.inheritModelFrom === 'orchestrator' ||
+        runtime.agent(agentType)?.inheritModelFrom === 'session';
+      return followsParent || chain?.some((entry) => entry.id === parentModel)
+        ? parentModel
+        : undefined;
+    },
     'v2.session.retry':
       foregroundFallback.handleV2Retry.bind(foregroundFallback),
 
@@ -2297,6 +2336,10 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     },
   } as Hooks & {
     'v2.refreshProfiles': typeof refreshProfilesFromDisk;
+    'v2.resolveDelegatedModel': (input: {
+      agentType: string;
+      parentSessionID: string;
+    }) => string | undefined;
   };
 
   return hooks;
