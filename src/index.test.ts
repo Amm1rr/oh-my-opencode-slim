@@ -2547,8 +2547,15 @@ describe('plugin config model inheritance', () => {
 
   async function loadConfiguredPlugin(
     config: Record<string, unknown>,
-    existingDirectory?: string,
+    existingDirectoryOrFallbackMessages?: string | unknown[],
   ) {
+    const existingDirectory =
+      typeof existingDirectoryOrFallbackMessages === 'string'
+        ? existingDirectoryOrFallbackMessages
+        : undefined;
+    const fallbackMessages = Array.isArray(existingDirectoryOrFallbackMessages)
+      ? existingDirectoryOrFallbackMessages
+      : undefined;
     const configDir =
       existingDirectory ?? (await mkdtemp('/tmp/oh-my-opencode-inheritance-'));
     if (!existingDirectory) configDirs.push(configDir);
@@ -2568,7 +2575,7 @@ describe('plugin config model inheritance', () => {
     const client = createPluginClient(async () => ({}));
     client.session.status = async () => ({ data: {} });
     client.session.messages = async () => ({
-      data: [
+      data: fallbackMessages ?? [
         {
           info: {
             role: 'assistant',
@@ -2811,6 +2818,119 @@ describe('plugin config model inheritance', () => {
       }
     },
   );
+
+  test('v1 delegation uses the fallback replay model instead of the last external selection', async () => {
+    const hooks = await loadConfiguredPlugin(
+      {
+        agents: {
+          orchestrator: {
+            model: ['openrouter/openrouter/auto', 'openai/gpt-6-luna'],
+          },
+          operator: {
+            model: ['openrouter/openrouter/auto', 'openai/gpt-6-luna'],
+          },
+        },
+      },
+      [
+        {
+          info: { id: 'msg-original', role: 'user' },
+          parts: [{ type: 'text', text: 'delegate this work' }],
+        },
+      ],
+    );
+    const hostConfig: Record<string, unknown> = { agent: {} };
+    const sessionID = 'orchestrator-live-fallback';
+    const fallbackMessageID = 'msg-fallback-replay';
+
+    try {
+      await hooks.config?.(hostConfig);
+      await hooks['chat.message']?.(
+        {
+          sessionID,
+          agent: 'orchestrator',
+          model: { providerID: 'openrouter', modelID: 'openrouter/auto' },
+        } as never,
+        {} as never,
+      );
+      await hooks.event?.({
+        event: {
+          type: 'message.updated',
+          properties: {
+            info: {
+              id: 'msg-primary-error',
+              sessionID,
+              role: 'assistant',
+              agent: 'orchestrator',
+              providerID: 'openrouter',
+              modelID: 'openrouter/auto',
+            },
+          },
+        },
+      } as never);
+      await hooks.event?.({
+        event: {
+          type: 'session.error',
+          properties: {
+            sessionID,
+            error: { statusCode: 403, message: 'Key limit exceeded' },
+          },
+        },
+      } as never);
+      // A synthetic admission may report another model in the same session;
+      // it must not displace the confirmed fallback used for delegation.
+      await hooks['chat.message']?.(
+        {
+          sessionID,
+          agent: 'orchestrator',
+          model: { providerID: 'anthropic', modelID: 'claude' },
+          messageID: fallbackMessageID,
+          parts: [createInternalAgentTextPart('background completion')],
+        } as never,
+        {} as never,
+      );
+      await hooks.event?.({
+        event: {
+          type: 'message.updated',
+          properties: {
+            info: {
+              id: fallbackMessageID,
+              sessionID,
+              role: 'user',
+              agent: 'orchestrator',
+              providerID: 'anthropic',
+              modelID: 'claude',
+            },
+          },
+        },
+      } as never);
+
+      const output = {
+        args: {
+          subagent_type: 'operator',
+          description: 'verify live fallback routing',
+          prompt: 'return ok',
+        },
+      };
+      await hooks['tool.execute.before']?.(
+        {
+          tool: 'task',
+          sessionID,
+          callID: 'call-live-fallback',
+        } as never,
+        output as never,
+      );
+
+      const routedAgent = output.args.subagent_type;
+      expect(routedAgent).toStartWith('slim-internal-fallback-operator-');
+      const agents = hostConfig.agent as Record<
+        string,
+        Record<string, unknown>
+      >;
+      expect(agents[routedAgent]?.model).toBe('openai/gpt-6-luna');
+    } finally {
+      await hooks.dispose?.();
+    }
+  });
 
   test('preset inheritance clears a stale host model in the final config', async () => {
     const hooks = await loadConfiguredPlugin({

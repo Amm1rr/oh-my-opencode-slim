@@ -1935,6 +1935,10 @@ describe('ForegroundFallbackManager session.error', () => {
     // Should have picked the next model after anthropic/claude-opus-4-5
     expect(call[0].body.model.providerID).toBe('openai');
     expect(call[0].body.model.modelID).toBe('gpt-4o');
+    expect(mgr.getActiveFallbackModel('sess-1')).toBe('openai/gpt-4o');
+
+    mgr.observeExternalTurn('sess-1');
+    expect(mgr.getActiveFallbackModel('sess-1')).toBeUndefined();
   });
 
   test('triggers fallback on content-policy moderation session.error', async () => {

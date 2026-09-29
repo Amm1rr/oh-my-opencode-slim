@@ -691,7 +691,13 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       agentName,
       childChain: runtime.modelArrays[agentName],
       followsParent,
-      parentModel: sessionMetadata.getModel(parentSessionID),
+      // External-selection metadata deliberately ignores internal fallback
+      // replays (#1079). Delegation needs the opposite view: the model
+      // actually executing this parent turn, or children will be launched
+      // back onto the provider the parent just escaped.
+      parentModel:
+        foregroundFallback?.getActiveFallbackModel(parentSessionID) ??
+        sessionMetadata.getModel(parentSessionID),
       parentChain: parentAgent ? runtime.modelArrays[parentAgent] : undefined,
     });
   };
@@ -1020,7 +1026,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         );
       },
       sameProviderPolicy: runtime.backgroundJobs.sameProviderPolicy,
-      getSessionModel: (sessionID) => sessionMetadata.getModel(sessionID),
+      getSessionModel: (sessionID) =>
+        foregroundFallback.getActiveFallbackModel(sessionID) ??
+        sessionMetadata.getModel(sessionID),
       hostFlavor,
       shouldManageSession: (sessionID) =>
         sessionMetadata.getAgent(sessionID) === 'orchestrator' ||
@@ -2309,6 +2317,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         partsInternal ||
         (typeof messageID === 'string' &&
           isInternalAdmission(input.sessionID, messageID));
+      if (!internalAdmission) {
+        foregroundFallback.observeExternalTurn(input.sessionID);
+      }
 
       // OpenCode v1's native background notifier does not pin a model. The
       // host therefore constructs (and persists) this synthetic message on
