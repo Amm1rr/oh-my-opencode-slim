@@ -297,8 +297,28 @@ describe('fixer agent fallback', () => {
     const librarian = agents.find((a) => a.name === 'librarian');
     const fixer = agents.find((a) => a.name === 'fixer');
 
-    expect(librarian?.config.model).toBe('orchestrator-model');
+    expect(librarian?.config.model).toBeUndefined();
     expect(fixer?.config.model).toBe('fixer-local-model');
+  });
+
+  test('orchestrator inheritance keeps the agent fallback chain live', () => {
+    const config: PluginConfig = {
+      agents: {
+        librarian: {
+          model: ['openrouter/primary', 'openai/fallback'],
+          inheritModelFrom: 'orchestrator',
+        },
+      },
+    };
+    const librarian = createAgents(runtimeFor(config)).find(
+      (agent) => agent.name === 'librarian',
+    );
+
+    expect(librarian?.config.model).toBeUndefined();
+    expect(librarian?._modelArray).toEqual([
+      { id: 'openrouter/primary' },
+      { id: 'openai/fallback' },
+    ]);
   });
 
   test('model inheritance works when configured inside a preset', () => {
@@ -414,7 +434,7 @@ describe('fixer agent fallback', () => {
     expect(configAgent.fixer).toEqual({ temperature: 0.2 });
   });
 
-  test('orchestrator inheritance replaces a stale host model', () => {
+  test('orchestrator inheritance clears a stale host model', () => {
     const runtime = runtimeFor({
       agents: {
         orchestrator: { model: 'orchestrator-model' },
@@ -427,10 +447,10 @@ describe('fixer agent fallback', () => {
 
     applyModelInheritanceToConfig(configAgent, runtime);
 
-    expect(configAgent.librarian).toEqual({ model: 'orchestrator-model' });
+    expect(configAgent.librarian).toEqual({});
   });
 
-  test('orchestrator inheritance follows the host orchestrator model', () => {
+  test('orchestrator inheritance remains live after host model resolution', () => {
     const runtime = runtimeFor({
       agents: {
         librarian: { inheritModelFrom: 'orchestrator' },
@@ -445,7 +465,7 @@ describe('fixer agent fallback', () => {
 
     applyModelInheritanceToConfig(configAgent, runtime);
 
-    expect(configAgent.librarian).toEqual({ model: 'host-orchestrator-model' });
+    expect(configAgent.librarian).toEqual({});
   });
 });
 

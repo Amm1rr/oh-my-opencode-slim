@@ -581,14 +581,14 @@ that should follow the current session or the configured orchestrator model:
 Supported values are:
 
 - `session`: omit the agent model so OpenCode uses the current session model
-- `orchestrator`: use the orchestrator model resolved during configuration; if
-  none is configured, fall back to the current session model
+- `orchestrator`: follow the live orchestrator/session model, including later
+  fallback switches
 
-`orchestrator` means the model resolved during plugin configuration. It does
-not dynamically follow a later foreground fallback to another model.
-Runtime fallback behavior is independent of `inheritModelFrom` — unless the
-same override also configures an array `model` chain, which combines with it
-(see the rules below).
+`orchestrator` inheritance remains live when the orchestrator changes models.
+Delegated agents therefore follow the active fallback model rather than
+starting on a stale primary and waiting for an avoidable provider failure.
+Their own configured model array remains the ordered fallback chain after the
+inherited active model.
 
 Model selection follows these rules:
 

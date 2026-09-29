@@ -93,7 +93,7 @@ The council agent is a synthesis-only specialist:
 ### Model Resolution and Fallback
 
 - **Priority arrays**: When `model` is configured as an array in user config, it's stored as `_modelArray`
-- **Explicit inheritance**: `inheritModelFrom: "session"` leaves the agent model unset so OpenCode uses the parent session model; `"orchestrator"` follows the model resolved during configuration, not later runtime fallback
+- **Explicit inheritance**: `inheritModelFrom: "session"` and `"orchestrator"` leave the agent model unset so OpenCode follows the live parent/orchestrator model, including later runtime fallback switches
 - **Runtime fallback**: ForegroundFallbackManager resolves models at runtime when API errors occur
 - **Preset overrides**: Runtime presets can override model/variant/temperature per agent
 
