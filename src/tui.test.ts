@@ -1556,10 +1556,21 @@ describe('clickable sidebar sessions', () => {
 
   function withIsolatedDataHome(root: string): () => void {
     const originalDataHome = process.env.XDG_DATA_HOME;
+    const originalConfigHome = process.env.XDG_CONFIG_HOME;
+    const originalOpenCodeConfigDir = process.env.OPENCODE_CONFIG_DIR;
     process.env.XDG_DATA_HOME = path.join(root, 'data');
+    process.env.XDG_CONFIG_HOME = path.join(root, 'config');
+    process.env.OPENCODE_CONFIG_DIR = path.join(root, 'opencode-config');
     return () => {
       if (originalDataHome === undefined) delete process.env.XDG_DATA_HOME;
       else process.env.XDG_DATA_HOME = originalDataHome;
+      if (originalConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = originalConfigHome;
+      if (originalOpenCodeConfigDir === undefined) {
+        delete process.env.OPENCODE_CONFIG_DIR;
+      } else {
+        process.env.OPENCODE_CONFIG_DIR = originalOpenCodeConfigDir;
+      }
     };
   }
 
