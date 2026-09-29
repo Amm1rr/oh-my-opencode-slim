@@ -95,6 +95,12 @@ describe('isOnPath', () => {
     expect(isOnPath('npm', dir, 'linux')).toBe(false);
   });
 
+  test('ignores relative PATH entries', () => {
+    const dir = dirWith(['bun']);
+    const relative = path.relative(process.cwd(), dir);
+    expect(isOnPath('bun', relative, 'linux')).toBe(false);
+  });
+
   test('uses PATHEXT resolution on Windows', () => {
     const dir = dirWith(['npm.CMD', 'bun']);
     expect(isOnPath('npm', dir, 'win32')).toBe(true);

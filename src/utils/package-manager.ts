@@ -23,12 +23,18 @@ export function isOnPath(
   pathEnv: string = process.env.PATH ?? '',
   platform: NodeJS.Platform = process.platform,
 ): boolean {
-  if (platform === 'win32') {
-    return resolveWindowsCommand(command, pathEnv) !== undefined;
-  }
-  return pathEnv
+  // Relative entries (e.g. ./node_modules/.bin) resolve against the probe's
+  // cwd, not the cache dir the install later runs in, so ignore them.
+  const pathApi = platform === 'win32' ? path.win32 : path.posix;
+  const dirs = pathEnv
     .split(path.delimiter)
-    .some((dir) => dir && isExecutableFile(path.join(dir, command)));
+    .filter((dir) => dir && pathApi.isAbsolute(dir));
+  if (platform === 'win32') {
+    return (
+      resolveWindowsCommand(command, dirs.join(path.delimiter)) !== undefined
+    );
+  }
+  return dirs.some((dir) => isExecutableFile(path.join(dir, command)));
 }
 
 /**
