@@ -1118,6 +1118,15 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "jaynis",
+      "name": "jaynis",
+      "avatar_url": "https://avatars.githubusercontent.com/u/1553675?v=4",
+      "profile": "https://github.com/jaynis",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "commitConvention": "angular"
