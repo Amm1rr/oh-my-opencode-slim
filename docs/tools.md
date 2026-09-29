@@ -141,8 +141,9 @@ ID excluded indefinitely: no automatic retry or recovery. Historical outcomes
 are not stop evidence; live quiescence does not guarantee queued prompts were
 purged, so future queued execution remains uncertain even after lease release.
 
-`task()` refuses an explicit `task_id` it cannot resume instead of dropping it
-and spawning another session.
+The delegation tool (`task()` on v1, `subagent()` on v2) refuses an explicit
+resume id (`task_id` on v1, `sessionID` on v2) it cannot resume instead of
+dropping it and spawning another session.
 
 Revive checks for an idle-verification mechanism before aborting an active child:
 the live status map on v1, or the host's idle wait on v2. Missing capability fails

@@ -26,6 +26,31 @@ describe('delegation normalization', () => {
     });
   });
 
+  test('accepts a legacy task_id as the resume id inbound', () => {
+    expect(subagentArgsToV1({ agent: 'fixer', task_id: 'ses_legacy' })).toEqual(
+      { subagent_type: 'fixer', task_id: 'ses_legacy' },
+    );
+  });
+
+  test('canonical sessionID wins over a legacy task_id', () => {
+    expect(
+      subagentArgsToV1({
+        agent: 'fixer',
+        task_id: 'ses_legacy',
+        sessionID: 'ses_canonical',
+      }),
+    ).toEqual({ subagent_type: 'fixer', task_id: 'ses_canonical' });
+  });
+
+  test('outbound emits only sessionID, never task_id', () => {
+    const out = v1ArgsToSubagent({
+      subagent_type: 'fixer',
+      task_id: 'ses_1',
+    });
+    expect(out).toEqual({ agent: 'fixer', sessionID: 'ses_1' });
+    expect(out.task_id).toBeUndefined();
+  });
+
   test('round-trips hook mutations', () => {
     const v1 = subagentArgsToV1({ agent: 'fixer', sessionID: 'ses_1' });
     delete v1.task_id;

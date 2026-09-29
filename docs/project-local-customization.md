@@ -179,6 +179,39 @@ is **inline > file > built-in default**:
      finalPrompt = effectiveBase
      ```
 
+### Host Vocabulary in Custom Prompts
+
+Prompt text you supply is used **verbatim** for delegation vocabulary — the
+plugin never rewrites delegation calls in it (`task(...)` on v1,
+`subagent(...)` on v2). Separately, display-name substitution rewrites
+`@<internalName>` mentions to the agent's `displayName` throughout the final
+orchestrator prompt (inline, file, and append orchestrator prompts) and in
+`orchestratorPrompt`/ACP routing snippets (see
+[Display name rewriting](#custom-routing-guidance-orchestratorprompt) below).
+The host you run on therefore determines the delegation vocabulary embedded in
+that text:
+
+| Host (plugin entry) | Delegation call | Agent param | Resume param |
+|---|---|---|---|
+| v1 (`opencode`) | `task(...)` | `subagent_type` | `task_id` |
+| v2 (`opencode2`) | `subagent(...)` | `agent` | `sessionID` |
+
+This applies to **every** prompt you supply:
+
+- inline `agents.<agent>.prompt`,
+- `<agent>.md` replacement and `<agent>_append.md` files,
+- `orchestratorPrompt` routing snippets,
+- custom and ACP agent prompts,
+- council `presets.<name>.<councillor>.prompt` guidance.
+
+A prompt that hard-codes delegation calls is therefore **not portable** between
+v1 and v2 — keep a host-specific version for each.
+
+The control-tool names (`task_status`, `task_result`, `task_message`,
+`task_reply`, `task_revive`, `task_cancel`) are identical on both hosts. On v2
+they take `sessionID` and also accept `task_id` as a deprecated alias (never
+emitted).
+
 ---
 
 ## Custom Routing Guidance (`orchestratorPrompt`)

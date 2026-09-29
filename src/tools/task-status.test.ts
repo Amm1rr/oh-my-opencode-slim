@@ -8,9 +8,14 @@ function makeTool(options: {
   board: BackgroundJobBoard;
   now?: () => number;
   statusTimeoutMs?: number;
+  hostFlavor?: string;
 }) {
   return createTaskStatusTool({
-    input: { directory: '/test', client } as any,
+    input: {
+      directory: '/test',
+      client,
+      ...(options.hostFlavor ? { hostFlavor: options.hostFlavor } : {}),
+    } as any,
     backgroundJobBoard: options.board,
     now: options.now,
     statusTimeoutMs: options.statusTimeoutMs,
@@ -218,5 +223,38 @@ describe('task_status', () => {
         sessionID: 'parent-2',
       } as any),
     ).rejects.toThrow('Unknown task ID or alias');
+  });
+
+  test('v2 exposes sessionID and accepts the task_id alias', async () => {
+    const board = new BackgroundJobBoard();
+    board.registerLaunch({
+      taskID: 'ses_child1',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+      description: 'implement',
+    });
+    client = {
+      session: {
+        status: mock(async () => ({
+          data: { ses_child1: { type: 'busy' } },
+        })),
+      },
+    };
+    const { task_status } = makeTool({ board, hostFlavor: 'v2' });
+
+    expect(Object.keys(task_status.args)).toContain('sessionID');
+
+    const viaNative = await task_status.execute({ sessionID: 'ses_child1' }, {
+      sessionID: 'parent-1',
+    } as any);
+    expect(viaNative).toContain('state: busy');
+    const viaAlias = await task_status.execute({ task_id: 'ses_child1' }, {
+      sessionID: 'parent-1',
+    } as any);
+    expect(viaAlias).toContain('state: busy');
+
+    await expect(
+      task_status.execute({ sessionID: ' ' }, { sessionID: 'parent-1' } as any),
+    ).rejects.toThrow('requires sessionID');
   });
 });

@@ -5,7 +5,8 @@ import { createReadOnlyAgentPermission } from './permissions';
 /**
  * Councillor agent - a read-only advisor in the multi-LLM council.
  *
- * Councillors are dispatched by the orchestrator via task() as agent sessions
+ * Councillors are dispatched by the orchestrator (via `task()` on v1,
+ * `subagent()` on v2) as agent sessions
  * (visible in tmux/UI). They have read-only access to the codebase via tools
  * but CANNOT modify files, run shell commands, or spawn subagents.
  *

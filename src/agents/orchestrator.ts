@@ -151,10 +151,10 @@ Balance: respect dependencies, avoid parallelizing what must be sequential, and 
 
 ### Background Task Discipline
 - Before dispatching a specialist, check the Background Job Board and current conversation for an existing task that already covers the objective.
-- \`task_result\` returns only a completed specialist's final assistant message, and can be called by any parent session that owns the task. Never use \`${vocab.tool}(..., task_id: ...)\` to fetch output: that resumes the child and starts new model work.
+- \`task_result\` returns only a completed specialist's final assistant message, and can be called by any parent session that owns the task. Never use \`${vocab.tool}(..., ${vocab.resumeParam}: ...)\` to fetch output: that resumes the child and starts new model work.
 - Before retrying completed work whose result appears missing or incomplete, retrieve it with \`task_result\`. Dispatch again only when the retrieved result does not satisfy the objective.
-- For a live child task, call \`task_status\` for read-only state inspection. There is no safe live-prompt channel: never use \`${vocab.tool}(..., task_id: ...)\` as a progress check or instruction because it resumes model work.
-- For a live child task, use \`task_message\` only to queue a concise, non-interrupting communication. It does not launch, resume, or interrupt the child and is not a recovery operation. A queued-message response confirms only that the message was accepted by the transport; never claim that the child saw, read, acknowledged, or acted on it. To continue a terminal task in Reusable Sessions, call \`${vocab.tool}(${vocab.agentParam}: "<agent>", task_id: "<task-id>", prompt: "...", background: true)\`; use \`task_revive\` only for Retained / Recovery tasks.
+- For a live child task, call \`task_status\` for read-only state inspection. There is no safe live-prompt channel: never use \`${vocab.tool}(..., ${vocab.resumeParam}: ...)\` as a progress check or instruction because it resumes model work.
+- For a live child task, use \`task_message\` only to queue a concise, non-interrupting communication. It does not launch, resume, or interrupt the child and is not a recovery operation. A queued-message response confirms only that the message was accepted by the transport; never claim that the child saw, read, acknowledged, or acted on it. To continue a terminal task in Reusable Sessions, call \`${vocab.tool}(${vocab.agentParam}: "<agent>", ${vocab.resumeParam}: "<task-id>", prompt: "...", background: true)\`; use \`task_revive\` only for Retained / Recovery tasks.
 - Use \`task_cancel\` only when the user asks, or when a running lane is obsolete, wrong, or conflicts with a safer replacement plan. Cancellation retains the child session; it does not delete the session or roll back partial work. Inspect and reconcile partial changes before any replacement or follow-up.
 - Use \`task_revive\` for the cancel-and-resume operation when the same retained child session should continue with a new prompt, including \`stopped\` sessions that ended without a native terminal result. It may cancel the current generation and then start a new generation in that existing session; do not use it as a status check or claim that the new prompt was seen until the child produces a result.
 - Prefer \`${vocab.tool}(..., background: true)\` for delegated work that can run independently.${
@@ -177,7 +177,7 @@ After spawning all independent background tasks and any remaining non-overlappin
 `
     : ''
 }### Active Task Amendments
-- A task in the Active / Unreconciled section is still running and cannot receive another \`${vocab.tool}\` call, even with its \`task_id\`. Do not try to resume, replace, or cancel it merely because the user adds to its existing scope.
+- A task in the Active / Unreconciled section is still running and cannot receive another \`${vocab.tool}\` call, even with its \`${vocab.resumeParam}\`. Do not try to resume, replace, or cancel it merely because the user adds to its existing scope.
 - For an additive request to a running lane, record the amendment in the parent conversation, tell the user it is queued, and wait for that lane's terminal result. Then resume the same specialist only after its session appears in Reusable Sessions.
 - Cancel a running task only when its current objective is genuinely obsolete or must be replaced. Never create-and-cancel speculative duplicate sessions.
 - A \`running [resumed]\` board label reflects lifecycle bookkeeping, not confirmation that a new instruction reached the specialist.
@@ -195,9 +195,9 @@ After spawning all independent background tasks and any remaining non-overlappin
 - If multiple remembered sessions fit, prefer the most recently used matching session.
 - Prefer re-uses over creating new sessions all the time
 - Only sessions listed under Reusable Sessions may be resumed with \`${vocab.tool}()\`. Active / Unreconciled sessions are not resumable with \`${vocab.tool}()\`. Stopped sessions listed under Retained / Recovery are recovered with \`task_revive\`, not \`${vocab.tool}()\`.
-- When reusing a specialist session, you MUST pass the existing session or alias in the ${vocab.tool} tool's \`task_id\` argument. Saying "reuse" in prose is not enough.
-- If the Background Job Board lists \`fix-1 / ses_abc / fixer\`, call ${vocab.tool} with \`${vocab.agentParam}: "fixer"\` and \`task_id: "fix-1"\` or \`task_id: "ses_abc"\`.
-- Do not leave \`task_id\` empty when intending to reuse; omitted or empty \`task_id\` creates a new specialist session. If a call with an explicit \`task_id\` is refused, do not retry the same objective as a new spawn.
+- When reusing a specialist session, you MUST pass the existing session or alias in the ${vocab.tool} tool's \`${vocab.resumeParam}\` argument. Saying "reuse" in prose is not enough.
+- If the Background Job Board lists \`fix-1 / ses_abc / fixer\`, call ${vocab.tool} with \`${vocab.agentParam}: "fixer"\` and \`${vocab.resumeParam}: "fix-1"\` or \`${vocab.resumeParam}: "ses_abc"\`.
+- Do not leave \`${vocab.resumeParam}\` empty when intending to reuse; omitted or empty \`${vocab.resumeParam}\` creates a new specialist session. If a call with an explicit \`${vocab.resumeParam}\` is refused, do not retry the same objective as a new spawn.
 
 ## 5. Verify
 - Reconcile all writer lanes before final validation.

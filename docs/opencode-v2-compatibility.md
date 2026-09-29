@@ -162,9 +162,15 @@ not an optional-degradation path.
 4. Bridges the returned v1 `Hooks` into v2 registrations:
    - `agent` → `ctx.agent.transform` (model/prompt/permission adaptation +
      `subagent`/`execute` permission mapping + `draft.default("orchestrator")`).
-     On v2 hosts the generated orchestrator/council prompts already use
-     native wording (`subagent` tool, `agent` param); the `task`→`subagent`
-     prompt rewrite remains only as a fallback for user-custom presets
+     On v2 hosts the generated orchestrator/council prompts use
+     native wording (`subagent` tool, `agent` param). No delegation-vocabulary
+     rewriting is applied: every user-supplied prompt must be written in the
+     host's own vocabulary directly — inline `prompt`, `<agent>.md`/append files,
+     `orchestratorPrompt` snippets, custom and ACP agent prompts, and council
+     councillor prompts. Separately, display-name substitution rewrites
+     `@<internalName>` mentions to the agent's `displayName` throughout the
+     final orchestrator prompt (inline, file, and append orchestrator prompts)
+     and in `orchestratorPrompt`/ACP routing snippets.
     - `tool` → `ctx.tool.transform` (zod shape → JSON schema; execute
       shimmed; every registration carries `options: {codemode: false}` —
       see the feature matrix note below)
@@ -372,7 +378,7 @@ side cannot be observed.
 | Capability | v1 (`opencode`) | v2 (`opencode2`) | Notes |
 |---|---|---|---|
 | Orchestrator + specialist agents, prompts & permission mapping | ✅ | ✅ `ctx.agent.transform` | — |
-| Delegation + background job board + `task_*` tools | ✅ `task` tool | ✅ host `subagent` (auto-bridged: name/args normalization in `src/v2/delegation.ts`, output parsing in the execute bridges) | — |
+| Delegation + background job board + `task_*` tools | ✅ `task` tool | ✅ host `subagent` (auto-bridged: name/args normalization in `src/v2/delegation.ts`, output parsing in the execute bridges) | On v2 the model-visible identifier parameter is `sessionID` for both the host `subagent` resume arg and the plugin's `task_*` tools; `task_id` is accepted only as a deprecated alias (never emitted). Prompt text must use the host's vocabulary directly — no v1→v2 delegation-vocabulary rewriting is applied (display-name substitution separately rewrites `@<internalName>` mentions to the agent's `displayName` throughout the final orchestrator prompt — inline, file, and append orchestrator prompts — and in `orchestratorPrompt`/ACP routing snippets) — so an instructed resume continues the child instead of forking a new one |
 | Tools (ast-grep, webfetch, task_message/task_cancel/task_revive, wait_for_user, acp_run) | ✅ | ✅ `ctx.tool.transform` | v2 requires `options: {codemode: false}` on each registration (CodeMode split): without it a tool registers cleanly but is confined to the `execute` tool's JS runtime and session catalogs yield `Unknown tool: <name>`. The plugin stamps it on every adapted tool (`adaptTool` in `src/v2/adapters.ts`; additive field, older hosts ignore it). ast-grep needs its CLI binary (package, system, or lazy download); webfetch needs `jsdom` resolvable |
 | Slash commands `/deepwork` `/reflect` `/loop` | ✅ | ✅ marker round-trip | — |
 | `/interview` | ✅ | ✅ marker command + trailing-message context bridge | — |

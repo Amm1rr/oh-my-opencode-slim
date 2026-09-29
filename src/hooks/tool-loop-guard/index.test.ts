@@ -176,6 +176,25 @@ describe('tool-loop-guard', () => {
     }
   });
 
+  test('recognizes v2 sessionID args and emitted labels', async () => {
+    const statusOutput = [
+      'sessionID: ses_child1',
+      'state: busy',
+      'agent: fixer',
+    ].join('\n');
+
+    for (let i = 1; i <= 3; i++) {
+      const output = await runToolCall(
+        'task_status',
+        `v2-${i}`,
+        { sessionID: 'ses_child1' },
+        statusOutput,
+      );
+      if (i < 3) expect(output.output).toBe(statusOutput);
+      else expect(output.output).toContain(LOOP_GUARD_WARNING);
+    }
+  });
+
   test('a new parent turn resets polling counters but not within-turn detection', async () => {
     const statusOutput = makeTaskStatusOutput();
 

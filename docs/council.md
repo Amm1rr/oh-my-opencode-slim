@@ -34,7 +34,8 @@ synthesizes their outputs into one answer.
 Each councillor in a preset is registered as a dynamic subagent named
 `councillor-<name>` (e.g. `councillor-alpha`, `councillor-beta`), each
 with its own configured model. The orchestrator dispatches all councillors
-in parallel via OpenCode's native `task()` tool at depth 1, and each
+in parallel via the host's native delegation tool (`task()` on v1,
+`subagent()` on v2) at depth 1, and each
 councillor appears as its own TUI pane.
 
 ```text
@@ -53,6 +54,8 @@ Council agent synthesizes councillor results
         v
 Final answer
 ```
+
+> The diagram shows v1 wording; on v2 the same dispatches use `subagent()`.
 
 The council agent waits for all councillors to respond (or fail), then
 synthesizes their results into a single report.

@@ -11,6 +11,7 @@ import {
 import type { BackgroundJobStore } from '../utils/background-job-store';
 import { getClient } from '../utils/opencode-client';
 import { OperationTimeoutError, withTimeout } from '../utils/session';
+import { idParamFor, readTaskRef, taskRefArgs } from './task-ref';
 
 const z = tool.schema;
 const DEFAULT_REPLY_TIMEOUT_MS = 10_000;
@@ -73,13 +74,12 @@ export function createTaskReplyTool(options: {
   backgroundJobBoard: BackgroundJobStore;
   replyTimeoutMs?: number;
 }): Record<'task_reply', ToolDefinition> {
+  const idParam = idParamFor(options.input);
   const task_reply = tool({
     description:
       'Answer a tracked background child task waiting on a supported question or permission request. Permissions are supported on OpenCode v2 hosts that expose permission.reply; v2 form-created questions are observable but not answerable through the pinned plugin context. Accepts the task ID or parent-scoped alias plus the request ID from the wake or task_status.',
     args: {
-      task_id: z
-        .string()
-        .describe('Tracked live task ID or parent-scoped alias'),
+      ...taskRefArgs(idParam),
       request_id: z
         .string()
         .describe('Open question/permission request ID to answer'),
@@ -100,8 +100,8 @@ export function createTaskReplyTool(options: {
       const parentSessionID = toolContext?.sessionID;
       if (!parentSessionID) throw new Error('task_reply requires sessionID');
 
-      const requested = args.task_id.trim();
-      if (!requested) throw new Error('task_reply requires task_id');
+      const requested = readTaskRef(args, idParam);
+      if (!requested) throw new Error(`task_reply requires ${idParam}`);
       const requestID = args.request_id.trim();
       if (!requestID) throw new Error('task_reply requires request_id');
 
@@ -109,7 +109,7 @@ export function createTaskReplyTool(options: {
         parentSessionID,
         requested,
       );
-      if (!job) throw new Error(`Unknown task ID or alias: ${args.task_id}`);
+      if (!job) throw new Error(`Unknown task ID or alias: ${requested}`);
       if (job.state !== 'running') {
         throw new Error(
           `Task ${requested} cannot be answered: board state is ${job.state}, not running`,

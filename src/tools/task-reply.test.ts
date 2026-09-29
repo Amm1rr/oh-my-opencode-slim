@@ -245,6 +245,45 @@ describe('task_reply', () => {
     expect(output).toContain('Answered pending question que_1');
   });
 
+  test('v2 exposes sessionID and accepts the task_id alias', async () => {
+    resetChildInputWaitForTests();
+    const board = new BackgroundJobBoard();
+    registerBackgroundChild(board);
+    noteChildInputWait({
+      taskID: 'ses_child1',
+      parentSessionID: 'parent-1',
+      kind: 'question',
+      requestID: 'que_1',
+      questions: [],
+    });
+    noteChildInputWait({
+      taskID: 'ses_child1',
+      parentSessionID: 'parent-1',
+      kind: 'question',
+      requestID: 'que_2',
+      questions: [],
+    });
+    const reply = mock(async () => ({ data: true }));
+    const client = { question: { reply, reject: mock(async () => ({})) } };
+    const { task_reply } = createTaskReplyTool({
+      input: { directory: '/test', client, hostFlavor: 'v2' } as never,
+      backgroundJobBoard: board,
+    });
+
+    expect(Object.keys(task_reply.args)).toContain('sessionID');
+
+    const viaNative = await task_reply.execute(
+      { sessionID: 'ses_child1', request_id: 'que_1', answers: ['yes'] },
+      { sessionID: 'parent-1' } as never,
+    );
+    expect(viaNative).toContain('Answered pending question que_1');
+    const viaAlias = await task_reply.execute(
+      { task_id: 'ses_child1', request_id: 'que_2', answers: ['yes'] },
+      { sessionID: 'parent-1' } as never,
+    );
+    expect(viaAlias).toContain('Answered pending question que_2');
+  });
+
   test('omitted answers rejects the open question', async () => {
     resetChildInputWaitForTests();
     const board = new BackgroundJobBoard();

@@ -118,6 +118,10 @@ export interface BackgroundJobBoardOptions {
   maxContextLines?: number;
   readContextMinLines?: number;
   readContextMaxFiles?: number;
+  /** Delegation tool name for model-visible recovery guidance: `subagent` on
+   * v2 hosts, `task` on v1/default. Only the two retained/recovery wording
+   * lines vary; the board stays v1 by default. */
+  delegationTool?: string;
   /** Alias counter high-water seed per `<parentSessionID>:<prefix>` so a
    * post-restart board never reuses a historical alias. Defaults to the
    * shared persistence high-water marks (0 without a storage backend —
@@ -225,6 +229,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
   private readonly maxContextLines: number;
   private readonly readContextMinLines: number;
   private readonly readContextMaxFiles: number;
+  private readonly delegationTool: string;
   private readonly aliasCounterHighWater: (
     parentSessionID: string,
     prefix: string,
@@ -238,6 +243,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       options.readContextMinLines ?? DEFAULT_READ_CONTEXT_MIN_LINES;
     this.readContextMaxFiles =
       options.readContextMaxFiles ?? DEFAULT_READ_CONTEXT_MAX_FILES;
+    this.delegationTool = options.delegationTool ?? 'task';
     this.aliasCounterHighWater =
       options.aliasCounterHighWater ?? aliasHighWaterMark;
   }
@@ -1372,7 +1378,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
           : ['Cancelled or errored sessions are not reusable.']),
         ...(retained.length > 0
           ? [
-              'Stopped sessions without a terminal result are retained for task_revive, not task().',
+              `Stopped sessions without a terminal result are retained for task_revive, not ${this.delegationTool}().`,
             ]
           : []),
         '',
@@ -1521,6 +1527,11 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     const lines = [
       `- ${promptSafe(job.alias)} / ${promptSafe(job.taskID)} / ${promptSafe(job.agent)} / stopped, ${REVIVE_ONLY}`,
       `  Objective: ${promptSafe(job.description || job.objective || '')}`,
+      ...(this.delegationTool === 'task'
+        ? []
+        : [
+            `  Recovery: no terminal result; recoverable with task_revive, not ${this.delegationTool}()`,
+          ]),
     ];
     const context = formatContextFiles(
       job.contextFiles,

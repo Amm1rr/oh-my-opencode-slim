@@ -88,6 +88,11 @@ describe('task output header parsing', () => {
     ],
     [
       'ses_A',
+      'completed',
+      'sessionID: ses_A\nstate: completed\n<task_result>done</task_result>',
+    ],
+    [
+      'ses_A',
       'running',
       '<task id="ses_A" state="running"><task_result>working</task_result></task>',
     ],
@@ -244,6 +249,24 @@ describe('parseTaskStatusOutput', () => {
   test('parses completed status output with task result', () => {
     const output = [
       'task_id: ses_123',
+      'state: completed',
+      '',
+      '<task_result>',
+      'done',
+      '</task_result>',
+    ].join('\n');
+
+    expect(parseTaskStatusOutput(output)).toEqual({
+      taskID: 'ses_123',
+      state: 'completed',
+      timedOut: false,
+      result: 'done',
+    });
+  });
+
+  test('parses a v2 sessionID header', () => {
+    const output = [
+      'sessionID: ses_123',
       'state: completed',
       '',
       '<task_result>',

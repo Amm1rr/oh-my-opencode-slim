@@ -80,6 +80,17 @@ When a `preset` is active, the plugin checks preset directories before falling b
 
 Both `{agent}.md` and `{agent}_append.md` can coexist - the full replacement takes effect first, then the append. If neither exists, the built-in default prompt is used.
 
+> **Prompt text is verbatim for delegation vocabulary.** The plugin never
+> rewrites delegation calls in prompts, so any delegation calls you write must
+> use the running host's vocabulary — v1 `task`/`subagent_type`/`task_id`, v2
+> `subagent`/`agent`/`sessionID`. This applies to prompt files, inline
+> `agents.<agent>.prompt`, and `orchestratorPrompt` snippets. Separately,
+> display-name substitution rewrites `@<internalName>` mentions to the agent's
+> `displayName` when one is defined, throughout the final orchestrator prompt
+> (inline, file, and append orchestrator prompts) and in
+> `orchestratorPrompt`/ACP routing snippets. See
+> [Host Vocabulary in Custom Prompts](project-local-customization.md#host-vocabulary-in-custom-prompts).
+
 ---
 
 ## JSONC Format
@@ -196,13 +207,13 @@ an MCP tool remains authoritative.
 | `backgroundJobs.orchestratorWake.mode` | string | `"auto"` | Wake-condition source: `"auto"` uses todo-gating on OpenCode v1 and children-driven degraded mode on v2 hosts; `"todo"`/`"children"` pin one mode (explicit `"todo"` degrades to children where no todo API exists). See [Background Orchestration](background-orchestration.md#orchestrator-wake-scheduler). |
 | `backgroundJobs.orchestratorWake.wakeOnTerminalPublication` | boolean | `true` | When true, a terminal completed/error publication that reaches an idle parent wakes it immediately instead of waiting for the next periodic evaluation. The first terminal publication of any generation (terminalRevision 1) is skipped (the native notifier armed by that generation's `subagent` tool call already delivers it); busy parents are skipped the same way See [Background Orchestration](background-orchestration.md#orchestrator-wake-scheduler) See [Background Job Management](#background-job-management). |
 | `backgroundJobs.orchestratorWake.publicationWakeMinIntervalMs` | integer | `30000` | Per-parent minimum spacing between terminal-publication wakes (`1000`–`2147483647` ms; `0` is invalid — the schema floor is 1,000ms). A burst of publications collapses into one wake; the window is consumed only when a wake is actually delivered See [Background Orchestration](background-orchestration.md#orchestrator-wake-scheduler) See [Background Job Management](#background-job-management). |
-| `backgroundJobs.wallClockTimeoutMs` | integer | `0` | **Opt-in wall-clock supervisor.** `0` disables it. Otherwise, only native `task(..., background: true)` child sessions are supervised; accepted values are `60000`–`2147483647` milliseconds See [Background Job Management](#background-job-management). |
+| `backgroundJobs.wallClockTimeoutMs` | integer | `0` | **Opt-in wall-clock supervisor.** `0` disables it. Otherwise, only native background child sessions (`task(..., background: true)` on v1, `subagent(..., background: true)` on v2) are supervised; accepted values are `60000`–`2147483647` milliseconds See [Background Job Management](#background-job-management). |
 | `backgroundJobs.abortGraceMs` | integer | `10000` | Grace period after a wall-clock deadline for a terminal confirmation. Accepted values are `1000`–`60000` milliseconds; a hanging or failed abort does not extend this grace See [Background Job Management](#background-job-management). |
 | `backgroundJobs.stopConfirmationMs` | integer | `5000` | Terminal-gate grace period the background-job terminal gate waits for stop confirmation evidence before publishing a stopped job. Accepted values are `1000`–`60000` milliseconds See [Background Job Management](#background-job-management). |
 | `backgroundJobs.concurrency.defaultConcurrency` | integer | `0` | Maximum concurrently running native background tasks. `0` means unlimited; accepted values are `0`–`1000` See [Background Job Management](#background-job-management). |
 | `backgroundJobs.concurrency.providerConcurrency` | object | `{}` | Per-provider caps keyed by provider ID. Each value must be `0`–`1000`, where `0` means unlimited for that provider. The most specific configured cap wins: model > provider > default See [Background Job Management](#background-job-management). |
 | `backgroundJobs.concurrency.modelConcurrency` | object | `{}` | Per-model caps keyed by `provider/model` ID. Each value must be `0`–`1000`, where `0` means unlimited for that model. The most specific configured cap wins: model > provider > default See [Background Job Management](#background-job-management). |
-| `backgroundJobs.sameProviderPolicy` | object | `{}` | Opt-in per-provider policy keyed by provider ID; the only value is `"foreground"`. When the parent session's current model and the child agent's resolved model both resolve to a configured provider, an explicit `task(..., background: true)` call is converted to the existing foreground execution path. Unconfigured, different, or undeterminable providers keep background behavior. See [Background Job Management](#background-job-management). |
+| `backgroundJobs.sameProviderPolicy` | object | `{}` | Opt-in per-provider policy keyed by provider ID; the only value is `"foreground"`. When the parent session's current model and the child agent's resolved model both resolve to a configured provider, an explicit background call (`task(..., background: true)` on v1, `subagent(..., background: true)` on v2) is converted to the existing foreground execution path. Unconfigured, different, or undeterminable providers keep background behavior. See [Background Job Management](#background-job-management). |
 | `backgroundJobs.waitForUserGuard` | boolean | `true` | When true, intercepts `wait_for_user` calls while background tasks are still running and the orchestrator wake scheduler is enabled, returning guidance to end the turn instead of blocking on manual input. See [Background Job Management](#background-job-management). |
 | `backgroundJobs.boardInjection` | boolean | `true` | When false, the Background Job Board reminder is never injected into prompts. Background task tracking, wake, and task_status all keep working; the orchestrator simply no longer passively sees the board. See [Background Job Management](#background-job-management). |
 | `disabled_mcps` | string[] | `[]` | MCP server IDs to disable globally |
@@ -384,6 +395,10 @@ major is available, the plugin shows a migration command instead.
 > regardless of `autoUpdate`.
 
 ### Background Job Management
+
+> The delegation tool named `task()` in the background-job material here is
+> `subagent()` on v2, with `task_id`/`sessionID` as the matching resume id; bare
+> `task()` mentions in this section refer to that host-specific delegation tool.
 
 Background job management is enabled by default and does not need to be present
 in the starter config. Add `backgroundJobs` only if you want to tune how many

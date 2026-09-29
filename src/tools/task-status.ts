@@ -8,8 +8,8 @@ import type { BackgroundJobStore } from '../utils/background-job-store';
 import { getRuntimeSessionStatusSnapshot } from '../utils/session-runtime-status';
 import type { TaskActivityTracker } from './task-activity';
 import { observationFromSnapshot, summarizeTaskStatus } from './task-policy';
+import { idParamFor, readTaskRef, taskRefArgs } from './task-ref';
 
-const z = tool.schema;
 const ACTIVE_STATES = new Set(['busy', 'running', 'retry']);
 
 export function createTaskStatusTool(options: {
@@ -19,17 +19,18 @@ export function createTaskStatusTool(options: {
   now?: () => number;
   statusTimeoutMs?: number;
 }): Record<'task_status', ToolDefinition> {
+  const idParam = idParamFor(options.input);
   const task_status = tool({
     description:
       'Read the current status of a tracked child task without resuming, prompting, or changing it. Accepts its task ID or parent-scoped alias.',
     args: {
-      task_id: z.string().describe('Tracked task ID or parent-scoped alias'),
+      ...taskRefArgs(idParam),
     },
     async execute(args, toolContext) {
       const parentSessionID = toolContext?.sessionID;
       if (!parentSessionID) throw new Error('task_status requires sessionID');
-      const requested = args.task_id.trim();
-      if (!requested) throw new Error('task_status requires task_id');
+      const requested = readTaskRef(args, idParam);
+      if (!requested) throw new Error(`task_status requires ${idParam}`);
 
       const job = options.backgroundJobBoard.resolve(
         parentSessionID,
