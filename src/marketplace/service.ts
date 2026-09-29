@@ -1,10 +1,16 @@
 import { readFileSync, realpathSync } from 'node:fs';
+import type { MarketplaceLivePackage } from '../agents/registry.js';
 import { BUILD_VERSION } from '../generated/build-info.js';
 import {
   DEFAULT_MARKETPLACE_REGISTRY_URL,
   MarketplacePackageBundleSchema,
   MarketplacePackageManifestSchema,
 } from '../marketplace-contract/index.js';
+import {
+  disableMarketplacePackage,
+  enableMarketplaceAgent,
+  type MarketplaceActivationScope,
+} from './activation-config.js';
 import { withMarketplaceConfigReferencesRemoved } from './config-references.js';
 import {
   MarketplaceCompatibilityError,
@@ -17,7 +23,14 @@ import type { MarketplaceRegistryDownload } from './registry-client.js';
 import { MarketplaceRegistryClient } from './registry-client.js';
 import type { MarketplacePackageBundle } from './schemas.js';
 import {
+  type MarketplaceReloadRequest,
+  type MarketplaceRuntimeStatus,
+  readMarketplaceRuntimeStatus,
+  requestMarketplaceReload,
+} from './status.js';
+import {
   MarketplaceStore,
+  type MarketplaceStoreInspection,
   type MarketplaceStoreOptions,
   type MarketplaceVerification,
   type StoredMarketplacePackage,
@@ -29,6 +42,27 @@ export interface MarketplaceServiceOptions
   pluginVersion?: string;
   projectDir?: string;
   registryClient?: MarketplaceRegistryDownloadClient;
+  getLivePackages?: () => readonly MarketplaceLivePackage[] | undefined;
+  getDesiredState?: (
+    inspection: MarketplaceStoreInspection,
+  ) => MarketplaceDesiredState;
+  getPresetOverride?: () => string | undefined;
+}
+
+export interface MarketplaceDesiredState {
+  readonly packageIds: readonly string[];
+  readonly packages?: readonly MarketplaceLivePackage[];
+  readonly error?: string;
+}
+
+export const MARKETPLACE_UNINSTALL_SCOPE_WARNING =
+  'Other project configurations were not inspected and may retain dangling marketplace package references.';
+
+export interface MarketplaceUninstallResult {
+  readonly packageId: string;
+  readonly uninstalled: true;
+  readonly otherProjectsInspected: false;
+  readonly warning: typeof MARKETPLACE_UNINSTALL_SCOPE_WARNING;
 }
 
 export type MarketplaceRegistryDownloadClient = Pick<
@@ -89,11 +123,17 @@ export class MarketplaceService {
   readonly store: MarketplaceStore;
   readonly projectDir: string;
   readonly registryClient: MarketplaceRegistryDownloadClient;
+  private readonly getLivePackages?: MarketplaceServiceOptions['getLivePackages'];
+  private readonly getDesiredState?: MarketplaceServiceOptions['getDesiredState'];
+  private readonly getPresetOverride?: MarketplaceServiceOptions['getPresetOverride'];
 
   constructor(options: MarketplaceServiceOptions = {}) {
     const pluginVersion = options.pluginVersion ?? BUILD_VERSION;
     this.store = new MarketplaceStore({ ...options, pluginVersion });
     this.projectDir = options.projectDir ?? process.cwd();
+    this.getLivePackages = options.getLivePackages;
+    this.getDesiredState = options.getDesiredState;
+    this.getPresetOverride = options.getPresetOverride;
     this.registryClient =
       options.registryClient ??
       new MarketplaceRegistryClient({ pluginVersion });
@@ -183,12 +223,105 @@ export class MarketplaceService {
       : this.store.verifyAll();
   }
 
-  remove(id: string): void {
+  status(): MarketplaceRuntimeStatus {
+    const livePackages = this.getLivePackages?.();
+    const inspection = this.store.inspectAll();
+    const desired = this.readDesiredPackages(inspection);
+    const presetOverride = this.getPresetOverride?.();
+    return readMarketplaceRuntimeStatus({
+      directory: this.projectDir,
+      store: this.store,
+      inspection,
+      ...(presetOverride === undefined ? {} : { presetOverride }),
+      ...(desired === undefined
+        ? {}
+        : { desiredPackageIds: desired.packageIds }),
+      ...(livePackages === undefined ? {} : { livePackages }),
+      ...(desired?.packages === undefined
+        ? {}
+        : { desiredPackages: desired.packages }),
+      ...(desired?.error === undefined
+        ? {}
+        : { desiredConfigError: desired.error }),
+    });
+  }
+
+  requestReload(): MarketplaceReloadRequest {
+    const livePackages = this.getLivePackages?.();
+    const inspection = this.store.inspectAll();
+    const desired = this.readDesiredPackages(inspection);
+    const presetOverride = this.getPresetOverride?.();
+    return requestMarketplaceReload({
+      directory: this.projectDir,
+      store: this.store,
+      inspection,
+      ...(presetOverride === undefined ? {} : { presetOverride }),
+      ...(desired === undefined
+        ? {}
+        : { desiredPackageIds: desired.packageIds }),
+      ...(livePackages === undefined ? {} : { livePackages }),
+      ...(desired?.packages === undefined
+        ? {}
+        : { desiredPackages: desired.packages }),
+      ...(desired?.error === undefined
+        ? {}
+        : { desiredConfigError: desired.error }),
+    });
+  }
+
+  private readDesiredPackages(
+    inspection: MarketplaceStoreInspection,
+  ): MarketplaceDesiredState | undefined {
+    if (!this.getDesiredState) return undefined;
+    try {
+      return this.getDesiredState(inspection);
+    } catch (error) {
+      return {
+        packageIds: [],
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  uninstallGlobal(
+    id: string,
+    acknowledgeOtherProjects: boolean,
+  ): MarketplaceUninstallResult {
+    if (acknowledgeOtherProjects !== true) {
+      throw new MarketplaceValidationError(
+        'Global marketplace uninstall requires explicit acknowledgement that other project configs are not inspected',
+      );
+    }
     const normalizedId = normalizeMarketplacePackageId(id);
     withMarketplaceConfigReferencesRemoved(
       this.projectDir,
       normalizedId,
       (onCommitted) => this.store.remove(normalizedId, { onCommitted }),
+    );
+    return {
+      packageId: normalizedId,
+      uninstalled: true,
+      otherProjectsInspected: false,
+      warning: MARKETPLACE_UNINSTALL_SCOPE_WARNING,
+    };
+  }
+
+  enable(id: string, scope: MarketplaceActivationScope = 'project'): void {
+    enableMarketplaceAgent(
+      this.projectDir,
+      id,
+      this.store,
+      scope,
+      this.getPresetOverride?.(),
+    );
+  }
+
+  disable(id: string, scope: MarketplaceActivationScope = 'project'): void {
+    disableMarketplacePackage(
+      this.projectDir,
+      id,
+      scope,
+      this.getPresetOverride?.(),
     );
   }
 
@@ -219,6 +352,7 @@ export class MarketplaceService {
     minimumVersion?: string,
     signal?: AbortSignal,
   ): Promise<MarketplaceRegistryDownload> {
+    let v3CompatibilityError: MarketplaceCompatibilityError | undefined;
     if (this.registryClient.downloadV3) {
       try {
         return await this.registryClient.downloadV3(
@@ -235,8 +369,26 @@ export class MarketplaceService {
           throw error;
         }
         if (signal?.aborted) throw error;
+        if (error instanceof MarketplaceCompatibilityError) {
+          v3CompatibilityError = error;
+        }
       }
     }
-    return this.registryClient.download(selector, minimumVersion, signal);
+    try {
+      return await this.registryClient.download(
+        selector,
+        minimumVersion,
+        signal,
+      );
+    } catch (error) {
+      if (
+        v3CompatibilityError &&
+        (error instanceof MarketplaceRegistryNotFoundError ||
+          error instanceof MarketplaceCompatibilityError)
+      ) {
+        throw v3CompatibilityError;
+      }
+      throw error;
+    }
   }
 }

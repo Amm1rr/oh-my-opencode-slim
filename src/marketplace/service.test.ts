@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import {
   MarketplaceCompatibilityError,
   MarketplaceConflictError,
@@ -69,6 +69,84 @@ function deferred<T>() {
 }
 
 describe('MarketplaceService', () => {
+  test('uses selection and projection from one normalized config snapshot', () => {
+    const root = tempRoot();
+    const packageId = 'community/config-snapshot';
+    let configReads = 0;
+    let projection:
+      | {
+          id: string;
+          runtimeName: string;
+          version: string;
+          digest: string;
+          configFingerprint: string;
+        }
+      | undefined;
+    try {
+      const service = new MarketplaceService({
+        rootDir: join(root, 'store'),
+        projectDir: root,
+        pluginVersion: '3.5.0',
+        getLivePackages: () => (projection ? [projection] : []),
+        getDesiredState: () => {
+          configReads += 1;
+          const resolvedSnapshot = {
+            packageIds: [packageId],
+            packages: projection ? [projection] : [],
+          };
+          return resolvedSnapshot;
+        },
+      });
+      const stored = service.install(bundle('1.0.0', packageId));
+      projection = {
+        id: packageId,
+        runtimeName: 'example',
+        version: stored.manifest.version,
+        digest: stored.digest,
+        configFingerprint: 'snapshot-fingerprint',
+      };
+
+      const status = service.status();
+      expect(configReads).toBe(1);
+      expect(status.desiredPackageIds).toEqual([packageId]);
+      expect(status.livePackages?.map(({ id }) => id)).toEqual([packageId]);
+      expect(status.reloadRequired).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('uses one inspection snapshot for each status and reload request', () => {
+    const root = tempRoot();
+    const desiredInspections: unknown[] = [];
+    try {
+      const service = new MarketplaceService({
+        rootDir: join(root, 'store'),
+        projectDir: root,
+        pluginVersion: '3.5.0',
+        getLivePackages: () => [],
+        getDesiredState: (inspection) => {
+          desiredInspections.push(inspection);
+          return { packageIds: [], packages: [] };
+        },
+      });
+      const inspectAll = spyOn(service.store, 'inspectAll');
+
+      expect(service.status().reloadRequired).toBe(false);
+      expect(service.requestReload().reloadRequired).toBe(false);
+
+      expect(inspectAll).toHaveBeenCalledTimes(2);
+      const inspectedSnapshots = inspectAll.mock.results.map(
+        ({ value }) => value,
+      );
+      expect(desiredInspections).toHaveLength(2);
+      expect(desiredInspections[0]).toBe(inspectedSnapshots[0]);
+      expect(desiredInspections[1]).toBe(inspectedSnapshots[1]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test('requires explicit updates and only accepts strictly newer versions', () => {
     const root = tempRoot();
     try {
@@ -325,7 +403,7 @@ describe('MarketplaceService', () => {
         await downloadStarted.promise;
 
         if (race === 'removed') {
-          service.remove('community/example');
+          service.uninstallGlobal('community/example', true);
         } else {
           service.update(bundle('3.0.0'));
         }
@@ -416,6 +494,98 @@ describe('MarketplaceService', () => {
     }
   });
 
+  test('preserves v3 incompatibility when v2 fallback is not found for install and update', async () => {
+    const installRoot = tempRoot();
+    const updateRoot = tempRoot();
+    const requiredRange = '>=3.0.0-beta.11';
+    const pluginVersion = '2.2.25';
+    const incompatibility = new MarketplaceCompatibilityError(
+      `Marketplace package alvin/janitor@1.0.0 is incompatible: requires plugin version ${requiredRange}; current plugin version is ${pluginVersion}`,
+    );
+    const registryClient = {
+      downloadV3: async () => {
+        throw incompatibility;
+      },
+      download: async () => {
+        throw new MarketplaceRegistryNotFoundError(
+          'Marketplace package alvin/janitor was not found in the registry',
+        );
+      },
+    };
+
+    try {
+      const installService = new MarketplaceService({
+        rootDir: installRoot,
+        pluginVersion,
+        registryClient,
+      });
+      await expect(
+        installService.installRemote('alvin/janitor@1.0.0'),
+      ).rejects.toBe(incompatibility);
+      expect(installService.list()).toEqual([]);
+
+      const updateService = new MarketplaceService({
+        rootDir: updateRoot,
+        pluginVersion,
+        registryClient,
+      });
+      updateService.install(
+        bundle(
+          '1.0.0',
+          'alvin/janitor',
+          'Existing installed package.',
+          '>=2.0.0',
+        ),
+      );
+      await expect(updateService.updateRemote('alvin/janitor')).rejects.toBe(
+        incompatibility,
+      );
+      expect(updateService.show('alvin/janitor').manifest.prompt).toBe(
+        'Existing installed package.',
+      );
+      expect(updateService.show('alvin/janitor').manifest.version).toBe(
+        '1.0.0',
+      );
+    } finally {
+      rmSync(installRoot, { recursive: true, force: true });
+      rmSync(updateRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('preserves v3 incompatibility when v2 also has only incompatible releases', async () => {
+    const root = tempRoot();
+    const calls: string[] = [];
+    const v3Error = new MarketplaceCompatibilityError(
+      'Marketplace package alvin/janitor is incompatible: requires plugin version >=3.0.0-beta.11; current plugin version is 2.2.25',
+    );
+    try {
+      const service = new MarketplaceService({
+        rootDir: root,
+        pluginVersion: '2.2.25',
+        registryClient: {
+          downloadV3: async () => {
+            calls.push('v3 incompatible index');
+            throw v3Error;
+          },
+          download: async () => {
+            calls.push('v2 incompatible index');
+            throw new MarketplaceCompatibilityError(
+              'Marketplace package alvin/janitor is incompatible with v2 range >=3.0.0',
+            );
+          },
+        },
+      });
+
+      await expect(service.installRemote('alvin/janitor')).rejects.toBe(
+        v3Error,
+      );
+      expect(calls).toEqual(['v3 incompatible index', 'v2 incompatible index']);
+      expect(service.list()).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test('restores config and package when lockfile publication fails', () => {
     const root = tempRoot();
     const previousConfigHome = process.env.XDG_CONFIG_HOME;
@@ -445,9 +615,9 @@ describe('MarketplaceService', () => {
         },
       );
       try {
-        expect(() => service.remove('community/example')).toThrow(
-          'injected lockfile publication failure',
-        );
+        expect(() =>
+          service.uninstallGlobal('community/example', true),
+        ).toThrow('injected lockfile publication failure');
       } finally {
         rename.mockRestore();
       }
@@ -458,7 +628,7 @@ describe('MarketplaceService', () => {
       expect(service.show('community/example').manifest.id).toBe(
         'community/example',
       );
-      service.remove('community/example');
+      service.uninstallGlobal('community/example', true);
       expect(readFileSync(configPath, 'utf8')).not.toContain(
         'community/example',
       );
@@ -505,9 +675,9 @@ describe('MarketplaceService', () => {
         },
       );
       try {
-        expect(() => service.remove('community/example')).toThrow(
-          'finalization failed; config references remain removed',
-        );
+        expect(() =>
+          service.uninstallGlobal('community/example', true),
+        ).toThrow('finalization failed; config references remain removed');
       } finally {
         unlink.mockRestore();
       }
@@ -565,7 +735,7 @@ describe('MarketplaceService', () => {
       );
       try {
         // The first request commits removal, but cleanup remains pending.
-        service.remove('community/example');
+        service.uninstallGlobal('community/example', true);
         expect(existsSync(quarantineRoot)).toBe(true);
         expect(readFileSync(configPath, 'utf8')).not.toContain(
           'community/example',
@@ -573,9 +743,9 @@ describe('MarketplaceService', () => {
 
         // Simulate stale config left by another writer before a retry.
         writeFileSync(configPath, staleConfig);
-        expect(() => service.remove('community/example')).toThrow(
-          'finalization failed; config references remain removed',
-        );
+        expect(() =>
+          service.uninstallGlobal('community/example', true),
+        ).toThrow('finalization failed; config references remain removed');
         expect(readFileSync(configPath, 'utf8')).not.toContain(
           'community/example',
         );
@@ -592,7 +762,7 @@ describe('MarketplaceService', () => {
         remove.mockRestore();
       }
 
-      service.remove('community/example');
+      service.uninstallGlobal('community/example', true);
       expect(existsSync(quarantineRoot)).toBe(false);
       expect(readFileSync(configPath, 'utf8')).not.toContain(
         'community/example',
@@ -624,13 +794,234 @@ describe('MarketplaceService', () => {
         rootDir: join(root, 'store'),
         projectDir: project,
       });
-      service.remove('community/example');
+      service.uninstallGlobal('community/example', true);
       expect(JSON.parse(readFileSync(configPath, 'utf8'))).toEqual({
         presets: { work: { marketplace: { agents: [] } } },
       });
     } finally {
       if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
       else process.env.XDG_CONFIG_HOME = previousConfigHome;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('uses the runtime preset override for activation and status', () => {
+    const root = tempRoot();
+    const previousConfigHome = process.env.XDG_CONFIG_HOME;
+    const project = join(root, 'project');
+    const configPath = join(project, '.opencode', 'oh-my-opencode-slim.jsonc');
+    try {
+      process.env.XDG_CONFIG_HOME = join(root, 'config');
+      mkdirSync(join(project, '.opencode'), { recursive: true });
+      writeFileSync(
+        configPath,
+        JSON.stringify({
+          preset: 'persisted',
+          presets: { persisted: {}, runtime: {} },
+        }),
+      );
+      const service = new MarketplaceService({
+        rootDir: join(root, 'store'),
+        projectDir: project,
+        pluginVersion: '3.5.0',
+        getPresetOverride: () => 'runtime',
+      });
+      service.install(bundle());
+
+      service.enable('community/example');
+      let saved = JSON.parse(readFileSync(configPath, 'utf8'));
+      expect(saved.preset).toBe('persisted');
+      expect(saved.presets.persisted.marketplace).toBeUndefined();
+      expect(saved.presets.runtime.marketplace.agents_add).toEqual([
+        'community/example',
+      ]);
+      expect(service.status().desiredPackageIds).toEqual(['community/example']);
+
+      service.disable('community/example');
+      saved = JSON.parse(readFileSync(configPath, 'utf8'));
+      expect(saved.presets.runtime.marketplace.agents_add).toEqual([]);
+      expect(saved.presets.persisted.marketplace).toBeUndefined();
+      expect(service.status().desiredPackageIds).toEqual([]);
+    } finally {
+      if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = previousConfigHome;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('disable is project-local and global uninstall requires acknowledgement', () => {
+    const root = tempRoot();
+    const previousConfigHome = process.env.XDG_CONFIG_HOME;
+    const configHome = join(root, 'user-config');
+    const userConfigPath = join(
+      configHome,
+      'opencode',
+      'oh-my-opencode-slim.json',
+    );
+    const projectA = join(root, 'project-a');
+    const projectB = join(root, 'project-b');
+    const storeRoot = join(root, 'shared-marketplace');
+    const config = JSON.stringify({
+      preset: 'work',
+      presets: { work: { marketplace: { agents: ['community/example'] } } },
+    });
+    try {
+      process.env.XDG_CONFIG_HOME = configHome;
+      for (const project of [projectA, projectB]) {
+        mkdirSync(join(project, '.opencode'), { recursive: true });
+        writeFileSync(
+          join(project, '.opencode', 'oh-my-opencode-slim.json'),
+          config,
+        );
+      }
+      const serviceA = new MarketplaceService({
+        rootDir: storeRoot,
+        projectDir: projectA,
+        pluginVersion: '3.5.0',
+      });
+      const serviceB = new MarketplaceService({
+        rootDir: storeRoot,
+        projectDir: projectB,
+        pluginVersion: '3.5.0',
+      });
+      serviceA.install(bundle());
+
+      serviceA.disable('community/example');
+      expect(serviceA.show('community/example').manifest.id).toBe(
+        'community/example',
+      );
+      expect(
+        readFileSync(
+          join(projectB, '.opencode', 'oh-my-opencode-slim.json'),
+          'utf8',
+        ),
+      ).toBe(config);
+
+      mkdirSync(join(configHome, 'opencode'), { recursive: true });
+      writeFileSync(userConfigPath, config);
+
+      const configBeforeUnacknowledged = readFileSync(
+        join(projectA, '.opencode', 'oh-my-opencode-slim.json'),
+        'utf8',
+      );
+      expect(() =>
+        serviceA.uninstallGlobal('community/example', false),
+      ).toThrow('requires explicit acknowledgement');
+      expect(serviceA.show('community/example').manifest.id).toBe(
+        'community/example',
+      );
+      expect(readFileSync(userConfigPath, 'utf8')).toBe(config);
+      expect(
+        readFileSync(
+          join(projectA, '.opencode', 'oh-my-opencode-slim.json'),
+          'utf8',
+        ),
+      ).toBe(configBeforeUnacknowledged);
+
+      expect(serviceA.uninstallGlobal('community/example', true)).toMatchObject(
+        {
+          packageId: 'community/example',
+          uninstalled: true,
+          otherProjectsInspected: false,
+          warning: expect.stringContaining(
+            'Other project configurations were not inspected',
+          ),
+        },
+      );
+      expect(readFileSync(userConfigPath, 'utf8')).not.toContain(
+        'community/example',
+      );
+      expect(
+        readFileSync(
+          join(projectA, '.opencode', 'oh-my-opencode-slim.json'),
+          'utf8',
+        ),
+      ).not.toContain('community/example');
+      expect(
+        readFileSync(
+          join(projectB, '.opencode', 'oh-my-opencode-slim.json'),
+          'utf8',
+        ),
+      ).toBe(config);
+      expect(serviceB.list()).toEqual([]);
+      expect(() => serviceB.show('community/example')).toThrow();
+      expect(serviceB.status().diagnostics).toContain(
+        'community/example: community/example is not installed',
+      );
+    } finally {
+      if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = previousConfigHome;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('uninstalls from writable user config when project config paths are read-only and absent', () => {
+    const root = tempRoot();
+    const previousConfigHome = process.env.XDG_CONFIG_HOME;
+    const previousOpenCodeConfigDir = process.env.OPENCODE_CONFIG_DIR;
+    const userConfigDir = join(root, 'custom-config');
+    const userConfigPath = join(userConfigDir, 'oh-my-opencode-slim.json');
+    const projectDir = join(root, 'read-only-project');
+    const projectConfigDir = join(projectDir, '.opencode');
+    const originalAccess = fsModule.accessSync;
+    try {
+      process.env.XDG_CONFIG_HOME = join(root, 'xdg-config');
+      process.env.OPENCODE_CONFIG_DIR = userConfigDir;
+      mkdirSync(userConfigDir, { recursive: true });
+      mkdirSync(projectConfigDir, { recursive: true });
+      writeFileSync(
+        userConfigPath,
+        JSON.stringify({
+          presets: {
+            work: { marketplace: { agents: ['community/example'] } },
+          },
+        }),
+      );
+      const service = new MarketplaceService({
+        rootDir: join(root, 'writable-store'),
+        projectDir,
+        pluginVersion: '3.5.0',
+      });
+      service.install(bundle());
+
+      const accessSpy = spyOn(fsModule, 'accessSync').mockImplementation(((
+        path: fsModule.PathLike,
+        mode?: number,
+      ) => {
+        if (resolve(path.toString()) === resolve(projectConfigDir)) {
+          throw Object.assign(
+            new Error('project config directory is read-only'),
+            {
+              code: 'EACCES',
+            },
+          );
+        }
+        return originalAccess.call(fsModule, path, mode);
+      }) as typeof fsModule.accessSync);
+      try {
+        expect(
+          service.uninstallGlobal('community/example', true).uninstalled,
+        ).toBe(true);
+        expect(service.list()).toEqual([]);
+        expect(
+          JSON.parse(readFileSync(userConfigPath, 'utf8')).presets.work
+            .marketplace.agents,
+        ).toEqual([]);
+        expect(
+          existsSync(join(projectConfigDir, 'oh-my-opencode-slim.json')),
+        ).toBe(false);
+        expect(
+          existsSync(join(projectConfigDir, 'oh-my-opencode-slim.jsonc')),
+        ).toBe(false);
+      } finally {
+        accessSpy.mockRestore();
+      }
+    } finally {
+      if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = previousConfigHome;
+      if (previousOpenCodeConfigDir === undefined)
+        delete process.env.OPENCODE_CONFIG_DIR;
+      else process.env.OPENCODE_CONFIG_DIR = previousOpenCodeConfigDir;
       rmSync(root, { recursive: true, force: true });
     }
   });

@@ -214,7 +214,11 @@ export function adaptTool(
       const v1Ctx = {
         sessionID: ctx?.sessionID ?? '',
         messageID: ctx?.messageID ?? '',
-        agent: ctx?.agent ?? 'orchestrator',
+        agent:
+          ctx?.agent ??
+          (name === 'marketplace_inspect' || name === 'marketplace_manage'
+            ? undefined
+            : 'orchestrator'),
         directory,
         worktree: directory,
         abort: new AbortController().signal,
@@ -289,6 +293,19 @@ export function applyAgentToDraft(
     Object.assign(settings, asRecord(request.settings));
     if (typeof v1.temperature === 'number') {
       settings.temperature = v1.temperature;
+    }
+    // v1 `options` are provider-specific request options; the v2 host merges
+    // `request.body` into the outgoing provider request body. Dropping them
+    // here would silently lose configured thinking/reasoning options on v2.
+    if (
+      v1.options &&
+      typeof v1.options === 'object' &&
+      !Array.isArray(v1.options)
+    ) {
+      request.body = {
+        ...(asRecord(request.body) ?? {}),
+        ...(v1.options as Record<string, unknown>),
+      };
     }
     if (Object.keys(settings).length > 0) request.settings = settings;
     agent.request = request;

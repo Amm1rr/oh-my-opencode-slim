@@ -1,5 +1,7 @@
-import { accessSync, constants } from 'node:fs';
+import { accessSync, constants, existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { mutateJsonFile } from '../cli/config-io';
+import { getConfigSearchDirs } from '../cli/paths';
 import {
   findPluginConfigPaths,
   interpolateEnvironmentVariables,
@@ -19,6 +21,7 @@ import type { MarketplaceStore } from './store';
 
 type MarketplaceStoreReader = Pick<MarketplaceStore, 'show'>;
 type ConfigRecord = Record<string, unknown>;
+export type MarketplaceActivationScope = 'project' | 'user';
 
 function asRecord(value: unknown): ConfigRecord {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -26,43 +29,71 @@ function asRecord(value: unknown): ConfigRecord {
     : {};
 }
 
-function configWritePath(directory: string): string {
+function configWritePath(
+  directory: string,
+  scope: MarketplaceActivationScope,
+): string {
   const paths = findPluginConfigPaths(directory);
-  const filePath = paths.projectConfigPath ?? paths.userConfigPath;
-  if (!filePath) {
-    throw new MarketplaceActivationError(
-      'No plugin config file found to persist marketplace activation',
+  if (scope === 'project') {
+    return (
+      paths.projectConfigPath ??
+      join(directory, '.opencode', 'oh-my-opencode-slim.jsonc')
     );
   }
-  return filePath;
+  return (
+    paths.userConfigPath ??
+    join(getConfigSearchDirs()[0] ?? '', 'oh-my-opencode-slim.jsonc')
+  );
 }
 
-function activePresetName(config: { preset?: string }): string {
-  if (typeof config.preset === 'string' && config.preset.length > 0) {
-    return config.preset;
+function activePresetName(
+  config: { preset?: unknown },
+  presetOverride?: string,
+): string {
+  const presetName =
+    presetOverride || process.env.OH_MY_OPENCODE_SLIM_PRESET || config.preset;
+  if (typeof presetName === 'string' && presetName.length > 0) {
+    return presetName;
   }
   throw new MarketplaceActivationError(
     'Select an active preset before enabling marketplace packages',
   );
 }
 
-export function preflightMarketplaceAgentActivation(directory: string): void {
-  const config = loadPluginConfig(directory, { silent: true });
-  const presetName = activePresetName(config);
-  if (!config.presets?.[presetName]) {
+function loadScopeConfig(
+  directory: string,
+  scope: MarketplaceActivationScope,
+  filePath: string,
+): ConfigRecord {
+  if (scope === 'project') {
+    return asRecord(loadPluginConfig(directory, { silent: true }));
+  }
+  return readPluginConfig(filePath);
+}
+
+export function preflightMarketplaceAgentActivation(
+  directory: string,
+  scope: MarketplaceActivationScope = 'project',
+  presetOverride?: string,
+): void {
+  const filePath = configWritePath(directory, scope);
+  const config = loadScopeConfig(directory, scope, filePath);
+  const presetName = activePresetName(config, presetOverride);
+  if (!asRecord(config.presets)[presetName]) {
     throw new MarketplaceActivationError(
       `Active preset '${presetName}' does not exist in the plugin config`,
     );
   }
-  const filePath = configWritePath(directory);
-  try {
-    accessSync(filePath, constants.W_OK);
-  } catch (error) {
-    throw new MarketplaceActivationError(
-      `Cannot write plugin config for marketplace activation: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-    );
+  if (existsSync(filePath)) {
+    try {
+      accessSync(filePath, constants.W_OK);
+    } catch (error) {
+      throw new MarketplaceActivationError(
+        `Cannot write plugin config for marketplace activation: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
   }
 }
 
@@ -166,9 +197,11 @@ function persistActivation(
   directory: string,
   id: string,
   enabled: boolean,
+  scope: MarketplaceActivationScope,
+  presetOverride: string | undefined,
   store?: MarketplaceStoreReader,
 ): void {
-  const filePath = configWritePath(directory);
+  const filePath = configWritePath(directory, scope);
   try {
     mutateJsonFile(filePath, (current) => {
       const persisted = { ...current };
@@ -184,7 +217,9 @@ function persistActivation(
       // The effective config is read inside mutateJsonFile's cross-process
       // lease, so a preceding writer's changes are part of this mutation.
       const rawPresetName =
-        process.env.OH_MY_OPENCODE_SLIM_PRESET ?? persisted.preset;
+        presetOverride ||
+        process.env.OH_MY_OPENCODE_SLIM_PRESET ||
+        persisted.preset;
       if (typeof rawPresetName === 'string') {
         const rawPreset = asRecord(asRecord(persisted.presets)[rawPresetName]);
         const rawMarketplace = asRecord(rawPreset.marketplace);
@@ -200,9 +235,9 @@ function persistActivation(
           }
         }
       }
-      const effectiveConfig = loadPluginConfig(directory, { silent: true });
-      const presetName = activePresetName(effectiveConfig);
-      if (!effectiveConfig.presets?.[presetName]) {
+      const effectiveConfig = loadScopeConfig(directory, scope, filePath);
+      const presetName = activePresetName(effectiveConfig, presetOverride);
+      if (!asRecord(effectiveConfig.presets)[presetName]) {
         throw new MarketplaceActivationError(
           `Active preset '${presetName}' does not exist in the plugin config`,
         );
@@ -210,10 +245,9 @@ function persistActivation(
       const presets = asRecord(persisted.presets);
       let currentPreset = { ...asRecord(presets[presetName]) };
       const paths = findPluginConfigPaths(directory);
-      const writesProjectConfig =
-        paths.projectConfigPath === filePath &&
-        paths.projectConfigPath !== paths.userConfigPath;
-      const userConfig = readPluginConfig(paths.userConfigPath);
+      const writesProjectConfig = scope === 'project';
+      const userConfig =
+        scope === 'project' ? readPluginConfig(paths.userConfigPath) : {};
       const userPresets = asRecord(userConfig.presets) as Record<
         string,
         PresetInput
@@ -278,10 +312,12 @@ function persistActivation(
         'agents_remove',
       );
 
-      // Remove this file's directives to determine whether the package comes
-      // from an inherited/lower layer. This preserves future parent additions.
+      // Remove this file's activation directives to determine whether the
+      // package remains active from a parent/lower scope. This is evaluated
+      // against the selected scope's actual lower layers.
       const baselinePreset = { ...currentPreset };
       const baselineMarketplace = { ...localMarketplace };
+      delete baselineMarketplace.agents;
       delete baselineMarketplace.agents_add;
       delete baselineMarketplace.agents_remove;
       if (Object.keys(baselineMarketplace).length > 0) {
@@ -301,12 +337,10 @@ function persistActivation(
           ...(effective.extends ? { extends: effective.extends } : {}),
         } as PresetInput,
       };
-      const inherited =
-        !ownsAgents &&
-        normalizePackageIds(
-          resolvePresetDefinition(presetName, inheritedPresets).marketplace
-            ?.agents ?? [],
-        ).includes(id);
+      const inherited = normalizePackageIds(
+        resolvePresetDefinition(presetName, inheritedPresets).marketplace
+          ?.agents ?? [],
+      ).includes(id);
 
       const next = { ...localMarketplace };
       if (enabled) {
@@ -349,10 +383,7 @@ function persistActivation(
             next.agents_add = remaining;
           }
         }
-        if (
-          (inherited || (ownsAgents && active && !replacement?.includes(id))) &&
-          !removals.includes(id)
-        ) {
+        if (inherited && !removals.includes(id)) {
           next.agents_remove = [...rawRemovals, id];
         } else if (
           active &&
@@ -387,16 +418,20 @@ export function enableMarketplaceAgent(
   directory: string,
   packageId: string,
   store: MarketplaceStoreReader,
+  scope: MarketplaceActivationScope = 'project',
+  presetOverride?: string,
 ): void {
   const id = normalizeMarketplacePackageId(packageId);
-  preflightMarketplaceAgentActivation(directory);
-  persistActivation(directory, id, true, store);
+  preflightMarketplaceAgentActivation(directory, scope, presetOverride);
+  persistActivation(directory, id, true, scope, presetOverride, store);
 }
 
 export function disableMarketplacePackage(
   directory: string,
   packageId: string,
+  scope: MarketplaceActivationScope = 'project',
+  presetOverride?: string,
 ): void {
   const id = normalizeMarketplacePackageId(packageId);
-  persistActivation(directory, id, false);
+  persistActivation(directory, id, false, scope, presetOverride);
 }

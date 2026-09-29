@@ -57,6 +57,10 @@ import {
   resetClientShimGenerationWarnings,
   resolveV2Directory,
 } from './client-shim';
+import {
+  createProfileRefreshRunner,
+  watchPluginConfigFiles,
+} from './config-watch';
 import { subagentArgsToV1, toolNameToV1, v1ArgsToSubagent } from './delegation';
 import { mapV2EventToV1 } from './event-adapter';
 import {
@@ -66,11 +70,18 @@ import {
 } from './internal-admissions';
 import { createV2InterviewBridge } from './interview-bridge';
 import {
+  applyRuntimeProfileOptions,
+  createSessionProfileBridge,
+  reconcileRuntimeProfileOptionKeys,
+  type V2AgentRuntimeProfiles,
+} from './runtime-profiles';
+import {
   createSessionSubmit,
   textFromContent,
   type V2CommandSubmit,
 } from './session-submit';
 import type {
+  V2AgentDraft,
   V2Cleanup,
   V2CommandDefinition,
   V2CommandDraft,
@@ -274,6 +285,10 @@ export interface V2SessionContextHandlerDeps {
       messages: Array<{ info: { role: string }; parts: unknown[] }>;
     },
   ) => Promise<void>;
+  /** Session-frozen runtime profile application: mutates ONLY the request
+   * `options` record (temperature/provider options) for a captured child
+   * session. Never touches system/messages/tools. */
+  applyRuntimeProfile?: (event: V2SessionContextEvent) => void;
 }
 
 /** Build the single `ctx.session.hook("context")` handler: interview marker
@@ -453,6 +468,17 @@ export function createSessionContextHandler(
         }
       } catch (err) {
         log('[v2] messages transform bridge failed', String(err));
+      }
+    }
+    // Session-frozen runtime profile: a captured child session gets its
+    // profile's temperature/provider options on the request options record.
+    // Model/variant travel through session.switchModel at capture time;
+    // system/messages/tools stay byte-stable.
+    if (deps.applyRuntimeProfile) {
+      try {
+        deps.applyRuntimeProfile(event);
+      } catch (err) {
+        log('[v2] runtime profile apply failed', String(err));
       }
     }
   };
@@ -798,8 +824,8 @@ const PERMISSION_RULES_UNAVAILABLE_WARNING =
   '[v2][permission-rules] child permission bridge disabled: native agent ' +
   'snapshot and ctx.session.update are required';
 const PERMISSION_IDENTITY_UNAVAILABLE_WARNING =
-  '[v2][permission-rules] child identity unavailable; prompt continues under ' +
-  'host permissions until session.created is observed';
+  '[v2][permission-rules] child identity unavailable; its permission policy ' +
+  'cannot be verified';
 const PERMISSION_RULES_OPERATION_TIMEOUT_MS = 5_000;
 const MAX_PENDING_PERMISSION_UPDATES = 128;
 let permissionRulesUnavailableWarned = false;
@@ -830,6 +856,14 @@ export interface V2PermissionRulesOptions {
    * whose agent is not in this set was not spawned by the plugin's task
    * pipeline and must never have its session rules replaced. */
   pluginAgents: ReadonlySet<string>;
+  /** Marketplace child policies are a security ceiling: prompt admission
+   * must not proceed until the session identity is known and its rules have
+   * been installed. Baseline configured agents retain fail-soft behavior. */
+  requireKnownIdentity?: boolean | (() => boolean);
+  /** Canonical and visible identities owned by finalized marketplace agents. */
+  marketplaceAgentNames?: () => ReadonlySet<string>;
+  /** All finalized host/plugin agent identities, including foreign agents. */
+  knownAgentNames?: () => ReadonlySet<string>;
   /** Injectable degradation sink (tests observe the one-time warning
    * without mocking the logger). */
   onUnavailable?: () => void;
@@ -849,8 +883,9 @@ function classifyPermissionIdentity(
   agent: string | undefined,
   pluginAgents: ReadonlySet<string>,
 ): PermissionIdentityState {
-  if (parentKnown && !parentID) return 'unmanaged';
-  if (!parentKnown || !parentID || !agent) return 'unknown';
+  if (parentKnown && !parentID && agent) return 'unmanaged';
+  if (!parentKnown || !agent) return 'unknown';
+  if (!parentID) return 'unknown';
   return pluginAgents.has(agent) ? 'managed' : 'unmanaged';
 }
 
@@ -886,8 +921,12 @@ export function createPermissionRulesBridge(
   observeEvent(event: Record<string, unknown>): Promise<void>;
   /** Compatibility seam for focused bridge tests and child creation paths. */
   observeSessionCreated(event: Record<string, unknown>): Promise<void>;
+  /** Reclassify identities observed before the finalized plugin-agent roster
+   * was available, and apply rules for newly recognized managed children. */
+  refreshPluginAgents(): Promise<void> | undefined;
   /** Cache-first prompt barrier. Unknown identities degrade if lookup is
-   * unavailable; known managed identities fail closed on update failures. */
+   * unavailable; known managed identities fail closed on update failures.
+   * Marketplace setups also require identity and policy resolution. */
   ensurePromptPermission(sessionID: string): Promise<void>;
   dispose(): Promise<void>;
 } {
@@ -957,6 +996,48 @@ export function createPermissionRulesBridge(
     if (permissionIdentityUnavailableWarned) return;
     permissionIdentityUnavailableWarned = true;
     log(PERMISSION_IDENTITY_UNAVAILABLE_WARNING);
+  }
+
+  function rejectUnknownIdentity(): never {
+    warnUnknownIdentity();
+    throw new Error(
+      'child session identity is unknown; prompt blocked until its permission policy is installed',
+    );
+  }
+
+  function marketplacePolicyRequired(): boolean {
+    return typeof options.requireKnownIdentity === 'function'
+      ? options.requireKnownIdentity()
+      : options.requireKnownIdentity === true;
+  }
+
+  function isClassifiedAgent(agent: string | undefined): boolean {
+    return Boolean(
+      agent &&
+        (options.pluginAgents.has(agent) ||
+          options.knownAgentNames?.().has(agent)),
+    );
+  }
+
+  function rejectDirectRootMarketplaceAgent(
+    identity: PermissionSessionIdentity,
+  ): never {
+    throw new Error(
+      `direct root marketplace agent '${identity.agent}' cannot be admitted because its permission ceiling cannot be enforced without replacing root session permissions`,
+    );
+  }
+
+  function rejectDirectRootMarketplaceAgentIfNeeded(
+    identity: PermissionSessionIdentity,
+  ): void {
+    if (
+      identity.parentKnown &&
+      !identity.parentID &&
+      identity.agent &&
+      options.marketplaceAgentNames?.().has(identity.agent)
+    ) {
+      rejectDirectRootMarketplaceAgent(identity);
+    }
   }
 
   async function applyChildSessionRules(
@@ -1158,20 +1239,43 @@ export function createPermissionRulesBridge(
   async function ensurePromptPermission(sessionID: string): Promise<void> {
     if (disposed) throw new Error('permission rules bridge is disposed');
     const initialIdentity = identities.get(sessionID);
+    if (initialIdentity)
+      rejectDirectRootMarketplaceAgentIfNeeded(initialIdentity);
     if (initialIdentity?.state === 'managed') {
       await enforceKnownIdentity(sessionID, initialIdentity);
       return;
     }
-    if (initialIdentity?.state === 'unmanaged') return;
+    if (initialIdentity?.state === 'unmanaged') {
+      if (
+        marketplacePolicyRequired() &&
+        initialIdentity.parentID &&
+        !isClassifiedAgent(initialIdentity.agent)
+      ) {
+        rejectUnknownIdentity();
+      }
+      return;
+    }
 
     const getSession = session?.get;
     if (typeof getSession !== 'function') {
+      // Marketplace roots cannot be distinguished from ordinary roots
+      // without an observed identity or a host lookup, so unknown prompts
+      // fail closed once marketplace policy is active.
+      if (
+        marketplacePolicyRequired() &&
+        (!initialIdentity ||
+          initialIdentity.state === 'unknown' ||
+          Boolean(initialIdentity.parentID))
+      ) {
+        rejectUnknownIdentity();
+      }
       warnUnknownIdentity();
       return;
     }
     let pendingLookup = pendingIdentityLookups.get(sessionID);
     if (!pendingLookup) {
       if (pendingIdentityLookups.size >= MAX_PENDING_PERMISSION_UPDATES) {
+        if (marketplacePolicyRequired()) rejectUnknownIdentity();
         warnUnknownIdentity();
         return;
       }
@@ -1195,6 +1299,7 @@ export function createPermissionRulesBridge(
             (!Object.hasOwn(record, 'parentID') &&
               typeof record.agent !== 'string')
           ) {
+            if (marketplacePolicyRequired()) rejectUnknownIdentity();
             warnUnknownIdentity();
             return;
           }
@@ -1202,6 +1307,7 @@ export function createPermissionRulesBridge(
           cacheIdentity(sessionID, identity, lookup);
         } catch (err) {
           if (!lookup.invalidated) {
+            if (marketplacePolicyRequired()) rejectUnknownIdentity();
             warnUnknownIdentity();
             log(
               '[v2][permission-rules] session identity lookup failed',
@@ -1218,17 +1324,58 @@ export function createPermissionRulesBridge(
     await pendingLookup.operation;
     if (disposed) throw new Error('permission rules bridge is disposed');
     const current = identities.get(sessionID);
+    if (current) rejectDirectRootMarketplaceAgentIfNeeded(current);
     if (current?.state === 'managed') {
       await enforceKnownIdentity(sessionID, current);
-    } else if (current?.state === 'unknown' || current === null || !current) {
+    } else if (
+      current?.state === 'unknown' ||
+      current === null ||
+      !current ||
+      (marketplacePolicyRequired() &&
+        current.parentID !== undefined &&
+        !isClassifiedAgent(current.agent))
+    ) {
+      if (marketplacePolicyRequired()) rejectUnknownIdentity();
       warnUnknownIdentity();
     }
+  }
+
+  function refreshPluginAgents(): Promise<void> | undefined {
+    const newlyManaged: Array<[string, PermissionSessionIdentity]> = [];
+    for (const [sessionID, identity] of identities) {
+      if (!identity) continue;
+      const state = classifyPermissionIdentity(
+        identity.parentKnown,
+        identity.parentID,
+        identity.agent,
+        options.pluginAgents,
+      );
+      if (state === identity.state) continue;
+      const updated = { ...identity, state };
+      identities.set(sessionID, updated);
+      if (state === 'managed') newlyManaged.push([sessionID, updated]);
+    }
+    if (newlyManaged.length === 0) return;
+    return Promise.all(
+      newlyManaged.map(async ([sessionID, identity]) => {
+        try {
+          await enforceKnownIdentity(sessionID, identity);
+        } catch (err) {
+          // The later prompt barrier retries a failed child rules update.
+          log('[v2][permission-rules] deferred child projection failed', {
+            sessionID,
+            err: String(err),
+          });
+        }
+      }),
+    ).then(() => undefined);
   }
 
   return {
     observeEvent,
     observeSessionCreated: observeEvent,
     ensurePromptPermission,
+    refreshPluginAgents,
     dispose() {
       if (disposal) return disposal;
       disposed = true;
@@ -1736,6 +1883,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
     // setup still needs the directory for config loading and tool adapters.
     const directory = resolveV2Directory(ctx);
     const disposers: Array<() => Promise<void> | void> = [];
+    let generationDisposed = false;
     let stopPermissionPromptAdmission: (() => Promise<void>) | undefined;
     let stopPermissionEventIntake: (() => Promise<void>) | undefined;
     let v1Hooks: Record<string, unknown> | undefined;
@@ -1856,14 +2004,26 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       let finalizedRegistry:
         | ReturnType<RegistryFactoryBridge['requireRegistry']>
         | undefined;
-      let nativePermissionRulesByAgent:
-        | Record<string, V2PermissionRule[]>
-        | undefined;
       let permissionSnapshotReady = false;
+      let permissionSnapshotFailure: Error | undefined;
+      let resolvePermissionSnapshotReady!: () => void;
+      const permissionSnapshotReadiness = new Promise<void>((resolve) => {
+        resolvePermissionSnapshotReady = resolve;
+      });
+      let pendingAgentDraft: V2AgentDraft | undefined;
+      let nativeAgentSnapshot:
+        | {
+            agents: Record<string, Record<string, unknown>>;
+            permissions: Record<string, V2PermissionRule[]>;
+          }
+        | undefined;
       let permissionRulesBridgeEnabled = false;
+      const pluginAgents = new Set<string>();
+      let marketplaceAgentsRequirePromptPolicy = false;
       let permissionRulesBridge:
         | ReturnType<typeof createPermissionRulesBridge>
         | undefined;
+      let permissionReadiness: Promise<void> | undefined;
       let synthCommands:
         | Record<string, { template?: string; description?: string }>
         | undefined;
@@ -1881,6 +2041,120 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       // connections, not the configured namespace inventory.
       const mcps = (v1Hooks.mcp ?? {}) as Record<string, McpConfig>;
       let hostMcpSnapshot: Record<string, unknown> | undefined;
+
+      const finalizeAgentDraft = (draft: V2AgentDraft) => {
+        if (permissionSnapshotFailure) return;
+        if (
+          hostMcpSnapshot === undefined ||
+          nativeAgentSnapshot === undefined
+        ) {
+          return;
+        }
+        const registry =
+          finalizedRegistry ??
+          registryBridge.finalize(
+            { agent: nativeAgentSnapshot.agents, mcp: hostMcpSnapshot },
+            nativeAgentSnapshot.permissions,
+          );
+        finalizedRegistry = registry;
+        marketplaceAgentsRequirePromptPolicy =
+          registry.marketplaceAgentNames.length > 0;
+        // Deferred agent finalization is the first point where marketplace
+        // agents are known. Latch capability failures for the readiness barrier.
+        if (
+          registry.marketplaceAgentNames.length &&
+          typeof ctx.session.update !== 'function'
+        ) {
+          permissionSnapshotFailure = new Error(
+            'Marketplace agents require ctx.session.update to enforce child permission ceilings',
+          );
+          resolvePermissionSnapshotReady();
+          return;
+        }
+        resolvedAgents = registry.getSdkAgentProjection() as Record<
+          string,
+          Record<string, unknown>
+        >;
+        pluginAgents.clear();
+        for (const name of Object.keys(resolvedAgents)) pluginAgents.add(name);
+        if (permissionRulesBridge) {
+          permissionReadiness = permissionRulesBridge.refreshPluginAgents();
+        }
+        for (const [name, cfg] of Object.entries(resolvedAgents)) {
+          if (
+            !registry.agentNames.includes(name) &&
+            !Object.hasOwn(registry.identities, name)
+          )
+            continue;
+          applyAgentToDraft(
+            draft,
+            name,
+            cfg,
+            registry.nativePolicies[name]?.rules,
+          );
+        }
+        if (resolvedAgents.orchestrator) {
+          try {
+            draft.default(registry.identities.orchestrator ?? 'orchestrator');
+          } catch {
+            /* default() optional */
+          }
+        }
+        permissionSnapshotReady = true;
+        resolvePermissionSnapshotReady();
+      };
+      const captureAgentDraft = (draft: V2AgentDraft) => {
+        if (permissionSnapshotFailure) {
+          if (generationDisposed) {
+            throw new Error(
+              'Agent transform callback belongs to a retired generation',
+            );
+          }
+          return;
+        }
+        pendingAgentDraft = draft;
+        try {
+          if (!nativeSnapshotCaptured) {
+            const nativeByAgent: Record<string, V2PermissionRule[]> = {};
+            const hostAgents: Record<string, Record<string, unknown>> = {};
+            const listedAgents = draft.list();
+            if (!Array.isArray(listedAgents)) {
+              throw new Error('agent transform did not expose a native list');
+            }
+            for (const listed of listedAgents) {
+              const name = typeof listed.id === 'string' ? listed.id : '';
+              if (!name) continue;
+              const native = draft.get(name) ?? listed;
+              // `permissions` is optional in the host type surface: absent
+              // means "no native rule overrides", not a fatal condition.
+              // Only a malformed non-array value latches a failure (surfaced
+              // at prompt time with its cause, never a silent setup death).
+              if (
+                native.permissions !== undefined &&
+                !Array.isArray(native.permissions)
+              ) {
+                throw new Error(
+                  `Native agent '${name}' exposed a malformed permissions field`,
+                );
+              }
+              const snapshot = snapshotNativeAgentForRegistry(native);
+              hostAgents[name] = snapshot.config;
+              nativeByAgent[name] = snapshot.permissions;
+            }
+            nativeAgentSnapshot = {
+              agents: hostAgents,
+              permissions: nativeByAgent,
+            };
+            nativeSnapshotCaptured = true;
+          }
+          finalizeAgentDraft(draft);
+        } catch (error) {
+          if (generationDisposed) throw error;
+          permissionSnapshotFailure =
+            error instanceof Error ? error : new Error(String(error));
+          resolvePermissionSnapshotReady();
+        }
+      };
       try {
         if (typeof ctx.mcp?.transform !== 'function') {
           throw new Error('MCP configuration draft is unavailable');
@@ -1894,13 +2168,9 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
           for (const [name, config] of Object.entries(mcps)) {
             draft.set(name, adaptMcpServer(config));
           }
+          if (pendingAgentDraft) finalizeAgentDraft(pendingAgentDraft);
         });
         disposers.push(() => reg.dispose());
-        if (hostMcpSnapshot === undefined) {
-          throw new Error(
-            'MCP transform did not produce a configuration snapshot',
-          );
-        }
       } catch (err) {
         throw new Error(
           'Unable to snapshot configured MCP namespaces: this host cannot ' +
@@ -1910,113 +2180,88 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       }
 
       // ── Agents ──
-      let transformError: unknown;
-      let transformFailed = false;
       let nativeSnapshotCaptured = false;
       try {
-        const reg = await ctx.agent.transform((draft) => {
-          try {
-            if (!nativeSnapshotCaptured) {
-              const nativeByAgent: Record<string, V2PermissionRule[]> = {};
-              const hostAgents: Record<string, Record<string, unknown>> = {};
-              const listedAgents = draft.list();
-              if (!Array.isArray(listedAgents)) {
-                throw new Error('agent transform did not expose a native list');
-              }
-              for (const listed of listedAgents) {
-                const name = typeof listed.id === 'string' ? listed.id : '';
-                if (!name) continue;
-                const native = draft.get(name) ?? listed;
-                if (!Array.isArray(native.permissions)) {
-                  throw new Error(
-                    `Native agent '${name}' did not expose a permissions array`,
-                  );
-                }
-                const snapshot = snapshotNativeAgentForRegistry(native);
-                hostAgents[name] = snapshot.config;
-                nativeByAgent[name] = snapshot.permissions;
-              }
-              const registry = registryBridge.finalize(
-                { agent: hostAgents, mcp: hostMcpSnapshot },
-                nativeByAgent,
-              );
-              finalizedRegistry = registry;
-              nativePermissionRulesByAgent = nativeByAgent;
-              permissionSnapshotReady = true;
-              nativeSnapshotCaptured = true;
-            }
-            const registry = registryBridge.requireRegistry();
-            finalizedRegistry = registry;
-            resolvedAgents = registry.getSdkAgentProjection() as Record<
-              string,
-              Record<string, unknown>
-            >;
-            for (const [name, cfg] of Object.entries(resolvedAgents)) {
-              // This transform may replay after the first materialization.
-              // Only our canonical agents and aliases are managed; host-owned
-              // registrations must remain byte-for-byte untouched.
-              if (
-                !registry.agentNames.includes(name) &&
-                !Object.hasOwn(registry.identities, name)
-              ) {
-                continue;
-              }
-              applyAgentToDraft(
-                draft,
-                name,
-                cfg,
-                registry.nativePolicies[name]?.rules,
-              );
-            }
-            // Make orchestrator the default primary agent.
-            if (resolvedAgents.orchestrator) {
-              try {
-                draft.default(
-                  registry.identities.orchestrator ?? 'orchestrator',
-                );
-              } catch {
-                /* default() optional */
-              }
-            }
-          } catch (err) {
-            transformFailed = true;
-            transformError = err;
-            throw err;
-          }
-        });
+        const reg = await ctx.agent.transform(captureAgentDraft);
         disposers.push(() => reg.dispose());
+        if (permissionSnapshotFailure) {
+          if (
+            permissionSnapshotFailure.message.startsWith(
+              'Marketplace agents require ctx.session.update',
+            )
+          ) {
+            throw permissionSnapshotFailure;
+          }
+          throw new Error('Agent permission snapshot finalization failed', {
+            cause: permissionSnapshotFailure,
+          });
+        }
         log('[v2] agents registered', {
           count: Object.keys(resolvedAgents ?? {}).length,
         });
-        // v2 transform callbacks may be deferred until State.batch flushes.
-        // agent.list() forces those transforms, so snapshot reads above are
-        // complete before the event stream or prompt barrier can use them.
-        try {
-          await withTimeout(
-            ctx.agent.list(),
-            PERMISSION_RULES_OPERATION_TIMEOUT_MS,
-            'Native permission snapshot materialization timed out',
-          );
-          if (transformFailed) throw transformError;
-          if (
-            nativePermissionRulesByAgent === undefined ||
-            !nativeSnapshotCaptured
-          ) {
-            throw new Error('agent transform did not produce a snapshot');
-          }
-        } catch (err) {
-          throw transformFailed ? (transformError ?? err) : err;
-        }
       } catch (err) {
         registryBridge.retire();
         throw err;
       }
+      const agentConfigs = resolvedAgents ?? {};
 
-      permissionRulesBridgeEnabled =
-        permissionSnapshotReady && typeof ctx.session.update === 'function';
+      permissionRulesBridgeEnabled = typeof ctx.session.update === 'function';
       if (!permissionRulesBridgeEnabled && !permissionRulesUnavailableWarned) {
         permissionRulesUnavailableWarned = true;
         log(PERMISSION_RULES_UNAVAILABLE_WARNING);
+      }
+
+      // ── Runtime profiles + config-file watcher ──
+      // Watches every config candidate (user + project, .json + .jsonc,
+      // including not-yet-created files/directories). On a settled change the
+      // v1 factory's `v2.refreshProfiles` hook re-reads the config and
+      // resolves ONLY model/variant/temperature/options per agent, atomically
+      // swapped here and projected to the sidebar through the existing
+      // tui-state writer. Failure is honest: no swap, one logged cause.
+      let currentProfiles: V2AgentRuntimeProfiles = {};
+      try {
+        const factoryRefreshProfiles = (
+          v1Hooks as { 'v2.refreshProfiles'?: unknown }
+        )['v2.refreshProfiles'];
+        if (typeof factoryRefreshProfiles === 'function') {
+          const refreshProfiles = factoryRefreshProfiles as (options?: {
+            allowInvalidFallback?: boolean;
+          }) => Promise<
+            | { ok: true; profiles: V2AgentRuntimeProfiles }
+            | { ok: false; reason: string }
+          >;
+          // Startup has no last-good table. Seed from the loader's normal
+          // fallback config so malformed input stays non-fatal, then make all
+          // later watcher refreshes strict and retain this seed on failure.
+          const initial = await refreshProfiles({ allowInvalidFallback: true });
+          if (!initial.ok) {
+            throw new Error(initial.reason);
+          }
+          currentProfiles = reconcileRuntimeProfileOptionKeys(
+            {},
+            initial.profiles,
+          );
+          const runner = createProfileRefreshRunner({
+            refresh: refreshProfiles,
+            apply: (profiles) => {
+              currentProfiles = reconcileRuntimeProfileOptionKeys(
+                currentProfiles,
+                profiles,
+              );
+            },
+          });
+          const watch = watchPluginConfigFiles({
+            directory,
+            onChanged: (signal) => runner(signal),
+          });
+          disposers.push(() => watch.dispose());
+        } else {
+          log(
+            '[v2] v1 factory exposes no v2.refreshProfiles hook; config edits need a reload',
+          );
+        }
+      } catch (err) {
+        log('[v2] config watcher registration failed', String(err));
       }
 
       // ── Tools ──
@@ -2203,20 +2448,61 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       // churn path keyed on events this bridge does not otherwise need.
       const chatHeaderStates = new Map<string, ChatHeaderSessionState>();
 
+      // Session-frozen runtime profiles: freeze the current profile for each
+      // newly seen plugin CHILD session and switch its model before the
+      // first request. Existing/resumed children keep their captured
+      // profile; parents and foreign agents are never touched.
+      //
+      // Created BEFORE the native prompt hook below so the hook can await
+      // `ensureSessionProfile`: the prompt hook is the guaranteed
+      // request-path capture (a child's first admission cannot race the
+      // asynchronous event pump), while `observeEvent` remains a
+      // prewarm/cleanup consumer of `session.created`/`session.deleted`.
+      let promptBridge: V2SessionPromptBridge | undefined;
+      const sessionProfileBridge = createSessionProfileBridge({
+        profiles: () => currentProfiles,
+        pluginAgents: new Set(Object.keys(agentConfigs)),
+        session: ctx.session,
+        knownAgent: (sessionID) => promptBridge?.agentForSession(sessionID),
+      });
+
       // Native per-admission prompt hook (v2): `session.prompt` fires once
       // per admitted input with the eventual inbox User messageID — the
       // identity v1 chat.message consumers key on. With it registered the
       // context hook's per-request chat.message emulation narrows to
       // agent/model discovery (registration is unconditional on full
       // contexts — a registration failure fails setup).
-      let promptBridge: V2SessionPromptBridge | undefined;
       if (chatMessage) {
         const bridge = createSessionPromptBridge(chatMessage);
+        promptBridge = bridge;
         const promptReg = await ctx.session.hook('prompt', async (event) => {
+          if (!permissionSnapshotReady) {
+            await withTimeout(
+              permissionSnapshotReadiness,
+              PERMISSION_RULES_OPERATION_TIMEOUT_MS,
+              'Agent permission snapshot readiness timed out',
+            );
+          }
+          if (permissionSnapshotFailure) {
+            if (
+              permissionSnapshotFailure.message.startsWith(
+                'Marketplace agents require ctx.session.update',
+              )
+            ) {
+              throw permissionSnapshotFailure;
+            }
+            throw new Error('Agent permission snapshot finalization failed', {
+              cause: permissionSnapshotFailure,
+            });
+          }
           const permissionBridge = permissionRulesBridge;
           if (permissionBridge) {
+            if (permissionReadiness) await permissionReadiness;
             await permissionBridge.ensurePromptPermission(event.sessionID);
           }
+          // Freeze and switch the inference profile before the admitted
+          // input's first model request; the event stream is only a prewarm.
+          await sessionProfileBridge.ensureSessionProfile(event.sessionID);
           await bridge.handlePrompt(event);
         });
         stopPermissionPromptAdmission = boundedPermissionStop(
@@ -2224,7 +2510,6 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
           'Permission prompt hook disposal timed out',
         );
         disposers.push(stopPermissionPromptAdmission);
-        promptBridge = bridge;
         log('[v2] native session prompt hook registered');
       }
 
@@ -2247,6 +2532,13 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
           promptBridge?.agentForSession(sessionID),
         systemTransform,
         messagesTransform,
+        // Captured child sessions get their frozen temperature/provider
+        // options on the request options record only.
+        applyRuntimeProfile: (event) =>
+          applyRuntimeProfileOptions(
+            event,
+            sessionProfileBridge.profileForSession(event.sessionID),
+          ),
       });
       const reg = await ctx.session.hook('context', handler);
       disposers.push(() => reg.dispose());
@@ -2362,7 +2654,39 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
               permissionForAgent: (agent) => {
                 return finalizedRegistry?.nativePolicies[agent]?.rules;
               },
-              pluginAgents: new Set(Object.keys(resolvedAgents ?? {})),
+              pluginAgents,
+              requireKnownIdentity: () => marketplaceAgentsRequirePromptPolicy,
+              marketplaceAgentNames: () => {
+                const registry = finalizedRegistry;
+                if (!registry) return new Set();
+                return new Set(
+                  registry.marketplaceAgentNames.flatMap((name) => [
+                    name,
+                    registry.identities[name] ?? name,
+                  ]),
+                );
+              },
+              knownAgentNames: () => {
+                const names = new Set<string>(pluginAgents);
+                for (const [name, config] of Object.entries(
+                  nativeAgentSnapshot?.agents ?? {},
+                )) {
+                  names.add(name);
+                  if (typeof config.displayName === 'string') {
+                    names.add(config.displayName);
+                  }
+                }
+                const registry = finalizedRegistry;
+                if (registry) {
+                  for (const [name, identity] of Object.entries(
+                    registry.identities,
+                  )) {
+                    names.add(name);
+                    names.add(identity);
+                  }
+                }
+                return names;
+              },
             });
             const permissionBridge = permissionRulesBridge;
             disposers.push(() => permissionBridge.dispose());
@@ -2393,7 +2717,11 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
                   }
                   // Child-session permission projection sees the same RAW
                   // event (before v1-shape synthesis) so it is independent
-                  // of v1 event-hook presence.
+                  // of v1 event-hook presence. Profile prewarm runs first so
+                  // a held permission update cannot delay identity capture
+                  // and force the awaited prompt path into another session
+                  // lookup for the same child.
+                  await sessionProfileBridge.observeEvent(next.value);
                   await permissionRulesBridge?.observeEvent(next.value);
                   if (eventHook) {
                     for (const ev of mapV2EventToV1(next.value)) {
@@ -2436,6 +2764,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
 
       return async () => {
         log('[v2] dispose invoked');
+        generationDisposed = true;
         registryBridge?.retire();
         // Mark disposed immediately, then stop new admissions and event
         // intake before awaiting the bounded drain. The OpenCode plugin
@@ -2482,6 +2811,25 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       };
     } catch (err) {
       registryBridge?.retire();
+      // The original cause MUST reach the plugin log and stderr before the
+      // unwind: without it a live setup failure is invisible (the host only
+      // sees a rejected plugin load). Walk the `cause` chain too — wrapper
+      // errors alone hide the host-side reason.
+      const causes: string[] = [];
+      let cursor: unknown = err;
+      while (cursor !== undefined && cursor !== null && causes.length < 5) {
+        causes.push(
+          cursor instanceof Error
+            ? (cursor.stack ?? cursor.message)
+            : String(cursor),
+        );
+        cursor = cursor instanceof Error ? cursor.cause : undefined;
+      }
+      log(
+        '[v2] FATAL: setup failed after factory init',
+        causes.join('\ncaused by: '),
+      );
+      console.error('[oh-my-opencode-slim][v2] setup failed:', err);
       // Best-effort abort-path cleanup: LIFO over the saved disposers,
       // each isolated so a failing disposer cannot mask the original
       // error, then the v1 dispose hook, then rethrow unchanged.

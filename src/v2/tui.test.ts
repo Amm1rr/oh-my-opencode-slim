@@ -5,9 +5,9 @@ import * as path from 'node:path';
 import type { PluginConfig } from '../config';
 import baseTui from '../tui';
 import { recordTuiAgentActivity, recordTuiSessionParent } from '../tui-state';
+import { registerConfigChangeListener } from './config-change-coordinator';
 import tui2Plugin, {
   applyPresetByName,
-  buildPresetOptions,
   runPresetFlow,
   type V2TuiPluginContext,
 } from './tui';
@@ -63,99 +63,6 @@ describe('v2 tui preset plugin', () => {
     fs.rmSync(projectDir, { recursive: true, force: true });
   });
 
-  describe('buildPresetOptions', () => {
-    test('maps config presets to dialog options with agent summaries', () => {
-      const options = buildPresetOptions(makeConfig());
-
-      expect(options).toHaveLength(2);
-      expect(options[0]).toMatchObject({
-        title: 'balanced',
-        value: 'balanced',
-      });
-      expect(options[0]?.description).toContain(
-        'orchestrator → model: anthropic/claude-sonnet-4-5',
-      );
-      expect(options[1]).toMatchObject({ title: 'cheap', value: 'cheap' });
-      expect(options[1]?.description).toContain(
-        'orchestrator → model: openai/gpt-5-mini → temp: 0.4',
-      );
-    });
-
-    test('shows effective resolved summaries for inheritance-only child presets', () => {
-      const config = {
-        presets: {
-          base: {
-            orchestrator: { model: 'anthropic/claude-sonnet-4-5' },
-          },
-          child: {
-            extends: 'base',
-            agents: {},
-          },
-        },
-      } as unknown as PluginConfig;
-
-      const options = buildPresetOptions(config);
-
-      const childOption = options.find((o) => o.value === 'child');
-      expect(childOption).toBeDefined();
-      expect(childOption?.description).toContain(
-        'orchestrator → model: anthropic/claude-sonnet-4-5',
-      );
-    });
-
-    test('shows effective resolved summaries combining base and child overrides', () => {
-      const config = {
-        presets: {
-          base: {
-            orchestrator: { model: 'anthropic/claude-sonnet-4-5' },
-            oracle: { model: 'openai/gpt-5-mini' },
-          },
-          child: {
-            extends: 'base',
-            agents: {
-              orchestrator: { model: 'openai/o3' },
-            },
-          },
-        },
-      } as unknown as PluginConfig;
-
-      const options = buildPresetOptions(config);
-
-      const childOption = options.find((o) => o.value === 'child');
-      expect(childOption).toBeDefined();
-      expect(childOption?.description).toContain(
-        'orchestrator → model: openai/o3',
-      );
-      expect(childOption?.description).toContain(
-        'oracle → model: openai/gpt-5-mini',
-      );
-    });
-
-    test('shows summaries for presets with only non-model fields', () => {
-      const config = {
-        presets: {
-          skillsOnly: {
-            orchestrator: {
-              inheritModelFrom: 'oracle',
-              skills: ['test-skill'],
-            },
-          },
-        },
-      } as unknown as PluginConfig;
-
-      const options = buildPresetOptions(config);
-
-      expect(options).toHaveLength(1);
-      expect(options[0]?.value).toBe('skillsOnly');
-      expect(options[0]?.description).toContain('inherit: oracle');
-      expect(options[0]?.description).toContain('skills: test-skill');
-    });
-
-    test('returns an empty list when no presets are configured', () => {
-      expect(buildPresetOptions({} as PluginConfig)).toEqual([]);
-    });
-  });
-
   describe('applyPresetByName', () => {
     test('persists the preset name and returns a success message', () => {
       writeUserConfig({
@@ -202,43 +109,87 @@ describe('v2 tui preset plugin', () => {
       const result = applyPresetByName(projectDir, makeConfig(), 'balanced');
 
       expect(result.ok).toBe(false);
-      expect(result.message).toContain(
-        'project config (.opencode) explicitly sets preset "project-preset"',
-      );
+      expect(result.message).toContain('project config (.opencode)');
+      expect(result.message).toContain('"project-preset"');
       expect(readUserConfig().preset).toBeUndefined();
     });
   });
 
   describe('runPresetFlow', () => {
-    interface PresetStubCtx {
+    interface ScriptedCtx {
       ctx: {
         location: { directory: string };
+        agent?: { reload: () => Promise<void> };
         ui: {
-          dialog: {
+          dialog?: {
             select: (args: unknown) => Promise<string | undefined>;
+            prompt: (args: unknown) => Promise<string | undefined>;
+            confirm: (args: unknown) => Promise<boolean | undefined>;
           };
           toast?: { show: (toast: { message: string }) => void };
         };
       };
       toasts: string[];
-      selectArgs: () => unknown;
+      selectCalls: unknown[];
+      promptCalls: unknown[];
+      selectTitles: () => string[];
+      reloadCalls: () => number;
     }
 
     function makeStubCtx(
-      selection: string | undefined,
-      withToast = true,
-    ): PresetStubCtx {
+      script: {
+        selects?: Array<string | undefined>;
+        prompts?: Array<string | undefined>;
+        confirms?: Array<boolean | undefined>;
+      } = {},
+      options: {
+        withToast?: boolean;
+        withDialogs?: boolean;
+        withReload?: boolean;
+      } = {},
+    ): ScriptedCtx {
+      const {
+        withToast = true,
+        withDialogs = true,
+        withReload = true,
+      } = options;
+      const selects = [...(script.selects ?? [])];
+      const prompts = [...(script.prompts ?? [])];
+      const confirms = [...(script.confirms ?? [])];
       const toasts: string[] = [];
-      let capturedSelectArgs: unknown;
+      const selectCalls: unknown[] = [];
+      const promptCalls: unknown[] = [];
+      let reloadCalls = 0;
       const ctx = {
         location: { directory: projectDir },
+        ...(withReload
+          ? {
+              agent: {
+                reload: async () => {
+                  reloadCalls += 1;
+                },
+              },
+            }
+          : {}),
         ui: {
-          dialog: {
-            select: async (args: unknown) => {
-              capturedSelectArgs = args;
-              return selection;
-            },
-          },
+          ...(withDialogs
+            ? {
+                dialog: {
+                  select: async (args: unknown) => {
+                    selectCalls.push(args);
+                    return selects.shift();
+                  },
+                  prompt: async (args: unknown) => {
+                    promptCalls.push(args);
+                    return prompts.shift();
+                  },
+                  confirm: async (args: unknown) => {
+                    void args;
+                    return confirms.shift();
+                  },
+                },
+              }
+            : {}),
           ...(withToast
             ? {
                 toast: {
@@ -250,10 +201,18 @@ describe('v2 tui preset plugin', () => {
             : {}),
         },
       };
-      return { ctx, toasts, selectArgs: () => capturedSelectArgs };
+      return {
+        ctx,
+        toasts,
+        selectCalls,
+        promptCalls,
+        selectTitles: () =>
+          selectCalls.map((call) => (call as { title?: string }).title ?? ''),
+        reloadCalls: () => reloadCalls,
+      };
     }
 
-    test('selects, applies, and toasts the switch result', async () => {
+    test('opens the manager and applies the selected preset', async () => {
       writeUserConfig({
         preset: 'balanced',
         presets: {
@@ -261,27 +220,36 @@ describe('v2 tui preset plugin', () => {
           cheap: { orchestrator: { model: 'openai/gpt-5-mini' } },
         },
       });
-      const stub = makeStubCtx('cheap');
+      const stub = makeStubCtx({ selects: ['cheap', 'apply'] });
+      const unregister = registerConfigChangeListener(projectDir, () => ({
+        ok: true,
+      }));
 
-      await runPresetFlow(stub.ctx);
+      try {
+        await runPresetFlow(stub.ctx);
 
-      expect(stub.toasts).toHaveLength(1);
-      expect(stub.toasts[0]).toContain('Saved preset "cheap"');
-      expect(readUserConfig().preset).toBe('cheap');
-      const args = stub.selectArgs() as {
-        title?: string;
+        expect(stub.toasts).toHaveLength(1);
+        expect(stub.toasts[0]).toContain('Saved preset "cheap"');
+        expect(readUserConfig().preset).toBe('cheap');
+      } finally {
+        unregister();
+      }
+      expect(stub.selectTitles()[0]).toBe('Presets');
+      const listArgs = stub.selectCalls[0] as {
         current?: string;
-        options?: Array<{ value: string }>;
+        options?: Array<{ title: string; value: string }>;
       };
-      expect(args.title).toBe('Select preset');
-      expect(args.current).toBe('balanced');
-      expect(args.options?.map((option) => option.value)).toEqual([
+      expect(listArgs.current).toBe('balanced');
+      expect(listArgs.options?.map((option) => option.value)).toEqual([
         'balanced',
         'cheap',
+        '__omo_new_preset__',
       ]);
+      expect(listArgs.options?.[0]?.title).toContain('(active)');
+      expect(stub.selectTitles()[1]).toBe('Preset: cheap');
     });
 
-    test('applies a named preset directly without opening the dialog', async () => {
+    test('applies a named preset directly and reports a requested live refresh', async () => {
       writeUserConfig({
         preset: 'balanced',
         presets: {
@@ -289,20 +257,82 @@ describe('v2 tui preset plugin', () => {
           cheap: { orchestrator: { model: 'openai/gpt-5-mini' } },
         },
       });
-      const stub = makeStubCtx('cheap');
+      const stub = makeStubCtx({ selects: ['cheap'] });
+      const unregister = registerConfigChangeListener(projectDir, () => ({
+        ok: true,
+      }));
 
-      await runPresetFlow(stub.ctx, 'cheap');
+      try {
+        await runPresetFlow(stub.ctx, 'cheap');
 
-      expect(stub.selectArgs()).toBeUndefined();
-      expect(stub.toasts[0]).toContain('Saved preset "cheap"');
-      expect(readUserConfig().preset).toBe('cheap');
+        expect(stub.selectCalls).toHaveLength(0);
+        expect(stub.toasts).toHaveLength(1);
+        expect(stub.toasts[0]).toContain('Saved preset "cheap"');
+        expect(stub.toasts[0]).toContain('Live refresh requested');
+        expect(stub.toasts[0]).not.toContain('Reload OpenCode');
+        expect(readUserConfig().preset).toBe('cheap');
+      } finally {
+        unregister();
+      }
     });
 
-    test('cancels silently when the dialog is dismissed', async () => {
+    test('reports honestly when no live refresh listener is registered', async () => {
       writeUserConfig({
         presets: { cheap: { orchestrator: { model: 'openai/gpt-5-mini' } } },
       });
-      const stub = makeStubCtx(undefined);
+      const stub = makeStubCtx({ selects: ['cheap'] });
+
+      await runPresetFlow(stub.ctx, 'cheap');
+
+      expect(readUserConfig().preset).toBe('cheap');
+      expect(stub.toasts).toHaveLength(1);
+      expect(stub.toasts[0]).toContain('live refresh request failed');
+      expect(stub.toasts[0]).toContain('Reload OpenCode to apply');
+      expect(stub.toasts[0]).not.toContain('Live refresh requested');
+    });
+
+    test('a failed switch never notifies the sidebar listener (label unchanged)', async () => {
+      const projectConfigDir = path.join(projectDir, '.opencode');
+      fs.mkdirSync(projectConfigDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(projectConfigDir, 'oh-my-opencode-slim.jsonc'),
+        JSON.stringify({ preset: 'locked-by-project' }),
+      );
+      writeUserConfig({
+        preset: 'old',
+        presets: {
+          cheap: { orchestrator: { model: 'openai/gpt-5-mini' } },
+          'locked-by-project': {
+            orchestrator: { model: 'anthropic/claude-sonnet-4-5' },
+          },
+        },
+      });
+      let notifications = 0;
+      const unregister = registerConfigChangeListener(projectDir, () => {
+        notifications += 1;
+        return { ok: true };
+      });
+      const stub = makeStubCtx({ selects: ['cheap'] });
+
+      try {
+        await runPresetFlow(stub.ctx, 'cheap');
+      } finally {
+        unregister();
+      }
+
+      // Persistence failed, so the sidebar is never asked to re-read: the
+      // label keeps showing the old preset.
+      expect(notifications).toBe(0);
+      expect(readUserConfig().preset).toBe('old');
+      expect(stub.toasts).toHaveLength(1);
+      expect(stub.toasts[0]).toContain('project config (.opencode)');
+    });
+
+    test('cancels silently when the manager is dismissed', async () => {
+      writeUserConfig({
+        presets: { cheap: { orchestrator: { model: 'openai/gpt-5-mini' } } },
+      });
+      const stub = makeStubCtx({ selects: [undefined] });
 
       await runPresetFlow(stub.ctx);
 
@@ -310,28 +340,44 @@ describe('v2 tui preset plugin', () => {
       expect(readUserConfig().preset).toBeUndefined();
     });
 
-    test('toasts a hint when no presets are configured', async () => {
+    test('opens the create prompt when no presets are configured', async () => {
       // An explicit (preset-less) user config stops the search before the
       // machine's real default config dir.
       writeUserConfig({});
-      const stub = makeStubCtx('cheap');
+      const stub = makeStubCtx({ prompts: [undefined] });
 
       await runPresetFlow(stub.ctx);
 
-      expect(stub.toasts).toHaveLength(1);
-      expect(stub.toasts[0]).toContain('No presets configured');
-      expect(stub.selectArgs()).toBeUndefined();
+      expect(stub.selectCalls).toHaveLength(0);
+      expect(
+        (stub.promptCalls[0] as { title?: string } | undefined)?.title,
+      ).toBe('Create new preset');
+      // Cancelled create leaves the config untouched and closes the manager.
+      expect(readUserConfig()).toEqual({});
     });
 
     test('applies a named preset without a toast surface', async () => {
       writeUserConfig({
         presets: { cheap: { orchestrator: { model: 'openai/gpt-5-mini' } } },
       });
-      const stub = makeStubCtx('cheap', false);
+      const stub = makeStubCtx({ selects: ['cheap'] }, { withToast: false });
 
       await runPresetFlow(stub.ctx, 'cheap');
 
       expect(readUserConfig().preset).toBe('cheap');
+    });
+
+    test('guides when the host exposes no dialogs', async () => {
+      writeUserConfig({
+        presets: { cheap: { orchestrator: { model: 'openai/gpt-5-mini' } } },
+      });
+      const stub = makeStubCtx({}, { withDialogs: false });
+
+      await runPresetFlow(stub.ctx);
+
+      expect(stub.toasts).toHaveLength(1);
+      expect(stub.toasts[0]).toContain('dialog API');
+      expect(readUserConfig().preset).toBeUndefined();
     });
 
     test('toasts warning and does not persist when project config preset conflicts', async () => {
@@ -352,13 +398,12 @@ describe('v2 tui preset plugin', () => {
         },
       });
 
-      const stub = makeStubCtx('cheap');
+      const stub = makeStubCtx({ selects: ['cheap', 'apply'] });
       await runPresetFlow(stub.ctx);
 
       expect(stub.toasts).toHaveLength(1);
-      expect(stub.toasts[0]).toContain(
-        'project config (.opencode) explicitly sets preset "locked-by-project"',
-      );
+      expect(stub.toasts[0]).toContain('project config (.opencode)');
+      expect(stub.toasts[0]).toContain('"locked-by-project"');
       expect(readUserConfig().preset).toBe('old');
     });
   });

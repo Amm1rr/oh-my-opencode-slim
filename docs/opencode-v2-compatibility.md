@@ -5,8 +5,9 @@ and OpenCode v2 (`opencode2`) from a single published package. This document
 describes how each host loads the plugin, what is supported where, and how to
 register it.
 
-The verified compatibility baseline is **OpenCode v2.0.7**. The plugin
-requires OpenCode v2.0.7+ on v2 hosts; older v2 hosts are unsupported.
+The repository baseline is **oh-my-opencode-slim v2.2.25** (see
+`package.json`), with live host verification on **OpenCode v2.0.7**. The
+plugin requires OpenCode v2.0.7+ on v2 hosts; older v2 hosts are unsupported.
 Bundled-skill delivery requires the host's in-process skill registration
 channel (a `ctx.skill` draft with `add`), available on OpenCode v2 hosts. On
 v1 hosts bundled skills are **not** delivered: the legacy disk-copy sync was
@@ -78,10 +79,11 @@ bump must re-check that pin.
 
 v2's plugin resolver tries the `server` subpath first
 (`subpaths: ["server", ""]`), which the exports map resolves directly to
-`dist/server/index.js` — the self-contained v2 server bundle, and also the
-entrypoint v2 loads when the `dist/server` directory is registered directly
-(see [Installing on v2](#installing-on-v2)); the release artifact check
-requires it. v1 uses the main entry.
+`dist/server/index.js` — the self-contained v2 server bundle, and the
+artifact the release check requires. Local source development registers an
+external shim directory instead of pointing at `dist/` (see
+[Local source development](#local-source-development-no-publishing)); v1
+uses the main entry.
 
 Upstream npm naming split with the stable line: v2 ships as
 `@opencode/plugin` / `@opencode/client` / `@opencode/sdk` / `@opencode/cli`
@@ -199,7 +201,13 @@ not an optional-degradation path.
       when no agent is ever learned. When the prompt hook registers, the
       context hook's per-request `chat.message` emulation narrows to
       agent/model discovery; hosts that reject the hook name keep the
-      full emulation as fallback.
+      full emulation as fallback. The session-frozen profile bridge is also
+      awaited from this hook BEFORE the admission's first model request: it
+      resolves the session's `parentID`/`agent` through `session.get`,
+      then freezes the child's runtime profile and applies
+      `session.switchModel` idempotently (the event-stream
+      `session.created` consumer is only a prewarm/cleanup path — a first
+      child request can never race the asynchronous event pump).
     - a native `ctx.session.hook("model.request")` registration
       (capability-guarded): the v2 equivalent of the v1 `chat.headers` hook.
       Fires once per provider request with a mutable `headers` record the
@@ -207,7 +215,7 @@ not an optional-degradation path.
       Copilot initiator-header semantics: for `github-copilot` /
       `github-copilot-enterprise` primary requests whose trailing user
       message is an internal-initiator admission (orchestrator-wake queue
-      prompts, foreground-fallback replays), it sets `x-initiator: agent`
+      prompts), it sets `x-initiator: agent`
       so Copilot's backend does not account plugin-driven turns as user
       activity. The internal marker is learned in-band — prompt `metadata`
       persisted onto the transcript user message (visible on the
@@ -267,9 +275,12 @@ not an optional-degradation path.
       `session.status` + `session.idle`; `failed` → a v1 `session.error`
       with the host error payload before the idle pair), and no
       `session.status`-based fallback remains. The execution-event
-      synthesis keeps orchestrator-wake suppression/arm scheduling and the
-      foreground fallback working on v2 hosts, while the Form and
-      permission bridges above feed the companion's waiting-input
+      synthesis keeps orchestrator-wake suppression/arm scheduling.
+      Automatic foreground fallback remains disabled on v2: the host has no
+      atomic turn-conditional
+      model switch, so a switch started for a failed turn could commit after a
+      newer user turn takes over. The Form and permission bridges above feed
+      the companion's waiting-input
       indicator and the task-session-manager input-wait gate. Form questions
       are observation-only for plugin code on the pinned v2 host: the promise
       plugin context exposes `permission.reply`, but not a supported
@@ -347,10 +358,14 @@ the current plugin generation. Subsequent v1 `config()` calls and v2 agent
 transform replays reproject that same owned model and permission policy; they
 do not absorb later changes to managed host entries or native rules. Foreign
 host-owned entries remain outside the managed projection. To apply changed
-managed configuration, reload the plugin so a fresh generation can capture a
-new snapshot. This is a generation boundary, not hot configuration: the
-planned V3 PR 10 status/reload work will report desired-versus-live state and
-provide explicit reload control, without making an active registry mutable.
+managed configuration, restart or reload OpenCode from the host so a fresh
+generation can capture a new snapshot. This is a generation boundary, not hot
+configuration. Marketplace status reports desired-versus-live state, and an
+explicit reload request returns this host action as an instruction; the plugin
+does not expose a supported full-host reload API, create a generation, or
+mutate an active registry. When no finalized registry is available (for example,
+in standalone CLI use), status reports `reloadRequired: null` because the live
+side cannot be observed.
 
 ## Feature matrix
 
@@ -367,11 +382,11 @@ provide explicit reload control, without making an active registry mutable.
 | Built-in MCPs (context7, gh_grep) auto-registered | ✅ | ✅ `ctx.mcp.transform` | `ctx.mcp.transform` is present in all v2.0.x stable hosts; the runtime capability probe is belt-and-suspenders |
 | webfetch secondary-model summaries | ✅ | ✅ via `ctx.generate.text` | host without `ctx.generate` → summaries unavailable (logged) |
 | Background-job state persistence (tombstones, deletion epochs, alias high-water marks) | ➖ process-local | ✅ via `ctx.storage` | optional domain; absent → pure in-memory fallback, zero behavior change (see [Background job state](#background-job-state-rehydrate-probe-and-persistence)) |
-| Foreground model fallback (rate-limit failover) | ✅ | ✅ shim translates re-prompt into `session.switchModel` + `delivery:"steer"` prompt | — |
-| `/preset` (interactive switcher) | ✅ | ✅ TUI plugin entry (`./tui` → `dist/tui2.js`): sidebar + `/preset` dialog or `/preset <name>` fast path | The layer registers from an `append: "app"` slot render because the host's `keymap.layer` is provider-scoped (calling it from plugin `setup` throws `Keymap.Provider is missing`); the command carries an `id` and `slash.arguments`; host needs `ui.slot` + `keymap.layer`; the interactive picker needs `ui.dialog.select` while `/preset <name>` works without it; feedback uses `ui.toast.show`; config-file `preset` still applies at load |
+| Foreground model fallback (rate-limit failover) | ✅ | ❌ disabled pending an atomic turn-conditional host switch | v2's non-atomic `session.switchModel` + steer replay could alter/replay a newer turn |
+| `/preset` (preset manager) | ✅ | ✅ TUI plugin entry (`./tui` → `dist/tui2.js`): sidebar (incl. clickable active-preset row) + the same three-level manager as v1 on bare `/preset`, or `/preset <name>` fast path | The layer registers from an `append: "app"` slot render because the host's `keymap.layer` is provider-scoped (calling it from plugin `setup` throws `Keymap.Provider is missing`); the command carries an `id` and `slash.arguments`; host needs `ui.slot` + `keymap.layer`; the manager needs `ui.dialog.select` + `prompt` + `confirm` (without them the sidebar preset row is informational-only, but `/preset <name>` still applies); feedback uses `ui.toast.show`; config-file `preset` still applies at load. Config edits (manual, manager saves, `/preset`) are watched over `.json` + `.jsonc` candidates (user + project, including files/directories created later, arbitrary `OPENCODE_CONFIG_DIR` names, and nested missing ancestors; ~300 ms debounce) and hot-applied **only** as inference profiles: `model`/`variant` via `session.switchModel` and `temperature`/`options` on the captured child session's request options, plus the sidebar's tui-state model entries. Capture is awaited on the `session.prompt` request path (the `session.created` event consumer is only a prewarm) so a first child request cannot race the event pump. Agent definitions, prompts, tools, permissions, skills, and MCPs stay frozen for the session lifetime; the host registry is never reloaded. The TUI **requests** this refresh and reports `Saved … Live refresh requested`; it cannot observe the server-side watcher (separate process, no safe plugin RPC bridge on the supported host), which logs its own failure cause. A malformed config (`invalid-json`/`invalid-schema`/`read-error`) is rejected before any swap — the last-known-good profiles/sidebar stay — and the fix-and-reload fallback applies |
 | Default primary agent | ✅ finalized visible orchestrator identity | ✅ `draft.default(<visible orchestrator identity>)`; the canonical `orchestrator` entry remains a hidden alias when `displayName` is configured | v1 `default_agent` and v2 draft default target the same visible entry |
 | TUI default agent | ✅ orchestrator | ✅ host follows the default primary agent and hoists it to the head of the agent list | — |
-| Multiplexer (tmux/zellij/herdr/cmux-tui panes) | ✅ | ❌ host-gated off (`hostFlavor: 'v2'` → `shouldEnableMultiplexer` returns false and the session manager is forced to `type: "none"`) | by design — v2 renders subagents natively |
+| Multiplexer (tmux/zellij/herdr/cmux-tui panes) | ✅ | ❌ not available on v2 hosts (by design): the pane lifecycle is wired only in the v1 TUI entry, and a configured `multiplexer.type` is ignored with one diagnostic per process | by design — v2's native subagent UX (subagent picker, completion notices) replaces panes |
 | Orchestrator-wake scheduler | ✅ todo-gated (host `todo`/`children`/`status` APIs) | ✅ children-driven degraded mode (`backgroundJobs.orchestratorWake.mode`) | v2 wake enumerates children via `session.list({parentID})` with an event-tracked fallback, gates on children without a terminal `outcome` (staleness-bounded), and delivers with `queue`; v2's native subagent completion nudges still cover the happy path — the port adds a periodic watchdog for stuck children and unreconciled jobs |
 | `chat.headers` (Copilot `x-initiator` routing) | ✅ | ✅ via `session.hook("model.request")` | transport-level only; auxiliary kinds are covered by v2's built-in Copilot provider hook |
 | Companion app | ✅ | ⚠️ unverified | independent desktop app; test separately against v2 |
@@ -504,9 +519,12 @@ currently break this plugin:
   matches raw MCP tool names: MCP access is granted per server name
   (`"mcps": ["context7", "!gh_grep"]` in agent config), and registration
   uses its own server names via `draft.set(name, ...)`.
-- **`opencode reload` recreates plugin instances in-process.** The CLI
-  `opencode reload` command, the TUI reload command, and the
-  `location.reload` HTTP endpoint all rebuild the host's location
+- **Host reload is not callable by plugins.** A host may provide an external
+  `opencode reload` command or a `location.reload` endpoint, but neither is
+  part of the plugin's supported API. Marketplace `requestReload` only reports
+  that a host reload/restart is required and never claims one occurred. The
+  When an operator invokes the CLI `opencode reload` command, the TUI reload
+  command, or the `location.reload` HTTP endpoint, the host rebuilds its location
   service layer: plugin instances are destroyed and recreated, `setup`
   re-enters in the same process, and the host calls the cleanup
   returned by the previous generation before the new generation loads.
@@ -588,20 +606,21 @@ is not read for plugin config):
 
 ```json
 {
-  "plugin": ["oh-my-opencode-slim@2.2.17"]
+  "plugin": ["oh-my-opencode-slim@2.2.25"]
 }
 ```
 
-For local development, point the config at the built `dist/server`
-**directory**:
+### Local source development (no publishing)
 
-```json
-{
-  "plugin": ["/path/to/oh-my-opencode-slim/dist/server"]
-}
-```
+The v2 local-directory plugin loader resolves a registered directory's own
+entrypoints: the root `index` (server) and `tui` files. This repository's
+root does not contain those (`src/` is the source tree; the v2 bundles live
+under `dist/`), so do **not** register `dist/` or `dist/server` directly —
+the TUI entry would not resolve, and future loader rules may reject a
+partial directory. Use a small external shim directory whose root files
+re-export this repo's built bundles.
 
-Then build:
+Build first:
 
 ```bash
 bun install
@@ -610,6 +629,30 @@ bun run build   # produces dist/index.js (v1), dist/server/index.js (v2
                 # dist/tui2.js (v2 TUI), dist/cli/
 ```
 
+Create the shim OUTSIDE the repository (paths below are generic placeholders
+such as `<home>/opencode-plugins-dev/oh-my-opencode-slim/`):
+
+```ts
+// index.ts — server entry (root `index` is what the loader resolves)
+export { default } from 'file:///absolute/path/to/oh-my-opencode-slim/dist/server/index.js';
+```
+
+```ts
+// tui.ts — TUI entry (root `tui`, loaded by the TUI runtime)
+export { default } from 'file:///absolute/path/to/oh-my-opencode-slim/dist/tui2.js';
+```
+
+Register the shim directory in the OpenCode v2 config:
+
+```json
+{
+  "plugin": ["file:///absolute/path/to/opencode-plugins-dev/oh-my-opencode-slim"]
+}
+```
+
+`bun run build` after each source change; the shim re-exports the fresh
+bundles and no publish step is involved.
+
 Verify with `opencode2 run "list your specialist agents" --standalone` — the
 orchestrator should name explorer, librarian, oracle, designer, fixer.
 
@@ -617,8 +660,9 @@ orchestrator should name explorer, librarian, oracle, designer, fixer.
 
 - **Directory or package entries only.** File-path entries (e.g.
   `…/dist/server.js`) are rejected with the WARN
-  `configured plugin path must be a directory`. A directory entry's
-  `index.js` is the entrypoint — hence `dist/server` above.
+  `configured plugin path must be a directory`. A directory entry's root
+  `index` (server) and `tui` files are the entrypoints — hence the shim
+  above.
 - **Single-file plugins need a wrapper dir** whose `index.js` re-exports the
   original file, e.g. `~/.config/opencode/plugins-dev/<name>/index.js`
   containing `export { default } from "/abs/path/to/plugin.js";`. Do not
@@ -633,15 +677,13 @@ Agent models are resolved the same way as v1 (per-agent `model` in
 v2, set a working provider+model in your config or the plugin's config file
 so delegated subagents can run.
 
-When the foreground model hits a rate limit, the plugin switches the
-session's model (`session.switchModel`) and steers the re-prompt through
-`delivery: "steer"`. A failing `switchModel` call degrades honestly: the
-re-prompt is still delivered (on the current model) and the plugin's logs
-record that no switch happened — the fallback chain is not aborted. On
-hosts without `session.switchModel`, the fallback replay is rejected with
-a clear error instead of silently replaying on the model that just failed
-(other prompt callers, like the orchestrator-wake scheduler, only pin the
-current model and keep steering).
+Automatic foreground fallback is disabled on v2, even when configured. The
+current host API cannot atomically switch a session model only if the failed
+turn is still current; an in-flight non-atomic `session.switchModel` could
+otherwise commit after a newer user turn takes over. Fallback will remain
+disabled until the host provides that turn-conditional operation. Other prompt
+callers, like the orchestrator-wake scheduler, only pin the current model and
+keep steering; this is not foreground fallback.
 
 ## Background job state: rehydrate probe and persistence
 
@@ -780,10 +822,11 @@ Q&A history.
 
 ### v1-only, by design
 
-- **Multiplexer panes.** tmux/zellij/herdr integration is a v1-TUI feature;
-  v2 renders subagents natively, so the multiplexer is host-gated off on v2
-  (`shouldEnableMultiplexer` / `sessionManagerMultiplexerConfig` in
-  `src/index.ts`).
+- **Multiplexer panes.** Pane creation is wired only in the v1 TUI entry
+  (`src/tui.ts`'s `tui()`); the v2 TUI entry (`setup()`) deliberately does not
+  start it (NFR-6). A `multiplexer.type` configured on a v2 host is ignored and
+  one diagnostic per process is logged; v2's native subagent UX (subagent
+  picker, completion notices) replaces panes.
 
 ### Not exposed to plugins: `session.list` / `session.remove`
 
@@ -867,7 +910,7 @@ How it differs from the v1 path:
   bypass the condition, as on v1.
 - **Wake delivery:** `delivery: "queue"` — v1 `prompt_async` queued, and a
   v2 `steer` would hijack an in-flight run. The shim's `promptAsync` keeps
-  `steer` as the default so the foreground-fallback replay is unchanged.
+  `steer` as the default for callers that request steering.
   The wake model pin carries the session model's variant as the v2-only
   `modelVariant` argument, so `switchModel` preserves the reasoning-effort
   setting instead of resetting it to the host default.
@@ -876,8 +919,8 @@ How it differs from the v1 path:
   read via `session.get` at delivery time) is treated as "continue on this
   model": the shim skips `switchModel` entirely instead of resetting the
   variant to default. This covers every internal caller that pins the
-  current model without a variant opinion (wake pins, task-message,
-  same-model fallback steps) even when the pin's source lost the variant.
+  current model without a variant opinion (wake pins and task-message)
+  even when the pin's source lost the variant.
   Explicit variants (including `default` via `modelVariant`) and
   cross-model pins still switch. Hosts without `session.get`, or a failing
   `get`, keep the legacy variant-free switch.
@@ -890,7 +933,7 @@ periodic watchdog: an idle parent with a stuck or unreconciled child (or a
 job that stopped without a terminal result) gets woken to assess, cancel, or
 respawn, bounded by the same no-progress cap as v1.
 
-### Terminal-publication wake（终态后唤醒）
+### Terminal-publication wake
 
 The native notifier fires on the FIRST terminal publication of every
 generation — on v2 every plugin task launch AND relaunch is a host

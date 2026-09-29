@@ -10,11 +10,14 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import { parse } from 'jsonc-parser';
 import { withMarketplaceConfigReferencesRemoved } from './config-references';
+import { acquireMarketplaceLease } from './lease';
+import { getMarketplacePaths } from './paths';
 
 const previousConfigHome = process.env.XDG_CONFIG_HOME;
+const previousOpenCodeConfigDir = process.env.OPENCODE_CONFIG_DIR;
 const previousReferenceId = process.env.MARKETPLACE_REFERENCE_ID;
 const previousKeptId = process.env.MARKETPLACE_KEPT_ID;
 const previousMissingId = process.env.MARKETPLACE_MISSING_ID;
@@ -22,6 +25,9 @@ const previousMissingId = process.env.MARKETPLACE_MISSING_ID;
 afterEach(() => {
   if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
   else process.env.XDG_CONFIG_HOME = previousConfigHome;
+  if (previousOpenCodeConfigDir === undefined)
+    delete process.env.OPENCODE_CONFIG_DIR;
+  else process.env.OPENCODE_CONFIG_DIR = previousOpenCodeConfigDir;
   if (previousReferenceId === undefined) {
     delete process.env.MARKETPLACE_REFERENCE_ID;
   } else {
@@ -376,4 +382,216 @@ describe('marketplace config reference cleanup', () => {
       rmSync(fixture.root, { recursive: true, force: true });
     }
   });
+
+  test('does not lock the unused default config directory when a custom config is selected', () => {
+    const fixture = createConfigs();
+    const defaultConfigDir = join(fixture.root, 'config', 'opencode');
+    const customConfigDir = join(fixture.root, 'custom', 'opencode');
+    const customConfigPath = join(customConfigDir, 'oh-my-opencode-slim.jsonc');
+    const originalMkdir = fs.mkdirSync;
+    try {
+      process.env.OPENCODE_CONFIG_DIR = customConfigDir;
+      mkdirSync(customConfigDir, { recursive: true });
+      writeFileSync(
+        customConfigPath,
+        JSON.stringify({
+          presets: {
+            work: { marketplace: { agents: ['community/remove'] } },
+          },
+        }),
+      );
+      const mkdirSpy = spyOn(fs, 'mkdirSync').mockImplementation(((
+        path: fs.PathLike,
+        ...args: Parameters<typeof fs.mkdirSync>[1][]
+      ) => {
+        const resolvedPath = resolve(path.toString());
+        if (
+          resolvedPath.startsWith(`${resolve(defaultConfigDir)}${sep}`) &&
+          resolvedPath.includes('.oh-my-opencode-slim.')
+        ) {
+          throw Object.assign(
+            new Error('default config directory is read-only'),
+            {
+              code: 'EACCES',
+            },
+          );
+        }
+        return originalMkdir.call(fs, path, ...args);
+      }) as typeof fs.mkdirSync);
+      try {
+        let committed = false;
+        withMarketplaceConfigReferencesRemoved(
+          fixture.project,
+          'community/remove',
+          (onCommitted) => {
+            committed = true;
+            onCommitted();
+          },
+        );
+        expect(committed).toBe(true);
+        expect(
+          parse(readFileSync(customConfigPath, 'utf8')).presets.work.marketplace
+            .agents,
+        ).toEqual([]);
+        expect(
+          readdirSync(defaultConfigDir).some((name) =>
+            name.includes('.oh-my-opencode-slim.'),
+          ),
+        ).toBe(false);
+      } finally {
+        mkdirSpy.mockRestore();
+      }
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  test('uninstalls through writable user config when the project config directory is read-only', () => {
+    const fixture = createConfigs();
+    const projectConfigDir = dirname(fixture.projectPath);
+    const originalAccess = fs.accessSync;
+    const originalMkdir = fs.mkdirSync;
+    try {
+      writeFileSync(
+        fixture.userPath,
+        JSON.stringify({
+          presets: {
+            work: { marketplace: { agents: ['community/remove'] } },
+          },
+        }),
+      );
+      const accessSpy = spyOn(fs, 'accessSync').mockImplementation(((
+        path: fs.PathLike,
+        mode?: number,
+      ) => {
+        if (resolve(path.toString()) === resolve(projectConfigDir)) {
+          throw Object.assign(
+            new Error('project config directory is read-only'),
+            {
+              code: 'EACCES',
+            },
+          );
+        }
+        return originalAccess.call(fs, path, mode);
+      }) as typeof fs.accessSync);
+      const mkdirSpy = spyOn(fs, 'mkdirSync').mockImplementation(((
+        path: fs.PathLike,
+        ...args: Parameters<typeof fs.mkdirSync>[1][]
+      ) => {
+        if (
+          resolve(path.toString()).startsWith(
+            `${resolve(projectConfigDir)}${sep}`,
+          ) &&
+          resolve(path.toString()).includes('.oh-my-opencode-slim.')
+        ) {
+          throw Object.assign(new Error('unexpected project config lock'), {
+            code: 'EACCES',
+          });
+        }
+        return originalMkdir.call(fs, path, ...args);
+      }) as typeof fs.mkdirSync);
+      try {
+        let storeMutationCommitted = false;
+        withMarketplaceConfigReferencesRemoved(
+          fixture.project,
+          'community/remove',
+          (onCommitted) => {
+            storeMutationCommitted = true;
+            onCommitted();
+          },
+        );
+
+        expect(storeMutationCommitted).toBe(true);
+        expect(
+          parse(readFileSync(fixture.userPath, 'utf8')).presets.work.marketplace
+            .agents,
+        ).toEqual([]);
+        expect(readdirSync(projectConfigDir)).toEqual([]);
+      } finally {
+        mkdirSpy.mockRestore();
+        accessSpy.mockRestore();
+      }
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  test.each(['json', 'jsonc'] as const)(
+    'waits for and rediscovers a project .%s config created during uninstall',
+    async (extension) => {
+      const fixture = createConfigs();
+      const projectConfigPath = fixture.projectPath.replace(
+        /\.jsonc$/,
+        `.${extension}`,
+      );
+      const lockRoot = join(
+        dirname(projectConfigPath),
+        `.${basename(projectConfigPath)}.write-lock`,
+      );
+      const heldLease = acquireMarketplaceLease(getMarketplacePaths(lockRoot));
+      const readyPath = join(fixture.root, 'uninstall.ready');
+      const resultPath = join(fixture.root, 'uninstall.result');
+      let worker: ReturnType<typeof Bun.spawn> | undefined;
+      let released = false;
+      try {
+        const script = `import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { withMarketplaceConfigReferencesRemoved } from './src/marketplace/config-references.ts';
+const { project, id, configPath, readyPath, resultPath } = JSON.parse(process.argv[1]);
+writeFileSync(readyPath, 'ready');
+withMarketplaceConfigReferencesRemoved(project, id, (onCommitted) => {
+  writeFileSync(resultPath, existsSync(configPath) ? readFileSync(configPath, 'utf8') : 'missing');
+  onCommitted();
+});`;
+        worker = Bun.spawn(
+          [
+            'bun',
+            '-e',
+            script,
+            JSON.stringify({
+              project: fixture.project,
+              id: 'community/remove',
+              configPath: projectConfigPath,
+              readyPath,
+              resultPath,
+            }),
+          ],
+          { stdout: 'pipe', stderr: 'pipe', env: { ...process.env } },
+        );
+
+        const deadline = Date.now() + 10_000;
+        while (!existsSync(readyPath)) {
+          if (Date.now() >= deadline) {
+            throw new Error('Timed out waiting for uninstall worker to start');
+          }
+          await Bun.sleep(10);
+        }
+        await Bun.sleep(100);
+        expect(existsSync(resultPath)).toBe(false);
+
+        writeFileSync(
+          projectConfigPath,
+          JSON.stringify({
+            presets: {
+              work: { marketplace: { agents: ['community/remove'] } },
+            },
+          }),
+        );
+        heldLease.release();
+        released = true;
+
+        expect(await worker.exited).toBe(0);
+        expect(await new Response(worker.stderr).text()).toBe('');
+        expect(JSON.parse(readFileSync(resultPath, 'utf8'))).toEqual({
+          presets: { work: { marketplace: { agents: [] } } },
+        });
+        expect(JSON.parse(readFileSync(projectConfigPath, 'utf8'))).toEqual({
+          presets: { work: { marketplace: { agents: [] } } },
+        });
+      } finally {
+        if (!released) heldLease.release();
+        if (worker) await worker.exited;
+        rmSync(fixture.root, { recursive: true, force: true });
+      }
+    },
+  );
 });

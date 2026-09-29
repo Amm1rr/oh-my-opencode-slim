@@ -32,15 +32,34 @@ export function deepMerge<T extends Record<string, unknown>>(
       !Array.isArray(baseVal) &&
       !Array.isArray(overrideVal)
     ) {
-      result[key] = deepMerge(
-        baseVal as Record<string, unknown>,
-        overrideVal as Record<string, unknown>,
-      ) as T[keyof T];
+      defineOwn(
+        result,
+        key as string,
+        deepMerge(
+          baseVal as Record<string, unknown>,
+          overrideVal as Record<string, unknown>,
+        ) as T[keyof T],
+      );
     } else {
-      result[key] = overrideVal;
+      defineOwn(result, key as string, overrideVal);
     }
   }
   return result;
+}
+
+/**
+ * Define an own enumerable data property. A plain `result[key] = value`
+ * assignment with a `__proto__` key would mutate the prototype chain; preset
+ * and agent maps are user-controlled, so every dynamic-key write goes through
+ * this helper.
+ */
+function defineOwn<T>(target: T, key: string, value: unknown): void {
+  Object.defineProperty(target, key, {
+    value,
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
 }
 
 /**
@@ -103,14 +122,19 @@ function canonicalizeAgentAliases(
   for (const [name, override] of Object.entries(agents)) {
     const canonicalName = AGENT_ALIASES[name] ?? name;
     if (canonicalName === name) {
-      result[name] = deepMerge(result[name], override) as AgentOverrideConfig;
+      defineOwn(
+        result,
+        name,
+        deepMerge(result[name], override) as AgentOverrideConfig,
+      );
       continue;
     }
 
-    result[canonicalName] = deepMerge(
-      result[canonicalName],
-      override,
-    ) as AgentOverrideConfig;
+    defineOwn(
+      result,
+      canonicalName,
+      deepMerge(result[canonicalName], override) as AgentOverrideConfig,
+    );
   }
 
   // Canonical keys are authoritative when both forms are present. Process
@@ -119,10 +143,11 @@ function canonicalizeAgentAliases(
     if (AGENT_ALIASES[name] === undefined) continue;
     const canonicalName = AGENT_ALIASES[name];
     if (!Object.hasOwn(agents, canonicalName)) continue;
-    result[canonicalName] = deepMerge(
-      result[canonicalName],
-      agents[canonicalName],
-    ) as AgentOverrideConfig;
+    defineOwn(
+      result,
+      canonicalName,
+      deepMerge(result[canonicalName], agents[canonicalName]),
+    );
   }
 
   return result;
@@ -149,6 +174,15 @@ export class PresetResolutionError extends Error {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** Own-property-only read (a `__proto__` key must not hit the prototype). */
+function ownValue<T>(record: Record<string, T>, name: string): T | undefined {
+  if (!Object.hasOwn(record, name)) return undefined;
+  const descriptor = Object.getOwnPropertyDescriptor(record, name);
+  return descriptor && 'value' in descriptor
+    ? (descriptor.value as T)
+    : undefined;
 }
 
 /** Convert every accepted external syntax to one canonical representation. */
@@ -214,9 +248,9 @@ export function mergePresetMaps(
 
   const result: PresetMap = { ...base };
   for (const [name, overrideInput] of Object.entries(override)) {
-    const baseInput = base[name];
+    const baseInput = ownValue(base, name);
     if (!baseInput) {
-      result[name] = overrideInput;
+      defineOwn(result, name, overrideInput);
       continue;
     }
 
@@ -248,7 +282,7 @@ export function mergePresetMaps(
       usesStructuredPresetSyntax(baseInput) ||
       usesStructuredPresetSyntax(overrideInput)
     ) {
-      result[name] = mergedDefinition;
+      defineOwn(result, name, mergedDefinition);
     } else {
       const legacy = { ...mergedDefinition.agents } as Record<string, unknown>;
       if (mergedDefinition.extends !== undefined) {
@@ -257,7 +291,7 @@ export function mergePresetMaps(
       if (mergedDefinition.marketplace !== undefined) {
         legacy.marketplace = mergedDefinition.marketplace;
       }
-      result[name] = legacy as PresetInput;
+      defineOwn(result, name, legacy as PresetInput);
     }
   }
   return result;
@@ -348,7 +382,7 @@ export function resolvePresetDefinition(
     const cached = cache.get(current);
     if (cached) return cached;
 
-    const definition = presets[current];
+    const definition = ownValue(presets, current);
     if (!definition) {
       throw new PresetResolutionError('missing-parent', [...stack, current]);
     }

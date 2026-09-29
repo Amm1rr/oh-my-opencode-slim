@@ -63,6 +63,12 @@ export interface V2SessionContextEvent {
   readonly sessionID: string;
   readonly agent: string;
   readonly model: Record<string, unknown>;
+  /** Mutable request options (official `SessionContext.options`): typed
+   * generation settings (e.g. `temperature`) and arbitrary provider options.
+   * The runtime-profile bridge applies captured child profiles here — it
+   * never touches `system`, `messages`, or `tools`. Optional: reduced hosts
+   * may omit the record. */
+  options?: Record<string, unknown>;
   system: Array<{ type: 'text'; text: string }>;
   messages: Array<{
     id?: string;
@@ -189,7 +195,8 @@ export interface V2Context {
   };
   agent: {
     transform(cb: (draft: V2AgentDraft) => void): Promise<V2Registration>;
-    reload(): Promise<unknown>;
+    /** v2 `AgentDomain.reload` — rebuilds the host agent registry. */
+    reload(): Promise<void>;
     list(): Promise<unknown>;
   };
   tool: {

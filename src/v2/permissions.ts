@@ -3,6 +3,8 @@ import type { V2PermissionRule } from './types';
 export type PermissionEffect = V2PermissionRule['effect'];
 
 export interface PermissionCeilings {
+  /** Default effect within admitted capability ceilings. */
+  readonly defaultEffect?: PermissionEffect;
   /** Exact native action names and their maximum admitted effect. */
   readonly actions: Readonly<Record<string, PermissionEffect>>;
   /** Resource ceilings keyed by exact native action. */
@@ -92,6 +94,7 @@ function compileCeilingRules(
     }
   }
   const allRules = [...baseline, ...host];
+  const defaultEffect = ceilings.defaultEffect ?? 'ask';
   const output: V2PermissionRule[] = [
     {
       action: '*',
@@ -100,14 +103,14 @@ function compileCeilingRules(
     },
   ];
 
-  // Admission defaults are ask. Specific source rules follow in their original
+  // Admission defaults follow the configured ceiling policy. Specific source rules follow in their original
   // order, with each rule's ceilings emitted before the next source rule.
   const defaults: V2PermissionRule[] = [
     ...actions.map((action) => ({
       action,
       resource: '*',
       effect: moreRestrictive(
-        'ask',
+        defaultEffect,
         moreRestrictive(
           ceilings.actions[action] ?? 'allow',
           namespaces
@@ -127,22 +130,33 @@ function compileCeilingRules(
       action,
       resource: '*',
       effect: moreRestrictive(
-        'ask',
+        defaultEffect,
         ceilings.namespaceEffects?.[action] ?? 'allow',
       ),
     })),
   ];
+  const resourceDefaults: V2PermissionRule[] = [];
   for (const [action, resourceCeilings] of Object.entries(resources)) {
+    const actionCeiling = namespaces
+      .filter((namespace) => patternMatches(namespace, action))
+      .reduce<PermissionEffect>(
+        (effect, namespace) =>
+          moreRestrictive(
+            effect,
+            ceilings.namespaceEffects?.[namespace] ?? 'allow',
+          ),
+        ceilings.actions[action] ?? 'allow',
+      );
     for (const [resource, effect] of resourceCeilings) {
-      defaults.push({
+      resourceDefaults.push({
         action,
         resource,
         effect: moreRestrictive(
           moreRestrictive(
-            'ask',
+            defaultEffect,
             actions.includes(action) ||
               namespaces.some((namespace) => patternMatches(namespace, action))
-              ? (ceilings.actions[action] ?? 'allow')
+              ? actionCeiling
               : 'deny',
           ),
           effect,
@@ -150,10 +164,21 @@ function compileCeilingRules(
       });
     }
   }
+  // The wildcard is an allowlist default, so admitted exact resources may
+  // override it. For overlapping non-wildcard ceilings, the strongest effect
+  // must win regardless of whether a broad prefix or an exact path matches.
+  resourceDefaults.sort((left, right) => {
+    if (left.resource === '*') return -1;
+    if (right.resource === '*') return 1;
+    return (
+      EFFECT_RANK[left.effect] - EFFECT_RANK[right.effect] ||
+      left.resource.length - right.resource.length
+    );
+  });
   defaults.sort(
     (left, right) => EFFECT_RANK[left.effect] - EFFECT_RANK[right.effect],
   );
-  output.push(...defaults);
+  output.push(...defaults, ...resourceDefaults);
 
   for (const source of allRules) {
     const actionPatterns = [...actions, ...namespaces]
@@ -174,8 +199,14 @@ function compileCeilingRules(
             'allow',
           ),
       );
-      for (const resource of intersectPattern(source.resource, '*')) {
-        block.push({ action, resource, effect: actionEffect });
+      const actionResourceCeilings = resources[action] ?? [];
+      const hasWildcardResourceDeny = actionResourceCeilings.some(
+        ([resource, effect]) => resource === '*' && effect === 'deny',
+      );
+      if (!hasWildcardResourceDeny) {
+        for (const resource of intersectPattern(source.resource, '*')) {
+          block.push({ action, resource, effect: actionEffect });
+        }
       }
       for (const [resourceAction, ceilingsForResource] of Object.entries(
         resources,
@@ -183,7 +214,16 @@ function compileCeilingRules(
         if (!patternMatches(action, resourceAction)) continue;
         const exactAction = intersectPattern(source.action, resourceAction)[0];
         if (!exactAction) continue;
+        const hasWildcardDeny = ceilingsForResource.some(
+          ([resource, effect]) => resource === '*' && effect === 'deny',
+        );
+        if (!hasWildcardDeny) {
+          for (const resource of intersectPattern(source.resource, '*')) {
+            block.push({ action, resource, effect: actionEffect });
+          }
+        }
         for (const [ceiling, effect] of ceilingsForResource) {
+          if (ceiling === '*' && effect === 'deny') continue;
           const overlap = intersectPattern(source.resource, ceiling);
           for (const resource of overlap) {
             block.push({
@@ -314,6 +354,7 @@ function cloneCeilings(ceilings: PermissionCeilings): PermissionCeilings {
     ]),
   );
   return {
+    defaultEffect: ceilings.defaultEffect,
     actions: Object.freeze(
       Object.fromEntries(
         Object.entries(ceilings.actions).map(([action, effect]) => [

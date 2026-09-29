@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { doctor, parseDoctorArgs } from './doctor';
 import { install } from './install';
+import { runMarketplaceCommand } from './marketplace';
 import { getGeneratedPresetNames, isGeneratedPresetName } from './providers';
 import type {
   BackgroundSubagentsArg,
@@ -66,6 +67,7 @@ oh-my-opencode-slim installer
 Usage:
   bunx oh-my-opencode-slim install [OPTIONS]
   bunx oh-my-opencode-slim doctor [OPTIONS]
+  bunx oh-my-opencode-slim marketplace <command> [target]
 
 Options:
   --companion=ask|yes|no Install desktop companion binary and enable config
@@ -112,6 +114,8 @@ async function main(): Promise<void> {
     const doctorArgs = parseDoctorArgs(args.slice(1));
     const exitCode = await doctor(doctorArgs);
     process.exit(exitCode);
+  } else if (args[0] === 'marketplace') {
+    process.exit(await runMarketplaceCommand(args.slice(1)));
   } else if (args[0] === '-h' || args[0] === '--help') {
     printHelp();
     process.exit(0);

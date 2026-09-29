@@ -1,4 +1,5 @@
 import {
+  afterEach,
   beforeEach,
   describe,
   expect,
@@ -9,8 +10,13 @@ import {
 } from 'bun:test';
 import { isInternalInitiatorPart } from '../../utils';
 import * as logger from '../../utils/logger';
+import { mapV2EventToV1 } from '../../v2/event-adapter';
 import { SessionLifecycle } from '../session-lifecycle';
-import { ForegroundFallbackManager, isFailoverError } from './index';
+import {
+  ForegroundFallbackManager,
+  isFailoverError,
+  isInlineFailoverError,
+} from './index';
 
 // ACCEPTANCE GAP: config() hook behaviour is not covered by CI — verify live.
 
@@ -95,6 +101,14 @@ function createMockClient(overrides?: {
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 function makeChains(
   overrides?: Record<string, string[]>,
 ): Record<string, string[]> {
@@ -117,7 +131,7 @@ const retryMgr = (
     { orchestrator: ids.map((id) => `test/${id}`) },
     true,
     { directory: '/test' } as any,
-    3,
+    0, // Existing hook-switch tests isolate switching from host retry budgets.
     undefined,
     onChanged,
   );
@@ -132,6 +146,1170 @@ const retryEvent = (
   model: { providerID: 'test', id },
   error: { message: 'rate limit' },
   decision,
+});
+
+// Host order: the assistant is announced before its error surfaces through
+// session.error and message.updated. The transcript already contains the
+// user's message and its parts when fallback requests a replay.
+const redoEvents = {
+  user: (sessionID: string, id: string, modelID = 'a') => ({
+    type: 'message.updated',
+    properties: {
+      info: {
+        id,
+        sessionID,
+        role: 'user',
+        model: { providerID: 'test', modelID },
+      },
+      parts: [{ type: 'text', text: `turn ${id}` }],
+    },
+  }),
+  assistant: (
+    sessionID: string,
+    modelID = 'a',
+    error?: unknown,
+    messageID = `assistant-${sessionID}-${modelID}`,
+  ) => ({
+    type: 'message.updated',
+    properties: {
+      info: {
+        id: messageID,
+        sessionID,
+        role: 'assistant',
+        agent: 'orchestrator',
+        providerID: 'test',
+        modelID,
+        ...(error === undefined ? {} : { error }),
+      },
+    },
+  }),
+  error: (
+    sessionID: string,
+    error: unknown = { message: 'rate limit' },
+    messageID = `assistant-${sessionID}-a`,
+  ) => ({
+    type: 'session.error',
+    properties: { sessionID, info: { id: messageID }, error },
+  }),
+  retry: (sessionID: string, attempt = 1) => ({
+    type: 'session.status',
+    properties: {
+      sessionID,
+      status: { type: 'retry', attempt, message: 'rate limit' },
+    },
+  }),
+  success: (sessionID: string, modelID = 'a') => ({
+    type: 'message.updated',
+    properties: {
+      info: {
+        sessionID,
+        role: 'assistant',
+        agent: 'orchestrator',
+        providerID: 'test',
+        modelID,
+        time: { completed: 1 },
+      },
+    },
+  }),
+};
+
+function makeManager({
+  chain = ['test/a', 'test/b', 'test/c'],
+  maxRetries = 3,
+  initialRetryDelayMs = 0,
+  retryDelayMs = 0,
+  hostFlavor,
+  onChanged,
+}: {
+  chain?: ReadonlyArray<string | { id: string; variant?: string }>;
+  maxRetries?: number;
+  initialRetryDelayMs?: number;
+  retryDelayMs?: number;
+  hostFlavor?: 'v2';
+  onChanged?: (sessionID: string, model: string) => void;
+} = {}) {
+  const { mocks } = createMockClient({
+    messagesData: [
+      {
+        info: { id: 'user-message', role: 'user' },
+        parts: [{ type: 'text', text: 'hello' }],
+      },
+    ],
+  });
+  return {
+    manager: new ForegroundFallbackManager(
+      { orchestrator: chain },
+      true,
+      { directory: '/test', hostFlavor } as never,
+      maxRetries,
+      undefined,
+      onChanged,
+      initialRetryDelayMs,
+      retryDelayMs,
+    ),
+    mocks,
+  };
+}
+
+describe('foreground fallback redo harness', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.setSystemTime(1_000_000);
+  });
+  afterEach(() => jest.useRealTimers());
+
+  test('host-ordered error replay selects the next model', async () => {
+    const { manager, mocks } = makeManager();
+    await manager.handleEvent(redoEvents.assistant('harness'));
+    await manager.handleEvent(redoEvents.error('harness'));
+    await manager.handleEvent(
+      redoEvents.assistant('harness', 'a', { message: 'rate limit' }),
+    );
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+    expect(mocks.promptAsync.mock.calls[0]?.[0]).toMatchObject({
+      body: { model: { providerID: 'test', modelID: 'b' } },
+    });
+    expect(mocks.abort).not.toHaveBeenCalled();
+  });
+
+  test('uncorrelated session.error is correlated with its matching errored message update', async () => {
+    const { manager, mocks } = makeManager();
+    const error = {
+      data: { statusCode: 429 },
+      message: 'provider quota exhausted for request 17',
+    };
+    await manager.handleEvent(redoEvents.assistant('error-correlation'));
+    await manager.handleEvent({
+      type: 'session.error',
+      properties: { sessionID: 'error-correlation', error },
+    });
+    await manager.handleEvent({
+      type: 'message.updated',
+      properties: {
+        info: {
+          id: 'failed-assistant-message',
+          sessionID: 'error-correlation',
+          role: 'assistant',
+          providerID: 'test',
+          modelID: 'a',
+          error,
+        },
+      },
+    });
+
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+  });
+
+  test('a separate user turn is not suppressed by failure deduplication', async () => {
+    const { manager, mocks } = makeManager({ maxRetries: 0 });
+    await manager.handleEvent(redoEvents.assistant('turn-dedup'));
+    await manager.handleEvent(redoEvents.error('turn-dedup'));
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+
+    await manager.handleEvent(redoEvents.user('turn-dedup', 'next-user-turn'));
+    await manager.handleEvent(redoEvents.error('turn-dedup'));
+
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(2);
+  });
+
+  test('duplicate host user-message updates cannot rewind fallback descent', async () => {
+    const { manager, mocks } = makeManager({
+      chain: ['test/a', 'test/b', 'test/c'],
+      maxRetries: 0,
+    });
+    const hostUserMessage = (id: string) => ({
+      type: 'message.updated',
+      properties: {
+        info: {
+          id,
+          sessionID: 'stale-user-model',
+          role: 'user',
+          providerID: 'test',
+          modelID: 'a',
+        },
+      },
+    });
+
+    await manager.handleEvent(hostUserMessage('user-turn-1'));
+    await manager.handleEvent(redoEvents.assistant('stale-user-model', 'a'));
+    await manager.handleEvent(redoEvents.error('stale-user-model'));
+    expect(mocks.promptAsync.mock.calls[0]?.[0]).toMatchObject({
+      body: { model: { providerID: 'test', modelID: 'b' } },
+    });
+
+    // The host can re-emit the original user message after the fallback
+    // replay. Its original model must not replace the current fallback model.
+    await manager.handleEvent(hostUserMessage('user-turn-1'));
+    await manager.handleEvent(
+      redoEvents.assistant('stale-user-model', 'b', { message: 'rate limit' }),
+    );
+
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(2);
+    expect(mocks.promptAsync.mock.calls[1]?.[0]).toMatchObject({
+      body: { model: { providerID: 'test', modelID: 'c' } },
+    });
+  });
+
+  test('v1 info-only replay notification is claimed by its reserved message ID', async () => {
+    const transcript: unknown[] = [
+      {
+        info: { id: 'original-user', role: 'user' },
+        parts: [{ type: 'text', text: 'hello' }],
+      },
+    ];
+    let manager!: ForegroundFallbackManager;
+    const onChanged = mock((_sessionID: string, _model: string) => {});
+    const { mocks } = createMockClient({
+      messagesData: transcript,
+      promptAsyncImpl: async (args) => {
+        const replayMessageID = (args as { body: { messageID: string } }).body
+          .messageID;
+        const replay = {
+          info: {
+            id: replayMessageID,
+            role: 'user',
+            model: { providerID: 'test', modelID: 'b' },
+          },
+          parts: [],
+        };
+        transcript.push(replay);
+        await manager.handleEvent({
+          type: 'message.updated',
+          properties: {
+            info: {
+              id: replayMessageID,
+              sessionID: 'v1-info-only-replay',
+              role: 'user',
+              model: { providerID: 'test', modelID: 'b' },
+            },
+          },
+        });
+        const markerPart = {
+          type: 'text',
+          text: '<!-- SLIM_INTERNAL_INITIATOR -->',
+          synthetic: true,
+          metadata: { 'oh-my-opencode-slim.internalInitiator': true },
+          sessionID: 'v1-info-only-replay',
+          messageID: replayMessageID,
+        };
+        replay.parts.push(markerPart);
+        await manager.handleEvent({
+          type: 'message.part.updated',
+          properties: { part: markerPart },
+        });
+        return {};
+      },
+    });
+    manager = new ForegroundFallbackManager(
+      { orchestrator: ['test/a', 'test/b'] },
+      true,
+      { directory: '/test' } as never,
+      0,
+      undefined,
+      onChanged,
+      0,
+      0,
+    );
+
+    await manager.handleEvent(redoEvents.assistant('v1-info-only-replay'));
+    await manager.handleEvent(redoEvents.error('v1-info-only-replay'));
+
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+    expect(mocks.promptAsync.mock.calls[0]?.[0]).toMatchObject({
+      body: { messageID: expect.stringMatching(/^msg/) },
+    });
+    expect(onChanged).toHaveBeenCalledWith('v1-info-only-replay', 'test/b');
+  });
+
+  test('identical external user content with another ID fences an in-flight replay', async () => {
+    const transcript: unknown[] = [
+      {
+        info: { id: 'original-user', role: 'user' },
+        parts: [{ type: 'text', text: 'hello' }],
+      },
+    ];
+    let manager!: ForegroundFallbackManager;
+    const onChanged = mock((_sessionID: string, _model: string) => {});
+    const { mocks } = createMockClient({
+      messagesData: transcript,
+      promptAsyncImpl: async (args) => {
+        const replayMessageID = (args as { body: { messageID: string } }).body
+          .messageID;
+        await manager.handleEvent({
+          type: 'message.updated',
+          properties: {
+            info: {
+              id: replayMessageID,
+              sessionID: 'external-turn-fence',
+              role: 'user',
+              model: { providerID: 'test', modelID: 'b' },
+            },
+          },
+        });
+        await manager.handleEvent({
+          type: 'message.updated',
+          properties: {
+            info: {
+              id: 'actual-user-message',
+              sessionID: 'external-turn-fence',
+              role: 'user',
+              model: { providerID: 'test', modelID: 'b' },
+            },
+          },
+        });
+        return {};
+      },
+    });
+    manager = new ForegroundFallbackManager(
+      { orchestrator: ['test/a', 'test/b'] },
+      true,
+      { directory: '/test' } as never,
+      0,
+      undefined,
+      onChanged,
+      0,
+      0,
+    );
+
+    await manager.handleEvent(redoEvents.assistant('external-turn-fence'));
+    await manager.handleEvent(redoEvents.error('external-turn-fence'));
+
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+    expect(onChanged).not.toHaveBeenCalled();
+  });
+
+  test('an older transcript probe cannot overwrite a newer external turn', async () => {
+    const olderProbe = deferred<unknown>();
+    let lookupCount = 0;
+    const onChanged = mock((_sessionID: string, _model: string) => {});
+    const { mocks } = createMockClient({
+      messagesImpl: async () => {
+        lookupCount += 1;
+        if (lookupCount === 1) return olderProbe.promise;
+        if (lookupCount === 2) {
+          return {
+            data: [{ info: { id: 'newer-user', role: 'user' }, parts: [] }],
+          };
+        }
+        return {
+          data: [
+            {
+              info: { id: 'replay-source', role: 'user' },
+              parts: [{ type: 'text', text: 'hello' }],
+            },
+          ],
+        };
+      },
+    });
+    const manager = new ForegroundFallbackManager(
+      { orchestrator: ['test/a', 'test/b', 'test/c'] },
+      true,
+      { directory: '/test' } as never,
+      0,
+      undefined,
+      onChanged,
+    );
+    const userEvent = (id: string, modelID: string) => ({
+      type: 'message.updated',
+      properties: {
+        info: {
+          id,
+          sessionID: 'turn-probe-order',
+          role: 'user',
+          model: { providerID: 'test', modelID },
+        },
+      },
+    });
+
+    const oldEvent = manager.handleEvent(userEvent('older-user', 'a'));
+    await manager.handleEvent(userEvent('newer-user', 'b'));
+    olderProbe.resolve({
+      data: [{ info: { id: 'older-user', role: 'user' }, parts: [] }],
+    });
+    await oldEvent;
+
+    await manager.handleEvent(redoEvents.error('turn-probe-order'));
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+    expect(mocks.promptAsync.mock.calls[0]?.[0]).toMatchObject({
+      body: { model: { providerID: 'test', modelID: 'c' } },
+    });
+    expect(onChanged).toHaveBeenCalledWith('turn-probe-order', 'test/c');
+  });
+
+  test('an internal replay notification does not invalidate an external turn probe', async () => {
+    const externalProbe = deferred<unknown>();
+    const promptStarted = deferred<void>();
+    const promptResponse = deferred<unknown>();
+    let lookupCount = 0;
+    let manager!: ForegroundFallbackManager;
+    const onChanged = mock((_sessionID: string, _model: string) => {});
+    const { mocks } = createMockClient({
+      messagesImpl: async () => {
+        lookupCount += 1;
+        if (lookupCount === 1) return externalProbe.promise;
+        return {
+          data: [
+            {
+              info: { id: 'fallback-source', role: 'user' },
+              parts: [{ type: 'text', text: 'hello' }],
+            },
+          ],
+        };
+      },
+      promptAsyncImpl: async (args) => {
+        const messageID = (args as { body: { messageID: string } }).body
+          .messageID;
+        await manager.handleEvent({
+          type: 'message.updated',
+          properties: {
+            info: {
+              id: messageID,
+              sessionID: 'internal-does-not-fence',
+              role: 'user',
+            },
+          },
+        });
+        promptStarted.resolve();
+        return promptResponse.promise;
+      },
+    });
+    manager = new ForegroundFallbackManager(
+      { orchestrator: ['test/a', 'test/b'] },
+      true,
+      { directory: '/test' } as never,
+      0,
+      undefined,
+      onChanged,
+    );
+    const sessionID = 'internal-does-not-fence';
+
+    await manager.handleEvent(redoEvents.assistant(sessionID));
+    const externalTurn = manager.handleEvent({
+      type: 'message.updated',
+      properties: {
+        info: {
+          id: 'genuine-external-turn',
+          sessionID,
+          role: 'user',
+          model: { providerID: 'test', modelID: 'b' },
+        },
+      },
+    });
+    const fallback = manager.handleEvent(redoEvents.error(sessionID));
+    await promptStarted.promise;
+    externalProbe.resolve({
+      data: [
+        { info: { id: 'genuine-external-turn', role: 'user' }, parts: [] },
+      ],
+    });
+    await externalTurn;
+    promptResponse.resolve({});
+    await fallback;
+
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+    expect(onChanged).not.toHaveBeenCalled();
+  });
+
+  test('delayed fallback retains inline 410 context for toast suppression', async () => {
+    const { mocks } = createMockClient();
+    const showToast = mock(async () => ({}));
+    const manager = new ForegroundFallbackManager(
+      makeChains(),
+      true,
+      {
+        directory: '/test',
+        client: { tui: { showToast } },
+      } as never,
+      0,
+      undefined,
+      undefined,
+      100,
+      0,
+    );
+    const sessionID = 'delayed-inline-410';
+
+    await manager.handleEvent(redoEvents.assistant(sessionID));
+    await manager.handleEvent(
+      redoEvents.assistant(sessionID, 'a', {
+        data: { statusCode: 410 },
+        message: 'AI_APICallError: Gone',
+      }),
+    );
+    jest.advanceTimersByTime(100);
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+    expect(showToast).not.toHaveBeenCalled();
+  });
+
+  test('permanent billing failure bypasses the configured initial delay', async () => {
+    const { manager, mocks } = makeManager({ initialRetryDelayMs: 1_000 });
+    const sessionID = 'permanent-billing-no-delay';
+    await manager.handleEvent(redoEvents.assistant(sessionID));
+
+    await manager.handleEvent(
+      redoEvents.assistant(sessionID, 'a', {
+        statusCode: 402,
+        message: 'Payment Required',
+      }),
+    );
+
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+    expect(jest.getTimerCount()).toBe(0);
+  });
+
+  test('initial retry delay is used once per descent before normal retry backoff', async () => {
+    const { manager, mocks } = makeManager({
+      initialRetryDelayMs: 1_000,
+      retryDelayMs: 100,
+    });
+    const sessionID = 'single-initial-delay';
+    await manager.handleEvent(redoEvents.assistant(sessionID));
+    await manager.handleEvent(redoEvents.error(sessionID));
+    jest.advanceTimersByTime(1_000);
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+
+    const secondFailure = manager.handleEvent(
+      redoEvents.assistant(sessionID, 'b', { message: 'rate limit' }),
+    );
+    jest.advanceTimersByTime(99);
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+    jest.advanceTimersByTime(1);
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    await secondFailure;
+
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(2);
+    expect(mocks.promptAsync.mock.calls[1]?.[0]).toMatchObject({
+      body: { model: { providerID: 'test', modelID: 'c' } },
+    });
+  });
+
+  test('a new external turn clears prior consecutive-fallback backoff', async () => {
+    const { manager, mocks } = makeManager({ retryDelayMs: 1_000 });
+    const sessionID = 'turn-clears-backoff';
+    await manager.handleEvent(redoEvents.assistant(sessionID));
+    await manager.handleEvent(redoEvents.error(sessionID));
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+
+    await manager.handleEvent(redoEvents.user(sessionID, 'new-user'));
+    const nextFailure = manager.handleEvent(
+      redoEvents.error(sessionID, { message: 'rate limit' }, 'new-failure'),
+    );
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(2);
+    await nextFailure;
+  });
+
+  test('a new external turn resets the retry budget before any model switch', async () => {
+    const { manager, mocks } = makeManager({ maxRetries: 1 });
+    await manager.handleEvent(redoEvents.assistant('early-turn-reset'));
+    await manager.handleEvent(redoEvents.retry('early-turn-reset', 1));
+    expect(mocks.promptAsync).not.toHaveBeenCalled();
+
+    await manager.handleEvent(redoEvents.user('early-turn-reset', 'new-user'));
+    await manager.handleEvent(redoEvents.retry('early-turn-reset', 1));
+    expect(mocks.abort).not.toHaveBeenCalled();
+    expect(mocks.promptAsync).not.toHaveBeenCalled();
+
+    await manager.handleEvent(redoEvents.retry('early-turn-reset', 2));
+    expect(mocks.abort).toHaveBeenCalledTimes(1);
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+  });
+
+  test('an overlapping retry during fallback does not consume the host retry budget', async () => {
+    const started = deferred<void>();
+    const admission = deferred<unknown>();
+    const { mocks } = createMockClient({
+      promptAsyncImpl: async () => {
+        started.resolve();
+        return admission.promise;
+      },
+    });
+    const manager = new ForegroundFallbackManager(
+      { orchestrator: ['test/a', 'test/b'] },
+      true,
+      { directory: '/test' } as never,
+      1,
+    );
+    const sessionID = 'overlapping-host-retry';
+
+    await manager.handleEvent(redoEvents.assistant(sessionID));
+    const fallback = manager.handleEvent(redoEvents.error(sessionID));
+    await started.promise;
+    await manager.handleEvent(redoEvents.retry(sessionID, 1));
+    admission.resolve({ data: { error: { message: 'not admitted' } } });
+    await fallback;
+
+    await manager.handleEvent(redoEvents.retry(sessionID, 2));
+    expect(mocks.abort).not.toHaveBeenCalled();
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+  });
+
+  test('uses fallback chains replaced after manager construction', async () => {
+    const { mocks } = createMockClient({
+      messagesData: [
+        {
+          info: { id: 'user-message', role: 'user' },
+          parts: [{ type: 'text', text: 'hello' }],
+        },
+      ],
+    });
+    const chains: Record<
+      string,
+      ReadonlyArray<string | { id: string; variant?: string }>
+    > = {
+      orchestrator: ['test/a', 'test/old'],
+    };
+    const manager = new ForegroundFallbackManager(
+      chains,
+      true,
+      { directory: '/test' } as never,
+      0,
+      undefined,
+      undefined,
+      0,
+      0,
+    );
+    chains.orchestrator = ['test/a', { id: 'test/new', variant: 'fast' }];
+
+    await manager.handleEvent(redoEvents.assistant('live-chain'));
+    await manager.handleEvent(redoEvents.error('live-chain'));
+
+    expect(mocks.promptAsync).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: expect.objectContaining({
+          model: { providerID: 'test', modelID: 'new' },
+          variant: 'fast',
+        }),
+      }),
+    );
+  });
+
+  test('a newer turn during waiter promotion fences the retry abort', async () => {
+    const promotion = deferred<unknown>();
+    const { manager, mocks } = makeManager({ maxRetries: 0 });
+    currentMockPost = mock(() => promotion.promise);
+    await manager.handleEvent({
+      type: 'session.created',
+      properties: { info: { id: 'promotion-race', parentID: 'parent' } },
+    });
+    const pending = manager.handleEvent(redoEvents.retry('promotion-race'));
+    await Promise.resolve();
+    await Promise.resolve();
+    await manager.handleEvent(redoEvents.user('promotion-race', 'new-turn'));
+    promotion.resolve({});
+    await pending;
+
+    expect(mocks.abort).not.toHaveBeenCalled();
+    expect(mocks.promptAsync).not.toHaveBeenCalled();
+  });
+
+  test('a newer turn during abort fences the subsequent replay', async () => {
+    const abort = deferred<unknown>();
+    const { manager, mocks } = makeManager({ maxRetries: 0 });
+    mocks.abort.mockImplementation(() => abort.promise);
+    const pending = manager.handleEvent(redoEvents.retry('abort-race'));
+    await Promise.resolve();
+    await Promise.resolve();
+    await manager.handleEvent(redoEvents.user('abort-race', 'new-turn'));
+    abort.resolve({});
+    await pending;
+
+    expect(mocks.abort).toHaveBeenCalledTimes(1);
+    expect(mocks.promptAsync).not.toHaveBeenCalled();
+  });
+
+  test('a newer turn during transcript read fences the replay', async () => {
+    const transcript = deferred<{ data: unknown[] }>();
+    const { manager, mocks } = makeManager({ maxRetries: 0 });
+    currentMockSession = {
+      abort: mocks.abort,
+      messages: mock(() => transcript.promise),
+      promptAsync: mocks.promptAsync,
+    };
+    installGetClientMock();
+    const pending = manager.handleEvent(redoEvents.error('transcript-race'));
+    await Promise.resolve();
+    await manager.handleEvent(redoEvents.user('transcript-race', 'new-turn'));
+    transcript.resolve({
+      data: [
+        {
+          info: { id: 'last-user', role: 'user' },
+          parts: [{ type: 'text', text: 'old turn' }],
+        },
+      ],
+    });
+    await pending;
+
+    expect(mocks.promptAsync).not.toHaveBeenCalled();
+  });
+
+  test('a newer turn during busy promotion fences the busy abort and retry', async () => {
+    const promotion = deferred<unknown>();
+    const { manager, mocks } = makeManager({
+      maxRetries: 0,
+    });
+    mocks.promptAsync.mockImplementationOnce(async () => {
+      throw new Error('session busy');
+    });
+    currentMockPost = mock(() => promotion.promise);
+    await manager.handleEvent({
+      type: 'session.created',
+      properties: { info: { id: 'busy-race', parentID: 'parent' } },
+    });
+    const pending = manager.handleEvent(redoEvents.error('busy-race'));
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    await manager.handleEvent(redoEvents.user('busy-race', 'new-turn'));
+    promotion.resolve({});
+    await pending;
+
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+    expect(mocks.abort).not.toHaveBeenCalled();
+  });
+
+  test('a newer turn during fallback backoff fences the delayed replay', async () => {
+    const { manager, mocks } = makeManager({ retryDelayMs: 500 });
+    await manager.handleEvent(redoEvents.assistant('backoff-race'));
+    await manager.handleEvent(redoEvents.error('backoff-race'));
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+
+    const pending = manager.handleEvent(
+      redoEvents.assistant('backoff-race', 'b', { message: 'rate limit' }),
+    );
+    await manager.handleEvent(redoEvents.user('backoff-race', 'new-turn'));
+    jest.advanceTimersByTime(500);
+    await Promise.resolve();
+    await Promise.resolve();
+    await pending;
+
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('foreground fallback redo: host retry budget', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.setSystemTime(1_000_000);
+  });
+  afterEach(() => jest.useRealTimers());
+
+  test('identical retry attempts are deduplicated before charging the budget', async () => {
+    const { manager, mocks } = makeManager({ maxRetries: 1 });
+    await manager.handleEvent(redoEvents.assistant('retry-attempt-dedup'));
+    await manager.handleEvent(redoEvents.retry('retry-attempt-dedup', 1));
+    await manager.handleEvent(redoEvents.retry('retry-attempt-dedup', 1));
+
+    expect(mocks.abort).not.toHaveBeenCalled();
+    expect(mocks.promptAsync).not.toHaveBeenCalled();
+
+    await manager.handleEvent(redoEvents.retry('retry-attempt-dedup', 2));
+    expect(mocks.abort).toHaveBeenCalledTimes(1);
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+  });
+
+  test('G2: retry statuses do not postpone the first scheduled abort', async () => {
+    const sid = 'stable-initial-delay';
+    const { manager, mocks } = makeManager({
+      maxRetries: 0,
+      initialRetryDelayMs: 1_000,
+    });
+    await manager.handleEvent(redoEvents.assistant(sid));
+    await manager.handleEvent(redoEvents.retry(sid));
+    jest.advanceTimersByTime(600);
+    await manager.handleEvent(redoEvents.retry(sid, 2));
+    expect(mocks.abort).not.toHaveBeenCalled();
+    jest.advanceTimersByTime(400);
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(mocks.abort).toHaveBeenCalledTimes(1);
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+    expect(mocks.promptAsync.mock.calls[0]?.[0]).toMatchObject({
+      body: { model: { providerID: 'test', modelID: 'b' } },
+    });
+    jest.advanceTimersByTime(600);
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(mocks.abort).toHaveBeenCalledTimes(1);
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+  });
+
+  test('N1: terminal error updates the pending deadline to replay without abort', async () => {
+    const sid = 'terminal-during-initial-delay';
+    const { manager, mocks } = makeManager({
+      maxRetries: 0,
+      initialRetryDelayMs: 1_000,
+    });
+    await manager.handleEvent(redoEvents.assistant(sid));
+    await manager.handleEvent(redoEvents.retry(sid));
+    jest.advanceTimersByTime(300);
+    await manager.handleEvent(redoEvents.error(sid));
+    jest.advanceTimersByTime(700);
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(mocks.abort).not.toHaveBeenCalled();
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+    expect(mocks.promptAsync.mock.calls[0]?.[0]).toMatchObject({
+      body: { model: { providerID: 'test', modelID: 'b' } },
+    });
+  });
+
+  test('T-N3: an absorbed retry cancels a terminal delay before the next run', async () => {
+    const sid = 'absorbed-retry-cancels-delay';
+    const { manager, mocks } = makeManager({
+      maxRetries: 1,
+      initialRetryDelayMs: 1_000,
+    });
+    await manager.handleEvent(redoEvents.assistant(sid));
+    await manager.handleEvent(redoEvents.error(sid));
+    jest.advanceTimersByTime(300);
+    await manager.handleEvent(redoEvents.retry(sid, 1));
+    jest.advanceTimersByTime(700);
+    expect(mocks.abort).not.toHaveBeenCalled();
+    expect(mocks.promptAsync).not.toHaveBeenCalled();
+    await manager.handleEvent(redoEvents.retry(sid, 2));
+    jest.advanceTimersByTime(1_000);
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(mocks.abort).toHaveBeenCalledTimes(1);
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+    expect(mocks.promptAsync.mock.calls[0]?.[0]).toMatchObject({
+      body: { model: { providerID: 'test', modelID: 'b' } },
+    });
+  });
+
+  test('T-LOCK: an unabsorbed retry upgrades a terminal delay to abort', async () => {
+    const sid = 'unabsorbed-retry-upgrades-delay';
+    const { manager, mocks } = makeManager({
+      maxRetries: 0,
+      initialRetryDelayMs: 1_000,
+    });
+    await manager.handleEvent(redoEvents.assistant(sid));
+    await manager.handleEvent(redoEvents.error(sid));
+    await manager.handleEvent(redoEvents.retry(sid));
+    jest.advanceTimersByTime(1_000);
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(mocks.abort).toHaveBeenCalledTimes(1);
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+    expect(mocks.promptAsync.mock.calls[0]?.[0]).toMatchObject({
+      body: { model: { providerID: 'test', modelID: 'b' } },
+    });
+  });
+
+  test.each([0, 1, 3])(
+    'T1: %i host retries are absorbed before the first switch, not renewed by the switch',
+    async (maxRetries) => {
+      const sid = `budget-${maxRetries}`;
+      const { manager, mocks } = makeManager({ maxRetries });
+      await manager.handleEvent(redoEvents.assistant(sid));
+      for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        await manager.handleEvent(redoEvents.retry(sid, attempt));
+        expect(mocks.abort).not.toHaveBeenCalled();
+        expect(mocks.promptAsync).not.toHaveBeenCalled();
+      }
+      await manager.handleEvent(redoEvents.retry(sid, maxRetries + 1));
+      expect(mocks.abort).toHaveBeenCalledTimes(1);
+      expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+      expect(mocks.promptAsync.mock.calls[0]?.[0]).toMatchObject({
+        body: { model: { providerID: 'test', modelID: 'b' } },
+      });
+      await manager.handleEvent(redoEvents.assistant(sid, 'b'));
+      await manager.handleEvent(redoEvents.retry(sid, 1));
+      expect(mocks.abort).toHaveBeenCalledTimes(2);
+      expect(mocks.promptAsync).toHaveBeenCalledTimes(2);
+      expect(mocks.promptAsync.mock.calls[1]?.[0]).toMatchObject({
+        body: { model: { providerID: 'test', modelID: 'c' } },
+      });
+    },
+  );
+
+  test.each([
+    ['401', { data: { statusCode: 401 } }],
+    ['410', { data: { statusCode: 410 } }],
+    ['not-found', { message: 'Model not found: test/a' }],
+    ['policy', { data: { responseBody: '{"code":"cyber_policy"}' } }],
+    ['429', { data: { statusCode: 429 } }],
+  ])(
+    'T2: terminal %s advances immediately via both error event paths',
+    async (_label, error) => {
+      for (const source of ['session.error', 'message.updated'] as const) {
+        const sid = `terminal-${_label}-${source}`;
+        const { manager, mocks } = makeManager();
+        await manager.handleEvent(redoEvents.assistant(sid));
+        const fail = () =>
+          source === 'session.error'
+            ? redoEvents.error(sid, error)
+            : redoEvents.assistant(sid, 'a', error);
+        await manager.handleEvent(fail());
+        // The host re-emits the failed assistant after session.error. Its
+        // model identifies the original incident even after the replay switch.
+        await manager.handleEvent(redoEvents.assistant(sid, 'a', error));
+        expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+        expect(mocks.promptAsync.mock.calls[0]?.[0]).toMatchObject({
+          body: { model: { providerID: 'test', modelID: 'b' } },
+        });
+        expect(mocks.abort).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  test('T3: serial and concurrent observations of one failure replay only once', async () => {
+    const sid = 'duplicate-observation';
+    const { manager, mocks } = makeManager();
+    await manager.handleEvent(redoEvents.assistant(sid));
+    await Promise.all([
+      manager.handleEvent(redoEvents.error(sid)),
+      manager.handleEvent(
+        redoEvents.assistant(sid, 'a', { message: 'rate limit' }),
+      ),
+    ]);
+    await manager.handleEvent(
+      redoEvents.assistant(sid, 'a', { message: 'rate limit' }),
+    );
+    await manager.handleEvent(redoEvents.error(sid));
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+  });
+
+  test('T4: fresh primary descent re-arms the full budget after stage 2', async () => {
+    const sid = 'fresh-descent';
+    const { manager, mocks } = makeManager({
+      chain: ['test/a', 'test/b'],
+      maxRetries: 2,
+    });
+    await manager.handleEvent(redoEvents.assistant(sid));
+    for (let attempt = 1; attempt <= 3; attempt++)
+      await manager.handleEvent(redoEvents.retry(sid, attempt));
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+    await manager.handleEvent(redoEvents.assistant(sid, 'b'));
+    await manager.handleEvent(redoEvents.error(sid));
+    jest.setSystemTime(1_006_000);
+    await manager.handleEvent(redoEvents.error(sid));
+    expect(mocks.abort).toHaveBeenCalledTimes(2);
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(2);
+
+    jest.setSystemTime(1_012_000);
+    await manager.handleEvent(redoEvents.assistant(sid));
+    await manager.handleEvent(redoEvents.retry(sid, 1));
+    await manager.handleEvent(redoEvents.retry(sid, 2));
+    expect(mocks.abort).toHaveBeenCalledTimes(2);
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(2);
+    await manager.handleEvent(redoEvents.retry(sid, 3));
+    expect(mocks.abort).toHaveBeenCalledTimes(3);
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(3);
+  });
+
+  test('S1: success on the fallback restores the full host retry budget', async () => {
+    const sid = 'success-rearms-budget';
+    const { manager, mocks } = makeManager({ maxRetries: 2 });
+    await manager.handleEvent(redoEvents.assistant(sid));
+    for (let attempt = 1; attempt <= 3; attempt++)
+      await manager.handleEvent(redoEvents.retry(sid, attempt));
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+
+    jest.setSystemTime(1_006_000);
+    await manager.handleEvent(redoEvents.success(sid, 'b'));
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      await manager.handleEvent(redoEvents.retry(sid, attempt));
+      expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+    }
+    await manager.handleEvent(redoEvents.retry(sid, 3));
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(2);
+    expect(mocks.promptAsync.mock.calls[1]?.[0]).toMatchObject({
+      body: { model: { providerID: 'test', modelID: 'c' } },
+    });
+    expect(mocks.abort).toHaveBeenCalledTimes(2);
+  });
+
+  test('T5: after stage 2 a non-primary new turn cannot abort again', async () => {
+    const sid = 'exhausted-non-primary';
+    const { manager, mocks } = makeManager({
+      chain: ['test/a', 'test/b'],
+      maxRetries: 0,
+    });
+    await manager.handleEvent(redoEvents.assistant(sid));
+    await manager.handleEvent(redoEvents.error(sid));
+    await manager.handleEvent(redoEvents.assistant(sid, 'b'));
+    jest.setSystemTime(1_006_000);
+    await manager.handleEvent(redoEvents.error(sid));
+    jest.setSystemTime(1_012_000);
+    await manager.handleEvent(redoEvents.error(sid));
+    expect(mocks.abort).toHaveBeenCalledTimes(1);
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(2);
+
+    jest.setSystemTime(1_018_000);
+    await manager.handleEvent(redoEvents.assistant(sid, 'b'));
+    await manager.handleEvent(redoEvents.retry(sid));
+    expect(mocks.abort).toHaveBeenCalledTimes(1);
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(2);
+  });
+
+  test.each([
+    { retry: true, maxRetries: 0 },
+    { retry: true, maxRetries: 2 },
+    { retry: false, maxRetries: 0 },
+    { retry: false, maxRetries: 2 },
+  ])(
+    'T6: v2 host decision retry=$retry with budget $maxRetries',
+    async ({ retry, maxRetries }) => {
+      const sid = `v2-${retry}-${maxRetries}`;
+      const { manager, mocks } = makeManager({ maxRetries });
+      const switchModel = mock(async () => {});
+      const decision = { retry, delay: 77 };
+      const first = retryEvent(sid, 'a', decision);
+      if (retry) {
+        for (let attempt = 0; attempt < maxRetries; attempt++) {
+          await manager.handleV2Retry(
+            retryEvent(sid, 'a', decision),
+            switchModel,
+          );
+          expect(switchModel).not.toHaveBeenCalled();
+          expect(decision).toEqual({ retry: true, delay: 77 });
+        }
+      }
+      await manager.handleV2Retry(first, switchModel);
+      expect(switchModel).toHaveBeenCalledWith(sid, {
+        providerID: 'test',
+        id: 'b',
+      });
+      expect(first.decision).toEqual({ retry: true, delay: 0 });
+
+      const next = retryEvent(sid, 'b', { retry: true, delay: 77 });
+      await manager.handleV2Retry(next, switchModel);
+      if (retry || maxRetries === 0) {
+        expect(switchModel).toHaveBeenCalledTimes(2);
+        expect(switchModel).toHaveBeenLastCalledWith(sid, {
+          providerID: 'test',
+          id: 'c',
+        });
+      } else {
+        expect(switchModel).toHaveBeenCalledTimes(1);
+        expect(next.decision).toEqual({ retry: true, delay: 77 });
+      }
+      expect(mocks.abort).not.toHaveBeenCalled();
+      expect(mocks.promptAsync).not.toHaveBeenCalled();
+    },
+  );
+
+  test('T6: v2 primary re-emission after exhaustion earns a fresh budget', async () => {
+    const sid = 'v2-fresh-descent';
+    const { manager } = makeManager({
+      chain: ['test/a', 'test/b'],
+      maxRetries: 2,
+    });
+    const switchModel = mock(async () => {});
+    for (let attempt = 0; attempt < 2; attempt++)
+      await manager.handleV2Retry(
+        retryEvent(sid, 'a', { retry: true }),
+        switchModel,
+      );
+    expect(switchModel).not.toHaveBeenCalled();
+    for (const id of ['a', 'b'])
+      await manager.handleV2Retry(
+        retryEvent(sid, id, { retry: false }),
+        switchModel,
+      );
+    const exhausted = retryEvent(sid, 'b', { retry: false });
+    await manager.handleV2Retry(exhausted, switchModel);
+    expect(exhausted.decision).toEqual({ retry: false });
+    expect(switchModel).toHaveBeenCalledTimes(2);
+
+    await manager.handleEvent(redoEvents.assistant(sid, 'a'));
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const host = retryEvent(sid, 'a', { retry: true, delay: 77 });
+      await manager.handleV2Retry(host, switchModel);
+      expect(host.decision).toEqual({ retry: true, delay: 77 });
+      expect(switchModel).toHaveBeenCalledTimes(2);
+    }
+    await manager.handleV2Retry(
+      retryEvent(sid, 'a', { retry: true }),
+      switchModel,
+    );
+    expect(switchModel).toHaveBeenCalledTimes(3);
+  });
+
+  test('T7: mapped v2 failed execution prompts once without charging host retries', async () => {
+    const sid = 'v2-failed-execution';
+    const { manager, mocks } = makeManager({ maxRetries: 2 });
+    await manager.handleEvent(redoEvents.assistant(sid));
+    for (const mapped of mapV2EventToV1({
+      type: 'session.execution.failed',
+      data: { sessionID: sid, error: { message: 'rate limit' } },
+    }))
+      await manager.handleEvent(mapped);
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+    expect(mocks.promptAsync.mock.calls[0]?.[0]).toMatchObject({
+      body: { model: { providerID: 'test', modelID: 'b' } },
+    });
+    const switchModel = mock(async () => {});
+    const host = retryEvent(sid, 'b', { retry: true, delay: 77 });
+    await manager.handleV2Retry(host, switchModel);
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(host.decision).toEqual({ retry: true, delay: 77 });
+  });
+
+  test.each([
+    ['v1', undefined],
+    ['v2', 'v2'],
+  ] as const)(
+    'T8: %s replay carries the fallback entry variant',
+    async (label, hostFlavor) => {
+      const sid = `variant-replay-${label}`;
+      const { manager, mocks } = makeManager({
+        chain: ['test/a', { id: 'test/b', variant: 'fast' }],
+        hostFlavor,
+      });
+      await manager.handleEvent(redoEvents.assistant(sid));
+      await manager.handleEvent(redoEvents.error(sid));
+      expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+      expect(mocks.promptAsync.mock.calls[0]?.[0]).toMatchObject({
+        body: { model: { providerID: 'test', modelID: 'b' }, variant: 'fast' },
+        ...(hostFlavor ? { modelVariant: 'fast' } : {}),
+      });
+    },
+  );
+
+  test('T9: v2 retry hook switches with the fallback entry variant', async () => {
+    const { manager } = makeManager({
+      chain: ['test/a', { id: 'test/b', variant: 'fast' }],
+    });
+    const switchModel = mock(async () => {});
+    await manager.handleV2Retry(
+      retryEvent('variant-hook', 'a', { retry: false }),
+      switchModel,
+    );
+    expect(switchModel).toHaveBeenCalledWith('variant-hook', {
+      providerID: 'test',
+      id: 'b',
+      variant: 'fast',
+    });
+  });
+
+  test('T10: entries without a variant add no replay or switch keys', async () => {
+    for (const hostFlavor of [undefined, 'v2'] as const) {
+      const sid = `no-variant-${hostFlavor ?? 'v1'}`;
+      const { manager, mocks } = makeManager({
+        chain: ['test/a', 'test/b'],
+        hostFlavor,
+      });
+      await manager.handleEvent(redoEvents.assistant(sid));
+      await manager.handleEvent(redoEvents.error(sid));
+      const call = mocks.promptAsync.mock.calls[0]?.[0] as {
+        body: Record<string, unknown>;
+      };
+      expect(Object.hasOwn(call.body, 'variant')).toBe(false);
+      expect(Object.hasOwn(call, 'modelVariant')).toBe(false);
+    }
+    const { manager } = makeManager({ chain: ['test/a', 'test/b'] });
+    const refs: Array<{ providerID: string; id: string; variant?: string }> =
+      [];
+    await manager.handleV2Retry(
+      retryEvent('no-variant-hook', 'a', { retry: false }),
+      async (_sid, ref) => {
+        refs.push(ref);
+      },
+    );
+    expect(refs).toHaveLength(1);
+    expect(Object.hasOwn(refs[0], 'variant')).toBe(false);
+  });
 });
 
 describe('ForegroundFallbackManager v2 retry hook', () => {
@@ -242,6 +1420,26 @@ describe('isFailoverError', () => {
   });
 
   test.each([
+    [
+      'nested data response numeric string',
+      { data: { response: { status: '503' } } },
+    ],
+    [
+      'cause response numeric string',
+      { cause: { response: { status: '429' } } },
+    ],
+    ['top-level status numeric string', { status: '410' }],
+  ])('extracts HTTP status from %s', (_label, error) => {
+    expect(isFailoverError(error)).toBe(true);
+  });
+
+  test('nested numeric-string 410 remains inline', () => {
+    expect(
+      isInlineFailoverError({ cause: { response: { status: '410' } } }),
+    ).toBe(true);
+  });
+
+  test.each([
     ['provider.quota', 'rpm exhausted', 429, true],
     ['provider.rate-limit', 'inference exceeds tpm/rpm limit', 429, true],
     ['provider.quota', 'You exceeded your current quota', undefined, true],
@@ -334,6 +1532,19 @@ describe('isFailoverError', () => {
           statusCode: 400,
           responseBody:
             '{"error":{"code":"content_policy_violation","message":"Your request was rejected as a result of our safety system."}}',
+        },
+      }),
+    ).toBe(true);
+  });
+
+  test('returns true for the host content-filter finish error', () => {
+    // OpenCode v1 surfaces a `content-filter` finish reason (Anthropic
+    // refusal, OpenAI content_filter, ...) as a status-less ContentFilterError.
+    expect(
+      isFailoverError({
+        name: 'ContentFilterError',
+        data: {
+          message: "The response was blocked by the provider's content filter",
         },
       }),
     ).toBe(true);
@@ -437,8 +1648,8 @@ describe('isFailoverError', () => {
 
   test('returns false for generic flagged/policy wording without the moderation signature', () => {
     // Only the structured code or the exact provider wording match; ordinary
-    // errors mentioning "flagged", "cybersecurity", or "policy" stay hard
-    // errors.
+    // errors mentioning "flagged", "cybersecurity", "policy" or "content
+    // filter" stay hard errors.
     expect(
       isFailoverError({ message: 'request flagged for review by the proxy' }),
     ).toBe(false);
@@ -447,6 +1658,9 @@ describe('isFailoverError', () => {
     ).toBe(false);
     expect(
       isFailoverError({ message: 'policy update required for this model' }),
+    ).toBe(false);
+    expect(
+      isFailoverError({ message: 'content filter settings updated' }),
     ).toBe(false);
   });
 
@@ -685,7 +1899,7 @@ describe('ForegroundFallbackManager session.error', () => {
 
   test('triggers fallback on rate-limit session.error', async () => {
     // First teach the manager which model is in use for this session
-    await mgr.handleEvent({
+    const finishEvent = {
       type: 'message.updated',
       properties: {
         info: {
@@ -695,7 +1909,9 @@ describe('ForegroundFallbackManager session.error', () => {
           role: 'assistant',
         },
       },
-    });
+    };
+    await mgr.handleEvent(finishEvent);
+    await mgr.handleEvent(finishEvent);
 
     await mgr.handleEvent({
       type: 'session.error',
@@ -1845,8 +3061,6 @@ describe('ForegroundFallbackManager session.error', () => {
     });
   });
 });
-
-// ---------------------------------------------------------------------------
 // ForegroundFallbackManager - message.updated
 // ---------------------------------------------------------------------------
 
@@ -1910,6 +3124,62 @@ describe('ForegroundFallbackManager message.updated', () => {
     expect(call[0].body.model.providerID).toBe('anthropic');
     expect(call[0].body.model.modelID).toBe('claude-haiku');
   });
+
+  test('content-filter finish triggers fallback and dedupes its later error', async () => {
+    const { mocks } = createMockClient();
+    const mgr = new ForegroundFallbackManager(makeChains(), true, {
+      directory: '/test',
+    } as any);
+    const sessionID = 'sess-content-filter-finish';
+    const messageID = 'assistant-content-filter';
+    const contentFilterError = {
+      name: 'ContentFilterError',
+      data: {
+        message: "The response was blocked by the provider's content filter",
+      },
+    };
+
+    await mgr.handleEvent({
+      type: 'message.updated',
+      properties: {
+        info: {
+          id: messageID,
+          sessionID,
+          agent: 'orchestrator',
+          providerID: 'anthropic',
+          modelID: 'claude-opus-4-5',
+          role: 'assistant',
+          finish: 'content-filter',
+          time: { created: 1, completed: 2 },
+        },
+      },
+    });
+    await mgr.handleEvent({
+      type: 'message.updated',
+      properties: {
+        info: {
+          id: messageID,
+          sessionID,
+          agent: 'orchestrator',
+          providerID: 'anthropic',
+          modelID: 'claude-opus-4-5',
+          role: 'assistant',
+          error: contentFilterError,
+          time: { created: 1, completed: 2 },
+        },
+      },
+    });
+    await mgr.handleEvent({
+      type: 'session.error',
+      properties: {
+        sessionID,
+        error: contentFilterError,
+      },
+    });
+
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+    expect((mgr as any).sessionModel.get(sessionID)).toBe('openai/gpt-4o');
+  });
 });
 
 describe('ForegroundFallbackManager v1 abort protection for live children', () => {
@@ -1949,7 +3219,7 @@ describe('ForegroundFallbackManager v1 abort protection for live children', () =
       chain,
       true,
       { directory: '/test', hostFlavor } as any,
-      3,
+      0, // Exercise abort/handoff guards on the first host retry.
       undefined,
       undefined,
       0,
@@ -2009,7 +3279,7 @@ describe('ForegroundFallbackManager v1 abort protection for live children', () =
     expect(mocks.abort).toHaveBeenCalledTimes(0);
     expect(mocks.promptAsync).toHaveBeenCalledTimes(0);
     live.clear();
-    await mgr.handleEvent(retry('sess-parent', 2));
+    await mgr.handleEvent(retry('sess-parent', 1));
     expect(calls).toEqual(['abort', 'promptAsync']);
     expect(mgr.isFallbackInProgress('sess-parent')).toBe(false);
   });
@@ -2223,7 +3493,7 @@ describe('ForegroundFallbackManager session.status', () => {
       makeChains(),
       true,
       { directory: '/test' } as any,
-      3,
+      0,
     );
 
     await mgr.handleEvent({
@@ -2275,7 +3545,7 @@ describe('ForegroundFallbackManager session.status', () => {
       makeChains(),
       true,
       { directory: '/test' } as any,
-      3,
+      0,
     );
 
     await mgr.handleEvent({
@@ -2337,7 +3607,7 @@ describe('ForegroundFallbackManager session.status', () => {
       makeChains(),
       true,
       { directory: '/test' } as any,
-      3,
+      0,
     );
 
     await mgr.handleEvent({
@@ -2379,7 +3649,7 @@ describe('ForegroundFallbackManager session.status', () => {
       },
     });
     const input = { directory: '/test' } as any;
-    const mgr = new ForegroundFallbackManager(makeChains(), true, input, 3);
+    const mgr = new ForegroundFallbackManager(makeChains(), true, input, 0);
     mgr.registerSessionAgent(sessionID, 'orchestrator');
     await mgr.handleEvent({
       type: 'session.created',
@@ -2535,7 +3805,7 @@ describe('ForegroundFallbackManager session.status', () => {
       makeChains(),
       true,
       { directory: '/test' } as any,
-      3,
+      0,
     );
     mgr = manager;
 
@@ -2576,7 +3846,7 @@ describe('ForegroundFallbackManager session.status', () => {
       }),
       true,
       { directory: '/test' } as any,
-      1,
+      0,
     );
 
     mgr.registerSessionAgent('child-oracle-sticky', 'oracle');
@@ -2615,7 +3885,7 @@ describe('ForegroundFallbackManager session.status', () => {
       }),
       true,
       { directory: '/test' } as any,
-      1,
+      0,
     );
 
     mgr.registerSessionAgent('child-oracle-agent-body', 'oracle');
@@ -2655,7 +3925,7 @@ describe('ForegroundFallbackManager session.status', () => {
       makeChains(),
       true,
       { directory: '/test' } as any,
-      1,
+      0,
     );
 
     await mgr.handleEvent({
@@ -2686,7 +3956,7 @@ describe('ForegroundFallbackManager session.status', () => {
       makeChains(),
       true,
       { directory: '/test' } as any,
-      1,
+      0,
     );
 
     await mgr.handleEvent({
@@ -2768,7 +4038,7 @@ describe('ForegroundFallbackManager session.status', () => {
       makeChains(),
       true,
       { directory: '/test' } as any,
-      3,
+      0,
     );
 
     await mgr.handleEvent({
@@ -2802,7 +4072,7 @@ describe('ForegroundFallbackManager session.status', () => {
       makeChains(),
       true,
       { directory: '/test' } as any,
-      3,
+      0,
     );
 
     await mgr.handleEvent({
@@ -2836,7 +4106,7 @@ describe('ForegroundFallbackManager session.status', () => {
       makeChains(),
       true,
       { directory: '/test' } as any,
-      1,
+      0,
     );
 
     await mgr.handleEvent({
@@ -2868,7 +4138,7 @@ describe('ForegroundFallbackManager session.status', () => {
       makeChains(),
       true,
       { directory: '/test' } as any,
-      1,
+      0,
     );
 
     await mgr.handleEvent({
@@ -2897,10 +4167,15 @@ describe('ForegroundFallbackManager session.status', () => {
   test('does not toast when 410 signal arrives via status.message with no error property', async () => {
     const { mocks } = createMockClient();
     const showToast = mock(async () => ({}));
-    const mgr = new ForegroundFallbackManager(makeChains(), true, {
-      directory: '/test',
-      client: { tui: { showToast } },
-    } as any);
+    const mgr = new ForegroundFallbackManager(
+      makeChains(),
+      true,
+      {
+        directory: '/test',
+        client: { tui: { showToast } },
+      } as any,
+      0,
+    );
 
     await mgr.handleEvent({
       type: 'message.updated',
@@ -2933,7 +4208,7 @@ describe('ForegroundFallbackManager session.status', () => {
       makeChains(),
       true,
       { directory: '/test' } as any,
-      3,
+      0,
     );
 
     await mgr.handleEvent({
@@ -2991,7 +4266,7 @@ describe('ForegroundFallbackManager session.status', () => {
       makeChains(),
       true,
       { directory: '/test' } as any,
-      3,
+      0,
     );
 
     // Seed session with model A (anthropic/claude-opus-4-5)
@@ -3067,8 +4342,8 @@ describe('ForegroundFallbackManager session.status', () => {
       makeChains(),
       true,
       { directory: '/test' } as any,
-      1,
-    ); // maxRetries=1 for immediate fallback
+      0,
+    ); // No host retries: test the model-change guard directly.
 
     // Seed session with model A
     await mgr.handleEvent({
@@ -4087,6 +5362,7 @@ describe('ForegroundFallbackManager deduplication', () => {
       type: 'session.error',
       properties: {
         sessionID: 'sess-dup',
+        info: { id: 'failed-message' },
         error: { message: 'rate limit exceeded' },
       },
     };
@@ -4095,6 +5371,33 @@ describe('ForegroundFallbackManager deduplication', () => {
     await mgr.handleEvent(event); // immediate second trigger - should be deduped
 
     expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+  });
+
+  test('distinct failure incidents on the same turn and model are not time-deduped', async () => {
+    const { mocks } = createMockClient({
+      promptAsyncImpl: async () => ({
+        data: { error: { message: 'replay admission rejected' } },
+      }),
+    });
+    const mgr = new ForegroundFallbackManager(
+      { orchestrator: ['test/a', 'test/b', 'test/c'] },
+      true,
+      { directory: '/test' } as any,
+    );
+    const errorEvent = (incidentID: string) => ({
+      type: 'session.error',
+      properties: {
+        sessionID: 'same-model-incidents',
+        info: { id: incidentID },
+        error: { message: 'rate limit' },
+      },
+    });
+
+    await mgr.handleEvent(redoEvents.assistant('same-model-incidents'));
+    await mgr.handleEvent(errorEvent('failure-one'));
+    await mgr.handleEvent(errorEvent('failure-two'));
+
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(2);
   });
 
   test('different sessions are not deduplicated against each other', async () => {
@@ -4342,14 +5645,14 @@ describe('ForegroundFallbackManager session.deleted', () => {
 
   test('shares fallback progress across plugin manager instances', () => {
     const first = new ForegroundFallbackManager(
-      createMockClient().client,
       makeChains(),
       true,
+      createMockClient().client,
     );
     const replacement = new ForegroundFallbackManager(
-      createMockClient().client,
       makeChains(),
       true,
+      createMockClient().client,
     );
     const sessionID = 'sess-shared-in-progress';
 
@@ -4414,7 +5717,7 @@ describe('ForegroundFallbackManager willAttemptFallback', () => {
 
 describe('ForegroundFallbackManager resolveChain cross-agent isolation', () => {
   test('does not use another agent chain when known agent has no configured chain', async () => {
-    // oracle has no chain in runtimeChains; without the fix resolveChain would
+    // oracle has no configured chain; without the fix resolveChain would
     // fall through to the cross-agent "last resort" and pick a model from
     // orchestrator's chain - re-prompting oracle with an orchestrator model.
     const { mocks } = createMockClient();
@@ -4836,3 +6139,5 @@ describe('ForegroundFallbackManager dispose', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------

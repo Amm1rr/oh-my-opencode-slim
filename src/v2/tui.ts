@@ -4,20 +4,22 @@
  * Composes the existing dual-contract TUI plugin (`../tui`): the v1 `tui`
  * field is re-exported unchanged so v1 hosts keep the exact sidebar
  * registration, while the v2 `setup` is extended with the `/preset` keymap
- * flow — v2 hosts get the sidebar plus an interactive preset switcher
- * (dialog select → on-disk persist → toast feedback).
+ * flow — v2 hosts get the sidebar plus the same three-level preset manager
+ * the v1 TUI has (see `./preset-manager`), reached from `/preset` or the
+ * sidebar's preset row; `/preset <name>` stays the direct fast path
+ * (on-disk persist → refresh REQUESTED: sidebar re-read + file-write-driven
+ * server watcher). The server watcher's outcome is not observable from the
+ * TUI process, so success toasts say "Live refresh requested" and failures
+ * show the reload fallback.
  *
  * Hosts discover this entry through the package.json `./tui` export
  * (exports-map probe in the host's `kind: "tui"` loader pass); the
  * server-side default export (src/index.ts) plays no role in that — in
  * fact it must stay free of any `tui` key (see the note there).
  */
-import type { PluginConfig, Preset, PresetInput } from '../config';
-import { normalizePreset, resolvePreset } from '../config';
+import type { PluginConfig } from '../config';
 import { loadPluginConfig } from '../config/loader';
 import {
-  buildAgentUpdates,
-  buildPresetSummary,
   type PresetSwitchResult,
   switchPresetOnDisk,
 } from '../tools/preset-switch';
@@ -32,13 +34,14 @@ import {
 import { readTuiSnapshot } from '../tui-state';
 import { isPluginDisabledByEnv } from '../utils/env';
 import { log } from '../utils/logger';
-
-/** A single `ui.dialog.select` option for the preset picker. */
-export interface PresetOption {
-  title: string;
-  value: string;
-  description?: string;
-}
+import { notifyConfigChanged } from './config-change-coordinator';
+import {
+  liveRefreshFailureMessage,
+  liveRefreshSuccessMessage,
+  openPresetManagerV2,
+  type V2PresetManagerContext,
+  type V2PresetUiSurface,
+} from './preset-manager';
 
 /** A keymap command as accepted by the host's `keymap.layer` reducer. */
 export interface V2KeymapCommand {
@@ -58,27 +61,12 @@ type V2SlotApi = (claim: {
 }) => (() => void) | undefined;
 
 /**
- * v2 TUI preset-switcher surface. Complements the sidebar context that
- * `../tui` mirrors (location/renderer/theme/ui.slot/ui.router); hosts may
- * provide either or both, so every field is optional and capability-guarded.
+ * v2 TUI preset surface. Complements the sidebar context that `../tui`
+ * mirrors (location/renderer/theme/ui.slot/ui.router); hosts may provide
+ * either or both, so every field is optional and capability-guarded.
  */
-export interface V2PresetTuiContext {
-  location?: { directory: string };
-  ui?: {
-    dialog?: {
-      select: <Value>(options: {
-        title: string;
-        options: Array<{ title: string; value: Value; description?: string }>;
-        current?: Value;
-      }) => Promise<Value | undefined>;
-    };
-    toast?: {
-      show?: (toast: {
-        title?: string;
-        message: string;
-        variant?: string;
-      }) => void;
-    };
+export interface V2PresetTuiContext extends V2PresetManagerContext {
+  ui?: V2PresetUiSurface & {
     slot?: V2SlotApi;
   };
   keymap?: {
@@ -99,37 +87,11 @@ const PRESET_COMMAND_ID = 'omo.preset';
 const PRESET_COMMAND_TITLE = 'OMO: switch preset';
 const PRESET_APP_SLOT = 'app';
 
-const NO_PRESETS_MESSAGE =
-  'No presets configured. Define presets in oh-my-opencode-slim.jsonc.';
-
-/**
- * Map a plugin config's presets to `ui.dialog.select` options. Each option's
- * description is the per-agent summary (e.g. "orchestrator → model: x"),
- * matching the v1 picker's tooltip.
- */
-export function buildPresetOptions(config: PluginConfig): PresetOption[] {
-  const presets = (config.presets ?? {}) as Record<string, PresetInput>;
-  return Object.entries(presets).map(([name, rawPreset]) => {
-    let effectivePreset: Preset;
-    try {
-      effectivePreset = resolvePreset(name, presets);
-    } catch {
-      const normalized = normalizePreset(rawPreset);
-      effectivePreset = normalized.agents;
-    }
-    const summary = buildPresetSummary(buildAgentUpdates(effectivePreset));
-    return {
-      title: name,
-      value: name,
-      ...(summary.length > 0 ? { description: summary.join('; ') } : {}),
-    };
-  });
-}
-
 /**
  * Apply a preset by name through the shared on-disk switcher
  * (`switchPresetOnDisk`): the preset name is persisted to the user config so
  * the next reload/restart picks it up; the running session is untouched.
+ * `runPresetFlow` follows a successful switch with the config refresh.
  * Returns the switch result whose `message` is user-facing (toast-ready).
  */
 export function applyPresetByName(
@@ -141,10 +103,17 @@ export function applyPresetByName(
 }
 
 /**
- * Interactive `/preset` flow: open the preset picker (or apply `presetArg`
- * directly when the slash command carried a name, e.g. `/preset cheap`),
- * persist the selection, and toast the result. Never throws — failures are
- * surfaced as a toast and logged.
+ * `/preset` flow: bare `/preset` opens the three-level preset manager
+ * (applying a preset persists the name on disk, reports the toast, and
+ * requests the config refresh for new dispatches/sidebar); `/preset <name>`
+ * keeps the direct fast path that works even when the host exposes no
+ * dialogs. Never throws — failures are surfaced as a toast and logged.
+ *
+ * Feedback is honest about the process boundary: the TUI can persist and
+ * REQUEST the live refresh (local sidebar re-read + the server-side watcher
+ * reacting to the file write), but it cannot observe the server watcher's
+ * outcome, so a successful switch never claims the refresh was applied and a
+ * failed/missing request path shows the actionable reload fallback.
  */
 export async function runPresetFlow(
   ctx: V2PresetTuiContext,
@@ -162,27 +131,38 @@ export async function runPresetFlow(
 
     const requested = presetArg?.trim();
     if (requested) {
-      toast(applyPresetByName(directory, config, requested).message);
+      const result = applyPresetByName(directory, config, requested);
+      if (!result.ok) {
+        toast(result.message);
+        return;
+      }
+      // Persistence succeeded; request the live refresh and report honestly.
+      // Success text says "Live refresh requested" (the server watcher owns
+      // the outcome); a failed request falls back to the reload action.
+      const outcome = await notifyConfigChanged(directory, '/preset');
+      if (outcome.ok) {
+        toast(liveRefreshSuccessMessage(requested, result.summary));
+      } else {
+        log(
+          '[v2][tui] preset applied but the live refresh request failed',
+          outcome.reason,
+        );
+        toast(
+          liveRefreshFailureMessage(
+            requested,
+            outcome.reason ?? 'live refresh request failed',
+          ),
+        );
+      }
       return;
     }
 
-    const options = buildPresetOptions(config);
-    if (options.length === 0) {
-      toast(NO_PRESETS_MESSAGE);
-      return;
-    }
-    const dialog = ctx.ui?.dialog;
-    if (!dialog || typeof dialog.select !== 'function') {
-      log('[v2][tui] ui.dialog.select unavailable; cannot open preset picker');
-      return;
-    }
-    const name = await dialog.select({
-      title: 'Select preset',
-      options,
-      current: config.preset,
-    });
-    if (name === undefined) return;
-    toast(applyPresetByName(directory, config, name).message);
+    // Bare `/preset`: open the three-level manager with the shared
+    // config-change coordinator so Apply/Save refresh the sidebar state.
+    const managerCtx = Object.create(ctx as object) as V2PresetTuiContext;
+    managerCtx.onConfigChanged = () =>
+      notifyConfigChanged(directory, '/preset-manager');
+    await openPresetManagerV2(managerCtx, directory);
   } catch (err) {
     log('[v2][tui] preset flow failed', String(err));
     toast(`Preset switch failed: ${String(err)}`);

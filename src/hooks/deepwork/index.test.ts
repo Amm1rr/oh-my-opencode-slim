@@ -58,7 +58,13 @@ describe('deepwork command hook', () => {
     );
 
     expect(output.parts).toHaveLength(1);
-    expect(output.parts[0].text).toContain('Use the deepwork skill');
+    // Content-delivery seam: the bundled SKILL.md body itself must arrive
+    // with the command (/deepwork is self-contained — it works even when the
+    // skill is disabled). Head + tail pins prove the whole body survives; the
+    // frontmatter guard catches a strip failure (including the CRLF case).
+    expect(output.parts[0].text).toContain('# Deepwork');
+    expect(output.parts[0].text).toContain('## Completion');
+    expect(output.parts[0].text).not.toContain('name: deepwork');
     expect(output.parts[0].text).toContain('.slim/deepwork/');
     // Dynamic-input propagation seam: the pinned per-session path must carry
     // the caller's real session ID (a hardcoded path cannot contain it).

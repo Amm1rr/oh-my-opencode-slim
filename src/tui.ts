@@ -14,7 +14,16 @@ import {
   SUBAGENT_NAMES,
 } from './config/constants';
 import { loadPluginConfig } from './config/loader';
-import { createTuiPaneWiring } from './multiplexer/client/tui-wiring';
+import { MultiplexerConfigSchema, type MultiplexerType } from './config/schema';
+import {
+  createOnceGate,
+  logHostUnsupported,
+  PLUGIN_LOG_SINK,
+} from './multiplexer/client/diagnostics';
+import {
+  createTuiPaneWiring,
+  initClientLogging,
+} from './multiplexer/client/tui-wiring';
 import {
   KILL_ALL_KEYBIND,
   killAllRunningSubagents,
@@ -30,6 +39,16 @@ import {
 } from './tui-state';
 import { isPluginDisabledByEnv } from './utils/env';
 import { log } from './utils/logger';
+import {
+  notifyConfigChanged,
+  registerConfigChangeListener,
+} from './v2/config-change-coordinator';
+import {
+  canOpenPresetManagerV2,
+  openPresetManagerV2,
+  type V2PresetManagerContext,
+  type V2PresetUiSurface,
+} from './v2/preset-manager';
 
 const PLUGIN_NAME = 'oh-my-opencode-slim';
 const CONFIG_WARNING_COLOR = 'orange';
@@ -53,6 +72,24 @@ const ACTIVITY_FRAMES = [
   '⠇',
   '⠏',
 ] as const;
+
+/** Once-per-process gate for the v2-host multiplexer diagnostic (NFR-6). */
+const v2HostUnsupportedGate = createOnceGate();
+
+/**
+ * Pane creation lives in the v1 TUI entry only (NFR-6): a multiplexer
+ * configured on a v2 host is ignored. Records that at most once per process
+ * so the disabled feature is self-explaining instead of silently dropping
+ * config; callers re-run it whenever the config is (re)read.
+ */
+function warnV2HostUnsupportedMultiplexer(
+  configuredType: MultiplexerType,
+): void {
+  if (configuredType === 'none') return;
+  if (!v2HostUnsupportedGate('v2-host-unsupported')) return;
+  initClientLogging();
+  logHostUnsupported(PLUGIN_LOG_SINK, configuredType);
+}
 
 type Child =
   | JSX.Element
@@ -620,6 +657,16 @@ export interface SidebarInteraction {
   hasSelectedText?: () => boolean;
 }
 
+/**
+ * The active preset row rendered below the header/config status block and
+ * above the agent list. `onActivate` is present only when the host can open
+ * the preset manager (v2 dialogs); without it the row is informational-only.
+ */
+export interface SidebarPresetRow {
+  name: string;
+  onActivate?: () => void;
+}
+
 export function createSidebarInteraction(
   navigate: ((sessionID: string) => void) | undefined,
   hasSelectedText?: () => boolean,
@@ -1170,8 +1217,17 @@ function renderSidebar(
   now: () => number = Date.now,
   visibleRootID?: string,
   interaction?: SidebarInteraction,
+  presetRow?: SidebarPresetRow,
 ): JSX.Element {
   const configStatusRow = buildConfigStatusRow(configInvalid, theme);
+  const presetRowEl = presetRow
+    ? buildPresetRow(
+        presetRow,
+        theme,
+        resolveHoverBackground(theme),
+        interaction?.hasSelectedText,
+      )
+    : null;
   const activeAgents = getActiveSidebarAgentNames(snapshot, visibleRootID);
   const targetsByAgent = new Map(
     getSidebarAgentTargets(snapshot, visibleRootID).map((group) => [
@@ -1233,7 +1289,7 @@ function renderSidebar(
     },
     [
       header,
-      ...(sidebarOpen ? [configStatusRow] : []),
+      ...(sidebarOpen ? [configStatusRow, presetRowEl] : []),
       ...(sidebarOpen
         ? getSidebarAgentNames(snapshot).flatMap((agentName) => {
             const model = snapshot.agentModels[agentName] ?? 'pending';
@@ -1336,10 +1392,64 @@ function buildConfigStatusRow(
   );
 }
 
-function readConfigState(directory: string): {
+function resolveMultiplexerType(value: unknown): MultiplexerType {
+  const parsed = MultiplexerConfigSchema.safeParse(value ?? {});
+  return parsed.success ? parsed.data.type : 'none';
+}
+
+/**
+ * Active-preset row. With `onActivate` it behaves like the agent rows
+ * (same hover/click decoration); without one it is a muted, informational
+ * line — capability detection happens in the v2 setup, never here.
+ */
+function buildPresetRow(
+  presetRow: SidebarPresetRow,
+  theme: { text: unknown; textMuted: unknown },
+  hoverBackground: unknown,
+  hasSelectedText?: () => boolean,
+): JSX.Element {
+  const clickable = presetRow.onActivate !== undefined;
+  const row = box(
+    {
+      width: '100%',
+      flexDirection: 'row',
+      marginTop: 1,
+      columnGap: 1,
+      ...(clickable ? { shouldFill: true } : {}),
+    },
+    [
+      text({ fg: theme.textMuted, width: 6 }, ['Preset']),
+      text(
+        {
+          fg: clickable ? theme.text : theme.textMuted,
+          wrapMode: 'none',
+          truncate: true,
+          flexShrink: 1,
+        },
+        [presetRow.name],
+      ),
+      ...(clickable
+        ? [text({ fg: theme.textMuted, flexShrink: 0 }, ['▸'])]
+        : []),
+    ],
+  );
+  if (!clickable) return row;
+  return decorateInteractiveRow(row, {
+    hoverBackground,
+    onActivate: presetRow.onActivate,
+    hasSelectedText,
+  });
+}
+
+export interface SidebarConfigState {
   configInvalid: boolean;
   compactSidebar: boolean;
-} {
+  multiplexerType: MultiplexerType;
+  /** Active preset name (`config.preset`), undefined when unset. */
+  presetName?: string;
+}
+
+export function readConfigState(directory: string): SidebarConfigState {
   let configInvalid = false;
   const config = loadPluginConfig(directory, {
     silent: true,
@@ -1358,7 +1468,26 @@ function readConfigState(directory: string): {
     },
   });
   const compactSidebar = config.compactSidebar ?? true;
-  return { configInvalid, compactSidebar };
+  const multiplexerType = resolveMultiplexerType(config.multiplexer);
+  const presetName =
+    typeof config.preset === 'string' && config.preset.length > 0
+      ? config.preset
+      : undefined;
+  return { configInvalid, compactSidebar, multiplexerType, presetName };
+}
+
+/**
+ * Surface a broken config without replacing config-backed rows with the
+ * loader's fallback defaults. Once the file is valid again, the fresh state
+ * atomically replaces the retained values.
+ */
+export function retainLastGoodConfigState(
+  current: SidebarConfigState,
+  next: SidebarConfigState,
+): SidebarConfigState {
+  return next.configInvalid
+    ? { ...current, configInvalid: true }
+    : { ...next, configInvalid: false };
 }
 
 export function readConfigInvalid(directory: string): boolean {
@@ -1439,12 +1568,12 @@ interface V2TuiSlotClaim {
   render: (input: { sessionID: string }) => JSX.Element;
 }
 
-interface V2TuiContext {
+interface V2TuiContext extends V2PresetManagerContext {
   location?: { directory: string };
   client?: unknown;
   renderer: { requestRender: () => void; getSelection?: () => unknown };
   theme: V2TuiThemeTokens;
-  ui: {
+  ui: V2PresetUiSurface & {
     slot: (claim: V2TuiSlotClaim) => () => void;
     router: {
       current: () => { type?: string; sessionID?: string };
@@ -1484,17 +1613,48 @@ interface SidebarRuntimeAdapter {
   theme: () => Parameters<typeof renderSidebar>[2];
   navigate?: (sessionID: string) => void;
   registerSlot: (render: () => JSX.Element) => undefined | (() => void);
+  subscribeConfigChanges?: (
+    directory: string,
+    listener: () => { ok: boolean; reason?: string } | undefined,
+  ) => () => void;
+  getPresetRow?: (
+    directory: string,
+    presetName?: string,
+  ) => SidebarPresetRow | undefined;
+  onMultiplexerConfig?: (type: MultiplexerType) => void;
 }
 
 /** One refresh/animation/interaction lifecycle for both host slot contracts. */
 function createSidebarRuntime(adapter: SidebarRuntimeAdapter) {
   let configDirectory = adapter.getDirectory();
-  let { configInvalid, compactSidebar } = readConfigState(configDirectory);
+  let { configInvalid, compactSidebar, multiplexerType, presetName } =
+    readConfigState(configDirectory);
+  adapter.onMultiplexerConfig?.(multiplexerType);
+  const applyConfigState = (): boolean => {
+    const next = retainLastGoodConfigState(
+      { configInvalid, compactSidebar, multiplexerType, presetName },
+      readConfigState(configDirectory),
+    );
+    const changed =
+      next.configInvalid !== configInvalid ||
+      next.compactSidebar !== compactSidebar ||
+      next.multiplexerType !== multiplexerType ||
+      next.presetName !== presetName;
+    if (changed) {
+      configInvalid = next.configInvalid;
+      compactSidebar = next.compactSidebar;
+      multiplexerType = next.multiplexerType;
+      presetName = next.presetName;
+      adapter.onMultiplexerConfig?.(multiplexerType);
+    }
+    return changed;
+  };
   const [snapshot, setSnapshot] = createSignal(
     readTuiSnapshot(configDirectory),
   );
   const [animationNow, setAnimationNow] = createSignal(Date.now());
   let disposed = false;
+  let unregisterConfigListener = () => {};
   const remoteCache: RemoteModelCache = {};
   const refreshSidebar = async () => {
     if (disposed) return;
@@ -1502,9 +1662,25 @@ function createSidebarRuntime(adapter: SidebarRuntimeAdapter) {
     let nextSnapshot = await readTuiSnapshotAsync(currentDirectory);
     if (disposed) return;
     const directoryChanged = currentDirectory !== configDirectory;
+    let stateChanged = false;
     if (directoryChanged) {
       configDirectory = currentDirectory;
-      ({ configInvalid, compactSidebar } = readConfigState(configDirectory));
+      ({ configInvalid, compactSidebar, multiplexerType, presetName } =
+        readConfigState(configDirectory));
+      adapter.onMultiplexerConfig?.(multiplexerType);
+      // Never carry one project's last-good config state into another.
+      bindConfigListener();
+      stateChanged = true;
+    }
+    // Config-backed rows (preset label, invalid badge, compact mode) are
+    // re-read on EVERY poll — even when the snapshot is unchanged — so
+    // manual config edits surface without waiting for the next write.
+    if (!directoryChanged) {
+      try {
+        stateChanged = applyConfigState();
+      } catch (err) {
+        log('[v2][tui] config state read failed', String(err));
+      }
     }
     nextSnapshot = await hydrateRemoteModels(
       nextSnapshot,
@@ -1516,10 +1692,14 @@ function createSidebarRuntime(adapter: SidebarRuntimeAdapter) {
     if (!isRefreshCurrent(currentDirectory, adapter.getDirectory())) {
       return;
     }
-    if (!directoryChanged && snapshotSectionsEqual(nextSnapshot, snapshot())) {
+    const snapshotChanged =
+      directoryChanged || !snapshotSectionsEqual(nextSnapshot, snapshot());
+    if (!snapshotChanged && !stateChanged) {
       return;
     }
-    setSnapshot(nextSnapshot);
+    if (snapshotChanged) {
+      setSnapshot(nextSnapshot);
+    }
     if (!disposed) adapter.renderer.requestRender();
   };
   const interaction = createSidebarInteraction(
@@ -1527,6 +1707,28 @@ function createSidebarRuntime(adapter: SidebarRuntimeAdapter) {
     selectionGuard(adapter.renderer),
   );
   const scheduleRefresh = createSerializedRefresh(refreshSidebar);
+  const bindConfigListener = () => {
+    unregisterConfigListener();
+    if (!adapter.subscribeConfigChanges) return;
+    unregisterConfigListener = adapter.subscribeConfigChanges(
+      configDirectory,
+      () => {
+        let changed = false;
+        try {
+          changed = applyConfigState();
+        } catch (err) {
+          log('[v2][tui] config state read failed', String(err));
+          return { ok: false, reason: String(err) };
+        }
+        if (changed) {
+          adapter.renderer.requestRender();
+          scheduleRefresh();
+        }
+        return { ok: true };
+      },
+    );
+  };
+  bindConfigListener();
   scheduleRefresh();
   const renderTimer = setInterval(scheduleRefresh, 1000);
   const animationTimer = setInterval(() => {
@@ -1558,6 +1760,7 @@ function createSidebarRuntime(adapter: SidebarRuntimeAdapter) {
         animationNow,
         visible,
         interaction,
+        adapter.getPresetRow?.(configDirectory, presetName),
       );
     }),
   );
@@ -1569,6 +1772,7 @@ function createSidebarRuntime(adapter: SidebarRuntimeAdapter) {
     dispose: () => {
       if (disposed) return;
       disposed = true;
+      unregisterConfigListener();
       disposeSlot?.();
       clearInterval(renderTimer);
       clearInterval(animationTimer);
@@ -1579,6 +1783,12 @@ function createSidebarRuntime(adapter: SidebarRuntimeAdapter) {
 /** V2 slot adapter; `/preset` remains registered by src/v2/tui.ts. */
 async function setup(ctx: V2TuiContext): Promise<undefined | (() => void)> {
   if (isPluginDisabledByEnv()) return;
+  const presetManagerCtx = (directory: string): V2TuiContext => {
+    const augmented = Object.create(ctx as object) as V2TuiContext;
+    augmented.onConfigChanged = () =>
+      notifyConfigChanged(directory, 'preset-manager');
+    return augmented;
+  };
   const runtime = createSidebarRuntime({
     version: (await readPackageVersion()) ?? 'dev',
     getDirectory: () => ctx.location?.directory ?? process.cwd(),
@@ -1589,6 +1799,19 @@ async function setup(ctx: V2TuiContext): Promise<undefined | (() => void)> {
     navigate: makeRouteNavigator(ctx.ui.router, 'navigate', true),
     registerSlot: (render) =>
       ctx.ui.slot({ append: 'sidebar.content', render }),
+    subscribeConfigChanges: (directory, listener) =>
+      registerConfigChangeListener(directory, listener),
+    onMultiplexerConfig: warnV2HostUnsupportedMultiplexer,
+    getPresetRow: (directory, presetName) => {
+      if (presetName === undefined) return undefined;
+      if (!canOpenPresetManagerV2(ctx)) return { name: presetName };
+      return {
+        name: presetName,
+        onActivate: () => {
+          void openPresetManagerV2(presetManagerCtx(directory), directory);
+        },
+      };
+    },
   });
   return runtime.dispose;
 }

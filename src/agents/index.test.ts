@@ -14,7 +14,10 @@ import {
   applyModelInheritanceToConfig,
   createAgents,
   getAgentConfigs,
+  getAgentConfigsFromDefinitions,
   isSubagent,
+  mergeHostAgentConfigs,
+  projectAgentRuntimeState,
 } from './index';
 import { TASK_REJECTION_INSTRUCTION } from './task-rejection';
 
@@ -31,6 +34,99 @@ function councilConfig() {
   });
   return parsed;
 }
+
+describe('hot-refreshed runtime profiles', () => {
+  test('applies display-name host model overrides to canonical agent profiles', () => {
+    const runtime = runtimeFor({
+      agents: {
+        explorer: { displayName: 'Scout', model: 'plugin/default' },
+      },
+    });
+    const agentDefs = createAgents(runtime);
+    const agentConfigs = getAgentConfigsFromDefinitions(runtime, agentDefs);
+    const merged = mergeHostAgentConfigs(
+      agentConfigs as Record<string, Record<string, unknown>>,
+      {
+        Scout: {
+          model: 'host/scout',
+          variant: 'host-variant',
+          temperature: 0.4,
+          options: { thinking: { type: 'enabled' } },
+        },
+      },
+    );
+
+    const { profiles, projection } = projectAgentRuntimeState({
+      runtime,
+      agentDefs,
+      agentConfigs: merged,
+    });
+
+    expect(profiles.explorer).toMatchObject({
+      model: { providerID: 'host', id: 'scout', variant: 'host-variant' },
+      sidebarModel: 'host/scout',
+      sidebarVariant: 'host-variant',
+      temperature: 0.4,
+      providerOptions: { thinking: { type: 'enabled' } },
+    });
+    expect(profiles.Scout).toMatchObject({
+      model: { providerID: 'host', id: 'scout', variant: 'host-variant' },
+      sidebarModel: 'host/scout',
+    });
+    expect(projection.agentModels.explorer).toBe('host/scout');
+  });
+
+  test('canonical host entry atomically wins over the display alias', () => {
+    const runtime = runtimeFor({
+      agents: { explorer: { displayName: 'Scout', model: 'plugin/default' } },
+    });
+    const agentDefs = createAgents(runtime);
+    const merged = mergeHostAgentConfigs(
+      getAgentConfigsFromDefinitions(runtime, agentDefs) as Record<
+        string,
+        Record<string, unknown>
+      >,
+      {
+        explorer: {
+          model: 'host/canonical',
+          variant: 'canonical-variant',
+          temperature: 0.2,
+          options: { canonical: true },
+        },
+        Scout: {
+          model: 'host/scout',
+          variant: 'visible-variant',
+          temperature: 0.8,
+          options: { visible: true },
+        },
+      },
+    );
+
+    const { profiles } = projectAgentRuntimeState({
+      runtime,
+      agentDefs,
+      agentConfigs: merged,
+    });
+
+    expect(profiles.explorer).toMatchObject({
+      sidebarModel: 'host/canonical',
+      sidebarVariant: 'canonical-variant',
+      temperature: 0.2,
+      providerOptions: { canonical: true },
+    });
+    expect(profiles.explorer?.model).toEqual({
+      providerID: 'host',
+      id: 'canonical',
+      variant: 'canonical-variant',
+    });
+    expect(profiles.Scout).toMatchObject({
+      sidebarModel: 'host/scout',
+      sidebarVariant: 'visible-variant',
+      temperature: 0.8,
+      providerOptions: { visible: true },
+    });
+  });
+});
 
 describe('agent alias backward compatibility', () => {
   test("applies 'explore' config to 'explorer' agent", () => {
@@ -578,6 +674,64 @@ describe('orchestrator agent', () => {
     ]) {
       expect(permission[toolName]).toBe('allow');
     }
+  });
+
+  test('marketplace tools are enabled only for the orchestrator by default', () => {
+    const agents = createAgents(
+      runtimeFor({
+        agents: {
+          fixer: { permission: { marketplace_manage: 'allow' } },
+        },
+      }),
+    );
+    const orchestrator = agents.find((agent) => agent.name === 'orchestrator');
+    const fixer = agents.find((agent) => agent.name === 'fixer');
+    expect(orchestrator).toBeDefined();
+    expect(fixer).toBeDefined();
+    if (!orchestrator || !fixer) throw new Error('Expected built-in agents');
+    for (const name of ['marketplace_inspect', 'marketplace_manage']) {
+      expect(
+        (orchestrator.config.permission as Record<string, unknown>)[name],
+      ).toBe('allow');
+      expect((fixer.config.permission as Record<string, unknown>)[name]).toBe(
+        'deny',
+      );
+    }
+  });
+
+  test.each(['allow', 'ask', 'deny'] as const)(
+    'preserves explicit orchestrator marketplace permission %s',
+    (action) => {
+      const agents = createAgents(
+        runtimeFor({
+          agents: {
+            orchestrator: {
+              permission: {
+                marketplace_inspect: action,
+                marketplace_manage: action,
+              },
+            },
+          },
+        }),
+      );
+      const orchestrator = agents.find(
+        (agent) => agent.name === 'orchestrator',
+      );
+      const permissions = orchestrator?.config.permission as Record<
+        string,
+        unknown
+      >;
+      expect(permissions.marketplace_inspect).toBe(action);
+      expect(permissions.marketplace_manage).toBe(action);
+    },
+  );
+
+  test('preserves shorthand specialist permissions unchanged', () => {
+    const agents = createAgents(
+      runtimeFor({ agents: { fixer: { permission: 'allow' } } }),
+    );
+    const fixer = agents.find((agent) => agent.name === 'fixer');
+    expect(fixer?.config.permission).toBe('allow');
   });
 
   test('orchestrator is allowed to invoke wait_for_user', () => {

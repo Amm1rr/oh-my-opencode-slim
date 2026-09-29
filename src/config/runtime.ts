@@ -30,6 +30,7 @@ import {
   SUBAGENT_NAMES,
 } from './constants';
 import type { CouncilConfig } from './council-schema';
+import { resolveEffectiveAgentOverrides } from './effective-agent-overrides';
 import {
   deepMerge,
   mergeAgentOverrides,
@@ -48,7 +49,7 @@ import {
   type ResolvedPluginConfig,
   type WebfetchConfig,
 } from './schema';
-import { getCustomAgentNames, normalizeAgentSkillDirectives } from './utils';
+import { getCustomAgentNames } from './utils';
 
 /** A single agent entry from the host opencode.json config. */
 export interface HostAgentConfig {
@@ -188,6 +189,16 @@ export class RuntimeConfig {
     return instance;
   }
 
+  /** Create an isolated runtime snapshot for read-only status projections. */
+  static createDetached(
+    directory: string,
+    pluginConfig: ResolvedPluginConfig,
+  ): RuntimeConfig {
+    const instance = new RuntimeConfig(directory);
+    instance.seedPlugin(pluginConfig);
+    return instance;
+  }
+
   /** Lazy per-directory accessor; creates an empty instance if unseeded. */
   static get(directory: string): RuntimeConfig {
     let instance = registry.get(directory);
@@ -195,6 +206,21 @@ export class RuntimeConfig {
       instance = new RuntimeConfig(directory);
       registry.set(directory, instance);
     }
+    return instance;
+  }
+
+  /**
+   * Build an UNREGISTERED instance from a plugin config. Used by read-only
+   * resolution paths (the v2 hot-profile refresh) that must not disturb the
+   * live per-directory singleton. Host override and runtime-preset state can
+   * be applied on the throwaway instance without any global side effect.
+   */
+  static create(
+    directory: string,
+    pluginConfig: ResolvedPluginConfig,
+  ): RuntimeConfig {
+    const instance = new RuntimeConfig(directory);
+    instance.seedPlugin(pluginConfig);
     return instance;
   }
 
@@ -255,12 +281,8 @@ export class RuntimeConfig {
     const merged = runtimePreset
       ? mergeAgentOverrides(base, runtimePreset)
       : base;
-    const includesLocalSkills = Object.values(merged).some(
-      (override) => override.skills_include_local === true,
-    );
-    return normalizeAgentSkillDirectives(
-      merged,
-      includesLocalSkills ? this.projectLocalSkillNames() : [],
+    return resolveEffectiveAgentOverrides(merged, () =>
+      this.projectLocalSkillNames(),
     );
   }
 
@@ -517,12 +539,13 @@ export class RuntimeConfig {
    * guard, mirrors the previous config-hook reset branch).
    */
   setRuntimePreset(name: string | null): void {
-    if (!name || !this.pluginConfig?.presets?.[name]) {
+    const presets = this.pluginConfig?.presets;
+    if (!name || !presets || !Object.hasOwn(presets, name)) {
       this.runtimePresetName = null;
       return;
     }
     try {
-      resolvePreset(name, this.pluginConfig.presets);
+      resolvePreset(name, presets);
       this.runtimePresetName = name;
     } catch {
       this.runtimePresetName = null;
@@ -531,6 +554,20 @@ export class RuntimeConfig {
 
   getRuntimePreset(): string | null {
     return this.runtimePresetName;
+  }
+
+  /** Return the runtime override only when it resolves in this config snapshot. */
+  resolveRuntimePreset(
+    pluginConfig: ResolvedPluginConfig | undefined = this.pluginConfig,
+  ): string | null {
+    const name = this.runtimePresetName;
+    if (!name || !pluginConfig?.presets?.[name]) return null;
+    try {
+      resolvePreset(name, pluginConfig.presets);
+      return name;
+    } catch {
+      return null;
+    }
   }
 
   /** Record that an agent's model was switched at runtime. */
@@ -560,7 +597,7 @@ export class RuntimeConfig {
     name: string,
   ): Record<string, AgentOverrideConfig> | undefined {
     const presets = this.pluginConfig?.presets;
-    if (!presets?.[name]) {
+    if (!presets || !Object.hasOwn(presets, name)) {
       return undefined;
     }
     try {
