@@ -2063,7 +2063,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
         // agents are known. Latch capability failures for the readiness barrier.
         if (
           registry.marketplaceAgentNames.length &&
-          typeof ctx.session.update !== 'function'
+          typeof ctx.session?.update !== 'function'
         ) {
           permissionSnapshotFailure = new Error(
             'Marketplace agents require ctx.session.update to enforce child permission ceilings',
@@ -2157,20 +2157,24 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       };
       try {
         if (typeof ctx.mcp?.transform !== 'function') {
-          throw new Error('MCP configuration draft is unavailable');
+          log('[v2] ctx.mcp.transform unavailable; skipping MCP snapshot (v1 host embedded v2 core)');
+          // Degrade gracefully: v1 hosts with embedded v2 core don't provide
+          // full v2 context. This is expected and non-fatal.
+          hostMcpSnapshot = {};
+        } else {
+          const reg = await ctx.mcp.transform((draft) => {
+            const configured = draft.list();
+            if (!Array.isArray(configured)) {
+              throw new Error('MCP configuration draft returned no inventory');
+            }
+            hostMcpSnapshot = Object.fromEntries(configured);
+            for (const [name, config] of Object.entries(mcps)) {
+              draft.set(name, adaptMcpServer(config));
+            }
+            if (pendingAgentDraft) finalizeAgentDraft(pendingAgentDraft);
+          });
+          disposers.push(() => reg.dispose());
         }
-        const reg = await ctx.mcp.transform((draft) => {
-          const configured = draft.list();
-          if (!Array.isArray(configured)) {
-            throw new Error('MCP configuration draft returned no inventory');
-          }
-          hostMcpSnapshot = Object.fromEntries(configured);
-          for (const [name, config] of Object.entries(mcps)) {
-            draft.set(name, adaptMcpServer(config));
-          }
-          if (pendingAgentDraft) finalizeAgentDraft(pendingAgentDraft);
-        });
-        disposers.push(() => reg.dispose());
       } catch (err) {
         throw new Error(
           'Unable to snapshot configured MCP namespaces: this host cannot ' +
@@ -2205,7 +2209,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       }
       const agentConfigs = resolvedAgents ?? {};
 
-      permissionRulesBridgeEnabled = typeof ctx.session.update === 'function';
+      permissionRulesBridgeEnabled = typeof ctx.session?.update === 'function';
       if (!permissionRulesBridgeEnabled && !permissionRulesUnavailableWarned) {
         permissionRulesUnavailableWarned = true;
         log(PERMISSION_RULES_UNAVAILABLE_WARNING);
@@ -2466,16 +2470,22 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
         knownAgent: (sessionID) => promptBridge?.agentForSession(sessionID),
       });
 
-      // Native per-admission prompt hook (v2): `session.prompt` fires once
-      // per admitted input with the eventual inbox User messageID — the
-      // identity v1 chat.message consumers key on. With it registered the
-      // context hook's per-request chat.message emulation narrows to
-      // agent/model discovery (registration is unconditional on full
-      // contexts — a registration failure fails setup).
-      if (chatMessage) {
-        const bridge = createSessionPromptBridge(chatMessage);
-        promptBridge = bridge;
-        const promptReg = await ctx.session.hook('prompt', async (event) => {
+      // Skip session hook registration if ctx.session is unavailable (v1 host
+      // embedded v2 core with limited context). On full v2 contexts, session
+      // hooks are required and registration failures fail setup.
+      if (!ctx.session) {
+        log('[v2] ctx.session unavailable; skipping session hooks (v1 host embedded v2 core)');
+      } else {
+        // Native per-admission prompt hook (v2): `session.prompt` fires once
+        // per admitted input with the eventual inbox User messageID — the
+        // identity v1 chat.message consumers key on. With it registered the
+        // context hook's per-request chat.message emulation narrows to
+        // agent/model discovery (registration is unconditional on full
+        // contexts — a registration failure fails setup).
+        if (chatMessage) {
+          const bridge = createSessionPromptBridge(chatMessage);
+          promptBridge = bridge;
+          const promptReg = await ctx.session.hook('prompt', async (event) => {
           if (!permissionSnapshotReady) {
             await withTimeout(
               permissionSnapshotReadiness,
@@ -2746,6 +2756,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       } catch (err) {
         log('[v2] event.subscribe failed', String(err));
       }
+      } // end if (ctx.session) check
 
       // ── Health check: surface silent zero-registration failures ──
       // Every bridge is fail-soft; without this, a fully broken registration

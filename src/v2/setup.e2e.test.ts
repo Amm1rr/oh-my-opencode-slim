@@ -1412,18 +1412,19 @@ describe('createV2Setup e2e', () => {
     expect(calls.disposed).toContain('mcp.transform');
   }, 20_000);
 
-  test('missing MCP transform fails startup and unwinds earlier resources', async () => {
+  test('missing MCP transform degrades gracefully (v1 host embedded v2 core)', async () => {
     const { ctx } = makeMockV2Context(projectDir);
     const mcp = ctx.mcp as unknown as { transform?: unknown };
     mcp.transform = undefined;
 
-    await expect(createV2Setup()(ctx)).rejects.toThrow(
-      'this host cannot expose configured MCP namespaces; update to a supported v2 host',
-    );
+    // Should succeed with degraded MCP snapshot instead of failing
+    const cleanup = await createV2Setup()(ctx);
     await flushLoggerForTesting();
     const logText = readPluginLog();
-    expect(logText).toContain('[v2][interview] bridge disposed');
-    expect(logText).toContain('[v2] v1 dispose hook invoked (abort path)');
+    expect(logText).toContain('[v2] ctx.mcp.transform unavailable; skipping MCP snapshot (v1 host embedded v2 core)');
+    expect(logText).toContain('[v2] agents registered');
+    
+    await cleanup();
   }, 20_000);
 
   test('subagent launch flows into the job board through the tool bridges', async () => {
