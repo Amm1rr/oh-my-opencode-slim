@@ -374,7 +374,7 @@ subprocess.
 ### Manual Update Mode
 
 Set `autoUpdate` to `false` if you want update notifications without automatic
-`bun install` runs.
+package installs.
 
 ```jsonc
 {
