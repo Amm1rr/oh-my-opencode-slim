@@ -50,6 +50,8 @@ agent has a `•` before its name. While an agent session reports `busy` or
 The bullet returns after every active session for that agent becomes idle or
 is deleted.
 
+In an expanded agent list, `⚰` marks a stopped session (no terminal result); only `task_revive` can continue it.
+
 ---
 
 ## Prompt Overriding
