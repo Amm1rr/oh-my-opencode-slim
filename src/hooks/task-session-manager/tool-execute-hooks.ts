@@ -50,10 +50,6 @@ function normalizeObjectiveKey(value: string): string {
   return value.replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
-/** Random-UUID shape: the signature of hallucinated task_ids (see unknown-id branch). */
-const UUID_SHAPE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
 function refuseExplicitTaskId(
   requested: string,
   message: string,
@@ -136,13 +132,6 @@ export async function handleToolExecuteBefore(
      * delegation vocabulary for model-visible refusal guidance. Defaults to
      * v1 wording. */
     hostFlavor?: string;
-    /**
-     * Host-truth probe: does the parent conversation have a running child
-     * session that the in-memory board does not track (e.g. after a plugin
-     * restart)? Used to refuse unknown-alias drops that could duplicate
-     * live work. Fail-closed: implementers should return true on errors.
-     */
-    hasUntrackedRunningChild?: (parentSessionID?: string) => Promise<boolean>;
   },
 ): Promise<void> {
   const toolName = input.tool.toLowerCase();
@@ -163,6 +152,13 @@ export async function handleToolExecuteBefore(
   if (!isObjectRecord(output.args)) return;
 
   const args = output.args as TaskArgs;
+  if (typeof args.task_id === 'string' && args.task_id.trim() === '') {
+    refuseExplicitTaskId(
+      args.task_id,
+      `${delegation.tool}() received an empty ${delegation.resumeParam}. It was not treated as omitted; no new session was created. Omit ${delegation.resumeParam} on a separate call to start a new session.`,
+      { empty: true },
+    );
+  }
   if (
     typeof args.subagent_type !== 'string' ||
     args.subagent_type.trim() === ''
@@ -258,46 +254,12 @@ export async function handleToolExecuteBefore(
           agentType,
           delegation,
         );
-      } else if (UUID_SHAPE.test(requested)) {
-        // Hallucinated id: random UUIDs name nothing in this board and are the
-        // known failure signature of degraded fallback providers (2026-09-19:
-        // grok invented task_ids during a 429 window, then models copied the
-        // pattern from compacted history while every refusal blocked all
-        // delegations). Drop the id and proceed as a fresh spawn.
-        log('[task-session-manager] dropped hallucinated UUID task_id', {
-          task_id: requested,
-        });
-        delete args.task_id;
-      } else {
-        // Unknown alias (fix-99, v2 non-ses sessionID): drop the id and spawn
-        // a new child instead of refuse-without-spawn — unless the board may
-        // have merely lost the mapping (plugin restart) while a child session
-        // is still running: silently spawning then would duplicate live work
-        // and lose the specialist's context.
-        let untrackedRunning = false;
-        try {
-          untrackedRunning =
-            (await deps.hasUntrackedRunningChild?.(input.sessionID)) ?? false;
-        } catch {
-          untrackedRunning = true;
-        }
-        if (untrackedRunning) {
-          refuseExplicitTaskId(
-            requested,
-            `Unknown task ID or alias: ${requested}. The board may have lost its mapping (plugin restart) while a child session may still be running or retrying; ${delegation.tool}() will not silently spawn a duplicate. Omit ${delegation.resumeParam} to deliberately spawn a fresh session, or resume with the exact ses_* session id.`,
-            { unknownAlias: true, probe: 'untracked-running-child' },
-          );
-        }
-        log(
-          '[task-session-manager] dropped unknown task_id; spawning new session',
-          {
-            task_id: requested,
-            agentType,
-            parentSessionID: input.sessionID,
-          },
-        );
-        delete args.task_id;
       }
+      refuseExplicitTaskId(
+        requested,
+        `Task ${requested}: ${delegation.tool}() cannot resolve this ${delegation.resumeParam}. It was not dropped; no new session was created. Omit ${delegation.resumeParam} on a separate call to start a new session.`,
+        { unresolved: true },
+      );
     } else {
       const relaunchLease = deps.backgroundJobBoard.acquireRelaunchLease(
         remembered.taskID,
