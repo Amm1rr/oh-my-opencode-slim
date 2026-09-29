@@ -6,6 +6,7 @@ import {
   getTuiStatePath,
   readTuiSnapshot,
   recordTuiSessionParent,
+  updateSnapshot,
 } from '../tui-state';
 import { BackgroundJobBoard } from './background-job-fixture';
 import { createTuiReusableProjection } from './tui-reusable-projection';
@@ -81,7 +82,95 @@ describe('tui-reusable-projection', () => {
     }
   });
 
-  test('board mutation projects the latest reconciled session into the snapshot', () => {
+  test('placeholder promotions publish running and finished jobs immediately', async () => {
+    const board = new BackgroundJobBoard();
+    const projection = createTuiReusableProjection({ board, projectDir });
+    const fsModule = await import('node:fs');
+    let writes = 0;
+    let notifications = 0;
+    board.addMutationListener(() => notifications++);
+    const statePath = getTuiStatePath(projectDir);
+    const originalRename = fsModule.renameSync;
+    const renameSpy = spyOn(fsModule, 'renameSync').mockImplementation(
+      (...args: Parameters<typeof fs.renameSync>) => {
+        if (String(args[1]) === statePath) writes++;
+        return originalRename(...args);
+      },
+    );
+    try {
+      board.registerLaunch({
+        taskID: 'ses_run',
+        parentSessionID: 'parent-1',
+        agent: 'fixer',
+        provisional: true,
+      });
+      const beforeRunning = notifications;
+      board.promoteProvisional('ses_run', 'parent-1', { agent: 'fixer' });
+      expect(notifications - beforeRunning).toBe(1);
+      expect(writes).toBe(1);
+      expect(
+        readTuiSnapshot(projectDir).reusableByAgent['parent-1']?.fixer?.[0],
+      ).toMatchObject({ taskID: 'ses_run', running: true });
+
+      board.registerLaunch({
+        taskID: 'ses_done',
+        parentSessionID: 'parent-2',
+        agent: 'oracle',
+        provisional: true,
+      });
+      board.updateStatus({
+        taskID: 'ses_done',
+        state: 'completed' as never,
+        resultSummary: 'done',
+      });
+      writes = 0;
+      const beforeFinished = notifications;
+      board.registerLaunch({
+        taskID: 'ses_done',
+        parentSessionID: 'parent-2',
+        agent: 'oracle',
+        preserveRun: true,
+      });
+      expect(notifications - beforeFinished).toBe(1);
+      expect(writes).toBe(1);
+      expect(
+        readTuiSnapshot(projectDir).reusableByAgent['parent-2']?.oracle?.[0],
+      ).toMatchObject({ taskID: 'ses_done', terminalState: 'completed' });
+    } finally {
+      renameSpy.mockRestore();
+      projection.dispose();
+    }
+  });
+
+  test('unattributed and uncertain running jobs are not advertised', () => {
+    const board = new BackgroundJobBoard();
+    const projection = createTuiReusableProjection({ board, projectDir });
+    try {
+      board.registerLaunch({
+        taskID: 'ses_placeholder',
+        parentSessionID: 'parent-1',
+        agent: 'oracle',
+        provisional: true,
+      });
+      board.registerLaunch({
+        taskID: 'ses_uncertain',
+        parentSessionID: 'parent-1',
+        agent: 'fixer',
+      });
+      board.updateStatus({
+        taskID: 'ses_uncertain',
+        state: 'running',
+        statusUncertain: true,
+      });
+      expect(
+        readTuiSnapshot(projectDir).reusableByAgent['parent-1'],
+      ).toBeUndefined();
+    } finally {
+      projection.dispose();
+    }
+  });
+
+  test('board mutation projects reconciled and stopped sessions into the snapshot', () => {
     const board = new BackgroundJobBoard();
     const projection = createTuiReusableProjection({ board, projectDir });
 
@@ -94,6 +183,20 @@ describe('tui-reusable-projection', () => {
         alias: 'ora-1',
         terminalState: 'completed',
       });
+      board.registerLaunch({
+        taskID: 'ses_stopped',
+        parentSessionID: 'parent-1',
+        agent: 'oracle',
+        now: 300,
+      });
+      board.markStopped('ses_stopped', 'no native result', 310, undefined, 310);
+      expect(
+        readTuiSnapshot(projectDir).reusableByAgent['parent-1']?.oracle?.[0],
+      ).toMatchObject({ taskID: 'ses_stopped', terminalState: 'stopped' });
+      board.markReconciled('ses_stopped', 400);
+      expect(
+        readTuiSnapshot(projectDir).reusableByAgent['parent-1']?.oracle?.[0],
+      ).toMatchObject({ taskID: 'ses_stopped', terminalState: 'stopped' });
     } finally {
       projection.dispose();
     }
@@ -145,6 +248,237 @@ describe('tui-reusable-projection', () => {
     }
   });
 
+  test('startup also drops ownerless inherited sections', () => {
+    updateSnapshot(projectDir, (snapshot) => {
+      snapshot.reusableByAgent['parent-old'] = {
+        oracle: [
+          {
+            taskID: 'ses_old',
+            alias: 'ora-1',
+            terminalState: 'completed',
+            lastUsedAt: 100,
+          },
+        ],
+      };
+    });
+    const projection = createTuiReusableProjection({
+      board: new BackgroundJobBoard(),
+      projectDir,
+    });
+    try {
+      expect(readTuiSnapshot(projectDir).reusableByAgent).toEqual({});
+    } finally {
+      projection.dispose();
+    }
+  });
+
+  test('startup sweeps failed same-PID retractions, never live instances', () => {
+    const live = new BackgroundJobBoard();
+    const liveProjection = createTuiReusableProjection({
+      board: live,
+      projectDir,
+    });
+    const failed = new BackgroundJobBoard();
+    const failedProjection = createTuiReusableProjection({
+      board: failed,
+      projectDir,
+    });
+    const later: Array<ReturnType<typeof createTuiReusableProjection>> = [];
+    const lockPath = `${getTuiStatePath(projectDir)}.lock`;
+    try {
+      live.registerLaunch({
+        taskID: 'ses_live',
+        parentSessionID: 'parent-live',
+        agent: 'fixer',
+      });
+      failed.registerLaunch({
+        taskID: 'ses_old',
+        parentSessionID: 'parent-old',
+        agent: 'fixer',
+      });
+      failed.registerLaunch({
+        taskID: 'ses_stale',
+        parentSessionID: 'parent-shared',
+        agent: 'fixer',
+      });
+      fs.writeFileSync(
+        lockPath,
+        JSON.stringify({
+          pid: process.pid,
+          token: 'held',
+          createdAt: Date.now(),
+        }),
+      );
+      failedProjection.dispose(); // Lock timeout: parent-old remains on disk.
+      fs.unlinkSync(lockPath);
+      // A live same-PID instance republishes a pending parent before startup.
+      live.registerLaunch({
+        taskID: 'ses_shared',
+        parentSessionID: 'parent-shared',
+        agent: 'fixer',
+      });
+      later.push(
+        createTuiReusableProjection({
+          board: new BackgroundJobBoard(),
+          projectDir,
+        }),
+      );
+      let sections = readTuiSnapshot(projectDir).reusableByAgent;
+      expect(sections['parent-live']).toBeDefined();
+      expect(sections['parent-old']).toBeUndefined();
+      expect(sections['parent-shared']?.fixer?.[0]?.taskID).toBe('ses_shared');
+
+      // A live republish retires the pending parent.
+      live.registerLaunch({
+        taskID: 'ses_back',
+        parentSessionID: 'parent-old',
+        agent: 'fixer',
+      });
+      later.push(
+        createTuiReusableProjection({
+          board: new BackgroundJobBoard(),
+          projectDir,
+        }),
+      );
+      sections = readTuiSnapshot(projectDir).reusableByAgent;
+      expect(sections['parent-old']?.fixer?.[0]?.taskID).toBe('ses_back');
+    } finally {
+      if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+      for (const projection of later) projection.dispose();
+      liveProjection.dispose();
+    }
+  }, 5_000);
+
+  test('dispose clears only this projection’s still-owned parent sections', () => {
+    const board = new BackgroundJobBoard();
+    const projection = createTuiReusableProjection({ board, projectDir });
+    board.registerLaunch({
+      taskID: 'ses_owned',
+      parentSessionID: 'parent-owned',
+      agent: 'oracle',
+    });
+    updateSnapshot(projectDir, (snapshot) => {
+      snapshot.reusableByAgent['parent-foreign'] = {
+        fixer: [{ taskID: 'ses_foreign', alias: 'fix-1', running: true }],
+      };
+      snapshot.reusableOwners['parent-foreign'] = 1;
+    });
+
+    projection.dispose();
+    projection.dispose();
+
+    const snapshot = readTuiSnapshot(projectDir);
+    expect(snapshot.reusableByAgent['parent-owned']).toBeUndefined();
+    expect(snapshot.reusableOwners['parent-owned']).toBeUndefined();
+    expect(snapshot.reusableByAgent['parent-foreign']?.fixer?.[0]?.taskID).toBe(
+      'ses_foreign',
+    );
+  });
+
+  test('a timed-out projection write keeps its ownership for the next mutation', () => {
+    const board = new BackgroundJobBoard();
+    const projection = createTuiReusableProjection({ board, projectDir });
+    board.registerLaunch({
+      taskID: 'ses_old',
+      parentSessionID: 'parent-old',
+      agent: 'oracle',
+    });
+    const lockPath = `${getTuiStatePath(projectDir)}.lock`;
+    fs.writeFileSync(
+      lockPath,
+      JSON.stringify({
+        pid: process.pid,
+        token: 'held',
+        createdAt: Date.now(),
+      }),
+    );
+    try {
+      board.drop('ses_old'); // The lock prevents the removal from persisting.
+      expect(
+        readTuiSnapshot(projectDir).reusableByAgent['parent-old'],
+      ).toBeDefined();
+      fs.unlinkSync(lockPath);
+      board.registerLaunch({
+        taskID: 'ses_new',
+        parentSessionID: 'parent-new',
+        agent: 'fixer',
+      });
+      const sections = readTuiSnapshot(projectDir).reusableByAgent;
+      expect(sections['parent-old']).toBeUndefined();
+      expect(sections['parent-new']?.fixer?.[0]?.taskID).toBe('ses_new');
+    } finally {
+      if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+      projection.dispose();
+    }
+  }, 5_000);
+
+  test('two live processes keep their own parent sections across startup and mutations', async () => {
+    const board = new BackgroundJobBoard();
+    const projection = createTuiReusableProjection({ board, projectDir });
+    board.registerLaunch({
+      taskID: 'ses_parent',
+      parentSessionID: 'parent-main',
+      agent: 'oracle',
+    });
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        path.join(import.meta.dir, 'tui-reusable-projection.child.ts'),
+        projectDir,
+      ],
+      {
+        env: { ...process.env, XDG_DATA_HOME: process.env.XDG_DATA_HOME ?? '' },
+        stdin: 'pipe',
+        stdout: 'pipe',
+        stderr: 'pipe',
+      },
+    );
+    const reader = child.stdout.getReader();
+    try {
+      const ready = await Promise.race([
+        reader.read(),
+        Bun.sleep(3_000).then(() => {
+          throw new Error('child startup timed out');
+        }),
+      ]);
+      expect(new TextDecoder().decode(ready.value)).toContain('ready');
+      let sections = readTuiSnapshot(projectDir).reusableByAgent;
+      expect(sections['parent-main']?.oracle?.[0]?.taskID).toBe('ses_parent');
+      expect(sections['parent-child']?.fixer?.[0]?.taskID).toBe('ses_child');
+
+      board.registerLaunch({
+        taskID: 'ses_parent_2',
+        parentSessionID: 'parent-main',
+        agent: 'oracle',
+      });
+      expect(
+        readTuiSnapshot(projectDir).reusableByAgent['parent-child'],
+      ).toBeDefined();
+      child.stdin.write('mutate\n');
+      const mutated = await Promise.race([
+        reader.read(),
+        Bun.sleep(3_000).then(() => {
+          throw new Error('child mutation timed out');
+        }),
+      ]);
+      expect(new TextDecoder().decode(mutated.value)).toContain('mutated');
+      sections = readTuiSnapshot(projectDir).reusableByAgent;
+      expect(sections['parent-main']?.oracle).toHaveLength(2);
+      expect(sections['parent-child']?.fixer).toHaveLength(2);
+
+      board.drop('ses_parent');
+      board.drop('ses_parent_2');
+      sections = readTuiSnapshot(projectDir).reusableByAgent;
+      expect(sections['parent-main']).toBeUndefined();
+      expect(sections['parent-child']?.fixer).toHaveLength(2);
+    } finally {
+      child.stdin.end();
+      child.kill();
+      await child.exited;
+      projection.dispose();
+    }
+  }, 10_000);
+
   test('a mutation that changes nothing does not rewrite the state file', async () => {
     const fsModule = await import('node:fs');
     const board = new BackgroundJobBoard();
@@ -154,21 +488,26 @@ describe('tui-reusable-projection', () => {
       seedReconciled(board, 'ses_1');
       const statePath = getTuiStatePath(projectDir);
 
-      // A mutation that does not change the derived section (a new
-      // running job, not yet reconciled) must not rewrite the file.
+      // Heartbeats change board timestamps, not the stable sidebar section.
+      board.registerLaunch({
+        taskID: 'ses_running_other',
+        parentSessionID: 'parent-2',
+        agent: 'fixer',
+        now: 500,
+      });
+      const originalWrite = fsModule.writeFileSync;
       let writes = 0;
       const writeSpy = spyOn(fsModule, 'writeFileSync').mockImplementation(
         (...args: Parameters<typeof fs.writeFileSync>) => {
-          if (String(args[0]) === statePath) writes += 1;
-          return fs.writeFileSync(...args);
+          if (String(args[0]).startsWith(path.dirname(statePath))) writes += 1;
+          return originalWrite(...args);
         },
       );
       try {
-        board.registerLaunch({
+        board.updateStatus({
           taskID: 'ses_running_other',
-          parentSessionID: 'parent-2',
-          agent: 'fixer',
-          now: 500,
+          state: 'running',
+          now: 600,
         });
         expect(writes).toBe(0);
       } finally {

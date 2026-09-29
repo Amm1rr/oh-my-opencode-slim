@@ -200,3 +200,22 @@ type _waitMirrorCompletion = Expect<
     ReturnType<SessionDomain['wait']>
   >
 >;
+
+/** The runtime-profile bridge relies on the context hook's mutable
+ * `options` record (temperature/provider options) and on session.switchModel
+ * for model/variant. Pin both to the official surface so an upstream change
+ * fails typecheck here instead of silently dropping profile application. */
+type _contextOptions = Expect<
+  SessionHooks['context'] extends { options: Record<string, unknown> }
+    ? true
+    : false
+>;
+type SessionSwitchModelInput = Parameters<SessionDomain['switchModel']>[0];
+type _sessionSwitchModelFields = Expect<
+  SessionSwitchModelInput extends {
+    sessionID: string;
+    model: { id: string; providerID: string; variant?: string };
+  }
+    ? true
+    : false
+>;

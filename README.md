@@ -54,6 +54,8 @@ The main idea is simple: instead of forcing one model to do everything, the plug
 - **[Fully customizable](docs/configuration.md)** - custom agents, prompt
   overrides, per-agent skill/MCP permissions, and
   [project-local customization](docs/project-local-customization.md).
+- **[Marketplace packages](docs/marketplace.md)** - install and manage community
+  agents; package changes apply only after reloading OpenCode.
 
 ### What Users Say
 
@@ -155,7 +157,7 @@ Then:
 > It's **recommended** to understand how background orchestration works. The **[Orchestrator prompt](https://github.com/alvinunreal/oh-my-opencode-slim/blob/master/src/agents/orchestrator.ts#L28)** contains the scheduler rules, specialist routing logic, and thresholds for when work should be assigned to background agents. You can always delegate manually by calling a subagent via: `@agentName <task>`
 
 > [!TIP]
-> Because background agents are now the default workflow, it is **highly recommended** to enable and configure **[Multiplexer Integration](docs/multiplexer-integration.md)**. It automatically opens each agent in a dedicated Tmux, Zellij, Herdr, cmux, or kitty pane, so you can watch specialists work live while the Orchestrator continues coordinating the session.
+> Because background agents are now the default workflow, it is **highly recommended** to enable and configure **[Multiplexer Integration](docs/multiplexer-integration.md)**. It automatically opens each agent in a dedicated Tmux, Zellij, Herdr, cmux, or kitty pane, so you can watch specialists work live while the Orchestrator continues coordinating the session. On OpenCode v2 hosts pane creation is unavailable by design: the setting is ignored there (one diagnostic per process; v2's native subagent UX replaces panes).
 
 The default generated configuration includes both `openai` and `opencode-go` presets.
 
@@ -178,7 +180,12 @@ The default generated configuration includes both `openai` and `opencode-go` pre
 
 Presets can inherit from one base preset with `extends`: a `design` preset can
 extend `base` and override only its designer model. Changes are persisted by
-`/preset` and take effect after an OpenCode reload. See
+`/preset`. On v2 hosts the saved/applied preset's inference fields (`model`,
+`variant`, `temperature`, `options`) apply to new child dispatches (frozen for
+each child before its first request) and the sidebar once the server-side
+config watcher has refreshed them; a malformed config keeps the last-known-good
+state, and existing sessions plus prompt/tool/policy/skill/MCP changes stay
+frozen until a full reload; on v1 hosts reload OpenCode. See
 [Configuration](docs/configuration.md#preset-inheritance) for the inheritance
 example and precedence rules.
 
@@ -651,6 +658,7 @@ Use this section as a map: start with installation, then jump to features, confi
 | **[Installation Guide](docs/installation.md)** | Install the plugin, use CLI flags, reset config, and troubleshoot setup |
 | **[OpenCode v2 Compatibility](docs/opencode-v2-compatibility.md)** | Run the same plugin on `opencode2`: feature matrix, v2.0.x compatibility baseline, version pinning |
 | **[Configuration](docs/configuration.md)** | Config file locations, JSONC support, prompt overrides, and full option reference |
+| **[Marketplace](docs/marketplace.md)** | Install, inspect, activate, and update marketplace agent packages |
 | **[Project Customization](docs/project-local-customization.md)** | Repository-specific custom agents, prompt overrides, per-agent skills, and precedence |
 | **[Background Orchestration](docs/background-orchestration.md)** | Scheduler-first orchestrator model built around native background subagents |
 | **[Maintainer Guide](docs/maintainers.md)** | Issue triage rules, label meanings, support routing, and repo maintenance workflow |
@@ -667,7 +675,7 @@ Use this section as a map: start with installation, then jump to features, confi
   <p><sub>Every merged contribution leaves a mark on the realm.</sub></p>
 
   <!-- ALL-CONTRIBUTORS-BADGE:START - Do not remove or modify this section -->
-[![All Contributors](https://img.shields.io/badge/all_contributors-121-orange.svg?style=flat-square)](#contributors-)
+[![All Contributors](https://img.shields.io/badge/all_contributors-123-orange.svg?style=flat-square)](#contributors-)
 <!-- ALL-CONTRIBUTORS-BADGE:END -->
 </div>
 
@@ -840,6 +848,8 @@ Use this section as a map: start with installation, then jump to features, confi
     </tr>
     <tr>
       <td align="center" valign="top" width="16.66%"><a href="https://github.com/wirsbf"><img src="https://avatars.githubusercontent.com/u/144008530?v=4?s=100" width="100px;" alt="wirsbf"/><br /><sub><b>wirsbf</b></sub></a><br /><a href="https://github.com/alvinunreal/oh-my-opencode-slim/commits?author=wirsbf" title="Code">💻</a></td>
+      <td align="center" valign="top" width="16.66%"><a href="https://github.com/maqifrnswa"><img src="https://avatars.githubusercontent.com/u/424153?v=4?s=100" width="100px;" alt="Scott Howard"/><br /><sub><b>Scott Howard</b></sub></a><br /><a href="https://github.com/alvinunreal/oh-my-opencode-slim/commits?author=maqifrnswa" title="Code">💻</a></td>
+      <td align="center" valign="top" width="16.66%"><a href="https://github.com/ananas-wonders"><img src="https://avatars.githubusercontent.com/u/7282452?v=4?s=100" width="100px;" alt="Ananas"/><br /><sub><b>Ananas</b></sub></a><br /><a href="https://github.com/alvinunreal/oh-my-opencode-slim/commits?author=ananas-wonders" title="Code">💻</a></td>
     </tr>
   </tbody>
 </table>

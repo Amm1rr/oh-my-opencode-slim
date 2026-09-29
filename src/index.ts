@@ -1,12 +1,16 @@
-import type { Plugin, ToolDefinition } from '@opencode-ai/plugin';
+import type { Hooks, Plugin, ToolDefinition } from '@opencode-ai/plugin';
 import {
   type AdmissionRuntimeLease,
   acquireAdmissionRuntime,
 } from './admission-runtime';
 import {
+  type AgentModelProjection,
+  type AgentRuntimeProfiles,
   createAgents,
   getAgentConfigsFromDefinitions,
   isSubagent,
+  mergeHostAgentConfigs,
+  projectAgentRuntimeState,
   resolvePrimaryModelValue,
 } from './agents';
 import { buildOrchestratorPrompt } from './agents/orchestrator';
@@ -18,11 +22,12 @@ import {
 import type { RegistryFactoryBridge } from './agents/registry-bridge';
 import { CompanionManager } from './companion/manager';
 import { ensureCompanionVersion } from './companion/updater';
-import { deepMerge, loadPluginConfig } from './config';
+import { deepMerge, loadPluginConfig, type Preset } from './config';
 import {
   DEFAULT_MAX_SESSION_METADATA_ENTRIES,
   TOAST_DURATION_MS,
 } from './config/constants';
+import type { ConfigLoadWarningKind } from './config/loader';
 import { RuntimeConfig } from './config/runtime';
 import { getBuildInfo } from './generated/build-info';
 import { HEALTH_CHECK, minimumExpectedToolCount } from './health-check';
@@ -42,6 +47,7 @@ import {
   createTaskSessionManagerHook,
   createToolLoopGuardHook,
   ForegroundFallbackManager,
+  type ForegroundFallbackModel,
   formatChildInputWaitDelta,
   formatStoppedJobDelta,
   SessionLifecycle,
@@ -65,12 +71,16 @@ import {
   type MessageWithParts,
 } from './hooks/types';
 import { createInterviewManager } from './interview';
+import { discoverPreflightSkills } from './marketplace/preflight';
+import { MarketplaceService } from './marketplace/service';
+import { resolveDesiredMarketplacePackageIds } from './marketplace/status';
 import { createBuiltinMcps } from './mcp';
 import {
   ast_grep_replace,
   ast_grep_search,
   createAcpRunTool,
   createCancelTaskTool,
+  createMarketplaceTools,
   createTaskMessageTool,
   createTaskReplyTool,
   createTaskResultTool,
@@ -78,6 +88,7 @@ import {
   createTaskStatusTool,
   createWaitForUserTool,
   createWebfetchTool,
+  resolveFinalizedOrchestratorIdentities,
 } from './tools';
 import { pickAgentModelRef } from './tools/smartfetch/secondary-model';
 import {
@@ -93,6 +104,7 @@ import {
   recordTuiAgentModel,
   recordTuiAgentModels,
   recordTuiSessionParent,
+  type TuiSessionDetails,
   updateTuiSessionDetails,
 } from './tui-state';
 import {
@@ -166,6 +178,34 @@ const IMAGE_SKIPPED_DEBOUNCE_MS = 60_000;
 // re-runs, it checks this variable and applies the runtime preset instead
 // of the config file's preset. State lives in RuntimeConfig.
 
+/**
+ * Result of the v2-only `v2.refreshProfiles` hook. `ok: true` carries the
+ * freshly resolved inference profiles plus the sidebar projection that was
+ * already written; `ok: false` carries the failure reason and guarantees no
+ * state was swapped.
+ */
+export type V2ProfileRefreshResult =
+  | {
+      ok: true;
+      profiles: AgentRuntimeProfiles;
+      projection: AgentModelProjection;
+    }
+  | { ok: false; reason: string };
+
+/**
+ * Config-load warning kinds that make a live profile refresh a hard failure.
+ *
+ * `loadPluginConfig` is deliberately non-fatal: malformed JSON or a schema
+ * violation falls back to `{}` and reports through `onWarning`. A refresh
+ * that ignored those warnings would report ok and swap the profile table +
+ * sidebar projection to defaults (silently wiping every agent model). These
+ * kinds therefore abort the refresh before any state is swapped; actionable
+ * warning-only kinds (`missing-preset`, `deprecated-key`, `normalized`)
+ * stay non-fatal.
+ */
+export const HARD_PROFILE_REFRESH_WARNING_KINDS: ReadonlySet<ConfigLoadWarningKind> =
+  new Set(['invalid-json', 'invalid-schema', 'read-error']);
+
 export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   const sessionId = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15);
   initLogger(sessionId);
@@ -187,6 +227,11 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   let agentDefs: ReturnType<typeof createAgents>;
   let agents: ReturnType<typeof getAgentConfigsFromDefinitions>;
   let resolvedAgentRegistry: ResolvedAgentRegistry | undefined;
+  let latestHostSnapshot: RegistryHostSnapshot | undefined;
+  let hostSnapshotProvenance: 'unknown' | 'clean' = 'unknown';
+  let latestNativePermissionsByAgent: Readonly<
+    Record<string, readonly import('./v2/types').V2PermissionRule[]>
+  > = {};
   let registryRetired = false;
   let mcps: ReturnType<typeof createBuiltinMcps>;
   // Host flavor ('v2' on OpenCode v2 hosts via the client shim, undefined on
@@ -243,10 +288,8 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // arrived before or after busy; both orders converge here or via the
     // coordinator's identity listener).
     const alias = backgroundJobBoard?.get(sessionID)?.alias;
-    const model = sessionMetadata.getModel(sessionID);
-    const details = {
+    const details: TuiSessionDetails = {
       ...(alias ? { alias } : {}),
-      ...(model ? { model } : {}),
       ...(status ? { status } : {}),
     };
     recordTuiAgentActivity(
@@ -348,6 +391,8 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
 
   let chatHeadersHook: ReturnType<typeof createChatHeadersHook>;
   let foregroundFallback: ForegroundFallbackManager;
+  let foregroundFallbackChains: Record<string, ForegroundFallbackModel[]> = {};
+  let selectedMarketplacePackageIds: readonly string[] = [];
   let deepworkCommandHook: ReturnType<typeof createDeepworkCommandHook>;
   let reflectCommandHook: ReturnType<typeof createReflectCommandHook>;
   let loopCommandHook: ReturnType<typeof createLoopCommandHook>;
@@ -361,6 +406,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   let jsonErrorRecoveryAfter: (i: unknown, o: unknown) => Promise<void>;
   let taskSessionManagerAfter: (i: unknown, o: unknown) => Promise<void>;
   let backgroundJobBoard: BackgroundJobBoard;
+  let tuiReusableProjection:
+    | ReturnType<typeof createTuiReusableProjection>
+    | undefined;
   let backgroundJobSupervisor: BackgroundJobSupervisor;
   let backgroundTaskConcurrency: BackgroundTaskConcurrency;
   let admissionRuntimeLease: AdmissionRuntimeLease | undefined;
@@ -480,20 +528,32 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // factory-local state, while module-level runtime preset state may persist.
     // Reapply that persisted preset so each fresh generation creates agents
     // with the correct models.
-    const runtimePreset = RuntimeConfig.get(ctx.directory).getRuntimePreset();
-    if (runtimePreset && config.presets?.[runtimePreset]) {
+    const runtimeConfig = RuntimeConfig.get(ctx.directory);
+    const previousRuntimePreset = runtimeConfig.getRuntimePreset();
+    const runtimePreset = runtimeConfig.resolveRuntimePreset(config);
+    if (runtimePreset) {
       config.preset = runtimePreset;
       // Re-merge runtime preset into config.agents (loadPluginConfig
       // already merged the config-file preset, not the runtime one).
       // Runtime preset is override so it wins over config-file preset.
-      const presetAgents = config.presets[runtimePreset];
+      const presetAgents = config.presets?.[runtimePreset];
+      if (!presetAgents) {
+        throw new Error(
+          `Resolved runtime preset '${runtimePreset}' is missing`,
+        );
+      }
       config.agents = deepMerge(config.agents, presetAgents);
-    } else if (runtimePreset) {
+    } else if (previousRuntimePreset) {
       // Preset was deleted from config since last switch - clear stale state
-      RuntimeConfig.get(ctx.directory).setRuntimePreset(null);
+      runtimeConfig.setRuntimePreset(null);
     }
 
     runtime = RuntimeConfig.get(ctx.directory);
+    const activePresetName = runtime.getRuntimePreset() ?? config.preset;
+    selectedMarketplacePackageIds = resolveDesiredMarketplacePackageIds(
+      config,
+      activePresetName,
+    );
     rewriteDisplayNameMentions = createDisplayNameMentionRewriter(runtime);
     // Host flavor marker ('v2' on OpenCode v2 hosts, set by the v2 client
     // shim; absent on v1). Threads the native delegation vocabulary into
@@ -561,12 +621,10 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // clickable sidebar can label active subagent sessions. Best-effort:
     // a failed tui-state write must never fail a launch.
     //
-    // Generation-scoped by construction: the projector listens on THIS
-    // generation's board, which dies with the generation, so its listener
-    // is never notified after dispose and no explicit unhook is wired
-    // into the instance-disposed path. Revisit only if a board ever
-    // outlives its generation.
-    createTuiReusableProjection({
+    // Each generation must retract its own projected sections on dispose:
+    // a reload reuses this PID, so the startup dead-owner sweep retains
+    // the previous generation's entries until explicitly removed.
+    tuiReusableProjection = createTuiReusableProjection({
       board: backgroundJobBoard,
       projectDir: ctx.directory,
     });
@@ -705,9 +763,24 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       backgroundJobBoard: backgroundJobCoordinator,
       revivedRunTracker,
     });
+    // The current v2 host interface has no per-turn/atomic conditional switch,
+    // so an in-flight switch can commit on the host after a newer user turn has
+    // taken over. Disable the manager's automatic intervention entirely on v2
+    // (unregistering only the retry hook is not enough: session.error,
+    // message.updated and session.status retry all reach the replay path).
+    const fallbackEnabled =
+      runtime.fallback.enabled !== false && hostFlavor !== 'v2';
+    if (runtime.fallback.enabled !== false && hostFlavor === 'v2') {
+      // Deterministic notice: no timestamps or per-call ids. Do not log when
+      // the user explicitly disabled fallback.
+      log(
+        '[foreground-fallback] automatic fallback disabled on v2 hosts (no atomic per-turn model switch)',
+      );
+    }
+    foregroundFallbackChains = runtime.modelArrays;
     foregroundFallback = new ForegroundFallbackManager(
-      runtime.runtimeChains,
-      runtime.fallback.enabled !== false,
+      foregroundFallbackChains,
+      fallbackEnabled,
       ctx,
       runtime.fallback.maxRetries,
       sessionLifecycle,
@@ -1102,7 +1175,11 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       );
     }
 
-    toolCount = Object.keys(tools).length;
+    toolCount =
+      Object.keys(tools).length +
+      ['marketplace_inspect', 'marketplace_manage'].filter(
+        (name) => !runtime.disabledTools.includes(name),
+      ).length;
   } catch (err) {
     terminalGate?.dispose();
     admissionRuntimeLease?.release();
@@ -1211,9 +1288,107 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     return undefined;
   }
 
-  const registryBridge: RegistryFactoryBridge = {
+  let registryBridge: RegistryFactoryBridge;
+  const marketplaceService = new MarketplaceService({
+    projectDir: ctx.directory,
+    pluginVersion: getBuildInfo().version,
+    getLivePackages: () => {
+      if (registryRetired || !resolvedAgentRegistry) return undefined;
+      return registryBridge.requireRegistry().marketplacePackages;
+    },
+    getPresetOverride: () => runtime.getRuntimePreset() ?? undefined,
+    getDesiredState: (packageInspection) => {
+      const freshConfig = loadPluginConfig(ctx.directory, { silent: true });
+      const runtimePreset = runtime.resolveRuntimePreset(freshConfig);
+      const desiredPackageIds = resolveDesiredMarketplacePackageIds(
+        freshConfig,
+        runtimePreset ?? undefined,
+      );
+      if (hostSnapshotProvenance !== 'clean' || !latestHostSnapshot) {
+        return {
+          packageIds: desiredPackageIds,
+          error:
+            'The current host agent snapshot is not trustworthy for desired marketplace status',
+        };
+      }
+      if (
+        packageInspection.lockfileError ||
+        packageInspection.operationalError
+      ) {
+        return {
+          packageIds: desiredPackageIds,
+          error:
+            packageInspection.lockfileError ??
+            packageInspection.operationalError ??
+            'Marketplace package inspection is incomplete',
+        };
+      }
+      const installedPackages = new Map(
+        packageInspection.packages.map((stored) => [
+          stored.manifest.id,
+          stored,
+        ]),
+      );
+      const readOnlyActivationStore = {
+        loadSelected(ids: readonly string[]) {
+          const packages = new Map();
+          const errors = new Map<string, Error>();
+          for (const id of ids) {
+            const stored = installedPackages.get(id);
+            if (stored) packages.set(id, stored);
+            else
+              errors.set(id, new Error(`${id} is not installed or verified`));
+          }
+          return { packages, errors };
+        },
+      };
+      const freshRuntime = RuntimeConfig.createDetached(
+        ctx.directory,
+        freshConfig,
+      );
+      freshRuntime.captureHostConfig(latestHostSnapshot ?? {});
+      if (runtimePreset) freshRuntime.setRuntimePreset(runtimePreset);
+      const freshPluginMcps = createBuiltinMcps(freshRuntime.disabledMcps);
+      try {
+        const freshRegistry = buildResolvedAgentRegistry(freshRuntime, {
+          hostSnapshot: latestHostSnapshot,
+          nativePermissionsByAgent: latestNativePermissionsByAgent,
+          projectDirectory: ctx.directory,
+          hostFlavor,
+          pluginMcps: freshPluginMcps,
+          marketplace: {
+            selectedPackageIds: desiredPackageIds,
+            store: readOnlyActivationStore,
+            pluginVersion: getBuildInfo().version,
+            availableSkillNames: discoverPreflightSkills(
+              freshRuntime,
+              ctx.directory,
+            ),
+          },
+        });
+        return {
+          packageIds: desiredPackageIds,
+          packages: freshRegistry.marketplacePackages,
+        };
+      } catch (error) {
+        return {
+          packageIds: desiredPackageIds,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    },
+  });
+  registryBridge = {
+    marketplaceService,
     finalize(hostSnapshot, nativePermissionsByAgent) {
       if (registryRetired) throw new Error('Agent registry is retired');
+      if (!latestHostSnapshot) {
+        latestHostSnapshot = structuredClone(hostSnapshot);
+        latestNativePermissionsByAgent = structuredClone(
+          nativePermissionsByAgent,
+        );
+        hostSnapshotProvenance = 'clean';
+      }
       if (!resolvedAgentRegistry) {
         RuntimeConfig.get(ctx.directory).captureHostConfig(hostSnapshot);
         resolvedAgentRegistry = buildResolvedAgentRegistry(runtime, {
@@ -1223,10 +1398,30 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           hostFlavor,
           pluginMcps: mcps,
           nativePermissionsByAgent,
+          marketplace: {
+            selectedPackageIds: selectedMarketplacePackageIds,
+            store: marketplaceService.store,
+            pluginVersion: getBuildInfo().version,
+            availableSkillNames: selectedMarketplacePackageIds.length
+              ? discoverPreflightSkills(runtime, ctx.directory)
+              : [],
+          },
           onHostModelSelected: (agentName) => {
             runtime.everModelSwitched(agentName);
           },
         });
+        for (const [name, candidates] of Object.entries(
+          resolvedAgentRegistry.modelCandidates,
+        )) {
+          if (candidates.length > 1) {
+            foregroundFallbackChains[name] = candidates.map(
+              ({ id, variant }) => ({
+                id,
+                ...(variant ? { variant } : {}),
+              }),
+            );
+          }
+        }
         for (const [agentName, models] of Object.entries(runtime.modelArrays)) {
           if (
             models.length > 0 &&
@@ -1255,10 +1450,129 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       registryRetired = true;
     },
   };
+  const marketplaceTools = createMarketplaceTools({
+    service: marketplaceService,
+    cwd: ctx.directory,
+    getOrchestratorIdentities: () => {
+      const registry = registryBridge.requireRegistry();
+      return resolveFinalizedOrchestratorIdentities(registry);
+    },
+  });
+  if (!runtime.disabledTools.includes('marketplace_inspect')) {
+    tools.marketplace_inspect = marketplaceTools.marketplace_inspect;
+  }
+  if (!runtime.disabledTools.includes('marketplace_manage')) {
+    tools.marketplace_manage = marketplaceTools.marketplace_manage;
+  }
+  toolCount = Object.keys(tools).length;
 
-  return {
+  /**
+   * Re-read the plugin config from disk and resolve ONLY the
+   * inference/runtime profile fields (model, variant, temperature, provider
+   * options) for each agent, plus the sidebar model projection. The v2
+   * adapter consumes this through the `v2.refreshProfiles` hook when a
+   * watched config file changes or a preset is applied.
+   *
+   * This is deliberately NOT a global agent reload: the session-frozen
+   * surfaces (agent definitions, prompts, tools, permissions, skills, MCPs)
+   * are never rebuilt and the host agent registry is never reloaded. It is
+   * read-only on factory-local state — a throwaway `RuntimeConfig.create`
+   * view resolves the fresh file against the captured host layer, so running
+   * generation state (`config`, `runtime`, `agentDefs`, `agents`,
+   * `finalHostAgentConfig`) is untouched. New child sessions receive the
+   * refreshed inference fields through the v2 session-profile bridge; the
+   * sidebar is rewritten through the existing `recordTuiAgentModels` writer.
+   *
+   * Returns a discriminated result; a failure never claims success and never
+   * swaps state (the caller decides what to do with the reason). A config
+   * load that produced `invalid-json`/`invalid-schema`/`read-error` warnings
+   * is a hard failure: the loader would otherwise fall back to `{}` and the
+   * "refresh" would report ok while wiping every profile/agent model.
+   */
+  const refreshProfilesFromDisk = async (options?: {
+    /** Startup has no last-good table yet; use the loader's normal fallback
+     * config so malformed user input remains non-fatal for this generation. */
+    allowInvalidFallback?: boolean;
+  }): Promise<V2ProfileRefreshResult> => {
+    try {
+      // Malformed config handling: collect warnings and abort BEFORE any
+      // resolution or sidebar rewrite when the load is invalid. The loader
+      // falls back to `{}` for invalid JSON/schema, which would otherwise
+      // report a successful "refresh" that wipes every profile/model.
+      const hardWarnings: string[] = [];
+      const freshConfig = loadPluginConfig(ctx.directory, {
+        silent: true,
+        onWarning: (warning) => {
+          if (HARD_PROFILE_REFRESH_WARNING_KINDS.has(warning.kind)) {
+            hardWarnings.push(
+              `${warning.kind} (${warning.path}): ${warning.message}`,
+            );
+          }
+        },
+      });
+      if (hardWarnings.length > 0 && !options?.allowInvalidFallback) {
+        const reason = `config load failed: ${hardWarnings.join('; ')}`;
+        log('[plugin] runtime profile refresh from disk failed', reason);
+        return { ok: false, reason };
+      }
+      const freshRuntime = RuntimeConfig.create(ctx.directory, freshConfig);
+      const hostSnapshot = runtime.host();
+      if (hostSnapshot) {
+        freshRuntime.captureHostConfig(hostSnapshot);
+      }
+      // Mirror factory init: a persisted runtime preset (in-session switch)
+      // survives the reload and wins over the config-file preset.
+      const runtimePresetName = runtime.getRuntimePreset();
+      let runtimePreset: Preset | undefined;
+      if (runtimePresetName && freshConfig.presets?.[runtimePresetName]) {
+        freshRuntime.setRuntimePreset(runtimePresetName);
+        runtimePreset = freshConfig.presets[runtimePresetName] as Preset;
+      }
+      const freshAgentDefs = createAgents(freshRuntime, {
+        projectDirectory: ctx.directory,
+        hostFlavor,
+      });
+      const freshAgents = getAgentConfigsFromDefinitions(
+        freshRuntime,
+        freshAgentDefs,
+      );
+      const mergedAgents = mergeHostAgentConfigs(
+        freshAgents as Record<string, Record<string, unknown>>,
+        hostSnapshot?.agent,
+      );
+      const { profiles, projection } = projectAgentRuntimeState({
+        runtime: freshRuntime,
+        agentDefs: freshAgentDefs,
+        agentConfigs: mergedAgents,
+        runtimePreset,
+      });
+      // Sidebar projection must land before the profiles are reported as
+      // refreshed (the caller swaps only on an ok result).
+      recordTuiAgentModels(
+        {
+          agentModels: projection.agentModels,
+          agentVariants: projection.agentVariants,
+        },
+        ctx.directory,
+      );
+      log('[plugin] runtime profiles refreshed from disk', {
+        agents: Object.keys(profiles).length,
+      });
+      return { ok: true, profiles, projection };
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      log('[plugin] runtime profile refresh from disk failed', reason);
+      return { ok: false, reason };
+    }
+  };
+
+  const hooks = {
     registryBridge,
     name: 'oh-my-opencode-slim',
+    // v2-only extension hook: re-read the plugin config and resolve the
+    // inference/runtime profiles for new child sessions + the sidebar.
+    // Unknown to v1 hosts, consumed by src/v2/setup.ts.
+    'v2.refreshProfiles': refreshProfilesFromDisk,
     'v2.session.retry':
       foregroundFallback.handleV2Retry.bind(foregroundFallback),
 
@@ -1273,6 +1587,8 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         ? undefined
         : (structuredClone(opencodeConfig) as RegistryHostSnapshot);
       if (preMutationHostSnapshot) {
+        latestHostSnapshot = preMutationHostSnapshot;
+        hostSnapshotProvenance = 'clean';
         RuntimeConfig.get(ctx.directory).captureHostConfig(
           preMutationHostSnapshot,
         );
@@ -1476,15 +1792,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           if (!internalAdmission) {
             sessionMetadata.setModel(info.sessionID, model);
           }
-          // Per-session sidebar detail: the model actually observed for
-          // this session (two same-agent sessions may differ). Published
-          // regardless of admission origin: the executing model is a
-          // runtime fact, not selection tracking.
-          updateTuiSessionDetails(
-            info.sessionID,
-            { model },
-            tuiActivityDirectory(info.sessionID),
-          );
           // Managed background-task sessions are identified by their session
           // ID. If the model serving one changed (fallback re-prompt, runtime
           // switch), migrate the admission accounting so provider/model caps
@@ -1642,6 +1949,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       clearAllWakeSessions();
       await interviewManager.dispose();
       clearTuiActivities();
+      tuiReusableProjection?.dispose();
       // Explicitly release this generation's companion ownership: a
       // reloaded generation only replaces the active manager at its own
       // onLoad, and if it fails before that the detached companion would
@@ -1845,14 +2153,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         if (!internalAdmission) {
           sessionMetadata.setModel(input.sessionID, model);
         }
-        // v2 synthesizes message.updated without provider/model; publish
-        // the observed model here so sessionDetails is not empty for the
-        // entire run. Only-if-active: idle sessions are not resurrected.
-        updateTuiSessionDetails(
-          input.sessionID,
-          { model },
-          tuiActivityDirectory(input.sessionID),
-        );
         backgroundTaskConcurrency.migrateTask(input.sessionID, model);
       }
       taskSessionManagerHook.observeChatMessage(input, output);
@@ -1894,16 +2194,27 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         const orchestratorDef = agentDefs.find(
           (a) => a.name === 'orchestrator',
         );
+        const finalizedOrchestratorName =
+          resolvedAgentRegistry?.identities.orchestrator ?? 'orchestrator';
+        const finalizedOrchestrator =
+          (resolvedAgentRegistry?.finalAgentConfig[finalizedOrchestratorName] as
+            | Record<string, unknown>
+            | undefined) ??
+          (resolvedAgentRegistry?.finalAgentConfig.orchestrator as
+            | Record<string, unknown>
+            | undefined);
         const orchestratorPrompt =
-          typeof orchestratorDef?.config?.prompt === 'string'
-            ? orchestratorDef.config.prompt
-            : buildOrchestratorPrompt(
-                runtime.disabledAgents,
-                undefined,
-                true,
-                true,
-                hostFlavor,
-              );
+          typeof finalizedOrchestrator?.prompt === 'string'
+            ? finalizedOrchestrator.prompt
+            : typeof orchestratorDef?.config?.prompt === 'string'
+              ? orchestratorDef.config.prompt
+              : buildOrchestratorPrompt(
+                  runtime.disabledAgents,
+                  undefined,
+                  true,
+                  true,
+                  hostFlavor,
+                );
         // Dedup by the EFFECTIVE prompt, not by default-prompt markers:
         // a custom replacement without `<Role>` previously slipped past
         // the marker check and was appended twice (P + host + P).
@@ -2021,7 +2332,11 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       );
       await taskSessionManagerAfter(input, output);
     },
+  } as Hooks & {
+    'v2.refreshProfiles': typeof refreshProfilesFromDisk;
   };
+
+  return hooks;
 };
 
 export default {

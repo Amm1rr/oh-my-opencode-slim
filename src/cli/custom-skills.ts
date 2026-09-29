@@ -30,7 +30,7 @@ function parseFrontmatter(text: string): Record<string, string> {
 }
 
 /** Strip the frontmatter block so `content` is prompt body only. */
-function stripFrontmatter(text: string): string {
+export function stripFrontmatter(text: string): string {
   return text.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '');
 }
 

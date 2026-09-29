@@ -22,6 +22,10 @@ their wire formats differ. The registry contract validates package identity,
 version compatibility, deterministic artifact paths, digests, and ordered
 registry entries.
 
+V3 routing text lines, including `delegateWhen`, allow up to 256 characters.
+This provides headroom over the published 164- and 170-character routing lines
+while keeping individual rendered routing values bounded.
+
 ## Canonical bundle digest
 
 Parse an input with the matching V2 or V3 package-bundle schema before
@@ -57,5 +61,6 @@ Semantic Versioning precedence, including prereleases. An exact version pin
 selects that version, and `minimumVersion` is an exclusive lower bound. These
 rules apply to both V2 and V3 registry indexes.
 
-This is a data-contract export only. It does not install or activate packages,
-provide a marketplace CLI, or expose a registry lifecycle service.
+This subpath remains a data-contract export: it does not itself install or
+activate packages. The plugin lifecycle service and CLI are documented in the
+[Marketplace guide](marketplace.md).

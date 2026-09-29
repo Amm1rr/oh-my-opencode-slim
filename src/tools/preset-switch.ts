@@ -12,8 +12,28 @@ import { deepMerge, normalizePreset, PresetResolutionError } from '../config';
 import { AGENT_ALIASES } from '../config/constants';
 import { findPluginConfigPaths } from '../config/loader';
 import { resolvePresetDefinition } from '../config/presets';
+import {
+  isPrototypeSensitiveName,
+  ownPresetValue,
+  withAgentOverride,
+  withoutAgentOverride,
+} from '../preset-editor-domain';
 
 export type PresetMap = Record<string, PresetInput>;
+
+/** Own-property-only write; a `__proto__` key can never touch the prototype. */
+function setOwn(
+  record: Record<string, PresetInput>,
+  name: string,
+  value: PresetInput,
+): void {
+  Object.defineProperty(record, name, {
+    value,
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
+}
 
 function interpolateConfigEnvironment(raw: string): string {
   return raw.replace(
@@ -96,7 +116,7 @@ export function switchPresetOnDisk(
     ...configuredPresets,
     ...((config.presets ?? {}) as PresetMap),
   };
-  const rawPreset = presets[presetName];
+  const rawPreset = ownPresetValue(presets, presetName);
 
   if (!rawPreset) {
     const available = Object.keys(presets);
@@ -449,6 +469,8 @@ export function readProjectConfig(
 
 /**
  * Retrieve all raw presets configured across user and project config files.
+ * Own-property-only reads and writes keep pre-existing prototype-sensitive
+ * names (`__proto__`, `constructor`) from resolving through the prototype.
  */
 export function getAllConfiguredPresets(
   directory: string,
@@ -462,10 +484,16 @@ export function getAllConfiguredPresets(
     !Array.isArray(projectConfig.presets)
       ? (projectConfig.presets as Record<string, PresetInput>)
       : {};
-  return (deepMerge(userPresets, projectPresets) ?? {}) as Record<
+  const merged = (deepMerge(userPresets, projectPresets) ?? {}) as Record<
     string,
     PresetInput
   >;
+  const safe: Record<string, PresetInput> = {};
+  for (const name of Object.keys(merged)) {
+    const value = ownPresetValue(merged, name);
+    if (value !== undefined) setOwn(safe, name, value);
+  }
+  return safe;
 }
 
 export type PresetSource = 'project' | 'user' | 'none';
@@ -502,7 +530,7 @@ export function getEditablePreset(
   name: string,
 ): PresetDefinition {
   const userPresets = readUserPresets(directory);
-  const raw = userPresets[name];
+  const raw = ownPresetValue(userPresets, name);
   if (raw !== undefined) {
     return normalizePreset(raw);
   }
@@ -514,7 +542,7 @@ export function getEditablePreset(
     !Array.isArray(projectConfig.presets)
       ? (projectConfig.presets as Record<string, PresetInput>)
       : {};
-  const projectRaw = projectPresets[name];
+  const projectRaw = ownPresetValue(projectPresets, name);
   if (projectRaw !== undefined) {
     return normalizePreset(projectRaw);
   }
@@ -568,7 +596,7 @@ export function wouldCreatePresetCycle(
     }
     visited.add(current);
 
-    const definition = presets[current];
+    const definition = ownPresetValue(presets, current);
     if (!definition) {
       break;
     }
@@ -595,6 +623,11 @@ export function writePreset(
   preset: Preset | PresetDefinition,
   options: { mergeChangesFrom?: PresetDefinition } = {},
 ): boolean {
+  if (isPrototypeSensitiveName(name) || name.startsWith('__omo_')) {
+    // New names are validated by the editors before they get here; this is
+    // defense-in-depth for direct callers.
+    return false;
+  }
   try {
     const { userConfigPath } = findPluginConfigPaths(directory);
     if (!userConfigPath) return false;
@@ -738,13 +771,13 @@ export function writePreset(
       }
       if (Object.keys(normalized.agents).length === 0) {
         if (normalized.extends !== undefined) {
-          presets[name] = {
+          setOwn(presets as PresetMap, name, {
             extends: normalized.extends,
             agents: {},
             ...(normalized.marketplace !== undefined
               ? { marketplace: normalized.marketplace }
               : {}),
-          };
+          });
           return { ...config, presets };
         }
 
@@ -754,12 +787,15 @@ export function writePreset(
         if (normalized.marketplace !== undefined) {
           flat.marketplace = normalized.marketplace;
         }
-        presets[name] = flat;
+        setOwn(presets as PresetMap, name, flat as PresetInput);
       } else {
-        presets[name] =
+        setOwn(
+          presets as PresetMap,
+          name,
           normalized.extends || normalized.marketplace !== undefined
             ? normalized
-            : normalized.agents;
+            : normalized.agents,
+        );
       }
       return { ...config, presets };
     });
@@ -775,6 +811,11 @@ export function writePreset(
  * or if other presets in the editable config depend on it.
  */
 export function deletePreset(directory: string, name: string): boolean {
+  if (isPrototypeSensitiveName(name)) {
+    // Pre-existing prototype-sensitive entries stay applicable but are
+    // never mutated through the editor (own-property operations only).
+    return false;
+  }
   try {
     const { userConfigPath } = findPluginConfigPaths(directory);
     if (!userConfigPath) return false;
@@ -809,7 +850,7 @@ export function setAgentOverride(
   agentName: string,
   override: AgentOverrideConfig,
 ): Preset {
-  return { ...preset, [agentName]: override };
+  return withAgentOverride(preset, agentName, override);
 }
 
 /**
@@ -820,8 +861,5 @@ export function removeAgentFromPreset(
   preset: Preset,
   agentName: string,
 ): Preset {
-  if (!(agentName in preset)) return preset;
-  const next = { ...preset };
-  delete next[agentName];
-  return next;
+  return withoutAgentOverride(preset, agentName);
 }

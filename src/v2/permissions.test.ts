@@ -104,6 +104,59 @@ describe('compilePermissionPolicy', () => {
     expect(policy.decide('edit', 'private/key')).toBe('deny');
   });
 
+  test('no-source resource ceilings use the most restrictive overlapping effect', () => {
+    const policy = compilePermissionPolicy({
+      baselineRules: [],
+      hostRules: [],
+      ceilings: {
+        actions: { read: 'allow' },
+        namespaces: [],
+        resources: {
+          read: { 'private/*': 'deny', 'private/public': 'ask' },
+        },
+      },
+    });
+    expect(policy.decide('read', 'private/public')).toBe('deny');
+    expect(emittedDecision(policy.rules, 'read', 'private/public')).toBe(
+      'deny',
+    );
+  });
+
+  test('resource ceilings cannot override action or namespace ceilings', () => {
+    const actionPolicy = compilePermissionPolicy({
+      baselineRules: [],
+      hostRules: [],
+      ceilings: {
+        actions: { read: 'deny' },
+        namespaces: [],
+        resources: {
+          read: { 'private/*': 'deny', 'private/public': 'ask' },
+        },
+      },
+    });
+    expect(actionPolicy.decide('read', 'private/public')).toBe('deny');
+    expect(emittedDecision(actionPolicy.rules, 'read', 'private/public')).toBe(
+      'deny',
+    );
+
+    const namespacePolicy = compilePermissionPolicy({
+      baselineRules: [],
+      hostRules: [],
+      ceilings: {
+        actions: { ctx_lookup: 'allow' },
+        namespaces: ['ctx_*'],
+        namespaceEffects: { 'ctx_*': 'deny' },
+        resources: {
+          ctx_lookup: { 'private/*': 'deny', 'private/public': 'ask' },
+        },
+      },
+    });
+    expect(namespacePolicy.decide('ctx_lookup', 'private/public')).toBe('deny');
+    expect(
+      emittedDecision(namespacePolicy.rules, 'ctx_lookup', 'private/public'),
+    ).toBe('deny');
+  });
+
   test('emitted rules preserve ceilings against namespace and resource grants', () => {
     const policy = compilePermissionPolicy({
       baselineRules: allowAll,

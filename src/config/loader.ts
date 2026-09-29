@@ -10,15 +10,17 @@ import {
   mergePresetMaps,
   normalizePreset,
   PresetResolutionError,
-  resolvePreset,
+  resolvePresetDefinition,
 } from './presets';
 import {
   BackgroundJobsConfigSchema,
   InterviewConfigSchema,
   LEGACY_FALLBACK_KEYS,
+  type MarketplaceActivation,
   PluginConfigSchema,
   type RawPluginConfig,
   type ResolvedPluginConfig,
+  sanitizeBackgroundJobsConfig,
   WebfetchConfigSchema,
 } from './schema';
 
@@ -224,6 +226,10 @@ function retainExplicitInterviewFields(
   };
 }
 
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 function retainExplicitBackgroundJobsFields(
   parsedConfig: RawPluginConfig,
   rawConfig: unknown,
@@ -233,58 +239,53 @@ function retainExplicitBackgroundJobsFields(
   }
 
   const rawBackgroundJobs =
-    typeof rawConfig === 'object' &&
-    rawConfig !== null &&
-    !Array.isArray(rawConfig) &&
-    typeof (rawConfig as Record<string, unknown>).backgroundJobs === 'object' &&
-    (rawConfig as Record<string, unknown>).backgroundJobs !== null &&
-    !Array.isArray((rawConfig as Record<string, unknown>).backgroundJobs)
-      ? ((rawConfig as Record<string, unknown>).backgroundJobs as Record<
-          string,
-          unknown
-        >)
+    isPlainRecord(rawConfig) && isPlainRecord(rawConfig.backgroundJobs)
+      ? rawConfig.backgroundJobs
       : undefined;
-
   if (!rawBackgroundJobs) {
     return parsedConfig;
   }
 
-  const backgroundJobs: Record<string, unknown> = {};
-  const parsedBackgroundJobs = parsedConfig.backgroundJobs as unknown as Record<
-    string,
-    unknown
-  >;
-  for (const key of Object.keys(rawBackgroundJobs)) {
-    if (
-      key !== 'orchestratorWake' &&
-      Object.hasOwn(parsedBackgroundJobs, key)
-    ) {
-      backgroundJobs[key] = parsedBackgroundJobs[key];
-    }
-  }
-
-  const rawWake =
-    typeof rawBackgroundJobs.orchestratorWake === 'object' &&
-    rawBackgroundJobs.orchestratorWake !== null &&
-    !Array.isArray(rawBackgroundJobs.orchestratorWake)
-      ? (rawBackgroundJobs.orchestratorWake as Record<string, unknown>)
-      : undefined;
-  const orchestratorWake: Record<string, unknown> = {};
-  const parsedWake = parsedConfig.backgroundJobs
-    .orchestratorWake as unknown as Record<string, unknown>;
-  for (const key of Object.keys(rawWake ?? {})) {
-    if (Object.hasOwn(parsedWake, key)) {
-      orchestratorWake[key] = parsedWake[key];
-    }
-  }
-  if (Object.keys(orchestratorWake).length > 0) {
-    backgroundJobs.orchestratorWake = orchestratorWake;
-  }
+  // Keys the sanitizer dropped were invalid in this layer (#1291). Retaining
+  // their parsed defaults would resurrect them as explicit values, letting a
+  // broken upper layer override valid lower-layer settings during merge.
+  // The sanitizer's once-per-process diagnostic already fired inside
+  // safeParse, so this second pass stays silent.
+  const sanitizedBackgroundJobs = sanitizeBackgroundJobsConfig(
+    rawBackgroundJobs,
+  ) as Record<string, unknown>;
 
   return {
     ...parsedConfig,
-    backgroundJobs: backgroundJobs as RawPluginConfig['backgroundJobs'],
+    backgroundJobs: retainSanitizedValues(
+      parsedConfig.backgroundJobs as unknown as Record<string, unknown>,
+      sanitizedBackgroundJobs,
+    ) as RawPluginConfig['backgroundJobs'],
   };
+}
+
+/** Keep parsed leaf values only where the sanitized raw layer kept the key, recursing into plain objects. */
+function retainSanitizedValues(
+  parsed: Record<string, unknown>,
+  sanitized: Record<string, unknown>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(sanitized)) {
+    if (!Object.hasOwn(parsed, key)) {
+      continue;
+    }
+    const parsedValue = parsed[key];
+    const sanitizedValue = sanitized[key];
+    if (isPlainRecord(parsedValue) && isPlainRecord(sanitizedValue)) {
+      const nested = retainSanitizedValues(parsedValue, sanitizedValue);
+      if (Object.keys(nested).length > 0) {
+        out[key] = nested;
+      }
+      continue;
+    }
+    out[key] = parsedValue;
+  }
+  return out;
 }
 
 /** Normalize preset syntax before layered config objects are merged. */
@@ -431,7 +432,7 @@ export function loadPluginConfigFromPath(
         .fallback as Record<string, unknown>;
       const present = LEGACY_FALLBACK_KEYS.filter((key) => key in fallback);
       if (present.length > 0) {
-        const fallbackMsg = `Deprecated fallback config key${present.length === 1 ? '' : 's'} ${present.join(', ')} found and ignored. These fields were removed in 2.3.x; fallback behavior is controlled by fallback.enabled and fallback.maxRetries.`;
+        const fallbackMsg = `Deprecated fallback config key${present.length === 1 ? '' : 's'} ${present.join(', ')} found and ignored. These keys are no longer supported by foreground fallback and have no effect.`;
         options?.onWarning?.({
           path: configPath,
           kind: 'deprecated-key',
@@ -625,6 +626,33 @@ export function findPluginConfigPaths(directory: string): {
 }
 
 /**
+ * All plugin config candidate paths for a directory, independent of
+ * existence: `.jsonc` then `.json` for every user config search location and
+ * for `<directory>/.opencode`. The loader prefers `.jsonc` over `.json`, and
+ * the v2 watcher must observe creation/deletion/rename and that precedence
+ * change, so it consumes this candidate set instead of existing files only.
+ */
+export function getPluginConfigCandidates(directory: string): {
+  user: string[];
+  project: string[];
+} {
+  const user: string[] = [];
+  for (const configDir of getConfigSearchDirs()) {
+    const basePath = path.join(configDir, 'oh-my-opencode-slim');
+    user.push(`${basePath}.jsonc`, `${basePath}.json`);
+  }
+  const projectBasePath = path.join(
+    directory,
+    '.opencode',
+    'oh-my-opencode-slim',
+  );
+  return {
+    user,
+    project: [`${projectBasePath}.jsonc`, `${projectBasePath}.json`],
+  };
+}
+
+/**
  * Merge two plugin configs using the loader's merge rules.
  * Project/override takes precedence over base.
  */
@@ -713,12 +741,20 @@ export function loadPluginConfig(
   // valid presets from being selected. A failed chain is omitted completely,
   // so the selected preset can never receive a partially resolved ancestor.
   let resolvedPresets: ResolvedPresetMap | undefined;
+  let resolvedMarketplacePresets:
+    | Record<string, MarketplaceActivation>
+    | undefined;
   const presetInheritanceFailures = new Set<string>();
   if (config.presets) {
     resolvedPresets = {};
+    resolvedMarketplacePresets = {};
     for (const name of Object.keys(config.presets)) {
       try {
-        resolvedPresets[name] = resolvePreset(name, config.presets);
+        const definition = resolvePresetDefinition(name, config.presets);
+        resolvedPresets[name] = definition.agents;
+        if (definition.marketplace) {
+          resolvedMarketplacePresets[name] = definition.marketplace;
+        }
       } catch (error) {
         presetInheritanceFailures.add(name);
         const message =
@@ -739,7 +775,13 @@ export function loadPluginConfig(
 
   const { presets: _rawPresets, ...configWithoutPresets } = config;
   const runtimeConfig: ResolvedPluginConfig = resolvedPresets
-    ? { ...configWithoutPresets, presets: resolvedPresets }
+    ? {
+        ...configWithoutPresets,
+        presets: resolvedPresets,
+        ...(resolvedMarketplacePresets
+          ? { marketplacePresets: resolvedMarketplacePresets }
+          : {}),
+      }
     : configWithoutPresets;
 
   // Resolve preset and merge with root agents

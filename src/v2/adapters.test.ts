@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { createReadOnlyAgentPermission } from '../agents/permissions';
 import {
   adaptPermissions,
+  adaptTool,
   applyAgentToDraft,
   compileAgentPermissions,
   parseModelRef,
@@ -56,6 +57,44 @@ describe('parseModelRef', () => {
   test('undefined for degenerate slashes', () => {
     expect(parseModelRef('/claude')).toBeUndefined(); // empty provider
     expect(parseModelRef('anthropic/')).toBeUndefined(); // empty id
+  });
+});
+
+describe('adaptTool agent context', () => {
+  test('does not invent orchestrator identity for marketplace tools', async () => {
+    let capturedAgent: string | undefined = 'not-called';
+    const marketplaceTool = adaptTool(
+      'marketplace_manage',
+      {
+        execute: async (_args, context) => {
+          capturedAgent = (context as { agent?: string }).agent;
+          return 'ok';
+        },
+      },
+      '/project',
+      {},
+    );
+
+    await marketplaceTool.execute({}, undefined);
+    expect(capturedAgent).toBeUndefined();
+  });
+
+  test('preserves legacy missing-agent context for unrelated tools', async () => {
+    let capturedAgent: string | undefined;
+    const unrelatedTool = adaptTool(
+      'task_status',
+      {
+        execute: async (_args, context) => {
+          capturedAgent = (context as { agent?: string }).agent;
+          return 'ok';
+        },
+      },
+      '/project',
+      {},
+    );
+
+    await unrelatedTool.execute({}, undefined);
+    expect(capturedAgent).toBe('orchestrator');
   });
 });
 
@@ -279,6 +318,29 @@ describe('applyAgentToDraft', () => {
 
     const request = calls[0].agent.request as Record<string, unknown>;
     expect((request.settings as Record<string, unknown>).temperature).toBe(0);
+  });
+
+  test('maps options into request.body (provider options are not dropped)', () => {
+    const { draft, calls } = recorder();
+    applyAgentToDraft(draft, 'a', {
+      options: { thinking: { type: 'enabled', budgetTokens: 4096 } },
+    });
+
+    const request = calls[0].agent.request as Record<string, unknown>;
+    expect(request.body).toEqual({
+      thinking: { type: 'enabled', budgetTokens: 4096 },
+    });
+  });
+
+  test('ignores array/null options in request.body', () => {
+    const { draft, calls } = recorder();
+    applyAgentToDraft(draft, 'a', { options: [1, 2] as never });
+    applyAgentToDraft(draft, 'b', { options: null as never });
+
+    for (const call of calls) {
+      const request = call.agent.request as Record<string, unknown>;
+      expect(request.body).toBeUndefined();
+    }
   });
 
   test('clears an existing model when the finalized config inherits it', () => {
