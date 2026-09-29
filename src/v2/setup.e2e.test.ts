@@ -1264,6 +1264,89 @@ describe('createV2Setup e2e', () => {
     }
   }, 20_000);
 
+  test('MCP rebuild does not re-finalize a previously consumed agent draft', async () => {
+    const { ctx, calls } = makeMockV2Context(projectDir);
+    const setupCtx = ctx as unknown as {
+      agent: {
+        transform: (callback: (draft: unknown) => void) => Promise<{
+          dispose: () => void;
+        }>;
+      };
+      mcp: {
+        transform: (callback: (draft: unknown) => void) => Promise<{
+          dispose: () => void;
+        }>;
+      };
+    };
+    const agentState = new Map<string, Record<string, unknown>>();
+    const agentUpdates: string[] = [];
+    let defaultAgent: string | undefined;
+    const agentDraft = {
+      list: () => [],
+      get: (name: string) => agentState.get(name),
+      default: (name: string | undefined) => {
+        defaultAgent = name;
+      },
+      update: (
+        name: string,
+        project: (draft: Record<string, unknown>) => void,
+      ) => {
+        const current = agentState.get(name) ?? {};
+        project(current);
+        agentState.set(name, current);
+        agentUpdates.push(name);
+      },
+      remove: () => {},
+    };
+    let mcpTransform: ((draft: unknown) => void) | undefined;
+    const makeMcpDraft = () => ({
+      list: () => [],
+      get: () => undefined,
+      set: (name: string, config: Record<string, unknown>) => {
+        calls.mcpSets.push({ name, config });
+      },
+      update: () => {},
+      remove: () => {},
+    });
+    setupCtx.agent.transform = async (callback) => {
+      callback(agentDraft);
+      return { dispose: () => calls.disposed.push('persistent-agent') };
+    };
+    setupCtx.mcp.transform = async (callback) => {
+      mcpTransform = callback;
+      callback(makeMcpDraft());
+      return { dispose: () => calls.disposed.push('replayable-mcp') };
+    };
+
+    const cleanup = await createV2Setup()(ctx);
+    try {
+      const explorer = agentState.get('explorer');
+      if (!explorer) throw new Error('Explorer agent was not finalized');
+      const updatesAfterFinalize = agentUpdates.length;
+      const downstreamPermissions = [
+        { action: 'read', resource: 'downstream-only', effect: 'allow' },
+      ];
+      Object.assign(explorer, {
+        model: { providerID: 'downstream', id: 'kept-model' },
+        permissions: downstreamPermissions,
+      });
+      defaultAgent = 'downstream-default';
+
+      if (!mcpTransform) throw new Error('MCP transform was not captured');
+      for (let replay = 0; replay < 2; replay += 1) {
+        mcpTransform(makeMcpDraft());
+        expect(explorer).toMatchObject({
+          model: { providerID: 'downstream', id: 'kept-model' },
+          permissions: downstreamPermissions,
+        });
+        expect(defaultAgent).toBe('downstream-default');
+        expect(agentUpdates).toHaveLength(updatesAfterFinalize);
+      }
+    } finally {
+      await cleanup();
+    }
+  }, 20_000);
+
   test.each(['agent-first', 'mcp-first'] as const)(
     'deferred %s callback keeps an unclassified child behind the live marketplace barrier',
     async (callbackOrder) => {

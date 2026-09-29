@@ -2050,6 +2050,8 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
         ) {
           return;
         }
+        // Consume before applying: MCP replays must not reuse this editor.
+        pendingAgentDraft = undefined;
         const registry =
           finalizedRegistry ??
           registryBridge.finalize(
