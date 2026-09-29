@@ -61,19 +61,23 @@ async function waitFor(
 }
 
 interface Harness {
-  cleanup: () => Promise<void>;
+  cleanup: () => void | Promise<void>;
   pushEvent: (event: unknown) => void;
   invokePrompt: (event: Record<string, unknown>) => Promise<void>;
-  switchCalls: Array<{ sessionID: string; model: { id: string } }>;
+  switchCalls: Array<{
+    sessionID: string;
+    model: { id: string; providerID?: string };
+  }>;
   contextHandler: ((event: V2SessionContextEvent) => Promise<void>) | undefined;
   agentTransformCalls: () => number;
   agentReloadCalls: () => number;
+  flushAgentTransform: () => void;
 }
 
 /** Live sidebar model projection for the fixture project dir. */
 const sidebarModels = () => readTuiSnapshot(env.projectDir).agentModels;
 
-async function bootHarness(): Promise<Harness> {
+async function bootHarness(deferAgentTransform = false): Promise<Harness> {
   const reg = () => ({ dispose() {} });
   /** Transform stub: apply `draft`, then hand back a disposable. */
   const transformWith =
@@ -114,9 +118,13 @@ async function bootHarness(): Promise<Harness> {
     },
   };
 
-  const switchCalls: Array<{ sessionID: string; model: { id: string } }> = [];
+  const switchCalls: Array<{
+    sessionID: string;
+    model: { id: string; providerID?: string };
+  }> = [];
   let agentTransformCalls = 0;
   let agentReloadCalls = 0;
+  let deferredAgentTransform: ((draft: unknown) => void) | undefined;
   let contextHandler:
     | ((event: V2SessionContextEvent) => Promise<void>)
     | undefined;
@@ -138,13 +146,19 @@ async function bootHarness(): Promise<Harness> {
     agent: {
       transform: async (cb: (draft: unknown) => void) => {
         agentTransformCalls += 1;
-        await transformWith({
+        const draft = {
           list: () => [],
           get: () => undefined,
           default: () => {},
           update: () => {},
           remove: () => {},
-        })(cb);
+        };
+        if (deferAgentTransform) {
+          deferredAgentTransform = cb;
+        } else {
+          cb(draft);
+        }
+        return reg();
       },
       reload: async () => {
         agentReloadCalls += 1;
@@ -205,7 +219,7 @@ async function bootHarness(): Promise<Harness> {
   const cleanup = await createV2Setup()(ctx);
 
   return {
-    cleanup: () => cleanup(),
+    cleanup,
     pushEvent: (event: unknown) => {
       if (closed) return;
       queue.push(event);
@@ -223,6 +237,15 @@ async function bootHarness(): Promise<Harness> {
     },
     agentTransformCalls: () => agentTransformCalls,
     agentReloadCalls: () => agentReloadCalls,
+    flushAgentTransform: () => {
+      deferredAgentTransform?.({
+        list: () => [],
+        get: () => undefined,
+        default: () => {},
+        update: () => {},
+        remove: () => {},
+      });
+    },
   };
 }
 
@@ -262,6 +285,30 @@ async function captureFirstChild(
 }
 
 describe('v2 session-frozen hot refresh', () => {
+  test('session profile bridge sees plugin agents after deferred agent transform', async () => {
+    env.writeUserConfig(hot('cheap'));
+    const harness = await bootHarness(true);
+    try {
+      harness.pushEvent(createChildEvent('early-deferred-child'));
+      await wait(50);
+      harness.flushAgentTransform();
+      await harness.invokePrompt({
+        sessionID: 'early-deferred-child',
+        messageID: 'msg_deferred_agent',
+        prompt: { text: 'capture deferred agent profile' },
+      });
+
+      expect(harness.switchCalls).toEqual([
+        {
+          sessionID: 'early-deferred-child',
+          model: { providerID: 'openai', id: 'gpt-5-mini' },
+        },
+      ]);
+    } finally {
+      await harness.cleanup();
+    }
+  }, 20_000);
+
   test('config edit refreshes new-child profiles and sidebar without touching frozen surfaces', async () => {
     env.writeUserConfig(hot('cheap'));
 
