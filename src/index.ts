@@ -125,12 +125,16 @@ import {
   createBackgroundJobTerminalGate,
 } from './utils/background-job-terminal-gate';
 import { isPluginDisabledByEnv } from './utils/env';
-import { isInternalInitiatorPart } from './utils/internal-initiator';
+import {
+  isInternalInitiatorPart,
+  isNativeBackgroundTaskNotification,
+} from './utils/internal-initiator';
 import { probeJSDOM } from './utils/jsdom';
 import { initLogger, log } from './utils/logger';
 import { SessionMetadataStore } from './utils/session-metadata';
 import {
   createSessionSelectionReader,
+  modelFromMetadataString,
   resolveCurrentSelection,
 } from './utils/session-selection';
 import {
@@ -171,6 +175,136 @@ async function appLog(
 // Debounce: only show image-skipped toast once per 60 seconds per project
 const lastImageSkippedToastByDir = new Map<string, number>();
 const IMAGE_SKIPPED_DEBOUNCE_MS = 60_000;
+
+const V1_FALLBACK_AGENT_PREFIX = 'slim-internal-fallback';
+
+type ModelChainEntry = { id: string; variant?: string };
+
+type DelegatedModelSelection = {
+  agentName: string;
+  entry: ModelChainEntry;
+  index: number;
+};
+
+function modelProvider(model: string): string | undefined {
+  const separator = model.indexOf('/');
+  return separator > 0 ? model.slice(0, separator) : undefined;
+}
+
+function v1FallbackAgentAlias(agentName: string, index: number): string {
+  const safeName = agentName.replace(/[^a-zA-Z0-9_-]/g, '_');
+  return `${V1_FALLBACK_AGENT_PREFIX}-${safeName}-${index}`;
+}
+
+/**
+ * Pick the child-chain entry that best matches a parent's live fallback.
+ * Exact model matches win. Once the parent has moved past its primary,
+ * specialists prefer the parent's working provider, then the first child
+ * entry outside the providers already exhausted by the parent.
+ */
+function selectDelegatedModel(input: {
+  agentName: string;
+  childChain: ModelChainEntry[] | undefined;
+  followsParent: boolean;
+  parentModel: string | undefined;
+  parentChain: ModelChainEntry[] | undefined;
+}): DelegatedModelSelection | undefined {
+  const { agentName, childChain, parentModel } = input;
+  if (!parentModel) return undefined;
+
+  if (input.followsParent) {
+    const index = childChain?.findIndex((entry) => entry.id === parentModel);
+    return {
+      agentName,
+      entry:
+        index !== undefined && index >= 0
+          ? (childChain?.[index] as ModelChainEntry)
+          : { id: parentModel },
+      index: index ?? -1,
+    };
+  }
+
+  if (!childChain?.length) return undefined;
+
+  const exact = childChain.findIndex((entry) => entry.id === parentModel);
+  if (exact >= 0) {
+    return { agentName, entry: childChain[exact], index: exact };
+  }
+
+  const parentChain = input.parentChain;
+  if (!parentChain) return undefined;
+  const parentIndex = parentChain.findIndex(
+    (entry) => entry.id === parentModel,
+  );
+  if (parentIndex <= 0) return undefined;
+
+  const activeProvider = modelProvider(parentModel);
+  if (activeProvider) {
+    const sameProvider = childChain.findIndex(
+      (entry) => modelProvider(entry.id) === activeProvider,
+    );
+    if (sameProvider >= 0) {
+      return {
+        agentName,
+        entry: childChain[sameProvider],
+        index: sameProvider,
+      };
+    }
+  }
+
+  const exhaustedProviders = new Set(
+    parentChain
+      .slice(0, parentIndex)
+      .map((entry) => modelProvider(entry.id))
+      .filter((provider): provider is string => provider !== undefined),
+  );
+  if (activeProvider) exhaustedProviders.delete(activeProvider);
+  const viable = childChain.findIndex((entry) => {
+    const provider = modelProvider(entry.id);
+    return provider === undefined || !exhaustedProviders.has(provider);
+  });
+  return viable >= 0
+    ? { agentName, entry: childChain[viable], index: viable }
+    : undefined;
+}
+
+/**
+ * OpenCode v1's task tool has no per-call model argument. Register hidden
+ * aliases for secondary chain entries; the before-hook can select one while
+ * the child session itself still records the canonical agent name.
+ */
+function installV1FallbackAgentAliases(
+  configAgent: Record<string, unknown>,
+  modelArrays: Record<string, ModelChainEntry[]>,
+): Map<string, string> {
+  const aliases = new Map<string, string>();
+  for (const [agentName, chain] of Object.entries(modelArrays)) {
+    const canonical = configAgent[agentName];
+    if (
+      canonical === null ||
+      typeof canonical !== 'object' ||
+      Array.isArray(canonical)
+    ) {
+      continue;
+    }
+    for (let index = 1; index < chain.length; index += 1) {
+      const entry = chain[index];
+      const alias = v1FallbackAgentAlias(agentName, index);
+      const aliasConfig: Record<string, unknown> = {
+        ...(canonical as Record<string, unknown>),
+        name: agentName,
+        mode: 'subagent',
+        hidden: true,
+        model: entry.id,
+      };
+      if (entry.variant) aliasConfig.variant = entry.variant;
+      else delete aliasConfig.variant;
+      configAgent[alias] = aliasConfig;
+      aliases.set(`${agentName}\0${entry.id}`, alias);
+    }
+  }
+  return aliases;
+}
 
 // Module-level runtime preset tracking. Survives plugin re-inits triggered
 // by client.config.update() → Instance.dispose(). When the plugin function
@@ -236,10 +370,13 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   // Host flavor ('v2' on OpenCode v2 hosts via the client shim, undefined on
   // v1). Survives the try block so prompt-assembly hooks can use it.
   let hostFlavor: string | undefined;
+  let v1FallbackAgentAliases = new Map<string, string>();
   let autoUpdateChecker: ReturnType<typeof createAutoUpdateCheckerHook>;
+  const v1InternalSelectionOverrides = new Set<string>();
   const sessionMetadata = new SessionMetadataStore({
     maxEntries: DEFAULT_MAX_SESSION_METADATA_ENTRIES,
     onEvict: (sessionID) => {
+      v1InternalSelectionOverrides.delete(sessionID);
       log('[session] evicted oldest session metadata', {
         threshold: DEFAULT_MAX_SESSION_METADATA_ENTRIES,
         droppedSessionId: sessionID,
@@ -251,18 +388,40 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   // #1079: lifecycle continuations (orchestrator wake, terminal
   // notifications) resolve the session's CURRENT agent/model at send
   // time instead of hardcoding `orchestrator`. Host-persisted selection
-  // wins; slim metadata (fed only by external admissions — see the
-  // chat.message filter) is the fallback.
+  // normally wins; when a v1 unpinned internal continuation has temporarily
+  // overwritten it, Slim's externally observed metadata wins until the next
+  // real operator admission.
   const lifecycleSelectionReader = createSessionSelectionReader(
     ctx.client,
     ctx.directory,
   );
-  const lifecycleSelectionResolver = (sessionID: string) =>
-    resolveCurrentSelection(
+  const lifecycleSelectionResolver = async (sessionID: string) => {
+    const resolved = await resolveCurrentSelection(
       sessionID,
       lifecycleSelectionReader,
       sessionMetadata,
     );
+    if (!v1InternalSelectionOverrides.has(sessionID)) return resolved;
+
+    // v1 computes an unpinned synthetic continuation from the static agent
+    // primary and persists that choice before chat.message runs. While that
+    // host selection is known to be internal, prefer the last real operator
+    // selection retained by Slim. A later external admission clears the
+    // override and makes the host authoritative again.
+    const agent = sessionMetadata.getAgent(sessionID) ?? resolved.agent;
+    const modelText = sessionMetadata.getModel(sessionID);
+    const model = modelFromMetadataString(modelText) ?? resolved.model;
+    return {
+      ...(agent ? { agent } : {}),
+      ...(model ? { model } : {}),
+      ...(modelText && agent
+        ? { variant: resolveTuiVariantForModel(agent, modelText) }
+        : resolved.variant
+          ? { variant: resolved.variant }
+          : {}),
+      provenance: 'observed-external' as const,
+    };
+  };
   // Busy/retry arrived before the session's agent was known. chat.message
   // latches the agent and flushes these so the spinner still starts. The
   // observed status is kept so the flushed activation records the right
@@ -513,6 +672,28 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
 
     const resolvedName = resolveRuntimeAgentName(runtime, agentType);
     return readModel(finalAgentConfig?.[resolvedName]);
+  };
+
+  const resolveDelegatedModelForParent = (
+    agentType: string,
+    parentSessionID?: string,
+  ): DelegatedModelSelection | undefined => {
+    if (!parentSessionID) return undefined;
+    const agentName = resolveRuntimeAgentName(runtime, agentType);
+    const parentAgentRaw = sessionMetadata.getAgent(parentSessionID);
+    const parentAgent = parentAgentRaw
+      ? resolveRuntimeAgentName(runtime, parentAgentRaw)
+      : undefined;
+    const followsParent =
+      runtime.agent(agentName)?.inheritModelFrom === 'orchestrator' ||
+      runtime.agent(agentName)?.inheritModelFrom === 'session';
+    return selectDelegatedModel({
+      agentName,
+      childChain: runtime.modelArrays[agentName],
+      followsParent,
+      parentModel: sessionMetadata.getModel(parentSessionID),
+      parentChain: parentAgent ? runtime.modelArrays[parentAgent] : undefined,
+    });
   };
 
   try {
@@ -822,30 +1003,21 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       backgroundTaskConcurrency,
       pendingCallTracker: admissionRuntimeLease.pendingCallTracker,
       getModelForAgent: (agentType: string, parentSessionID?: string) => {
-        // A delegated child follows the parent's active fallback when that
-        // model belongs to the child's chain. Otherwise an orchestrator that
-        // already escaped a failed provider would send each specialist back
-        // through the same avoidable failure.
-        const parentModel = parentSessionID
-          ? sessionMetadata.getModel(parentSessionID)
-          : undefined;
-        const resolvedName = resolveRuntimeAgentName(runtime, agentType);
-        const chain =
-          runtime.modelArrays[resolvedName] ?? runtime.modelArrays[agentType];
-        const followsParent =
-          runtime.agent(agentType)?.inheritModelFrom === 'orchestrator' ||
-          runtime.agent(agentType)?.inheritModelFrom === 'session';
-        if (
-          parentModel &&
-          (followsParent || chain?.some((entry) => entry.id === parentModel))
-        ) {
-          return parentModel;
-        }
+        const delegated = resolveDelegatedModelForParent(
+          agentType,
+          parentSessionID,
+        );
+        if (delegated) return delegated.entry.id;
 
-        // Admission otherwise uses the config after the host merged all of
-        // its agent layers. The direct lookup preserves display-name keys;
-        // the resolved lookup handles canonical names and legacy aliases.
-        return resolvePrimaryModelFromFinalHostConfig(agentType) ?? parentModel;
+        // Admission must use the config after the host has merged all of its
+        // agent layers. The direct lookup preserves display-name keys; the
+        // resolved lookup handles canonical names and legacy aliases.
+        return (
+          resolvePrimaryModelFromFinalHostConfig(agentType) ??
+          (parentSessionID
+            ? sessionMetadata.getModel(parentSessionID)
+            : undefined)
+        );
       },
       sameProviderPolicy: runtime.backgroundJobs.sameProviderPolicy,
       getSessionModel: (sessionID) => sessionMetadata.getModel(sessionID),
@@ -1562,19 +1734,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     }: {
       agentType: string;
       parentSessionID: string;
-    }) => {
-      const parentModel = sessionMetadata.getModel(parentSessionID);
-      if (!parentModel) return undefined;
-      const resolvedName = resolveRuntimeAgentName(runtime, agentType);
-      const chain =
-        runtime.modelArrays[resolvedName] ?? runtime.modelArrays[agentType];
-      const followsParent =
-        runtime.agent(agentType)?.inheritModelFrom === 'orchestrator' ||
-        runtime.agent(agentType)?.inheritModelFrom === 'session';
-      return followsParent || chain?.some((entry) => entry.id === parentModel)
-        ? parentModel
-        : undefined;
-    },
+    }) => resolveDelegatedModelForParent(agentType, parentSessionID)?.entry.id,
     'v2.session.retry':
       foregroundFallback.handleV2Retry.bind(foregroundFallback),
 
@@ -1646,7 +1806,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         ...currentAgentConfig,
         ...structuredClone(registry.managedAgentConfig),
       };
-      finalHostAgentConfig = opencodeConfig.agent as Record<string, unknown>;
       const currentMcpConfig =
         opencodeConfig.mcp && typeof opencodeConfig.mcp === 'object'
           ? (opencodeConfig.mcp as Record<string, unknown>)
@@ -1662,6 +1821,23 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         },
         ctx.directory,
       );
+
+      // v1 task() cannot select a model per call. Hidden aliases preserve
+      // each specialist's prompt/permissions while exposing its secondary
+      // chain entries to the task before-hook. The alias advertises the
+      // canonical name, so child sessions, job-board records, and fallback
+      // state never leak the implementation detail. v2 has a native model
+      // argument and does not need aliases.
+      const configAgent = opencodeConfig.agent as Record<string, unknown>;
+      v1FallbackAgentAliases =
+        hostFlavor === 'v2'
+          ? new Map()
+          : installV1FallbackAgentAliases(configAgent, runtime.modelArrays);
+
+      // This is the source of truth for admission. It is intentionally
+      // captured only after every host/plugin merge, model pass, permission
+      // pass, and v1 fallback-alias expansion.
+      finalHostAgentConfig = configAgent;
 
       registryBridge.prepareCommands(opencodeConfig);
     },
@@ -1926,6 +2102,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         }
         companionManager.onSessionDeleted(sessionID);
         if (sessionID) {
+          v1InternalSelectionOverrides.delete(sessionID);
           sessionMetadata.delete(sessionID);
         }
       }
@@ -1949,6 +2126,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       // so generation two would otherwise inherit generation one's
       // two-wake no-progress caps and never wake those sessions again.
       clearAllWakeSessions();
+      v1InternalSelectionOverrides.clear();
       await interviewManager.dispose();
       clearTuiActivities();
       tuiReusableProjection?.dispose();
@@ -1981,6 +2159,34 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         input as never,
         output as never,
       );
+      if (
+        hostFlavor !== 'v2' &&
+        input.tool.toLowerCase() === 'task' &&
+        output.args !== null &&
+        typeof output.args === 'object' &&
+        !Array.isArray(output.args)
+      ) {
+        const args = output.args as Record<string, unknown>;
+        if (typeof args.subagent_type === 'string') {
+          const selected = resolveDelegatedModelForParent(
+            args.subagent_type,
+            input.sessionID,
+          );
+          if (selected && selected.index > 0) {
+            const alias = v1FallbackAgentAliases.get(
+              `${selected.agentName}\0${selected.entry.id}`,
+            );
+            if (alias) {
+              args.subagent_type = alias;
+              log('[delegation] routed v1 child to active fallback model', {
+                parentSessionID: input.sessionID,
+                agent: selected.agentName,
+                model: selected.entry.id,
+              });
+            }
+          }
+        }
+      }
       // Record a call only after all rejecting before-hooks have accepted it.
       // In particular, search-path-guard can reject grep/glob before the host
       // emits tool.execute.after; running the loop guard first would leave a
@@ -2073,18 +2279,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       // turn. Fails safe — worst case the summary keeps the boilerplate,
       // which is the pre-change behavior.
       compactingSessionIds.delete(input.sessionID);
-      const rawAgent = input.agent ?? output?.message?.agent;
-      const agent = rawAgent
-        ? resolveRuntimeAgentName(runtime, rawAgent)
-        : undefined;
-
-      if (
-        agent &&
-        output?.message &&
-        typeof output.message.agent === 'string'
-      ) {
-        output.message.agent = agent;
-      }
 
       // #1079: internal admissions (lifecycle wakes, terminal
       // notifications) must not overwrite the user's tracked selection.
@@ -2098,8 +2292,10 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       const messageID = input.messageID ?? output?.message?.id;
       const inputParts = Array.isArray(input.parts) ? input.parts : [];
       const outputParts = Array.isArray(output?.parts) ? output.parts : [];
-      const partsInternal = [...inputParts, ...outputParts].some((part) =>
-        isInternalInitiatorPart(part),
+      const partsInternal = [...inputParts, ...outputParts].some(
+        (part) =>
+          isInternalInitiatorPart(part) ||
+          isNativeBackgroundTaskNotification(part),
       );
       // v1 chat.message sees the internal parts but historically never
       // recorded the message id, so the later message.updated could not
@@ -2113,6 +2309,70 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         partsInternal ||
         (typeof messageID === 'string' &&
           isInternalAdmission(input.sessionID, messageID));
+
+      // OpenCode v1's native background notifier does not pin a model. The
+      // host therefore constructs (and persists) this synthetic message on
+      // the agent's static primary before exposing chat.message, even when
+      // the parent is already running on a fallback. Rewrite the message to
+      // the last externally selected model so this continuation executes on
+      // the live fallback. Remember that the host-side selection is stale so
+      // later Slim lifecycle continuations also prefer external metadata.
+      const unpinnedV1InternalContinuation =
+        hostFlavor !== 'v2' && internalAdmission && input.model === undefined;
+      const trackedAgent = unpinnedV1InternalContinuation
+        ? sessionMetadata.getAgent(input.sessionID)
+        : undefined;
+      const trackedModelText = unpinnedV1InternalContinuation
+        ? sessionMetadata.getModel(input.sessionID)
+        : undefined;
+      const trackedModel = modelFromMetadataString(trackedModelText);
+      let rewroteInternalSelection = false;
+      if (output?.message && unpinnedV1InternalContinuation) {
+        if (trackedAgent && output.message.agent !== trackedAgent) {
+          output.message.agent = trackedAgent;
+          rewroteInternalSelection = true;
+        }
+        if (
+          trackedModel &&
+          (output.message.model?.providerID !== trackedModel.providerID ||
+            output.message.model?.modelID !== trackedModel.modelID)
+        ) {
+          const variant = trackedAgent
+            ? resolveTuiVariantForModel(trackedAgent, trackedModelText ?? '')
+            : undefined;
+          output.message.model = {
+            ...trackedModel,
+            ...(variant ? { variant } : {}),
+          };
+          rewroteInternalSelection = true;
+        }
+      }
+      if (rewroteInternalSelection) {
+        v1InternalSelectionOverrides.add(input.sessionID);
+        log('[fallback] kept v1 internal continuation on live selection', {
+          sessionID: input.sessionID,
+          agent: trackedAgent,
+          model: trackedModelText,
+        });
+      } else if (!internalAdmission) {
+        v1InternalSelectionOverrides.delete(input.sessionID);
+      }
+
+      const rawAgent =
+        (unpinnedV1InternalContinuation ? trackedAgent : undefined) ??
+        input.agent ??
+        output?.message?.agent;
+      const agent = rawAgent
+        ? resolveRuntimeAgentName(runtime, rawAgent)
+        : undefined;
+
+      if (
+        agent &&
+        output?.message &&
+        typeof output.message.agent === 'string'
+      ) {
+        output.message.agent = agent;
+      }
 
       if (agent) {
         foregroundFallback.registerSessionAgent(input.sessionID, agent);

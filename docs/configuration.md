@@ -590,6 +590,17 @@ starting on a stale primary and waiting for an avoidable provider failure.
 Their own configured model array remains the ordered fallback chain after the
 inherited active model.
 
+Array-configured specialists also avoid a provider the orchestrator has
+already fallen past. When the parent's active fallback is present in the
+child's chain, that exact entry is used. Otherwise Slim prefers the child's
+first entry on the working parent provider, then the first entry outside the
+providers exhausted by the parent. OpenCode v2 uses the native per-call
+subagent model override; OpenCode v1 uses hidden internal agent routes because
+its `task` tool has no model argument. The child session still records the
+canonical specialist name in both cases. On v1, native background-completion
+turns also retain the parent's live fallback instead of silently returning the
+parent to its configured primary while collecting the child result.
+
 Model selection follows these rules:
 
 - If the same effective agent override contains both a scalar `model` and
