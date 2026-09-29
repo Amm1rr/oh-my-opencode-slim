@@ -560,7 +560,7 @@ describe('model inheritance with fallback chains', () => {
     expect(configAgent.fixer).toEqual({ temperature: 0.2 });
   });
 
-  test('combined orchestrator inheritance pins the orchestrator model over the chain head', () => {
+  test('combined orchestrator inheritance stays model-less for live parent selection', () => {
     const runtime = runtimeFor({
       agents: {
         orchestrator: { model: 'orchestrator-model' },
@@ -576,7 +576,7 @@ describe('model inheritance with fallback chains', () => {
 
     applyModelInheritanceToConfig(configAgent, runtime);
 
-    expect(configAgent.fixer).toEqual({ model: 'orchestrator-model' });
+    expect(configAgent.fixer).toEqual({});
   });
 
   test('combined session inheritance clears the chain head inline variant from the host config', () => {
@@ -619,7 +619,7 @@ describe('model inheritance with fallback chains', () => {
     expect(configAgent.fixer).toEqual({ variant: 'custom' });
   });
 
-  test('combined orchestrator inheritance clears the chain head inline variant', () => {
+  test('combined orchestrator inheritance clears the chain head model and inline variant', () => {
     const runtime = runtimeFor({
       agents: {
         orchestrator: { model: 'orchestrator-model' },
@@ -635,7 +635,7 @@ describe('model inheritance with fallback chains', () => {
 
     applyModelInheritanceToConfig(configAgent, runtime);
 
-    expect(configAgent.fixer).toEqual({ model: 'orchestrator-model' });
+    expect(configAgent.fixer).toEqual({});
   });
 
   test('scalar model plus inheritance leaves the host variant untouched', () => {

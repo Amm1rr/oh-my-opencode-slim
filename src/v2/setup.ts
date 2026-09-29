@@ -1709,6 +1709,10 @@ export function createToolExecuteBridges(
       ) => Promise<void>)
     | undefined,
   after: ((i: unknown, o: unknown) => Promise<void>) | undefined,
+  resolveDelegatedModel?: (input: {
+    agentType: string;
+    parentSessionID: string;
+  }) => string | undefined,
 ): V2ToolBridgeEvents {
   const beforeBridge = async (
     event: Record<string, unknown> & { input: unknown },
@@ -1719,6 +1723,19 @@ export function createToolExecuteBridges(
     const argsView = isDelegation
       ? subagentArgsToV1(e.input)
       : { ...(e.input as object) };
+    if (
+      isDelegation &&
+      resolveDelegatedModel &&
+      isRecord(argsView) &&
+      typeof argsView.subagent_type === 'string' &&
+      typeof argsView.model !== 'string'
+    ) {
+      const model = resolveDelegatedModel({
+        agentType: argsView.subagent_type,
+        parentSessionID: e.sessionID,
+      });
+      if (model) argsView.model = model;
+    }
     const out: { args: unknown } = { args: argsView };
     // Rethrow: v2 rejects the tool call when execute.before fails, which is
     // how the v1 anti-duplicate / relaunch-lease guards enforce on v2.

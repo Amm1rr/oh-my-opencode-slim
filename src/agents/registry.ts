@@ -694,30 +694,7 @@ export function buildResolvedAgentRegistry(
 
   appendMarketplaceRouting(finalAgentConfig, definitions, marketplaceMetadata);
 
-  const orchestratorEntry = finalAgentConfig.orchestrator as
-    | Record<string, unknown>
-    | undefined;
-  const orchestratorDefinition = definitions.find(
-    (definition) => definition.name === 'orchestrator',
-  );
-  const visibleOrchestratorName = orchestratorDefinition?.displayName
-    ? normalizeAgentName(orchestratorDefinition.displayName)
-    : 'orchestrator';
-  const visibleOrchestratorHost =
-    visibleOrchestratorName === 'orchestrator'
-      ? undefined
-      : hostEntries[visibleOrchestratorName];
-  const visibleOrchestratorModel =
-    typeof visibleOrchestratorHost?.model === 'string'
-      ? visibleOrchestratorHost.model
-      : typeof orchestratorEntry?.model === 'string'
-        ? orchestratorEntry.model
-        : null;
-  applyModelInheritanceToConfig(
-    finalAgentConfig,
-    runtime,
-    visibleOrchestratorModel,
-  );
+  applyModelInheritanceToConfig(finalAgentConfig, runtime);
 
   for (const definition of definitions) {
     const name = definition.name;

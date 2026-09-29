@@ -210,7 +210,7 @@ describe('finalized existing-agent registry', () => {
     });
   });
 
-  test('clears stale variants for session inheritance and pins orchestrator inheritance', () => {
+  test('clears stale models and variants for live inheritance', () => {
     const runtime = runtimeFor({
       agents: {
         explorer: {
@@ -229,16 +229,14 @@ describe('finalized existing-agent registry', () => {
     });
     expect(registry.finalAgentConfig.explorer).not.toHaveProperty('model');
     expect(registry.finalAgentConfig.explorer).not.toHaveProperty('variant');
-    expect(registry.finalAgentConfig.oracle).toMatchObject({
-      model: 'owner/orchestrator',
-    });
+    expect(registry.finalAgentConfig.oracle).not.toHaveProperty('model');
     expect(registry.modelCandidates.explorer).toEqual([
       { id: 'fallback/model' },
       { id: 'fallback/next' },
     ]);
   });
 
-  test('orchestrator inheritance follows the finalized visible model while canonical stays independently callable', () => {
+  test('orchestrator inheritance stays live while canonical and visible entries remain independent', () => {
     const runtime = runtimeFor({
       presets: {
         runtime: {
@@ -265,9 +263,7 @@ describe('finalized existing-agent registry', () => {
     expect(registry.finalAgentConfig.lead).toMatchObject({
       model: 'host/visible',
     });
-    expect(registry.finalAgentConfig.explorer).toMatchObject({
-      model: 'host/visible',
-    });
+    expect(registry.finalAgentConfig.explorer).not.toHaveProperty('model');
     expect(registry.effectiveStartupModels.orchestrator?.model).toBe(
       'preset/canonical',
     );
