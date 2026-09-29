@@ -10,6 +10,7 @@
  */
 
 import type { MultiplexerLayout } from '../../config/schema';
+import type { ViewerFlavor } from '../shared';
 import type { Multiplexer, PaneResult } from '../types';
 import {
   type DiagnosticLogger,
@@ -52,6 +53,11 @@ export interface PaneLifecycleConfig {
   /** Stable-idle debounce window in ms (FR-10; OQ-1 fixes the value). */
   stableIdleMs: number;
   readiness: ReadinessPolicy;
+  /**
+   * Viewer command flavor (FR-2 matrix) and, for `v2-remote`, the password
+   * forwarded into the viewer command. Absent means the v1 attach form.
+   */
+  viewer?: { flavor: ViewerFlavor; password?: string };
 }
 
 /** Anchor recorded when the wiring cannot resolve a native anchor. */
@@ -619,7 +625,18 @@ export class PaneLifecycle {
         description,
         serverUrl,
         directory,
-        { parentSessionId, subagentType },
+        {
+          parentSessionId,
+          subagentType,
+          ...(this.config.viewer === undefined
+            ? {}
+            : {
+                viewerFlavor: this.config.viewer.flavor,
+                ...(this.config.viewer.password === undefined
+                  ? {}
+                  : { viewerPassword: this.config.viewer.password }),
+              }),
+        },
       );
     } catch {
       return { success: false, error: 'hard' };

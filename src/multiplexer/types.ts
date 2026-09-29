@@ -6,6 +6,7 @@
  */
 
 import type { MultiplexerLayout } from '../config/schema';
+import type { ViewerFlavor } from './shared';
 
 export interface PaneResult {
   success: boolean;
@@ -23,6 +24,17 @@ export interface PaneSpawnOptions {
    * names (cmux) consume it; every other adapter ignores it.
    */
   subagentType?: string;
+  /**
+   * Viewer command flavor the adapter must build (FR-2 command matrix);
+   * defaults to `v1` (the attach form) when absent.
+   */
+  viewerFlavor?: ViewerFlavor;
+  /**
+   * `v2-remote` only: password injected into the viewer command. A pane shell
+   * does not inherit the parent client's environment, so the wiring forwards
+   * the value it read from its own environment.
+   */
+  viewerPassword?: string;
 }
 
 /**

@@ -179,6 +179,44 @@ describe('HerdrMultiplexer', () => {
     ]);
   });
 
+  test('pane run builds the viewer command for the requested v2 flavor', async () => {
+    const { HerdrMultiplexer } = await importFreshHerdr();
+    const herdr = new HerdrMultiplexer('main-vertical', 60);
+
+    const runCommand = (): string =>
+      commands()
+        .filter((command) => command.includes('run'))
+        .at(-1)
+        ?.at(-1) ?? '';
+
+    await herdr.spawnPane(
+      'session-1',
+      'Remote worker',
+      'http://localhost:4096',
+      '/repo',
+      { viewerFlavor: 'v2-remote', viewerPassword: 'pw' },
+    );
+
+    const remote = runCommand();
+    expect(remote).toContain("env OPENCODE_PASSWORD='pw'");
+    expect(remote).toContain('--server');
+    expect(remote).not.toContain('attach');
+
+    crossSpawnMock.mockClear();
+    await herdr.spawnPane(
+      'session-2',
+      'Shared worker',
+      'http://localhost:4096',
+      '/repo',
+      { viewerFlavor: 'v2-shared' },
+    );
+
+    const shared = runCommand();
+    expect(shared).toContain('--session');
+    expect(shared).not.toContain('--server');
+    expect(shared).not.toContain('attach');
+  });
+
   test('returns not_found and issues no command when HERDR_PANE_ID is not set', async () => {
     delete process.env.HERDR_PANE_ID;
 

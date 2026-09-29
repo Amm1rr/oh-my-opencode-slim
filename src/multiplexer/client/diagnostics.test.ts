@@ -43,6 +43,7 @@ describe('no-pane diagnostics', () => {
       'admission-unavailable',
       'backfill-skipped',
       'host-unreachable',
+      'host-unsupported',
       'not-our-child',
       'readiness-timeout',
     ]);
@@ -115,22 +116,48 @@ describe('pane-created diagnostics', () => {
 });
 
 describe('host-unsupported diagnostics', () => {
-  test('records the configured multiplexer type for a v2 host', () => {
+  test('records the configured type and the host mode for a v2 host', () => {
     const { entries, logger } = createCapturingLogger();
-    expect(logHostUnsupported(logger, 'tmux')).toBe(true);
+    expect(logHostUnsupported(logger, 'tmux', { mode: 'standalone' })).toBe(
+      true,
+    );
 
     expect(entries).toHaveLength(1);
-    expect(entries[0]?.message).toContain('unavailable on v2 hosts');
+    expect(entries[0]?.message).toContain('host-unsupported');
+    expect(entries[0]?.message).toContain('/subagent');
     expect(entries[0]?.data).toEqual({
       event: DIAGNOSTIC_EVENT_HOST_UNSUPPORTED,
+      reason: 'host-unsupported',
       host: 'v2',
       configuredType: 'tmux',
+      mode: 'standalone',
+    });
+  });
+
+  test('carries the invalid-mode reason when the launch mode is malformed', () => {
+    const { entries, logger } = createCapturingLogger();
+    expect(
+      logHostUnsupported(logger, 'herdr', {
+        mode: 'invalid',
+        reason: '--server requires a URL',
+      }),
+    ).toBe(true);
+
+    expect(entries[0]?.data).toEqual({
+      event: DIAGNOSTIC_EVENT_HOST_UNSUPPORTED,
+      reason: 'host-unsupported',
+      host: 'v2',
+      configuredType: 'herdr',
+      mode: 'invalid',
+      modeReason: '--server requires a URL',
     });
   });
 
   test('stays quiet when no multiplexer is configured', () => {
     const { entries, logger } = createCapturingLogger();
-    expect(logHostUnsupported(logger, 'none')).toBe(false);
+    expect(logHostUnsupported(logger, 'none', { mode: 'standalone' })).toBe(
+      false,
+    );
     expect(entries).toHaveLength(0);
   });
 });

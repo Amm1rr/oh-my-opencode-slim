@@ -32,12 +32,8 @@
 
 import type { MultiplexerLayout } from '../../config/schema';
 import { crossSpawn } from '../../utils/compat';
-import {
-  buildOpencodeAttachCommand,
-  findBinary,
-  gracefulClosePane,
-} from '../shared';
-import type { Multiplexer, PaneResult } from '../types';
+import { buildViewCommand, findBinary, gracefulClosePane } from '../shared';
+import type { Multiplexer, PaneResult, PaneSpawnOptions } from '../types';
 
 interface ZellijPaneInfo {
   id: number;
@@ -128,6 +124,7 @@ export class ZellijMultiplexer implements Multiplexer {
     description: string,
     serverUrl: string,
     directory: string,
+    options?: PaneSpawnOptions,
   ): Promise<PaneResult> {
     // Fail closed without issuing any zellij command when the client
     // environment cannot resolve the anchor: the session to address or the
@@ -146,6 +143,7 @@ export class ZellijMultiplexer implements Multiplexer {
         serverUrl,
         directory,
         description,
+        options,
       );
     } catch {
       return { success: false, error: 'hard' };
@@ -158,11 +156,14 @@ export class ZellijMultiplexer implements Multiplexer {
     serverUrl: string,
     directory: string,
     description: string,
+    options?: PaneSpawnOptions,
   ): Promise<PaneResult> {
-    const opencodeCmd = buildOpencodeAttachCommand(
+    const opencodeCmd = buildViewCommand(
+      options?.viewerFlavor ?? 'v1',
       sessionId,
       serverUrl,
       directory,
+      { password: options?.viewerPassword },
     );
     // The name doubles as the pane title; the description is the FR-8
     // metadata (owner pid + child session id) and must survive intact.

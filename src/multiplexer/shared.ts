@@ -40,6 +40,79 @@ export function buildOpencodeAttachCommand(
 }
 
 /**
+ * Viewer command flavor, one per host deployment mode (FR-2 matrix):
+ * `v1` attaches to a reflected server URL; `v2-shared` lets the viewer
+ * rediscover the shared background service itself; `v2-remote` connects to
+ * the same explicit `--server` the parent client uses.
+ */
+export type ViewerFlavor = 'v1' | 'v2-shared' | 'v2-remote';
+
+export interface ViewerCommandOptions {
+  /** Absolute host binary; defaults to the bare `opencode` name. */
+  executable?: string;
+  /**
+   * `v2-remote` only: password for the explicit server. A pane shell does not
+   * inherit the parent client's environment, so the value travels in the
+   * command line (documented trade-off; see the integration docs).
+   */
+  password?: string;
+}
+
+/**
+ * Builds the pane viewer command for one host flavor (FR-2 command matrix).
+ * Every adapter routes through here so the matrix lives in exactly one place.
+ *
+ * - `v1`: `opencode attach <url> --session <id> --dir <dir>` (unchanged)
+ * - `v2-shared`: `opencode --session <id> <dir>` — the viewer discovers the
+ *   same shared background service by itself; no URL is passed.
+ * - `v2-remote`: `env OPENCODE_PASSWORD=<pw> opencode --server <url> --session <id> <dir>`
+ *
+ * The `env` prefix keeps the assignment portable across POSIX and fish-style
+ * shells, matching the existing `OPENCODE_DISABLE_TERMINAL_TITLE` usage.
+ */
+export function buildViewCommand(
+  flavor: ViewerFlavor,
+  sessionId: string,
+  serverUrl: string,
+  directory: string,
+  options: ViewerCommandOptions = {},
+): string {
+  const executable = options.executable ?? 'opencode';
+  if (flavor === 'v1') {
+    return buildOpencodeAttachCommand(
+      sessionId,
+      serverUrl,
+      directory,
+      executable,
+    );
+  }
+  const viewDir = normalizePathForShell(directory);
+  const exe =
+    executable === 'opencode' ? executable : quoteShellArg(executable);
+  if (flavor === 'v2-shared') {
+    return [
+      exe,
+      '--session',
+      quoteShellArg(sessionId),
+      quoteShellArg(viewDir),
+    ].join(' ');
+  }
+  const envPrefix =
+    options.password === undefined
+      ? []
+      : ['env', `OPENCODE_PASSWORD=${quoteShellArg(options.password)}`];
+  return [
+    ...envPrefix,
+    exe,
+    '--server',
+    quoteShellArg(serverUrl),
+    '--session',
+    quoteShellArg(sessionId),
+    quoteShellArg(viewDir),
+  ].join(' ');
+}
+
+/**
  * Resolve the absolute path to the running OpenCode binary so child shells
  * (e.g. a kitty-launched window) don't need `opencode` on their PATH. Falls
  * back to the bare `opencode` name when no absolute path can be determined.

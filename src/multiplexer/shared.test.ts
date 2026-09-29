@@ -275,3 +275,75 @@ describe('findBinaryLogPrefix', () => {
     expect(findBinaryLogPrefix('cmux', 'cmux-tui')).toBe('[cmux-tui]');
   });
 });
+
+describe('buildViewCommand', () => {
+  test('v1 flavor is byte-identical to the legacy attach command', async () => {
+    const { buildOpencodeAttachCommand, buildViewCommand } =
+      await importShared();
+    const legacy = buildOpencodeAttachCommand('sess', 'http://x', '/repo');
+    expect(buildViewCommand('v1', 'sess', 'http://x', '/repo')).toBe(legacy);
+  });
+
+  test('v2-shared omits URL and password (the viewer discovers the service)', async () => {
+    const { buildViewCommand } = await importShared();
+    expect(
+      buildViewCommand('v2-shared', 'ses_abc', 'http://unused', '/repo'),
+    ).toBe("opencode --session 'ses_abc' '/repo'");
+  });
+
+  test('v2-remote carries server URL, session, directory and password', async () => {
+    const { buildViewCommand } = await importShared();
+    expect(
+      buildViewCommand(
+        'v2-remote',
+        'ses_abc',
+        'http://192.168.5.212:8192',
+        '/repo',
+        { password: 'pw-123' },
+      ),
+    ).toBe(
+      "env OPENCODE_PASSWORD='pw-123' opencode --server 'http://192.168.5.212:8192' --session 'ses_abc' '/repo'",
+    );
+  });
+
+  test('v2-remote without a password omits the env prefix', async () => {
+    const { buildViewCommand } = await importShared();
+    expect(buildViewCommand('v2-remote', 'ses_abc', 'http://x', '/repo')).toBe(
+      "opencode --server 'http://x' --session 'ses_abc' '/repo'",
+    );
+  });
+
+  test('v2 flavors quote directories, session ids and executables', async () => {
+    const { buildViewCommand } = await importShared();
+    expect(
+      buildViewCommand('v2-shared', "s'es s", 'http://x', "/tmp/a b's", {
+        executable: "/opt/King's/opencode",
+      }),
+    ).toBe(
+      "'/opt/King'\\''s/opencode' --session 's'\\''es s' '/tmp/a b'\\''s'",
+    );
+  });
+
+  test('v2-remote normalizes Windows backslash paths', async () => {
+    const original = process.platform;
+    Object.defineProperty(process, 'platform', {
+      value: 'win32',
+      configurable: true,
+    });
+    try {
+      const { buildViewCommand } = await importShared();
+      const cmd = buildViewCommand(
+        'v2-remote',
+        'ses',
+        'http://x',
+        'C:\\Users\\foo\\repo',
+      );
+      expect(cmd).toContain('C:/Users/foo/repo');
+    } finally {
+      Object.defineProperty(process, 'platform', {
+        value: original,
+        configurable: true,
+      });
+    }
+  });
+});

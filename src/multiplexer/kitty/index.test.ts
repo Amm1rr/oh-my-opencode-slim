@@ -193,6 +193,38 @@ describe('KittyMultiplexer', () => {
     }
   });
 
+  test('launch builds the viewer command for the requested v2 flavor', async () => {
+    const { KittyMultiplexer } = await importFreshKitty();
+    const kitty = new KittyMultiplexer();
+
+    await kitty.spawnPane(
+      'session-1',
+      'Remote worker',
+      'http://localhost:4096',
+      '/repo',
+      { viewerFlavor: 'v2-remote', viewerPassword: 'pw' },
+    );
+
+    const remote = commandContaining('launch')?.at(-1) ?? '';
+    expect(remote).toContain("env OPENCODE_PASSWORD='pw'");
+    expect(remote).toContain('--server');
+    expect(remote).not.toContain('attach');
+
+    crossSpawnMock.mockClear();
+    await kitty.spawnPane(
+      'session-2',
+      'Shared worker',
+      'http://localhost:4096',
+      '/repo',
+      { viewerFlavor: 'v2-shared' },
+    );
+
+    const shared = commandContaining('launch')?.at(-1) ?? '';
+    expect(shared).toContain('--session');
+    expect(shared).not.toContain('--server');
+    expect(shared).not.toContain('attach');
+  });
+
   test('spawnPane parses integer window id from launch stdout', async () => {
     const { KittyMultiplexer } = await importFreshKitty();
     const kitty = new KittyMultiplexer();

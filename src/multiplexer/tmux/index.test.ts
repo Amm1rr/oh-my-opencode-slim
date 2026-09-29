@@ -147,6 +147,38 @@ describe('TmuxMultiplexer', () => {
     );
   });
 
+  test('spawnPane builds the viewer command for the requested v2 flavor', async () => {
+    const { TmuxMultiplexer } = await importFreshTmux();
+    const tmux = new TmuxMultiplexer('main-vertical', 60);
+
+    await tmux.spawnPane(
+      'session-1',
+      'Remote worker',
+      'http://localhost:4096',
+      '/repo',
+      { viewerFlavor: 'v2-remote', viewerPassword: 'pw' },
+    );
+
+    const remote = commandContaining('split-window')?.at(-1) ?? '';
+    expect(remote).toContain("env OPENCODE_PASSWORD='pw'");
+    expect(remote).toContain('--server');
+    expect(remote).not.toContain('attach');
+
+    crossSpawnMock.mockClear();
+    await tmux.spawnPane(
+      'session-2',
+      'Shared worker',
+      'http://localhost:4096',
+      '/repo',
+      { viewerFlavor: 'v2-shared' },
+    );
+
+    const shared = commandContaining('split-window')?.at(-1) ?? '';
+    expect(shared).toContain('--session');
+    expect(shared).not.toContain('--server');
+    expect(shared).not.toContain('attach');
+  });
+
   test('spawnPane re-resolves the anchor from the environment at spawn time', async () => {
     const { TmuxMultiplexer } = await importFreshTmux();
     // Construction-time TMUX_PANE is %1; the spawn-time value must win.

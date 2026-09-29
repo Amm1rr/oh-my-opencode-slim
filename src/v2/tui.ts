@@ -66,7 +66,21 @@ type V2SlotApi = (claim: {
  * either or both, so every field is optional and capability-guarded.
  */
 export interface V2PresetTuiContext extends V2PresetManagerContext {
+  data?: V2PresetManagerContext['data'] & {
+    session?: {
+      list?: () => Array<{
+        id?: string;
+        parentID?: string;
+        time?: { created?: number };
+      }>;
+    };
+  };
   ui?: V2PresetUiSurface & {
+    router?: { current?: () => unknown };
+    tabs?: {
+      enabled?: () => boolean;
+      open?: (sessionID: string) => boolean;
+    };
     slot?: V2SlotApi;
   };
   keymap?: {
@@ -85,6 +99,7 @@ export type V2TuiPluginContext = Parameters<(typeof omoTui)['setup']>[0] &
 
 const PRESET_COMMAND_ID = 'omo.preset';
 const PRESET_COMMAND_TITLE = 'OMO: switch preset';
+const OPEN_SUBAGENT_COMMAND_ID = 'omo.open_subagent';
 const PRESET_APP_SLOT = 'app';
 
 /**
@@ -191,6 +206,7 @@ function buildPresetLayer(
         run: (input?: string) => void runPresetFlow(ctx, input),
       },
       buildKillAllCommand(ctx),
+      buildOpenSubagentCommand(ctx),
     ],
   });
 }
@@ -223,6 +239,60 @@ function buildKillAllCommand(
       void runKillAllFlow(ctx);
     },
   };
+}
+
+/**
+ * Fallback surface for v2 hosts that cannot host panes (standalone private
+ * servers, malformed launch modes): open the most recent subagent session of
+ * the visible conversation in a host tab. Manual only — nothing opens
+ * automatically, and a host without tab support just toasts.
+ */
+function buildOpenSubagentCommand(ctx: V2PresetTuiContext): V2KeymapCommand {
+  return {
+    id: OPEN_SUBAGENT_COMMAND_ID,
+    title: 'OMO: open latest subagent in a tab',
+    group: 'System',
+    palette: true,
+    slash: { name: 'subagent' },
+    run: () => {
+      void runOpenSubagentFlow(ctx);
+    },
+  };
+}
+
+/** Opens the newest child of the displayed session in a tab; never throws. */
+async function runOpenSubagentFlow(ctx: V2PresetTuiContext): Promise<void> {
+  const toast = (message: string) => ctx.ui?.toast?.show?.({ message });
+  try {
+    const route = ctx.ui?.router?.current?.() as TuiRouteView | undefined;
+    const visible = route ? resolveRouteSessionId(route) : undefined;
+    if (visible === undefined) {
+      toast('No session is displayed.');
+      return;
+    }
+    const children = (ctx.data?.session?.list?.() ?? [])
+      .filter((entry) => entry.parentID === visible)
+      .sort((a, b) => (b.time?.created ?? 0) - (a.time?.created ?? 0));
+    const child = children[0];
+    if (!child || typeof child.id !== 'string') {
+      toast('No subagent session found for this conversation.');
+      return;
+    }
+    const tabs = ctx.ui?.tabs;
+    if (tabs?.enabled?.() === false) {
+      toast('Session tabs are disabled for this host.');
+      return;
+    }
+    const opened = tabs?.open?.(child.id);
+    if (opened === false) {
+      toast('Session tabs are unavailable.');
+      return;
+    }
+    toast(`Opened subagent ${child.id} in a tab.`);
+  } catch (err) {
+    log('[v2][tui] open-subagent flow failed', String(err));
+    toast('Open subagent failed.');
+  }
 }
 
 /** Resolve the visible session, kill, and toast the summary. Never throws. */

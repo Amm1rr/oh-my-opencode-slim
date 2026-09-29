@@ -23,7 +23,13 @@ import {
 import {
   createTuiPaneWiring,
   initClientLogging,
+  type TuiPaneWiring,
 } from './multiplexer/client/tui-wiring';
+import {
+  buildV2PaneWiringOptions,
+  describeV2HostMode,
+  detectV2HostMode,
+} from './multiplexer/client/v2-host';
 import {
   KILL_ALL_KEYBIND,
   killAllRunningSubagents,
@@ -84,11 +90,12 @@ const v2HostUnsupportedGate = createOnceGate();
  */
 function warnV2HostUnsupportedMultiplexer(
   configuredType: MultiplexerType,
+  detail: { mode: string; reason?: string },
 ): void {
   if (configuredType === 'none') return;
   if (!v2HostUnsupportedGate('v2-host-unsupported')) return;
   initClientLogging();
-  logHostUnsupported(PLUGIN_LOG_SINK, configuredType);
+  logHostUnsupported(PLUGIN_LOG_SINK, configuredType, detail);
 }
 
 type Child =
@@ -1562,6 +1569,9 @@ interface V2TuiSlotClaim {
 interface V2TuiContext extends V2PresetManagerContext {
   location?: { directory: string };
   client?: unknown;
+  data?: V2PresetManagerContext['data'] & {
+    on?: (type: string, handler: (event: unknown) => void) => unknown;
+  };
   renderer: { requestRender: () => void; getSelection?: () => unknown };
   theme: V2TuiThemeTokens;
   ui: V2PresetUiSurface & {
@@ -1609,10 +1619,48 @@ async function setup(ctx: V2TuiContext): Promise<undefined | (() => void)> {
   let { configInvalid, compactSidebar, multiplexerType, presetName } =
     readConfigState(configDirectory);
 
-  // Pane creation lives in the v1 TUI entry only (NFR-6): a multiplexer
-  // configured on a v2 host is ignored. Record that once per process so the
-  // disabled feature is self-explaining instead of silently dropping config.
-  warnV2HostUnsupportedMultiplexer(multiplexerType);
+  // Client-side pane lifecycle: the v2 host adapter classifies this process's
+  // access mode (shared service / explicit server / standalone) and supplies
+  // the lifecycle seams. Standalone and malformed modes cannot host panes —
+  // their private server has no joinable address — so they get the
+  // once-per-process diagnostic (pointing at the native-surface fallback)
+  // instead of a wiring. The mode is constant per process, which keeps the
+  // diagnostic well-defined across directory changes.
+  const v2HostMode = detectV2HostMode(process.argv);
+  let hostFailureDetail: { mode: string; reason?: string } | null =
+    v2HostMode.mode === 'standalone' || v2HostMode.mode === 'invalid'
+      ? describeV2HostMode(v2HostMode)
+      : null;
+  let paneWiring: TuiPaneWiring | null = null;
+  if (multiplexerType !== 'none' && hostFailureDetail === null) {
+    try {
+      const paneHost = await buildV2PaneWiringOptions({
+        location: ctx.location,
+        client: ctx.client,
+        data: ctx.data,
+        ui: ctx.ui,
+        env: process.env,
+        argv: process.argv,
+      });
+      if (paneHost.options !== null) {
+        paneWiring = await createTuiPaneWiring({
+          ...paneHost.options,
+          client: ctx.client,
+        });
+      } else {
+        hostFailureDetail = describeV2HostMode(paneHost.mode);
+      }
+    } catch (error) {
+      log('[pane-lifecycle] v2 wiring failed', {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  const warnPaneUnsupported = () => {
+    if (hostFailureDetail === null) return;
+    warnV2HostUnsupportedMultiplexer(multiplexerType, hostFailureDetail);
+  };
+  warnPaneUnsupported();
 
   /** Re-read the config-backed sidebar state; returns true when it changed. */
   const applyConfigState = (): boolean => {
@@ -1630,7 +1678,7 @@ async function setup(ctx: V2TuiContext): Promise<undefined | (() => void)> {
       compactSidebar = next.compactSidebar;
       multiplexerType = next.multiplexerType;
       presetName = next.presetName;
-      warnV2HostUnsupportedMultiplexer(multiplexerType);
+      warnPaneUnsupported();
     }
     return changed;
   };
@@ -1652,7 +1700,7 @@ async function setup(ctx: V2TuiContext): Promise<undefined | (() => void)> {
       configDirectory = currentDirectory;
       ({ configInvalid, compactSidebar, multiplexerType, presetName } =
         readConfigState(configDirectory));
-      warnV2HostUnsupportedMultiplexer(multiplexerType);
+      warnPaneUnsupported();
       // Never carry one project's last-good config state into another.
       bindConfigListener();
       stateChanged = true;
@@ -1792,6 +1840,12 @@ async function setup(ctx: V2TuiContext): Promise<undefined | (() => void)> {
     disposeSlot();
     clearInterval(renderTimer);
     clearInterval(animationTimer);
+    const wiring = paneWiring;
+    if (wiring !== null) {
+      void wiring.dispose().catch(() => {
+        // Best-effort teardown; pane leftovers fall to the FR-8 sweep.
+      });
+    }
   };
 }
 

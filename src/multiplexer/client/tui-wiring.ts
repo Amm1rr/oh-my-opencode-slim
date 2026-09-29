@@ -30,6 +30,7 @@ import {
 import { isRecord } from '../../utils/guards';
 import { initLogger } from '../../utils/logger';
 import { getMultiplexer } from '../factory';
+import type { ViewerFlavor } from '../shared';
 import type { Multiplexer } from '../types';
 import {
   createOnceGate,
@@ -176,6 +177,34 @@ export interface TuiPaneWiringOptions {
   isProcessAlive?: (pid: number) => boolean;
   /** Terminal-session probe seam for the FR-8 sweep. */
   isSessionTerminal?: (childSessionId: string) => Promise<boolean>;
+  /**
+   * Pre-resolved host base URL (v2 host adapter). When set, SDK reflection is
+   * skipped; the v2 adapter resolves it from the argv `--server` URL or the
+   * shared service's `client.server.info()` before wiring.
+   */
+  baseUrl?: string;
+  /**
+   * Host reachability probe (design D5). Defaults to the raw-fetch
+   * `/session/status` probe; the v2 adapter supplies an authenticated
+   * `server.info()` probe because the shared service rejects unauthenticated
+   * fetches.
+   */
+  probeHost?: (directory: string) => Promise<boolean>;
+  /** Host session status reader (FR-4); defaults to the fetch-based reader. */
+  statusReader?: SessionStatusReader;
+  /** Host session list reader (FR-7); defaults to the fetch-based reader. */
+  sessionListReader?: SessionListReader;
+  /**
+   * Already-projected host session events (v2 `data.on`). When set it replaces
+   * `eventBus` plus the v1 envelope projection.
+   */
+  sessionEvents?: (
+    handler: (event: SessionLifecycleEvent) => void,
+  ) => () => void;
+  /** Viewer command flavor handed to adapters (FR-2 matrix); defaults to `v1`. */
+  viewerFlavor?: ViewerFlavor;
+  /** `v2-remote` only: password forwarded into the viewer command. */
+  viewerPassword?: string;
 }
 
 export interface TuiPaneWiring {
@@ -504,7 +533,7 @@ export async function createTuiPaneWiring(
     return disabledWiring(admission, detected);
   }
 
-  const baseUrl = reflectServerBaseUrl(options.client);
+  const baseUrl = options.baseUrl ?? reflectServerBaseUrl(options.client);
   if (baseUrl === undefined || isEmbeddedHostUrl(baseUrl)) {
     // Embedded mode: no listener exists and none can be created by us, so
     // the feature stays off for this process (D3, deployment matrix).
@@ -519,13 +548,17 @@ export async function createTuiPaneWiring(
   /** FR-8: a sweep is owed after startup / an `unreachable → reachable` edge. */
   let sweepDue = false;
 
+  const probeHost =
+    options.probeHost ??
+    ((directory: string): Promise<boolean> =>
+      probeServerReachable(baseUrl, {
+        directory,
+        fetchFn: options.fetchFn,
+        timeoutMs: options.probeTimeoutMs,
+      }));
   const runProbe = async (): Promise<boolean> => {
     const wasReachable = hostState === 'reachable';
-    const reachable = await probeServerReachable(baseUrl, {
-      directory: getDirectory(),
-      fetchFn: options.fetchFn,
-      timeoutMs: options.probeTimeoutMs,
-    });
+    const reachable = await probeHost(getDirectory());
     hostState = reachable ? 'reachable' : 'unreachable';
     nextProbeAt = clock.now() + HOST_REPROBE_INTERVAL_MS;
     // The startup probe counts as a transition too: `hostState` starts
@@ -560,16 +593,12 @@ export async function createTuiPaneWiring(
     options.fetchFn ?? (globalThis.fetch as FetchLike | undefined);
   const ports: ClientPorts = {
     clock,
-    statusReader: createSessionStatusReader(
-      baseUrl,
-      readerFetch,
-      options.statusTimeoutMs,
-    ),
-    sessionListReader: createSessionListReader(
-      baseUrl,
-      readerFetch,
-      options.listTimeoutMs,
-    ),
+    statusReader:
+      options.statusReader ??
+      createSessionStatusReader(baseUrl, readerFetch, options.statusTimeoutMs),
+    sessionListReader:
+      options.sessionListReader ??
+      createSessionListReader(baseUrl, readerFetch, options.listTimeoutMs),
     adapterFactory,
     resolveServerUrl: () =>
       hostState === 'reachable' ? { url: baseUrl } : { unreachable: true },
@@ -593,6 +622,16 @@ export async function createTuiPaneWiring(
       mainPaneSize: loaded.multiplexer.main_pane_size,
       stableIdleMs: options.stableIdleMs ?? DEFAULT_STABLE_IDLE_MS,
       readiness: options.readiness ?? DEFAULT_READINESS,
+      ...(options.viewerFlavor === undefined
+        ? {}
+        : {
+            viewer: {
+              flavor: options.viewerFlavor,
+              ...(options.viewerPassword === undefined
+                ? {}
+                : { password: options.viewerPassword }),
+            },
+          }),
     },
     logger,
   );
@@ -656,10 +695,10 @@ export async function createTuiPaneWiring(
   /** Child ids seen in this client's directory, for directory-less events. */
   const knownDirectories = new Map<string, string>();
 
-  const processEvent = async (type: string, raw: unknown): Promise<void> => {
+  const processProjectedEvent = async (
+    projected: SessionLifecycleEvent,
+  ): Promise<void> => {
     if (disposed) return;
-    const projected = projectSessionEvent(type, raw);
-    if (!projected) return;
     const displayedDirectory = getDirectory();
     const event = withDirectory(projected, knownDirectories, lifecycle);
     if (event.directory === displayedDirectory) {
@@ -677,7 +716,24 @@ export async function createTuiPaneWiring(
     await lifecycle.handleEvent(event);
   };
 
-  if (options.eventBus) {
+  const processEvent = async (type: string, raw: unknown): Promise<void> => {
+    if (disposed) return;
+    const projected = projectSessionEvent(type, raw);
+    if (!projected) return;
+    await processProjectedEvent(projected);
+  };
+
+  if (options.sessionEvents) {
+    try {
+      unsubscribers.push(
+        options.sessionEvents((event) => {
+          void processProjectedEvent(event);
+        }),
+      );
+    } catch {
+      // Subscription is best-effort; a host without the feed stays idle.
+    }
+  } else if (options.eventBus) {
     for (const type of SESSION_EVENT_TYPES) {
       try {
         unsubscribers.push(

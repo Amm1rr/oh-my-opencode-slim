@@ -376,6 +376,38 @@ describe('ZellijMultiplexer', () => {
     );
   });
 
+  test('new-pane builds the viewer command for the requested v2 flavor', async () => {
+    const { ZellijMultiplexer } = await importFreshZellij();
+    const zellij = new ZellijMultiplexer('main-vertical', 60);
+
+    await zellij.spawnPane(
+      'session-1',
+      'Remote worker',
+      'http://localhost:4096',
+      '/repo',
+      { viewerFlavor: 'v2-remote', viewerPassword: 'pw' },
+    );
+
+    const remote = newPaneCommands()[0]?.at(-1) ?? '';
+    expect(remote).toContain("env OPENCODE_PASSWORD='pw'");
+    expect(remote).toContain('--server');
+    expect(remote).not.toContain('attach');
+
+    crossSpawnMock.mockClear();
+    await zellij.spawnPane(
+      'session-2',
+      'Shared worker',
+      'http://localhost:4096',
+      '/repo',
+      { viewerFlavor: 'v2-shared' },
+    );
+
+    const shared = newPaneCommands()[0]?.at(-1) ?? '';
+    expect(shared).toContain('--session');
+    expect(shared).not.toContain('--server');
+    expect(shared).not.toContain('attach');
+  });
+
   test('reports failure when zellij does not return a terminal pane id', async () => {
     const { ZellijMultiplexer } = await importFreshZellij();
     const zellij = new ZellijMultiplexer('main-vertical', 60);

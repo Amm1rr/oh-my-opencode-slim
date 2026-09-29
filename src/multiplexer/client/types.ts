@@ -83,6 +83,7 @@ export const NO_PANE_REASONS = [
   'admission-unavailable',
   'not-our-child',
   'host-unreachable',
+  'host-unsupported',
   'readiness-timeout',
   'adapter-unavailable',
   'adapter-not-found',

@@ -187,6 +187,44 @@ describe('CmuxMultiplexer', () => {
     expect(calls[5]).toEqual(cmux(['terminal', 'term_child', 'close']));
   });
 
+  test('builds the viewer command for the requested v2 flavor', async () => {
+    const { runner, calls } = recorder();
+    const instance = mux({ runner });
+    const runScript = (): string =>
+      calls.find((argv) => argv.includes('run'))?.at(-1) ?? '';
+
+    expect(
+      await instance.spawnPane(
+        CHILD_ID,
+        DESCRIPTION,
+        'http://127.0.0.1:7777',
+        '/repo',
+        { viewerFlavor: 'v2-remote', viewerPassword: 'pw' },
+      ),
+    ).toEqual({ success: true, paneId: 'term_child' });
+
+    const remote = runScript();
+    expect(remote).toContain("env OPENCODE_PASSWORD='pw'");
+    expect(remote).toContain('--server');
+    expect(remote).not.toContain('attach');
+
+    calls.length = 0;
+    expect(
+      await instance.spawnPane(
+        CHILD_ID,
+        DESCRIPTION,
+        'http://127.0.0.1:7777',
+        '/repo',
+        { viewerFlavor: 'v2-shared' },
+      ),
+    ).toEqual({ success: true, paneId: 'term_child' });
+
+    const shared = runScript();
+    expect(shared).toContain('--session');
+    expect(shared).not.toContain('--server');
+    expect(shared).not.toContain('attach');
+  });
+
   test('keeps the child view when the focus restore fails (diagnostic only)', async () => {
     const { runner, calls } = recorder((argv) => {
       if (argv.includes('focus')) {

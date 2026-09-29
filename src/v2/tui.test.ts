@@ -664,5 +664,240 @@ describe('v2 tui preset plugin', () => {
         else process.env.XDG_DATA_HOME = originalDataHome;
       }
     });
+
+    test('fallback command opens the latest subagent tab manually', async () => {
+      const stub = makeSetupCtx();
+      const opened: string[] = [];
+      const toasts: string[] = [];
+      stub.ctx.data = {
+        session: {
+          list: () => [
+            { id: 'ora-old', parentID: 'conv-1', time: { created: 1 } },
+            { id: 'ora-new', parentID: 'conv-1', time: { created: 2 } },
+            { id: 'other', parentID: 'conv-2', time: { created: 3 } },
+          ],
+        },
+      };
+      (stub.ctx.ui as { router?: unknown }).router = {
+        current: () => ({ type: 'session', sessionID: 'conv-1' }),
+      };
+      (stub.ctx.ui as { tabs?: unknown }).tabs = {
+        enabled: () => true,
+        open: (sessionID: string) => {
+          opened.push(sessionID);
+          return true;
+        },
+      };
+      (stub.ctx.ui as { toast?: unknown }).toast = {
+        show: (toast: { message: string }) => {
+          toasts.push(toast.message);
+        },
+      };
+
+      let cleanup: (() => void) | undefined;
+      try {
+        cleanup = (await tui2Plugin.setup(
+          stub.ctx as unknown as V2TuiPluginContext,
+        )) as (() => void) | undefined;
+        stub.renderAppSlot();
+
+        const command = stub.layers[0]?.commands.find(
+          (c) => c.id === 'omo.open_subagent',
+        );
+        expect(command).toBeDefined();
+        // Registration alone must never open anything (manual fallback).
+        expect(opened).toEqual([]);
+
+        await command?.run();
+        await Bun.sleep(10);
+        expect(opened).toEqual(['ora-new']);
+        expect(toasts[0]).toContain('ora-new');
+      } finally {
+        cleanup?.();
+      }
+    });
+
+    test('fallback command toasts when session tabs are disabled', async () => {
+      const stub = makeSetupCtx();
+      const opened: string[] = [];
+      const toasts: string[] = [];
+      stub.ctx.data = {
+        session: {
+          list: () => [
+            { id: 'ora-new', parentID: 'conv-1', time: { created: 2 } },
+          ],
+        },
+      };
+      (stub.ctx.ui as { router?: unknown }).router = {
+        current: () => ({ type: 'session', sessionID: 'conv-1' }),
+      };
+      (stub.ctx.ui as { tabs?: unknown }).tabs = {
+        enabled: () => false,
+        open: (sessionID: string) => {
+          opened.push(sessionID);
+          return false;
+        },
+      };
+      (stub.ctx.ui as { toast?: unknown }).toast = {
+        show: (toast: { message: string }) => {
+          toasts.push(toast.message);
+        },
+      };
+
+      let cleanup: (() => void) | undefined;
+      try {
+        cleanup = (await tui2Plugin.setup(
+          stub.ctx as unknown as V2TuiPluginContext,
+        )) as (() => void) | undefined;
+        stub.renderAppSlot();
+
+        const command = stub.layers[0]?.commands.find(
+          (c) => c.id === 'omo.open_subagent',
+        );
+        await command?.run();
+        await Bun.sleep(10);
+        expect(opened).toEqual([]);
+        expect(toasts[0]).toContain('tabs are disabled');
+      } finally {
+        cleanup?.();
+      }
+    });
+
+    test('a standalone host never wires panes even with a multiplexer configured', async () => {
+      const stub = makeSetupCtx();
+      const projectConfigDir = path.join(projectDir, '.opencode');
+      fs.mkdirSync(projectConfigDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(projectConfigDir, 'oh-my-opencode-slim.json'),
+        JSON.stringify({ multiplexer: { type: 'tmux' } }),
+      );
+      process.env.TMUX_PANE = '%1';
+      const originalArgv = process.argv;
+      process.argv = [...originalArgv, '--standalone'];
+
+      const subscriptions: string[] = [];
+      stub.ctx.data = {
+        on: (type: string) => {
+          subscriptions.push(type);
+          return () => {};
+        },
+      };
+      stub.ctx.client = {
+        server: {
+          info: async () => ({ urls: ['http://127.0.0.1:9999'] }),
+        },
+      };
+
+      let cleanup: (() => void) | undefined;
+      try {
+        cleanup = (await tui2Plugin.setup(
+          stub.ctx as unknown as V2TuiPluginContext,
+        )) as (() => void) | undefined;
+        // Standalone: no wiring, no subscriptions (diagnostic path instead).
+        expect(subscriptions).toEqual([]);
+      } finally {
+        cleanup?.();
+        process.argv = originalArgv;
+      }
+    });
+
+    test('wires the v2 pane lifecycle in shared mode and disposes it on cleanup', async () => {
+      const stub = makeSetupCtx();
+      const projectConfigDir = path.join(projectDir, '.opencode');
+      fs.mkdirSync(projectConfigDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(projectConfigDir, 'oh-my-opencode-slim.json'),
+        JSON.stringify({ multiplexer: { type: 'tmux' } }),
+      );
+      process.env.TMUX_PANE = '%1';
+
+      const subscriptions = new Map<string, unknown>();
+      const unsubscribed: string[] = [];
+      let infoCalls = 0;
+      stub.ctx.data = {
+        on: (type: string, handler: (event: unknown) => void) => {
+          subscriptions.set(type, handler);
+          return () => {
+            unsubscribed.push(type);
+          };
+        },
+      };
+      // First call resolves the shared-service base URL; every later call is
+      // the liveness probe, which fails here so the wiring never reaches the
+      // real adapter factory (no tmux commands run during the test).
+      stub.ctx.client = {
+        server: {
+          info: async () => {
+            infoCalls += 1;
+            if (infoCalls === 1) return { urls: ['http://127.0.0.1:1'] };
+            throw new Error('probe down');
+          },
+        },
+      };
+
+      const expectedEvents = [
+        'session.created',
+        'session.deleted',
+        'session.execution.failed',
+        'session.execution.interrupted',
+        'session.execution.started',
+        'session.execution.succeeded',
+        'session.idle',
+      ];
+
+      let cleanup: (() => void) | undefined;
+      try {
+        cleanup = (await tui2Plugin.setup(
+          stub.ctx as unknown as V2TuiPluginContext,
+        )) as (() => void) | undefined;
+
+        // The wiring subscribes through the host `data.on` feed, proving the
+        // lifecycle was established for this v2 process.
+        expect([...subscriptions.keys()].sort()).toEqual(expectedEvents);
+      } finally {
+        cleanup?.();
+        cleanup = undefined;
+      }
+
+      // Disposal must release every host subscription (fire-and-forget in the
+      // setup cleanup; the unsubscribe loop runs synchronously).
+      expect([...unsubscribed].sort()).toEqual(expectedEvents);
+    });
+
+    test('does not wire panes when the v2 server URL cannot be resolved', async () => {
+      const stub = makeSetupCtx();
+      const projectConfigDir = path.join(projectDir, '.opencode');
+      fs.mkdirSync(projectConfigDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(projectConfigDir, 'oh-my-opencode-slim.json'),
+        JSON.stringify({ multiplexer: { type: 'tmux' } }),
+      );
+      process.env.TMUX_PANE = '%1';
+
+      const subscriptions: string[] = [];
+      stub.ctx.data = {
+        on: (type: string) => {
+          subscriptions.push(type);
+          return () => {};
+        },
+      };
+      stub.ctx.client = {
+        server: {
+          info: async () => {
+            throw new Error('service down');
+          },
+        },
+      };
+
+      let cleanup: (() => void) | undefined;
+      try {
+        cleanup = (await tui2Plugin.setup(
+          stub.ctx as unknown as V2TuiPluginContext,
+        )) as (() => void) | undefined;
+        expect(subscriptions).toEqual([]);
+      } finally {
+        cleanup?.();
+      }
+    });
   });
 });

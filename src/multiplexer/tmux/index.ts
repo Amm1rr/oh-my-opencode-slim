@@ -14,11 +14,7 @@
 import type { MultiplexerLayout } from '../../config/schema';
 import { crossSpawn } from '../../utils/compat';
 import { log } from '../../utils/logger';
-import {
-  buildOpencodeAttachCommand,
-  findBinary,
-  gracefulClosePane,
-} from '../shared';
+import { buildViewCommand, findBinary, gracefulClosePane } from '../shared';
 import type { Multiplexer, PaneResult, PaneSpawnOptions } from '../types';
 
 const TMUX_LAYOUT_DEBOUNCE_MS = 150;
@@ -58,7 +54,7 @@ export class TmuxMultiplexer implements Multiplexer {
     description: string,
     serverUrl: string,
     directory: string,
-    _options?: PaneSpawnOptions,
+    options?: PaneSpawnOptions,
   ): Promise<PaneResult> {
     // Multi-instance hardening: resolve the server socket and the anchor from
     // this client's own environment at spawn time. When either is missing the
@@ -81,10 +77,12 @@ export class TmuxMultiplexer implements Multiplexer {
     }
 
     try {
-      const opencodeCmd = `env OPENCODE_DISABLE_TERMINAL_TITLE=1 ${buildOpencodeAttachCommand(
+      const opencodeCmd = `env OPENCODE_DISABLE_TERMINAL_TITLE=1 ${buildViewCommand(
+        options?.viewerFlavor ?? 'v1',
         sessionId,
         serverUrl,
         directory,
+        { password: options?.viewerPassword },
       )}`;
 
       const result = await this.splitPane(

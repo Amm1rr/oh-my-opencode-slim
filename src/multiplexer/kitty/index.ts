@@ -35,14 +35,14 @@ import type { MultiplexerLayout } from '../../config/schema';
 import { crossSpawn } from '../../utils/compat';
 import { log } from '../../utils/logger';
 import {
-  buildOpencodeAttachCommand,
   buildShellLaunchArgs,
+  buildViewCommand,
   findBinary,
   gracefulClosePane,
   normalizePathForShell,
   resolveOpencodeExecutable,
 } from '../shared';
-import type { Multiplexer, PaneResult } from '../types';
+import type { Multiplexer, PaneResult, PaneSpawnOptions } from '../types';
 
 export class KittyMultiplexer implements Multiplexer {
   readonly type = 'kitty' as const;
@@ -90,6 +90,7 @@ export class KittyMultiplexer implements Multiplexer {
     description: string,
     serverUrl: string,
     directory: string,
+    options?: PaneSpawnOptions,
   ): Promise<PaneResult> {
     // Anchor first: without the parent window id no target can be resolved, so
     // no kitty command may be issued.
@@ -127,11 +128,15 @@ export class KittyMultiplexer implements Multiplexer {
     await this.ensureLayout(kittyLayout, parentWindowId);
 
     try {
-      const opencodeCmd = buildOpencodeAttachCommand(
+      const opencodeCmd = buildViewCommand(
+        options?.viewerFlavor ?? 'v1',
         sessionId,
         serverUrl,
         directory,
-        resolveOpencodeExecutable(),
+        {
+          executable: resolveOpencodeExecutable(),
+          password: options?.viewerPassword,
+        },
       );
 
       // Normalize for Windows/MSYS2/Git Bash (backslashes would be treated as

@@ -17,12 +17,12 @@ import { crossSpawn } from '../../utils/compat';
 import { isRecord } from '../../utils/guards';
 import { log } from '../../utils/logger';
 import {
-  buildOpencodeAttachCommand,
+  buildViewCommand,
   findBinary,
   gracefulClosePane,
   normalizePathForShell,
 } from '../shared';
-import type { Multiplexer, PaneResult } from '../types';
+import type { Multiplexer, PaneResult, PaneSpawnOptions } from '../types';
 
 type HerdrPaneDirection = 'right' | 'down';
 
@@ -76,6 +76,7 @@ export class HerdrMultiplexer implements Multiplexer {
     description: string,
     serverUrl: string,
     directory: string,
+    options?: PaneSpawnOptions,
   ): Promise<PaneResult> {
     // ponytail: serialize concurrent spawns to prevent races on agentAreaPaneId
     const prev = this.spawnMutex;
@@ -84,7 +85,13 @@ export class HerdrMultiplexer implements Multiplexer {
     await prev;
 
     try {
-      return await this.doSpawn(sessionId, description, serverUrl, directory);
+      return await this.doSpawn(
+        sessionId,
+        description,
+        serverUrl,
+        directory,
+        options,
+      );
     } finally {
       release();
     }
@@ -95,6 +102,7 @@ export class HerdrMultiplexer implements Multiplexer {
     description: string,
     serverUrl: string,
     directory: string,
+    options?: PaneSpawnOptions,
   ): Promise<PaneResult> {
     // The parent pane is required: without HERDR_PANE_ID the anchor is
     // unknowable, so no herdr command may be issued (no `--current` fallback).
@@ -159,10 +167,12 @@ export class HerdrMultiplexer implements Multiplexer {
       }).exited;
 
       // 3. Run opencode attach in the new pane
-      const opencodeCmd = buildOpencodeAttachCommand(
+      const opencodeCmd = buildViewCommand(
+        options?.viewerFlavor ?? 'v1',
         sessionId,
         serverUrl,
         attachDir,
+        { password: options?.viewerPassword },
       );
 
       const runProc = crossSpawn([herdr, 'pane', 'run', paneId, opencodeCmd], {

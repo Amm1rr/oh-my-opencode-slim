@@ -9,10 +9,11 @@ that displays their parent session.
 > client manages only its own panes. See
 > [Per-client view semantics](#per-client-view-semantics).
 
-> **OpenCode v2 hosts:** pane creation is unavailable by design — the pane
-> lifecycle is wired only in the v1 TUI entry. A configured `multiplexer.type`
-> is ignored on v2 hosts (one diagnostic per process); v2's native subagent UX
-> replaces panes. See [Deployment Modes](#deployment-modes) and
+> **OpenCode v2 hosts:** pane creation is supported when the parent TUI talks
+> to the shared background service (the default) or to an explicit `--server`
+> URL. `--standalone` hosts are unsupported (fail-closed, one diagnostic per
+> process) and fall back to v2's native subagent surfaces. See
+> [Deployment Modes](#deployment-modes) and
 > [Known Limitations](#known-limitations).
 
 ## Table of Contents
@@ -86,7 +87,16 @@ Pane behavior is fixed per host mode:
 | `opencode serve` + N × `opencode attach <url>` | multiple processes | real | Supported (target deployment) |
 | `opencode run` | no TUI host | — | No pane (child runs in the host's native background mode) |
 | `opencode --mini` | TUI host does not load plugins | — | No pane |
-| v2 host | — | — | Feature off (v2 `setup()` is not wired); `multiplexer.type` is ignored, one diagnostic per process |
+| v2 host, shared background service (default) | TUI client of the user-level shared service | discovered via the service registration | Supported: viewers run `opencode --session <id> <dir>` and rediscover the same service |
+| v2 host, `--server <url>` | TUI client of an explicit server | `--server` URL | Supported: viewers run `env OPENCODE_PASSWORD=<pw> opencode --server <url> --session <id> <dir>`; the password comes from the parent process environment and is visible in the viewer's command line |
+| v2 host, `--standalone` | private stdio server (no registration, random password, exits with the parent) | ephemeral loopback | **Not supported**: fail-closed + exactly one diagnostic; the fallback is v2's native subagent surfaces (`/subagent` opens the latest child session in a tab) |
+
+On v2 hosts the event source is the TUI's own `data` feed
+(`session.created` / `session.execution.*` / `session.idle` /
+`session.deleted`). Execution events carry no directory, so the pane
+lifecycle records each child's directory at `session.created` and reuses it,
+exactly like the v1 directory-less path; reads (session list, running set)
+go through the authenticated TUI client instead of raw HTTP.
 
 **Why embedded mode is not supported yet** (translated from the internal
 requirements, §2.2):
@@ -367,8 +377,10 @@ a structured, distinguishable reason:
 Every successful creation logs the full identity: child session, parent
 session, adapter, view handle (for cmux-tui the terminal id), and the anchored
 target the view was created in. Admission and host diagnostics are emitted at
-most once per cause per process. On v2 hosts a configured `multiplexer.type`
-produces one `multiplexer.host-unsupported` record per process.
+most once per cause per process. On a v2 host that cannot host panes
+(`--standalone`, or a malformed launch mode) a configured `multiplexer.type`
+produces one `multiplexer.host-unsupported` record per process; shared and
+`--server` hosts never log that record.
 
 **Log paths:**
 
@@ -435,9 +447,14 @@ produces one `multiplexer.host-unsupported` record per process.
   pane (`readiness-timeout`). Real `task` dispatches make the child busy
   immediately, so this only affects synthetic sessions created through the REST
   API.
-- **v2 hosts and embedded hosts have no pane feature** (see
-  [Deployment Modes](#deployment-modes)); on v2 hosts a configured
-  `multiplexer.type` is ignored and one diagnostic per process is logged.
+- **Embedded hosts and v2 `--standalone` hosts have no pane feature** (see
+  [Deployment Modes](#deployment-modes)). On v2 `--standalone`, a configured
+  `multiplexer.type` is ignored and one diagnostic per process is logged; use
+  `/subagent` or the host's subagent picker instead.
+- **v2 viewers are full clients.** A pane opens a regular `opencode` TUI on
+  the child session — there is no read-only mode. Opening a session replaces
+  the process environment its shell commands use (the last client to open it
+  wins), and unread/attention state is shared across clients by the server.
 - **Nested multiplexer detection priority is unchanged** (for example, kitty
   inside herdr), and a client only opens panes for children of the session it
   currently displays.
@@ -467,7 +484,7 @@ removed or changed behavior, with migration guidance:
 | 6 | kitty active-window behavior | `kitten @ launch` opened windows relative to the active window, and the layout change hit the **active tab** | Anchoring is `KITTY_WINDOW_ID`: the new window is placed `--next-to=id:<parent>` and the mapped layout is applied to the **parent window's tab** (`--match=window_id:<id>`); the active tab is never modified | None. `main_pane_size` remains ignored by kitty |
 | 7 | Embedded-mode restriction | Best-effort behavior with the server's environment; no listener required by design | Bare `opencode` (no TCP listener) is **fail-closed**: no pane and exactly one `host-unreachable` diagnostic; the plugin cannot create a listener for the host | Start with `opencode --port <port>`, or use `opencode serve` + `opencode attach <url>` |
 | 8 | Per-client view semantics | One global manager decided pane placement, with a single view per child | Every client that displays the parent opens **its own** pane; the same child can have several panes, one per viewing client, with no coordination | Expect one pane per displaying client. Close extras manually if undesired; dispatch is still once per task |
-| 9 | Server-side pane execution | `src/index.ts` built a multiplexer session manager and routed `session.created/status/idle/deleted` on the server; pane code read multiplexer env from the server process | Pane code lives only in the TUI entry's dependency graph. The server never creates, closes, or positions a pane and never reads multiplexer environment variables (invariant I1) | None. Headless and v2 hosts are unaffected (feature off) |
+| 9 | Server-side pane execution | `src/index.ts` built a multiplexer session manager and routed `session.created/status/idle/deleted` on the server; pane code read multiplexer env from the server process | Pane code lives only in the TUI entry's dependency graph. The server never creates, closes, or positions a pane and never reads multiplexer environment variables (invariant I1) | None. Headless hosts are unaffected; v2 TUI hosts wire the lifecycle through the v2 host adapter (shared/`--server` supported, `--standalone` fail-closed) |
 | 10 | cmux-tui child view placement | Subagent views were **screen-level split panes** shown side by side with the parent (and titled with the encoded `omosc:<pid>:<session>` name) | Each subagent view is a **sibling tab appended inside the parent pane**, created already named `parent_name/child_name`; the pane's previously active tab is restored after creation; closing uses `terminal close` (ends the process) | None. No config change; `multiplexer.layout` / `multiplexer.main_pane_size` are now ignored for cmux-tui |
 | 11 | `multiplexer.type: "cmux"` value | The type value `"cmux"` selected the cmux-tui adapter | The value is renamed to `"cmux-tui"`; `"cmux"` is no longer a valid type, so the key is dropped, the type falls back to `"none"` (pane management disabled), and a once-per-process diagnostic reports the rename | Rename the value to `"cmux-tui"` |
 

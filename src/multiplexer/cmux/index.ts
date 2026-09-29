@@ -35,8 +35,8 @@ import type { MultiplexerLayout } from '../../config/schema';
 import { crossSpawn } from '../../utils/compat';
 import { log } from '../../utils/logger';
 import {
-  buildOpencodeAttachCommand,
   buildShellLaunchArgs,
+  buildViewCommand,
   findBinary,
   resolveHostOpencodeBinary,
   shellSupportsHashComments,
@@ -279,6 +279,7 @@ export class CmuxMultiplexer implements Multiplexer {
       description,
       serverUrl,
       directory,
+      options,
     );
     const created = await this.client.runInPane(
       target,
@@ -460,12 +461,17 @@ export class CmuxMultiplexer implements Multiplexer {
     description: string,
     serverUrl: string,
     directory: string,
+    options?: PaneSpawnOptions,
   ): string[] {
-    const command = buildOpencodeAttachCommand(
+    const command = buildViewCommand(
+      options?.viewerFlavor ?? 'v1',
       sessionId,
       serverUrl,
       directory,
-      this.opencodeBinary,
+      {
+        executable: this.opencodeBinary,
+        password: options?.viewerPassword,
+      },
     );
     // FR-8 carrier: a POSIX comment data marker in the launch script. The
     // `cmd` branch has no `#` comments, so the marker is omitted there and
