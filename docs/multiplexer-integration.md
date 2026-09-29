@@ -465,13 +465,14 @@ produces one `multiplexer.host-unsupported` record per process; shared and
   the pane launch script reads the value from the plugin process's own
   `/proc/<pid>/environ` (readable by the owning user only) and exports it
   before the viewer starts; the secret never enters command text or argv.
-  Every injection path derives the value from the TUI process environment,
-  so it must be present in the environment that starts the TUI — the same
-  `OPENCODE_PASSWORD` (falling back to `OPENCODE_SERVER_PASSWORD`) lookup
-  the v2 client itself performs to connect. Exporting it into a shell after
-  the TUI has started is not picked up; when no value is present the viewer
-  starts without credentials and a server that requires one reports the
-  missing password.
+  This is the same `OPENCODE_PASSWORD` (falling back to
+  `OPENCODE_SERVER_PASSWORD`) lookup the v2 client itself performs to
+  connect, so a password-protected explicit server already requires it in
+  the TUI's environment — the native flags read that same value, the `/proc`
+  bridge reads the launch-time snapshot, and the panes need nothing extra.
+  A value that only appears after the TUI started (for example exported into
+  a shell later) is not picked up; if the server requires a password and
+  none is available, the viewer reports the missing password.
   Residual exposure: the value is visible in the multiplexer client's argv
   for the duration of the spawn call (millisecond-scale), and — like any
   environment entry — is readable by same-user processes inspecting the
