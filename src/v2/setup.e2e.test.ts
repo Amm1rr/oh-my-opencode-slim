@@ -1459,9 +1459,9 @@ describe('createV2Setup e2e', () => {
         background: true,
       });
 
-      // (2) Write-back rewrite: a v2 `sessionID` that is not a
-      // resolvable/valid task id maps to v1 `task_id`. Unknown aliases are
-      // dropped so task() can spawn a new session instead of refusing.
+      // (2) An explicit sessionID the board cannot resolve is refused.
+      // The before-hook throws before write-back, so the original
+      // sessionID stays and the host does not spawn a replacement.
       const resumeEvent = {
         tool: 'subagent',
         sessionID: 'ses_parent',
@@ -1478,8 +1478,27 @@ describe('createV2Setup e2e', () => {
       };
       const resumeHook = calls.toolBeforeCb;
       if (!resumeHook) throw new Error('tool:execute.before not captured');
-      await resumeHook(resumeEvent);
-      expect(resumeEvent.input.sessionID).toBeUndefined();
+      await expect(resumeHook(resumeEvent)).rejects.toThrow(
+        /cannot resolve this sessionID/,
+      );
+      expect(resumeEvent.input.sessionID).toBe('resume_me');
+
+      const emptyEvent = {
+        tool: 'subagent',
+        sessionID: 'ses_parent',
+        agent: 'orchestrator',
+        messageID: 'msg_1',
+        id: 'call_empty',
+        input: {
+          agent: 'fixer',
+          description: 'e2e empty id',
+          prompt: 'More work',
+          background: true,
+          sessionID: '',
+        },
+      };
+      await expect(beforeHook(emptyEvent)).rejects.toThrow(/empty sessionID/);
+      expect(emptyEvent.input.sessionID).toBe('');
 
       // (3) v2 subagent result: plain-text background output. The
       // after-bridge maps content → v1 `output` under tool 'task'; the

@@ -222,8 +222,6 @@ export function createTaskSessionManagerHook(
      * (question/permission that would otherwise park the child forever with
      * the parent's turn already ended). */
     onChildInputWait?: (notification: ChildInputWaitNotification) => void;
-    /** Host-truth probe: refuse unknown-alias drops when a child may still be running. */
-    hasUntrackedRunningChild?: (parentSessionID?: string) => Promise<boolean>;
     /** Test seam only; production always uses the reconciliation delay. */
     idleReconcileDelayMs?: number;
     /** Test seam only; production uses the runtime reconciliation delay. */
@@ -628,7 +626,6 @@ export function createTaskSessionManagerHook(
         pendingCallTracker,
         taskContextTracker,
         getLifecycleEpoch: () => rehydrateState.nextEpoch,
-        hasUntrackedRunningChild: options.hasUntrackedRunningChild,
         hostFlavor: options.hostFlavor,
       }),
 
