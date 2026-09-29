@@ -40,6 +40,7 @@ function createTool(overrides?: {
   admissionTimeoutMs?: number;
   onLaunch?: () => void;
   revivedRunTracker?: Partial<RevivedRunTracker>;
+  hostFlavor?: string;
 }) {
   const board = new BackgroundJobBoard();
   const abort = mock(overrides?.abort ?? (async () => ({})));
@@ -50,6 +51,7 @@ function createTool(overrides?: {
   const waitIdle = overrides?.waitIdle ? mock(overrides.waitIdle) : undefined;
   const input = {
     directory: '/test/project',
+    ...(overrides?.hostFlavor ? { hostFlavor: overrides.hostFlavor } : {}),
     ...(waitIdle ? { experimental_v2: { waitForSessionIdle: waitIdle } } : {}),
     client: {
       session: {
@@ -477,6 +479,24 @@ describe('task_revive tool', () => {
     const lease = board.acquireRelaunchLease('ses_1', 2);
     expect(lease).toBeDefined();
     if (lease) board.releaseLease(lease);
+  });
+
+  test('v2 exposes sessionID and emits a sessionID label', async () => {
+    const { board, taskRevive } = createTool({ hostFlavor: 'v2' });
+    acknowledgedCompleted(board);
+
+    expect(Object.keys(taskRevive.args)).toContain('sessionID');
+
+    const output = await taskRevive.execute(
+      { sessionID: 'ses_1', prompt: 'Continue the investigation' },
+      context,
+    );
+    expect(String(output)).toContain('sessionID: ses_1');
+    expect(String(output)).toContain('status: started');
+
+    await expect(
+      taskRevive.execute({ sessionID: ' ', prompt: 'x' }, context),
+    ).rejects.toThrow('requires sessionID');
   });
 
   test('reports a fast terminal completion observed by the immediate probe', async () => {

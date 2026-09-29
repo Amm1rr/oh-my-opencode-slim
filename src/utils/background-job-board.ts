@@ -59,7 +59,7 @@ export interface BackgroundJobPromptMetadata {
 export interface ReusableSessionSelection {
   taskID: string;
   alias: string;
-  terminalState: TaskOutputState;
+  terminalState: TaskOutputState | 'stopped';
   completedAt?: number;
   lastUsedAt: number;
 }
@@ -118,6 +118,10 @@ export interface BackgroundJobBoardOptions {
   maxContextLines?: number;
   readContextMinLines?: number;
   readContextMaxFiles?: number;
+  /** Delegation tool name for model-visible recovery guidance: `subagent` on
+   * v2 hosts, `task` on v1/default. Only the two retained/recovery wording
+   * lines vary; the board stays v1 by default. */
+  delegationTool?: string;
   /** Alias counter high-water seed per `<parentSessionID>:<prefix>` so a
    * post-restart board never reuses a historical alias. Defaults to the
    * shared persistence high-water marks (0 without a storage backend —
@@ -225,6 +229,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
   private readonly maxContextLines: number;
   private readonly readContextMinLines: number;
   private readonly readContextMaxFiles: number;
+  private readonly delegationTool: string;
   private readonly aliasCounterHighWater: (
     parentSessionID: string,
     prefix: string,
@@ -238,6 +243,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       options.readContextMinLines ?? DEFAULT_READ_CONTEXT_MIN_LINES;
     this.readContextMaxFiles =
       options.readContextMaxFiles ?? DEFAULT_READ_CONTEXT_MAX_FILES;
+    this.delegationTool = options.delegationTool ?? 'task';
     this.aliasCounterHighWater =
       options.aliasCounterHighWater ?? aliasHighWaterMark;
   }
@@ -338,7 +344,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
           // terminal evidence stay untouched.
           if (!existing.provisional) return existing;
           const promoted = { ...existing, provisional: false };
-          this.jobs.set(input.taskID, promoted);
+          this.setJob(promoted);
           // The stop-time notification skipped this record while it was
           // still provisional; the attributed record owes the wake.
           this.notifyTerminalStateListeners(input.taskID);
@@ -1253,7 +1259,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
           background: record.background || metadata.background === true,
         }
       : { ...record, provisional: false };
-    this.jobs.set(taskID, promoted);
+    this.setJob(promoted);
     if (promoted.state !== 'running') {
       // The stop-time notification skipped this record while it was
       // still provisional; the attributed record owes the wake.
@@ -1274,48 +1280,14 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     return this.list(parent).filter((j) => isReusable(j, this.maxContextLines));
   }
 
-  /** Finished sessions the sidebar may surface as reusable destinations.
-   *  Independent of parent acknowledgment: a child that has reached a
-   *  canonical terminal state is history even while still unreconciled. */
+  /** Sessions the sidebar may surface as navigation destinations: canonical
+   *  terminal or stopped. Independent of parent acknowledgment: such a child
+   *  is history even while still unreconciled. */
   private listSidebarHistory(parent?: string): BackgroundJobRecord[] {
     return this.list(parent).filter(isSidebarHistory);
   }
 
-  /** Shared selection logic for sidebar recency and taskID tiebreaks. */
-  private upsertSidebarSelection(
-    latest: Map<string, ReusableSessionSelection>,
-    job: BackgroundJobRecord,
-  ): void {
-    const selection: ReusableSessionSelection = {
-      taskID: job.taskID,
-      alias: job.alias,
-      terminalState:
-        job.terminalState ?? terminalStateOf(job.state) ?? 'completed',
-      completedAt: job.completedAt,
-      lastUsedAt: job.lastUsedAt,
-    };
-    const current = latest.get(job.agent);
-    if (
-      current === undefined ||
-      sidebarRecency(selection) > sidebarRecency(current) ||
-      (sidebarRecency(selection) === sidebarRecency(current) &&
-        selection.taskID > current.taskID)
-    ) {
-      latest.set(job.agent, selection);
-    }
-  }
-
-  latestReconciledByAgent(
-    parentSessionID: string,
-  ): Map<string, ReusableSessionSelection> {
-    const latest = new Map<string, ReusableSessionSelection>();
-    for (const job of this.listSidebarHistory(parentSessionID)) {
-      this.upsertSidebarSelection(latest, job);
-    }
-    return latest;
-  }
-
-  /** Every accessible terminal session, grouped for TUI navigation. */
+  /** Accessible terminal and stopped sessions, grouped for TUI navigation. */
   sidebarHistoryByParentAgent() {
     const byParent = new Map<string, Map<string, ReusableSessionSelection[]>>();
     for (const job of this.listSidebarHistory()) {
@@ -1329,7 +1301,9 @@ export class BackgroundJobBoard implements BackgroundJobStore {
         taskID: job.taskID,
         alias: job.alias,
         terminalState:
-          job.terminalState ?? terminalStateOf(job.state) ?? 'completed',
+          job.state === 'stopped'
+            ? 'stopped'
+            : (job.terminalState ?? terminalStateOf(job.state) ?? 'completed'),
         completedAt: job.completedAt,
         lastUsedAt: job.lastUsedAt,
       });
@@ -1404,7 +1378,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
           : ['Cancelled or errored sessions are not reusable.']),
         ...(retained.length > 0
           ? [
-              'Stopped sessions without a terminal result are retained for task_revive, not task().',
+              `Stopped sessions without a terminal result are retained for task_revive, not ${this.delegationTool}().`,
             ]
           : []),
         '',
@@ -1551,9 +1525,13 @@ export class BackgroundJobBoard implements BackgroundJobStore {
 
   private formatRetainedJob(job: BackgroundJobRecord): string {
     const lines = [
-      `- ${promptSafe(job.alias)} / ${promptSafe(job.taskID)} / ${promptSafe(job.agent)} / stopped, retained`,
+      `- ${promptSafe(job.alias)} / ${promptSafe(job.taskID)} / ${promptSafe(job.agent)} / stopped, ${REVIVE_ONLY}`,
       `  Objective: ${promptSafe(job.description || job.objective || '')}`,
-      '  Recovery: no terminal result; recoverable with task_revive, not task()',
+      ...(this.delegationTool === 'task'
+        ? []
+        : [
+            `  Recovery: no terminal result; recoverable with task_revive, not ${this.delegationTool}()`,
+          ]),
     ];
     const context = formatContextFiles(
       job.contextFiles,
@@ -1640,15 +1618,15 @@ function isReusable(
   return sumContextLines(job) <= maxContextLines;
 }
 
-/** Sidebar history: canonical terminal (completed/error/cancelled), not
- *  running, not status-uncertain, not stopped-retained. Parent
- *  acknowledgment is NOT required — the transcript exists as soon as
- *  the child finishes. */
+/** Sidebar history: canonical terminal or stopped, not running or
+ *  status-uncertain. Parent acknowledgment is NOT required — the transcript
+ *  exists as soon as the child stops. */
 function isSidebarHistory(job: BackgroundJobRecord): boolean {
   // Unattributed placeholders stay out of advertised surfaces until
   // attribution (same exclusion as the prompt's reusable section).
   if (job.provisional) return false;
   if (job.statusUncertain) return false;
+  if (job.state === 'stopped') return true;
   const terminal = job.terminalState ?? terminalStateOf(job.state);
   return (
     terminal === 'completed' || terminal === 'error' || terminal === 'cancelled'
@@ -1700,6 +1678,8 @@ function timeoutSummary(state: TaskOutputState): string {
   return `Background task exceeded its wall-clock deadline; abort was observed with child state ${state}.`;
 }
 
+const REVIVE_ONLY = 'task_revive only';
+
 function formatJob(job: BackgroundJobRecord): string {
   const isResume = job.lastLaunchedAt !== job.launchedAt;
   // Exclude wall-clock age labels so prompts remain stable between job-state transitions for cache reuse.
@@ -1715,7 +1695,7 @@ function formatJob(job: BackgroundJobRecord): string {
         ? `${job.state}, timed out`
         : displayState;
   const lines = [
-    `- ${promptSafe(job.alias)} / ${promptSafe(job.taskID)} / ${promptSafe(job.agent)} / ${promptSafe(status)}`,
+    `- ${promptSafe(job.alias)} / ${promptSafe(job.taskID)} / ${promptSafe(job.agent)} / ${promptSafe(job.state === 'stopped' ? `${status}, ${REVIVE_ONLY}` : status)}`,
     `  Objective: ${promptSafe(job.description || job.objective || '')}`,
   ];
 

@@ -45,6 +45,12 @@ const crossSpawnMock = mock((_command: string[]) => ({
   proc: {} as never,
 }));
 
+const BUN_INSTALL = { command: ['bun', 'install', '--ignore-scripts'] };
+const NPM_INSTALL = {
+  command: ['npm', 'install', '--ignore-scripts', '--no-audit', '--no-fund'],
+};
+let resolvedInstall: { command: string[] } | null = BUN_INSTALL;
+
 mock.module('../../utils/logger', () => ({
   log: logMock,
 }));
@@ -59,6 +65,10 @@ mock.module('../../utils/compat', () => ({
   crossSpawn: crossSpawnMock,
   crossWrite: mock(() => Promise.resolve()),
   isBun: false,
+}));
+
+mock.module('../../utils/package-manager', () => ({
+  resolvePackageInstallCommand: () => resolvedInstall,
 }));
 
 let importCounter = 0;
@@ -150,6 +160,8 @@ describe('auto-update-checker/index', () => {
       proc: {} as never,
     }));
 
+    resolvedInstall = BUN_INSTALL;
+
     companionUpdaterMocks.ensureCompanionVersion.mockReset();
     companionUpdaterMocks.ensureCompanionVersion.mockImplementation(
       async () => ({
@@ -230,7 +242,7 @@ describe('auto-update-checker/index', () => {
       'latest',
     );
     expect(crossSpawnMock).toHaveBeenCalledWith(
-      ['bun', 'install'],
+      ['bun', 'install', '--ignore-scripts'],
       expect.objectContaining({ cwd: '/tmp/opencode-staging' }),
     );
     expect(showToast).toHaveBeenCalledWith({
@@ -242,6 +254,34 @@ describe('auto-update-checker/index', () => {
         duration: 8000,
       },
     });
+  });
+
+  test('uses npm with audit/fund disabled when the resolver returns npm', async () => {
+    checkerMocks.findPluginEntry.mockImplementation(() => ({
+      pinnedVersion: null,
+      isPinned: false,
+    }));
+    checkerMocks.getCachedVersion.mockImplementation(() => '0.9.1');
+    checkerMocks.getLatestCompatibleVersion.mockImplementation(async () => ({
+      latestVersion: '0.9.11',
+      latestMajorVersion: null,
+      blockedByMajor: false,
+    }));
+    resolvedInstall = NPM_INSTALL;
+
+    const { createAutoUpdateCheckerHook } = await import(
+      `./index?test=${importCounter++}`
+    );
+    const { ctx, showToast } = createCtx();
+
+    const hook = createAutoUpdateCheckerHook(ctx as never);
+    hook.event({ event: { type: 'session.created', properties: {} } });
+    await waitForCalls(showToast);
+
+    expect(crossSpawnMock).toHaveBeenCalledWith(
+      ['npm', 'install', '--ignore-scripts', '--no-audit', '--no-fund'],
+      expect.objectContaining({ cwd: '/tmp/opencode-staging' }),
+    );
   });
 
   test('updates enabled companion after plugin auto-update', async () => {
@@ -564,8 +604,46 @@ describe('auto-update-checker/index', () => {
     await waitForCalls(showToast);
 
     expect(crossSpawnMock).toHaveBeenCalledWith(
-      ['bun', 'install'],
+      ['bun', 'install', '--ignore-scripts'],
       expect.objectContaining({ cwd: '/tmp/opencode-staging' }),
+    );
+    expect(showToast).toHaveBeenCalledWith({
+      body: {
+        title: 'OMO-Slim 0.9.11',
+        message:
+          'v0.9.11 available, but auto-update failed to install it. Check logs or retry manually.',
+        variant: 'error',
+        duration: 8000,
+      },
+    });
+  });
+
+  test('shows install failure toast and does not spawn when no package manager is found', async () => {
+    checkerMocks.findPluginEntry.mockImplementation(() => ({
+      pinnedVersion: null,
+      isPinned: false,
+    }));
+    checkerMocks.getCachedVersion.mockImplementation(() => '0.9.1');
+    checkerMocks.getLatestCompatibleVersion.mockImplementation(async () => ({
+      latestVersion: '0.9.11',
+      latestMajorVersion: null,
+      blockedByMajor: false,
+    }));
+    resolvedInstall = null;
+
+    const { createAutoUpdateCheckerHook } = await import(
+      `./index?test=${importCounter++}`
+    );
+    const { ctx, showToast } = createCtx();
+
+    const hook = createAutoUpdateCheckerHook(ctx as never);
+    hook.event({ event: { type: 'session.created', properties: {} } });
+    await waitForCalls(showToast);
+
+    expect(crossSpawnMock).not.toHaveBeenCalled();
+    expect(cacheMocks.discardPreparedPackageUpdate).toHaveBeenCalled();
+    expect(logMock).toHaveBeenCalledWith(
+      '[auto-update-checker] No bun or npm found; cannot install update',
     );
     expect(showToast).toHaveBeenCalledWith({
       body: {

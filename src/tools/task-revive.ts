@@ -12,6 +12,7 @@ import {
   cancelTrackedExecution,
   type TaskControlToolOptions,
 } from './cancel-task';
+import { idParamFor, readTaskRef, taskRefArgs } from './task-ref';
 
 const z = tool.schema;
 const DEFAULT_BASELINE_TIMEOUT_MS = 5_000;
@@ -32,13 +33,12 @@ export function createTaskReviveTool(
   options: TaskReviveToolOptions,
 ): Record<'task_revive', ToolDefinition> {
   const revivedRunTracker = options.revivedRunTracker;
+  const idParam = idParamFor(options.input);
   const task_revive = tool({
     description:
       'Revive a retained background task in its existing session with a new prompt.',
     args: {
-      task_id: z
-        .string()
-        .describe('Tracked background task ID or Background Job Board alias'),
+      ...taskRefArgs(idParam),
       prompt: z.string().min(1).describe('Prompt for the revived task'),
     },
     async execute(args, toolContext) {
@@ -47,9 +47,9 @@ export function createTaskReviveTool(
         toolContext,
         'task_revive',
       );
-      const requested = args.task_id.trim();
+      const requested = readTaskRef(args, idParam);
       const prompt = args.prompt.trim();
-      if (!requested) throw new Error('task_revive requires task_id');
+      if (!requested) throw new Error(`task_revive requires ${idParam}`);
       if (!prompt) throw new Error('task_revive requires prompt');
 
       const resolved = options.backgroundJobBoard.resolve(
@@ -320,7 +320,7 @@ export function createTaskReviveTool(
           // Preserve the local race outcome, regardless of later settlement.
           // A timeout error from the transport is still an admission failure.
           if (error instanceof ReviveAdmissionDeadlineError) {
-            return renderReviveOutput(current, true);
+            return renderReviveOutput(idParam, current, true);
           }
           throw error;
         } finally {
@@ -345,7 +345,7 @@ export function createTaskReviveTool(
           `Task ${requested} revive became stale before launch completed`,
         );
       }
-      return renderReviveOutput(latest);
+      return renderReviveOutput(idParam, latest);
     },
   });
 
@@ -419,6 +419,7 @@ async function ownInvalidatedAdmission(
 }
 
 function renderReviveOutput(
+  idParam: string,
   record: NonNullable<
     ReturnType<TaskReviveToolOptions['backgroundJobBoard']['get']>
   >,
@@ -429,7 +430,7 @@ function renderReviveOutput(
       ? (record.terminalState ?? record.state)
       : record.state;
   const lines = [
-    `task_id: ${record.taskID}`,
+    `${idParam}: ${record.taskID}`,
     `generation: ${record.generation}`,
     `state: ${state}`,
     `status: ${admissionUnknown ? 'admission_unknown' : state === 'running' ? 'started' : state}`,

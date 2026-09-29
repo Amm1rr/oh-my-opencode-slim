@@ -452,6 +452,20 @@ export function getActiveSidebarAgentNames(
       names.add(agentName);
     }
   }
+  for (const [parentID, byAgent] of Object.entries(snapshot.reusableByAgent)) {
+    if (
+      root !== undefined &&
+      resolveTuiSnapshotRoot(snapshot, parentID) !== root
+    ) {
+      continue;
+    }
+    for (const [agentName, entries] of Object.entries(byAgent)) {
+      // The projection prepends running jobs ahead of terminal history.
+      if (entries[0]?.running === true) {
+        names.add(agentName);
+      }
+    }
+  }
   return names;
 }
 
@@ -460,8 +474,7 @@ export interface SidebarSessionTarget {
   sessionID: string;
   agentName: string;
   alias?: string;
-  model?: string;
-  status?: 'busy' | 'retry' | 'reusable';
+  status?: 'busy' | 'retry' | 'reusable' | 'stopped';
 }
 
 export interface SidebarAgentTargets {
@@ -500,7 +513,6 @@ export function getSidebarAgentTargets(
       sessionID,
       agentName,
       alias: details?.alias,
-      model: details?.model,
       status: details?.status,
     });
     byAgent.set(agentName, list);
@@ -537,7 +549,9 @@ export interface SidebarReusableTarget {
   taskID: string;
   alias: string;
   completedAt?: number;
-  lastUsedAt: number;
+  lastUsedAt?: number;
+  running?: true;
+  stopped?: true;
 }
 
 /**
@@ -566,10 +580,16 @@ export function getSidebarReusableTargets(
         const candidate: SidebarReusableTarget = {
           taskID: entry.taskID,
           alias: entry.alias,
+          ...(entry.running === true ? { running: true as const } : {}),
+          ...(entry.terminalState === 'stopped'
+            ? { stopped: true as const }
+            : {}),
           ...(entry.completedAt !== undefined
             ? { completedAt: entry.completedAt }
             : {}),
-          lastUsedAt: entry.lastUsedAt,
+          ...(entry.lastUsedAt !== undefined
+            ? { lastUsedAt: entry.lastUsedAt }
+            : {}),
         };
         const existing = byTaskID.get(entry.taskID);
         if (
@@ -584,17 +604,20 @@ export function getSidebarReusableTargets(
     }
   }
   for (const entries of targets.values()) {
-    entries.sort(
-      (a, b) =>
+    entries.sort((a, b) => {
+      if (a.running !== b.running) return a.running ? -1 : 1;
+      if (a.running) return 0;
+      return (
         reusableRecency(b) - reusableRecency(a) ||
-        b.taskID.localeCompare(a.taskID),
-    );
+        b.taskID.localeCompare(a.taskID)
+      );
+    });
   }
   return targets;
 }
 
 function reusableRecency(target: SidebarReusableTarget): number {
-  return Math.max(target.lastUsedAt, target.completedAt ?? 0);
+  return Math.max(target.lastUsedAt ?? 0, target.completedAt ?? 0);
 }
 
 function compareSidebarTargets(
@@ -715,11 +738,7 @@ export function makeRouteNavigator(
   };
 }
 
-export function getSidebarActivityIndicator(
-  active: boolean,
-  now = Date.now(),
-): string {
-  if (!active) return ' ';
+export function getSidebarActivityIndicator(now = Date.now()): string {
   const frame = Math.floor(now / ACTIVITY_FRAME_MS) % ACTIVITY_FRAMES.length;
   return ACTIVITY_FRAMES[frame];
 }
@@ -864,6 +883,8 @@ function decorateInteractiveRow(
     hoverBackground: unknown;
     onActivate?: () => void;
     hasSelectedText?: () => boolean;
+    /** Skip hover painting (e.g. static headers) while keeping activation. */
+    paintHover?: boolean;
   },
 ): JSX.Element {
   const row = node as unknown as HoverRowRenderable;
@@ -883,13 +904,19 @@ function decorateInteractiveRow(
     }
   };
 
-  setProp(node as never, 'onMouseOver', () => {
-    applyHover(true);
-  });
-  setProp(node as never, 'onMouseOut', (event?: { x?: number; y?: number }) => {
-    if (isPointerInsideRow(row, event)) return;
-    applyHover(false);
-  });
+  if (opts.paintHover !== false) {
+    setProp(node as never, 'onMouseOver', () => {
+      applyHover(true);
+    });
+    setProp(
+      node as never,
+      'onMouseOut',
+      (event?: { x?: number; y?: number }) => {
+        if (isPointerInsideRow(row, event)) return;
+        applyHover(false);
+      },
+    );
+  }
   if (opts.onActivate) {
     setProp(node as never, 'onMouseUp', (event?: { button?: number }) => {
       if (!shouldActivateRow(event, opts.hasSelectedText)) return;
@@ -900,6 +927,7 @@ function decorateInteractiveRow(
 }
 
 export const STATUS_DOT_GLYPH = '•';
+export const STATUS_STOPPED_GLYPH = '⚰';
 
 function statusDot(
   active: boolean,
@@ -917,25 +945,59 @@ function statusDot(
       width: 2,
     },
     active
-      ? [() => `${getSidebarActivityIndicator(true, now())} `]
+      ? [() => `${getSidebarActivityIndicator(now())} `]
       : [hasHistory ? '✦ ' : `${STATUS_DOT_GLYPH} `],
   );
 }
 
-function agentRow(
-  label: string,
-  model: string,
-  variant: string | undefined,
-  active: boolean,
-  now: () => number,
-  theme: AgentRowTheme,
-  sessionCount?: number,
-  expanded = false,
-  onClick?: () => void,
-  hoverBackground?: unknown,
-  hasSelectedText?: () => boolean,
-  hasHistory?: boolean,
-): JSX.Element {
+interface AgentRowOptions {
+  label: string;
+  model: string;
+  variant?: string;
+  active: boolean;
+  now: () => number;
+  theme: AgentRowTheme;
+  sessionCount?: number;
+  expanded: boolean;
+  onClick?: () => void;
+  hoverBackground?: unknown;
+  hasSelectedText?: () => boolean;
+  hasHistory: boolean;
+}
+
+function agentHeaderCells({
+  label,
+  active,
+  now,
+  theme,
+  sessionCount,
+  expanded,
+  hasHistory,
+}: AgentRowOptions): JSX.Element[] {
+  return [
+    statusDot(active, hasHistory, now, theme),
+    text(
+      {
+        fg: theme.textMuted,
+        wrapMode: 'none',
+        truncate: true,
+        flexShrink: 1,
+      },
+      [label],
+    ),
+    ...(sessionCount !== undefined && sessionCount > 1
+      ? [
+          text({ fg: theme.textMuted, wrapMode: 'none', flexShrink: 0 }, [
+            ` ${expanded ? '▾' : '▸'}${sessionCount}`,
+          ]),
+        ]
+      : []),
+  ];
+}
+
+function agentRow(options: AgentRowOptions): JSX.Element {
+  const { model, variant, theme, onClick, hoverBackground, hasSelectedText } =
+    options;
   const modelParts = splitSidebarModelId(model);
   const detailRows: JSX.Element[] = [];
 
@@ -968,25 +1030,7 @@ function agentRow(
       flexDirection: 'row',
       shouldFill: true,
     },
-    [
-      statusDot(active, hasHistory ?? false, now, theme),
-      text(
-        {
-          fg: theme.textMuted,
-          wrapMode: 'none',
-          truncate: true,
-          flexShrink: 1,
-        },
-        [label],
-      ),
-      ...(sessionCount !== undefined && sessionCount > 1
-        ? [
-            text({ fg: theme.textMuted, wrapMode: 'none', flexShrink: 0 }, [
-              ` ${expanded ? '▾' : '▸'}${sessionCount}`,
-            ]),
-          ]
-        : []),
-    ],
+    agentHeaderCells(options),
   );
   decorateInteractiveRow(header, {
     hoverBackground: hoverBackground ?? resolveHoverBackground(theme),
@@ -1005,20 +1049,8 @@ function agentRow(
   );
 }
 
-function compactAgentRow(
-  label: string,
-  model: string,
-  _variant: string | undefined,
-  active: boolean,
-  now: () => number,
-  theme: AgentRowTheme,
-  sessionCount?: number,
-  expanded = false,
-  onClick?: () => void,
-  hoverBackground?: unknown,
-  hasSelectedText?: () => boolean,
-  hasHistory?: boolean,
-): JSX.Element {
+function compactAgentRow(options: AgentRowOptions): JSX.Element {
+  const { model, theme, onClick, hoverBackground, hasSelectedText } = options;
   const modelName = splitSidebarModelId(model).model;
   const row = box(
     {
@@ -1035,31 +1067,7 @@ function compactAgentRow(
           flexDirection: 'row',
           shouldFill: false,
         },
-        [
-          statusDot(active, hasHistory ?? false, now, theme),
-          text(
-            {
-              fg: theme.textMuted,
-              wrapMode: 'none',
-              truncate: true,
-              flexShrink: 1,
-            },
-            [label],
-          ),
-          ...(sessionCount !== undefined && sessionCount > 1
-            ? [
-                text(
-                  {
-                    fg: theme.textMuted,
-                    wrapMode: 'none',
-                    flexShrink: 0,
-                  },
-                  [` ${expanded ? '▾' : '▸'}${sessionCount}`],
-                ),
-              ]
-            : []),
-          box({ flexGrow: 1, shouldFill: false }),
-        ],
+        [...agentHeaderCells(options), box({ flexGrow: 1, shouldFill: false })],
       ),
       box({ flexDirection: 'row', flexGrow: 1, shouldFill: false }),
       text(
@@ -1068,6 +1076,7 @@ function compactAgentRow(
           wrapMode: 'none',
           truncate: true,
           flexShrink: 1,
+          marginLeft: 1,
         },
         [modelName],
       ),
@@ -1094,11 +1103,13 @@ function sessionTargetRow(
 ): JSX.Element {
   const label = target.alias ?? shortSessionID(target.sessionID);
   const reusable = target.status === 'reusable';
-  const indicatorColor = reusable
-    ? theme.textMuted
-    : target.status === 'retry'
-      ? (theme.warning ?? STATUS_RETRY_COLOR)
-      : (theme.success ?? STATUS_ACTIVE_COLOR);
+  const stopped = target.status === 'stopped';
+  const indicatorColor =
+    reusable || stopped
+      ? theme.textMuted
+      : target.status === 'retry'
+        ? (theme.warning ?? STATUS_RETRY_COLOR)
+        : (theme.success ?? STATUS_ACTIVE_COLOR);
   const row = box(
     {
       width: '100%',
@@ -1117,7 +1128,9 @@ function sessionTargetRow(
         [
           reusable
             ? `${STATUS_DOT_GLYPH} `
-            : () => `${getSidebarActivityIndicator(true, now())} `,
+            : stopped
+              ? `${STATUS_STOPPED_GLYPH} `
+              : () => `${getSidebarActivityIndicator(now())} `,
         ],
       ),
       text(
@@ -1269,6 +1282,7 @@ function renderSidebar(
     hoverBackground,
     onActivate: interaction?.toggleOpen,
     hasSelectedText: interaction?.hasSelectedText,
+    paintHover: false,
   });
   return box(
     {
@@ -1300,12 +1314,19 @@ function renderSidebar(
                   sessionID: target.taskID,
                   agentName,
                   alias: target.alias,
-                  model,
-                  status: 'reusable',
+                  status:
+                    target.running === true
+                      ? 'busy'
+                      : target.stopped === true
+                        ? 'stopped'
+                        : 'reusable',
                 }),
               );
             const allTargets = [...sessions, ...reusableTargets];
-            const history = reusableTargets.length > 0;
+            const history = reusableTargets.some(
+              (target) =>
+                target.status === 'reusable' || target.status === 'stopped',
+            );
             const clickable =
               interaction?.navigate !== undefined && allTargets.length > 0;
             const expanded =
@@ -1321,35 +1342,23 @@ function renderSidebar(
                   }
                 }
               : undefined;
+            const rowOptions: AgentRowOptions = {
+              label: agentName,
+              model,
+              variant,
+              active,
+              now,
+              theme,
+              sessionCount: clickable ? allTargets.length : undefined,
+              expanded,
+              onClick: onAgentClick,
+              hoverBackground,
+              hasSelectedText: interaction?.hasSelectedText,
+              hasHistory: !active && history,
+            };
             const agentRowEl = compactSidebar
-              ? compactAgentRow(
-                  agentName,
-                  model,
-                  variant,
-                  active,
-                  now,
-                  theme,
-                  clickable ? allTargets.length : undefined,
-                  expanded,
-                  onAgentClick,
-                  hoverBackground,
-                  interaction?.hasSelectedText,
-                  !active && history,
-                )
-              : agentRow(
-                  agentName,
-                  model,
-                  variant,
-                  active,
-                  now,
-                  theme,
-                  clickable ? allTargets.length : undefined,
-                  expanded,
-                  onAgentClick,
-                  hoverBackground,
-                  interaction?.hasSelectedText,
-                  !active && history,
-                );
+              ? compactAgentRow(rowOptions)
+              : agentRow(rowOptions);
             if (!expanded) return [agentRowEl];
             return [
               agentRowEl,
@@ -1605,20 +1614,193 @@ function v2ThemeView(theme: V2TuiThemeTokens): {
   };
 }
 
-/**
- * V2 entry point: sidebar slot (incl. the clickable preset row) + refresh
- * loop; returns cleanup. `/preset` is registered by the v2 TUI plugin entry
- * (`src/v2/tui.ts`) through the host keymap; the sidebar's preset row opens
- * the same three-level manager.
- */
-async function setup(ctx: V2TuiContext): Promise<undefined | (() => void)> {
-  if (isPluginDisabledByEnv()) return;
+interface SidebarRuntimeAdapter {
+  version: string;
+  getDirectory: () => string;
+  getVisibleSession: () => string | undefined;
+  client?: unknown;
+  renderer: { requestRender: () => void; getSelection?: () => unknown };
+  theme: () => Parameters<typeof renderSidebar>[2];
+  navigate?: (sessionID: string) => void;
+  registerSlot: (render: () => JSX.Element) => undefined | (() => void);
+  subscribeConfigChanges?: (
+    directory: string,
+    listener: () => { ok: boolean; reason?: string } | undefined,
+  ) => () => void;
+  getPresetRow?: (
+    directory: string,
+    presetName?: string,
+  ) => SidebarPresetRow | undefined;
+  onMultiplexerConfig?: (type: MultiplexerType) => void;
+}
 
-  const version = (await readPackageVersion()) ?? 'dev';
-  let configDirectory = ctx.location?.directory ?? process.cwd();
+/** One refresh/animation/interaction lifecycle for both host slot contracts. */
+function createSidebarRuntime(adapter: SidebarRuntimeAdapter) {
+  let configDirectory = adapter.getDirectory();
   let { configInvalid, compactSidebar, multiplexerType, presetName } =
     readConfigState(configDirectory);
+  adapter.onMultiplexerConfig?.(multiplexerType);
+  const applyConfigState = (): boolean => {
+    const next = retainLastGoodConfigState(
+      { configInvalid, compactSidebar, multiplexerType, presetName },
+      readConfigState(configDirectory),
+    );
+    const changed =
+      next.configInvalid !== configInvalid ||
+      next.compactSidebar !== compactSidebar ||
+      next.multiplexerType !== multiplexerType ||
+      next.presetName !== presetName;
+    if (changed) {
+      configInvalid = next.configInvalid;
+      compactSidebar = next.compactSidebar;
+      multiplexerType = next.multiplexerType;
+      presetName = next.presetName;
+      adapter.onMultiplexerConfig?.(multiplexerType);
+    }
+    return changed;
+  };
+  const [snapshot, setSnapshot] = createSignal(
+    readTuiSnapshot(configDirectory),
+  );
+  const [animationNow, setAnimationNow] = createSignal(Date.now());
+  let disposed = false;
+  let unregisterConfigListener = () => {};
+  const remoteCache: RemoteModelCache = {};
+  const refreshSidebar = async () => {
+    if (disposed) return;
+    const currentDirectory = adapter.getDirectory();
+    let nextSnapshot = await readTuiSnapshotAsync(currentDirectory);
+    if (disposed) return;
+    const directoryChanged = currentDirectory !== configDirectory;
+    let stateChanged = false;
+    if (directoryChanged) {
+      configDirectory = currentDirectory;
+      ({ configInvalid, compactSidebar, multiplexerType, presetName } =
+        readConfigState(configDirectory));
+      adapter.onMultiplexerConfig?.(multiplexerType);
+      // Never carry one project's last-good config state into another.
+      bindConfigListener();
+      stateChanged = true;
+    }
+    // Config-backed rows (preset label, invalid badge, compact mode) are
+    // re-read on EVERY poll — even when the snapshot is unchanged — so
+    // manual config edits surface without waiting for the next write.
+    if (!directoryChanged) {
+      try {
+        stateChanged = applyConfigState();
+      } catch (err) {
+        log('[v2][tui] config state read failed', String(err));
+      }
+    }
+    nextSnapshot = await hydrateRemoteModels(
+      nextSnapshot,
+      adapter.client,
+      currentDirectory,
+      remoteCache,
+    );
+    if (disposed) return;
+    if (!isRefreshCurrent(currentDirectory, adapter.getDirectory())) {
+      return;
+    }
+    const snapshotChanged =
+      directoryChanged || !snapshotSectionsEqual(nextSnapshot, snapshot());
+    if (!snapshotChanged && !stateChanged) {
+      return;
+    }
+    if (snapshotChanged) {
+      setSnapshot(nextSnapshot);
+    }
+    if (!disposed) adapter.renderer.requestRender();
+  };
+  const interaction = createSidebarInteraction(
+    adapter.navigate,
+    selectionGuard(adapter.renderer),
+  );
+  const scheduleRefresh = createSerializedRefresh(refreshSidebar);
+  const bindConfigListener = () => {
+    unregisterConfigListener();
+    if (!adapter.subscribeConfigChanges) return;
+    unregisterConfigListener = adapter.subscribeConfigChanges(
+      configDirectory,
+      () => {
+        let changed = false;
+        try {
+          changed = applyConfigState();
+        } catch (err) {
+          log('[v2][tui] config state read failed', String(err));
+          return { ok: false, reason: String(err) };
+        }
+        if (changed) {
+          adapter.renderer.requestRender();
+          scheduleRefresh();
+        }
+        return { ok: true };
+      },
+    );
+  };
+  bindConfigListener();
+  scheduleRefresh();
+  const renderTimer = setInterval(scheduleRefresh, 1000);
+  const animationTimer = setInterval(() => {
+    if (
+      !disposed &&
+      getActiveSidebarAgentNames(snapshot(), adapter.getVisibleSession()).size >
+        0
+    ) {
+      setAnimationNow(Date.now());
+    }
+  }, ACTIVITY_FRAME_MS);
 
+  const disposeSlot = adapter.registerSlot(() =>
+    reactiveElement(() => {
+      const visible = adapter.getVisibleSession();
+      const currentSnapshot = snapshot();
+      interaction.syncScope(
+        configDirectory,
+        visible === undefined
+          ? undefined
+          : resolveTuiSnapshotRoot(currentSnapshot, visible),
+      );
+      return renderSidebar(
+        currentSnapshot,
+        adapter.version,
+        adapter.theme(),
+        configInvalid,
+        compactSidebar,
+        animationNow,
+        visible,
+        interaction,
+        adapter.getPresetRow?.(configDirectory, presetName),
+      );
+    }),
+  );
+
+  return {
+    getDirectory: () => configDirectory,
+    getSnapshot: snapshot,
+    setSnapshot,
+    dispose: () => {
+      if (disposed) return;
+      disposed = true;
+      unregisterConfigListener();
+      disposeSlot?.();
+      clearInterval(renderTimer);
+      clearInterval(animationTimer);
+    },
+  };
+}
+
+/** V2 slot adapter; `/preset` remains registered by src/v2/tui.ts. */
+async function setup(ctx: V2TuiContext): Promise<undefined | (() => void)> {
+  if (isPluginDisabledByEnv()) return;
+  const presetManagerCtx = (directory: string): V2TuiContext => {
+    const augmented = Object.create(ctx as object) as V2TuiContext;
+    augmented.onConfigChanged = () =>
+      notifyConfigChanged(directory, 'preset-manager');
+    return augmented;
+  };
+  // Tracks the runtime's effective `multiplexer.type` (onMultiplexerConfig).
+  let multiplexerType: MultiplexerType = 'none';
   // Client-side pane lifecycle: the v2 host adapter classifies this process's
   // access mode (shared service / explicit server / standalone) and supplies
   // the lifecycle seams. Standalone and malformed modes cannot host panes —
@@ -1678,9 +1860,6 @@ async function setup(ctx: V2TuiContext): Promise<undefined | (() => void)> {
       });
     }
   };
-  if (multiplexerType !== 'none' && hostFailureDetail === null) {
-    await createPaneWiring();
-  }
   /**
    * v2 hosts hot-reload config, so the pane wiring must follow the effective
    * `multiplexer.type` (FR-9) for the whole process lifetime: disabling
@@ -1713,189 +1892,42 @@ async function setup(ctx: V2TuiContext): Promise<undefined | (() => void)> {
     if (hostFailureDetail === null) return;
     warnV2HostUnsupportedMultiplexer(multiplexerType, hostFailureDetail);
   };
-  warnPaneUnsupported();
-
-  /** Re-read the config-backed sidebar state; returns true when it changed. */
-  const applyConfigState = (): boolean => {
-    const next = retainLastGoodConfigState(
-      { configInvalid, compactSidebar, multiplexerType, presetName },
-      readConfigState(configDirectory),
-    );
-    const changed =
-      next.configInvalid !== configInvalid ||
-      next.compactSidebar !== compactSidebar ||
-      next.multiplexerType !== multiplexerType ||
-      next.presetName !== presetName;
-    if (changed) {
-      configInvalid = next.configInvalid;
-      compactSidebar = next.compactSidebar;
-      multiplexerType = next.multiplexerType;
-      presetName = next.presetName;
+  const version = (await readPackageVersion()) ?? 'dev';
+  const runtime = createSidebarRuntime({
+    version,
+    getDirectory: () => ctx.location?.directory ?? process.cwd(),
+    getVisibleSession: () => resolveRouteSessionId(ctx.ui.router.current()),
+    client: ctx.client,
+    renderer: ctx.renderer,
+    theme: () => v2ThemeView(ctx.theme),
+    navigate: makeRouteNavigator(ctx.ui.router, 'navigate', true),
+    registerSlot: (render) =>
+      ctx.ui.slot({ append: 'sidebar.content', render }),
+    subscribeConfigChanges: (directory, listener) =>
+      registerConfigChangeListener(directory, listener),
+    onMultiplexerConfig: (type) => {
+      multiplexerType = type;
       warnPaneUnsupported();
       void reconcilePaneWiring();
-    }
-    return changed;
-  };
-  const [snapshot, setSnapshot] = createSignal(
-    readTuiSnapshot(configDirectory),
-  );
-  const [animationNow, setAnimationNow] = createSignal(Date.now());
-  let disposed = false;
-  let unregisterConfigListener = () => {};
-  const remoteCache: RemoteModelCache = {};
-  const refreshSidebar = async () => {
-    if (disposed) return;
-    const currentDirectory = ctx.location?.directory ?? process.cwd();
-    let nextSnapshot = await readTuiSnapshotAsync(currentDirectory);
-    if (disposed) return;
-    const directoryChanged = currentDirectory !== configDirectory;
-    let stateChanged = false;
-    if (directoryChanged) {
-      configDirectory = currentDirectory;
-      ({ configInvalid, compactSidebar, multiplexerType, presetName } =
-        readConfigState(configDirectory));
-      warnPaneUnsupported();
-      void reconcilePaneWiring();
-      // Never carry one project's last-good config state into another.
-      bindConfigListener();
-      stateChanged = true;
-    }
-    // Config-backed rows (preset label, invalid badge, compact mode) are
-    // re-read on EVERY poll — even when the snapshot is unchanged — so
-    // manual config edits surface without waiting for the next write.
-    if (!directoryChanged) {
-      try {
-        stateChanged = applyConfigState();
-      } catch (err) {
-        log('[v2][tui] config state read failed', String(err));
-      }
-    }
-    nextSnapshot = await hydrateRemoteModels(
-      nextSnapshot,
-      ctx.client,
-      currentDirectory,
-      remoteCache,
-    );
-    if (disposed) return;
-    if (
-      !isRefreshCurrent(
-        currentDirectory,
-        ctx.location?.directory ?? process.cwd(),
-      )
-    ) {
-      return;
-    }
-    const snapshotChanged =
-      directoryChanged || !snapshotSectionsEqual(nextSnapshot, snapshot());
-    if (!snapshotChanged && !stateChanged) {
-      return;
-    }
-    if (snapshotChanged) {
-      setSnapshot(nextSnapshot);
-    }
-    ctx.renderer.requestRender();
-  };
-  const scheduleRefresh = createSerializedRefresh(refreshSidebar);
-  scheduleRefresh();
-  const renderTimer = setInterval(scheduleRefresh, 1000);
-  const animationTimer = setInterval(() => {
-    if (
-      !disposed &&
-      getActiveSidebarAgentNames(snapshot(), visibleSession()).size > 0
-    ) {
-      setAnimationNow(Date.now());
-    }
-  }, ACTIVITY_FRAME_MS);
-
-  const visibleSession = () => resolveRouteSessionId(ctx.ui.router.current());
-
-  // Clickable sidebar: navigation is optional on v2 hosts (feature-detected
-  // at startup); without it the sidebar renders informatively.
-  const interaction = createSidebarInteraction(
-    makeRouteNavigator(ctx.ui.router, 'navigate', true),
-    selectionGuard(ctx.renderer),
-  );
-
-  // Preset row: visible whenever a preset is active, clickable only when the
-  // host exposes the promise dialogs the manager needs. A successful config
-  // write notifies the shared coordinator; this sidebar's listener re-reads
-  // the config-backed rows immediately, while the server-side watcher
-  // refreshes the runtime profiles NEW child dispatches use. Running sessions
-  // keep their own model bindings by design.
-  const presetManagerCtx = (): V2TuiContext => {
-    const augmented = Object.create(ctx as object) as V2TuiContext;
-    augmented.onConfigChanged = () =>
-      notifyConfigChanged(configDirectory, 'preset-manager');
-    return augmented;
-  };
-  function bindConfigListener(): void {
-    unregisterConfigListener();
-    unregisterConfigListener = registerConfigChangeListener(
-      configDirectory,
-      () => {
-        let changed = false;
-        try {
-          changed = applyConfigState();
-        } catch (err) {
-          log('[v2][tui] config state read failed', String(err));
-          return { ok: false, reason: String(err) };
-        }
-        if (changed) {
-          // Config state is captured by the slot render closure, not a Solid
-          // signal. Force a render even if a serialized snapshot poll is
-          // already in flight and will observe no further state delta.
-          ctx.renderer.requestRender();
-          scheduleRefresh();
-        }
-        return { ok: true };
-      },
-    );
-  }
-  bindConfigListener();
-  const presetRowView = (): SidebarPresetRow | undefined => {
-    if (presetName === undefined) return undefined;
-    if (!canOpenPresetManagerV2(ctx)) return { name: presetName };
-    return {
-      name: presetName,
-      onActivate: () => {
-        void openPresetManagerV2(presetManagerCtx(), configDirectory);
-      },
-    };
-  };
-
-  const disposeSlot = ctx.ui.slot({
-    append: 'sidebar.content',
-    render: () =>
-      reactiveElement(() => {
-        const visible = visibleSession();
-        const currentSnapshot = snapshot();
-        interaction.syncScope(
-          configDirectory,
-          visible === undefined
-            ? undefined
-            : resolveTuiSnapshotRoot(currentSnapshot, visible),
-        );
-        return renderSidebar(
-          currentSnapshot,
-          version,
-          v2ThemeView(ctx.theme),
-          configInvalid,
-          compactSidebar,
-          animationNow,
-          visible,
-          interaction,
-          presetRowView(),
-        );
-      }),
+    },
+    getPresetRow: (directory, presetName) => {
+      if (presetName === undefined) return undefined;
+      if (!canOpenPresetManagerV2(ctx)) return { name: presetName };
+      return {
+        name: presetName,
+        onActivate: () => {
+          void openPresetManagerV2(presetManagerCtx(directory), directory);
+        },
+      };
+    },
   });
+  // The runtime reports the initial setting synchronously; let the first
+  // wiring settle before setup returns.
+  await paneWiringSync;
 
   return () => {
-    disposed = true;
     paneWiringClosed = true;
-    unregisterConfigListener();
-    disposeSlot();
-    clearInterval(renderTimer);
-    clearInterval(animationTimer);
+    runtime.dispose();
     // Release what is live now (the wiring's unsubscribe loop runs
     // synchronously), then settle any in-flight rebuild: it self-disposes
     // when it sees `paneWiringClosed`, so a wiring created during the
@@ -1989,90 +2021,23 @@ const plugin: TuiDualContractModule = {
   tui: async (api, _options, meta) => {
     if (isPluginDisabledByEnv()) return;
 
-    const version = meta.version ?? (await readPackageVersion()) ?? 'dev';
-    let configDirectory = getTuiDirectory(api);
-    let { configInvalid, compactSidebar } = readConfigState(configDirectory);
-    const [snapshot, setSnapshot] = createSignal(
-      readTuiSnapshot(configDirectory),
-    );
-    const [animationNow, setAnimationNow] = createSignal(Date.now());
-    const remoteCache: RemoteModelCache = {};
-    const refreshSidebar = async () => {
-      const currentDirectory = getTuiDirectory(api);
-      let nextSnapshot = await readTuiSnapshotAsync(currentDirectory);
-      const directoryChanged = currentDirectory !== configDirectory;
-      if (directoryChanged) {
-        configDirectory = currentDirectory;
-        ({ configInvalid, compactSidebar } = readConfigState(configDirectory));
-      }
-      nextSnapshot = await hydrateRemoteModels(
-        nextSnapshot,
-        (api as { client?: unknown }).client,
-        currentDirectory,
-        remoteCache,
-      );
-      if (!isRefreshCurrent(currentDirectory, getTuiDirectory(api))) return;
-      if (
-        !directoryChanged &&
-        snapshotSectionsEqual(nextSnapshot, snapshot())
-      ) {
-        return;
-      }
-      setSnapshot(nextSnapshot);
-      api.renderer.requestRender();
-    };
-    const scheduleRefresh = createSerializedRefresh(refreshSidebar);
-    scheduleRefresh();
-    const renderTimer = setInterval(scheduleRefresh, 1000);
-    const animationTimer = setInterval(() => {
-      if (
-        getActiveSidebarAgentNames(
-          snapshot(),
-          resolveRouteSessionId(api.route.current),
-        ).size > 0
-      ) {
-        setAnimationNow(Date.now());
-      }
-    }, ACTIVITY_FRAME_MS);
-
-    api.lifecycle.onDispose(() => {
-      clearInterval(renderTimer);
-      clearInterval(animationTimer);
-    });
-
-    // Clickable sidebar: v1 hosts always expose api.route.navigate.
-    const interaction = createSidebarInteraction(
-      makeRouteNavigator(api.route, 'navigate', false),
-      selectionGuard(api.renderer),
-    );
-
-    api.slots.register({
-      order: resolveSidebarSlotOrder(api.tuiConfig?.plugin, PLUGIN_NAME),
-      slots: {
-        sidebar_content() {
-          return reactiveElement(() => {
-            const visible = resolveRouteSessionId(api.route.current);
-            const currentSnapshot = snapshot();
-            interaction.syncScope(
-              configDirectory,
-              visible === undefined
-                ? undefined
-                : resolveTuiSnapshotRoot(currentSnapshot, visible),
-            );
-            return renderSidebar(
-              currentSnapshot,
-              version,
-              api.theme.current,
-              configInvalid,
-              compactSidebar,
-              animationNow,
-              visible,
-              interaction,
-            );
-          });
-        },
+    const runtime = createSidebarRuntime({
+      version: meta.version ?? (await readPackageVersion()) ?? 'dev',
+      getDirectory: () => getTuiDirectory(api),
+      getVisibleSession: () => resolveRouteSessionId(api.route.current),
+      client: (api as { client?: unknown }).client,
+      renderer: api.renderer,
+      theme: () => api.theme.current,
+      navigate: makeRouteNavigator(api.route, 'navigate', false),
+      registerSlot: (render) => {
+        api.slots.register({
+          order: resolveSidebarSlotOrder(api.tuiConfig?.plugin, PLUGIN_NAME),
+          slots: { sidebar_content: render },
+        });
+        return undefined;
       },
     });
+    api.lifecycle.onDispose(runtime.dispose);
 
     // `/preset` is a pure TUI slash command (like the built-in `/models`):
     // it opens a picker, switches the preset via on-disk state, and never
@@ -2085,19 +2050,15 @@ const plugin: TuiDualContractModule = {
     if (api.command) {
       const snapshotRef: { snapshot: TuiSnapshot } = {
         get snapshot() {
-          return snapshot();
+          return runtime.getSnapshot();
         },
         set snapshot(value: TuiSnapshot) {
-          setSnapshot(value);
+          runtime.setSnapshot(value);
         },
       };
       const disposeCommands = api.command.register(() => [
-        buildPresetCommand(api, () => configDirectory, snapshotRef),
-        buildKillAllCommand(
-          api,
-          () => configDirectory,
-          () => snapshot(),
-        ),
+        buildPresetCommand(api, runtime.getDirectory, snapshotRef),
+        buildKillAllCommand(api, runtime.getDirectory, runtime.getSnapshot),
       ]);
       api.lifecycle.onDispose(disposeCommands);
     }

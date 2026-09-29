@@ -27,9 +27,10 @@ export function isLateCancelledTaskError(
 export function formatCancelledTaskStatusOutput(
   taskID: string,
   summary = 'cancelled',
+  idParam = 'task_id',
 ): string {
   return [
-    `task_id: ${taskID}`,
+    `${idParam}: ${taskID}`,
     'state: cancelled',
     '',
     '<task_error>',
@@ -41,6 +42,7 @@ export function formatCancelledTaskStatusOutput(
 export function normalizeLateCancelledTaskOutput(
   output: { output: unknown; metadata?: unknown },
   backgroundJobBoard: BackgroundJobStore,
+  idParam = 'task_id',
 ): void {
   if (typeof output.output !== 'string') return;
   const status = parseTaskStatusOutput(output.output);
@@ -57,6 +59,7 @@ export function normalizeLateCancelledTaskOutput(
   output.output = formatCancelledTaskStatusOutput(
     status.taskID,
     backgroundJobBoard.getResultSummary(status.taskID),
+    idParam,
   );
   if (isObjectRecord(output) && isObjectRecord(output.metadata)) {
     output.metadata.state = 'cancelled';

@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { RGBA } from '@opentui/core';
 import { testRender } from '@opentui/solid';
+import sidebarFrameGolden from './sidebar-frame-golden.json';
 import {
   applyRemoteAgentModels,
   compareAliasNumeric,
@@ -25,6 +27,7 @@ import {
   resolveSidebarSlotOrder,
   resolveTuiPaneDirectory,
   STATUS_DOT_GLYPH,
+  STATUS_STOPPED_GLYPH,
   selectionGuard,
   shortSessionID,
   splitSidebarModelId,
@@ -43,6 +46,8 @@ import {
   type TuiSnapshot,
   updateSnapshot,
 } from './tui-state';
+import { BackgroundJobBoard } from './utils/background-job-fixture';
+import { createTuiReusableProjection } from './utils/tui-reusable-projection';
 
 const ACTIVITY_FRAME_PATTERN = /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/;
 
@@ -121,6 +126,68 @@ describe('TUI multiplexer directory scope', () => {
   });
 });
 
+// v1 only: both hosts run createSidebarRuntime; v1 is the host that
+// rendered after disposal before the runtime was shared.
+test('sidebar refresh never renders after disposal', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-dispose-'));
+  const projectDir = path.join(root, 'project');
+  fs.mkdirSync(projectDir, { recursive: true });
+  const oldHome = process.env.XDG_DATA_HOME;
+  process.env.XDG_DATA_HOME = path.join(root, 'data');
+  let beginFetch!: () => void;
+  const started = new Promise<void>((resolve) => {
+    beginFetch = resolve;
+  });
+  let finishFetch!: (value: unknown) => void;
+  const slowFetch = new Promise<unknown>((resolve) => {
+    finishFetch = resolve;
+  });
+  let disposed = false;
+  let rendersAfterDispose = 0;
+  const renderer = {
+    requestRender: () => {
+      if (disposed) rendersAfterDispose++;
+    },
+  };
+  const list = () => {
+    beginFetch();
+    return slowFetch;
+  };
+  const disposers: Array<() => void> = [];
+  try {
+    await tuiPlugin.tui(
+      {
+        state: { path: { directory: projectDir } },
+        client: { app: { agents: list } },
+        route: { current: { name: 'home' }, navigate: () => {} },
+        lifecycle: {
+          onDispose: (callback: () => void) => {
+            disposers.push(callback);
+            return () => {};
+          },
+        },
+        renderer,
+        slots: { register: () => 'slot' },
+        theme: { current: {} },
+      } as never,
+      {},
+      { version: 'test' } as never,
+    );
+    await started;
+    for (const dispose of disposers) dispose();
+    disposed = true;
+    finishFetch([{ name: 'oracle', model: { providerID: 'p', modelID: 'm' } }]);
+    await Bun.sleep(20);
+    expect(rendersAfterDispose).toBe(0);
+  } finally {
+    finishFetch([]);
+    for (const dispose of disposers) dispose();
+    if (oldHome === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = oldHome;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 function createSnapshot(overrides: Partial<TuiSnapshot> = {}): TuiSnapshot {
   return {
     version: 1,
@@ -132,6 +199,7 @@ function createSnapshot(overrides: Partial<TuiSnapshot> = {}): TuiSnapshot {
     sessionParents: {},
     sessionDetails: {},
     reusableByAgent: {},
+    reusableOwners: {},
     ...overrides,
   };
 }
@@ -354,11 +422,10 @@ describe('tui sidebar agents', () => {
     expect([...activeAgents]).toEqual(['fixer', 'oracle']);
   });
 
-  test('renders a stable blank column or deterministic braille frame', () => {
-    expect(getSidebarActivityIndicator(false, 0)).toBe(' ');
-    expect(getSidebarActivityIndicator(true, 0)).toBe('⠋');
-    expect(getSidebarActivityIndicator(true, 100)).toBe('⠙');
-    expect(getSidebarActivityIndicator(true, 1_000)).toBe('⠋');
+  test('renders a deterministic braille frame for active rows', () => {
+    expect(getSidebarActivityIndicator(0)).toBe('⠋');
+    expect(getSidebarActivityIndicator(100)).toBe('⠙');
+    expect(getSidebarActivityIndicator(1_000)).toBe('⠋');
   });
 
   test('keeps compact agent rows single-line with truncated right-aligned model IDs', async () => {
@@ -429,7 +496,7 @@ describe('tui sidebar agents', () => {
 
       // Explorer row should have the agent label on left and truncated model on right
       const explorerLine = lines[explorerLineIdx];
-      expect(explorerLine).toMatch(/explorer\s+accounts\.\.\.p5-turbo/);
+      expect(explorerLine).toMatch(/explorer\s+account\.\.\.p5-turbo/);
 
       // Oracle row should be single-line with right-aligned model
       const oracleLine = lines[oracleLineIdx];
@@ -935,7 +1002,7 @@ describe('dual-contract plugin module', () => {
 });
 
 describe('clickable sidebar sessions', () => {
-  test('getSidebarAgentTargets groups active subagents by agent with alias/model/status', () => {
+  test('getSidebarAgentTargets groups active subagents by agent with alias/status', () => {
     const snapshot = createSnapshot({
       activeSessions: {
         'ora-1-ses': 'oracle',
@@ -953,7 +1020,6 @@ describe('clickable sidebar sessions', () => {
       sessionDetails: {
         'ora-1-ses': {
           alias: 'ora-1',
-          model: 'openai/gpt-6',
           status: 'busy',
         },
         'ora-2-ses': { alias: 'ora-2', status: 'retry' },
@@ -968,7 +1034,7 @@ describe('clickable sidebar sessions', () => {
       'ora-2-ses',
     ]);
     expect(oracle?.sessions[0].alias).toBe('ora-1');
-    expect(oracle?.sessions[0].model).toBe('openai/gpt-6');
+    expect(oracle?.sessions[0]).not.toHaveProperty('model');
     expect(oracle?.sessions[1].status).toBe('retry');
 
     // Other conversation: no targets even though sessions are active.
@@ -1296,54 +1362,215 @@ describe('clickable sidebar sessions', () => {
     projectDir: string;
     sessionID: string;
     navigate?: (name: string, params?: Record<string, unknown>) => void;
+    host?: 'v1' | 'v2';
   }) {
     const disposers: Array<() => void> = [];
     let slotPlugin: { slots: { sidebar_content: () => unknown } } | undefined;
-    await tuiPlugin.tui(
-      {
-        state: { path: { directory: opts.projectDir } },
-        route: {
-          current: { name: 'session', params: { sessionID: opts.sessionID } },
-          navigate: opts.navigate,
+    if (opts.host === 'v2') {
+      const claim: { render: (input: { sessionID: string }) => unknown } = {
+        render: () => undefined,
+      };
+      const dispose = await tuiPlugin.setup({
+        location: { directory: opts.projectDir },
+        renderer: { requestRender: () => {} },
+        client: undefined,
+        theme: {
+          text: { default: '#ffffff', subdued: '#aaaaaa' },
+          background: { default: '#111111' },
+          border: { default: '#555555' },
+          success: '#00ff00',
+          warning: '#ffcc00',
         },
-        lifecycle: {
-          onDispose: (callback: () => void) => {
-            disposers.push(callback);
+        ui: {
+          router: {
+            current: () => ({ type: 'session', sessionID: opts.sessionID }),
+            navigate: opts.navigate as unknown as
+              | ((route: { type: string; sessionID: string }) => void)
+              | undefined,
+          },
+          slot: (input) => {
+            expect(input.append).toBe('sidebar.content');
+            claim.render = input.render;
             return () => {};
           },
         },
-        renderer: { requestRender: () => {} },
+      });
+      if (dispose) disposers.push(dispose);
+      slotPlugin = {
         slots: {
-          register: (plugin: typeof slotPlugin) => {
-            slotPlugin = plugin;
-            return 'click-slot';
-          },
+          sidebar_content: () => claim.render({ sessionID: opts.sessionID }),
         },
-        theme: {
-          current: {
-            accent: '#22c55e',
-            background: '#111111',
-            backgroundElement: '#222222',
-            borderActive: '#555555',
-            success: '#00ff00',
-            text: '#ffffff',
-            textMuted: '#aaaaaa',
-            warning: '#ffcc00',
+      };
+    } else {
+      await tuiPlugin.tui(
+        {
+          state: { path: { directory: opts.projectDir } },
+          route: {
+            current: { name: 'session', params: { sessionID: opts.sessionID } },
+            navigate: opts.navigate,
           },
-        },
-      } as Parameters<typeof tuiPlugin.tui>[0],
-      {},
-      { version: 'test' } as Parameters<typeof tuiPlugin.tui>[2],
-    );
+          lifecycle: {
+            onDispose: (callback: () => void) => {
+              disposers.push(callback);
+              return () => {};
+            },
+          },
+          renderer: { requestRender: () => {} },
+          slots: {
+            register: (plugin: typeof slotPlugin) => {
+              slotPlugin = plugin;
+              return 'click-slot';
+            },
+          },
+          theme: {
+            current: {
+              accent: '#22c55e',
+              background: '#111111',
+              backgroundElement: '#222222',
+              borderActive: '#555555',
+              success: '#00ff00',
+              text: '#ffffff',
+              textMuted: '#aaaaaa',
+              warning: '#ffcc00',
+            },
+          },
+        } as Parameters<typeof tuiPlugin.tui>[0],
+        {},
+        { version: 'test' } as Parameters<typeof tuiPlugin.tui>[2],
+      );
+    }
     return { slotPlugin, disposers };
   }
 
+  test('mounted sidebar keeps its spinner and expanded targets through the idle-to-terminal gap', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-flicker-'));
+    const projectDir = path.join(root, 'project');
+    fs.mkdirSync(projectDir, { recursive: true });
+    const restoreDataHome = withIsolatedDataHome(root);
+    const board = new BackgroundJobBoard();
+    const projection = createTuiReusableProjection({ board, projectDir });
+    const navigated: unknown[] = [];
+    let setup: Awaited<ReturnType<typeof testRender>> | undefined;
+    let mounted: Awaited<ReturnType<typeof mountClickableSidebar>> | undefined;
+    try {
+      recordTuiAgentModels(
+        { agentModels: { oracle: 'openai/gpt-6' } },
+        projectDir,
+      );
+      board.registerLaunch({
+        taskID: 'ses_old',
+        parentSessionID: 'conv-1',
+        agent: 'oracle',
+        now: 10,
+      });
+      board.updateStatus({
+        taskID: 'ses_old',
+        state: 'completed' as never,
+        now: 20,
+      });
+      const live = board.registerLaunch({
+        taskID: 'ses_live',
+        parentSessionID: 'conv-1',
+        agent: 'oracle',
+        now: 100,
+      });
+      recordTuiSessionParent('ses_live', 'conv-1', projectDir);
+      recordTuiAgentActivity(
+        {
+          sessionID: 'ses_live',
+          agentName: 'oracle',
+          active: true,
+          details: { alias: live.alias, status: 'busy' },
+        },
+        projectDir,
+      );
+      mounted = await mountClickableSidebar({
+        projectDir,
+        sessionID: 'conv-1',
+        navigate: (...args) => navigated.push(args),
+      });
+      setup = await testRender(
+        () => mounted?.slotPlugin?.slots.sidebar_content() as never,
+        { width: 60, height: 18 },
+      );
+      await setup.renderOnce();
+      const oracleLine = () =>
+        setup
+          ?.captureCharFrame()
+          .split('\n')
+          .find((l) => l.includes('oracle')) ?? '';
+      const clickHeader = async () => {
+        const lines = setup?.captureCharFrame().split('\n') ?? [];
+        const row = lines.findIndex((line) => line.includes('oracle'));
+        await setup?.mockMouse.click(lines[row].indexOf('oracle') + 1, row);
+        await setup?.renderOnce();
+      };
+      expect(oracleLine()).toMatch(/oracle ▸2/);
+      await clickHeader();
+      expect(oracleLine()).toMatch(/oracle ▾2/);
+
+      recordTuiAgentActivity(
+        { sessionID: 'ses_live', active: false },
+        projectDir,
+      );
+      await Bun.sleep(1_100);
+      await setup.renderOnce();
+      expect(oracleLine()).toMatch(ACTIVITY_FRAME_PATTERN);
+      expect(oracleLine()).toMatch(/oracle ▾2/);
+      expect(setup.captureCharFrame()).toContain(live.alias);
+      expect(
+        setup
+          .captureCharFrame()
+          .split('\n')
+          .find(
+            (line) => line.includes(live.alias) && !line.includes('oracle'),
+          ),
+      ).toMatch(ACTIVITY_FRAME_PATTERN);
+      const gapFrame = oracleLine().match(ACTIVITY_FRAME_PATTERN)?.[0];
+      await Bun.sleep(200);
+      await setup.renderOnce();
+      expect(oracleLine().match(ACTIVITY_FRAME_PATTERN)?.[0]).not.toBe(
+        gapFrame,
+      );
+      await clickHeader();
+      expect(oracleLine()).toMatch(/oracle ▸2/);
+      expect(navigated).toEqual([]);
+
+      board.updateStatus({
+        taskID: 'ses_live',
+        state: 'completed' as never,
+        now: 200,
+      });
+      await Bun.sleep(1_100);
+      await setup.renderOnce();
+      expect(oracleLine()).toContain('✦');
+      expect(oracleLine()).not.toMatch(ACTIVITY_FRAME_PATTERN);
+    } finally {
+      setup?.renderer.destroy();
+      for (const dispose of mounted?.disposers ?? []) dispose();
+      projection.dispose();
+      restoreDataHome();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }, 10_000);
+
   function withIsolatedDataHome(root: string): () => void {
     const originalDataHome = process.env.XDG_DATA_HOME;
+    const originalConfigHome = process.env.XDG_CONFIG_HOME;
+    const originalOpenCodeConfigDir = process.env.OPENCODE_CONFIG_DIR;
     process.env.XDG_DATA_HOME = path.join(root, 'data');
+    process.env.XDG_CONFIG_HOME = path.join(root, 'config');
+    process.env.OPENCODE_CONFIG_DIR = path.join(root, 'opencode-config');
     return () => {
       if (originalDataHome === undefined) delete process.env.XDG_DATA_HOME;
       else process.env.XDG_DATA_HOME = originalDataHome;
+      if (originalConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = originalConfigHome;
+      if (originalOpenCodeConfigDir === undefined) {
+        delete process.env.OPENCODE_CONFIG_DIR;
+      } else {
+        process.env.OPENCODE_CONFIG_DIR = originalOpenCodeConfigDir;
+      }
     };
   }
 
@@ -1436,6 +1663,72 @@ describe('clickable sidebar sessions', () => {
     }
   });
 
+  test('sidebar heading never highlights on hover but still toggles on click', async () => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'omos-sidebar-nohover-'),
+    );
+    const projectDir = path.join(root, 'project');
+    fs.mkdirSync(path.join(projectDir, '.opencode'), { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDir, '.opencode', 'oh-my-opencode-slim.json'),
+      '{invalid',
+    );
+    const restoreDataHome = withIsolatedDataHome(root);
+    let setup: Awaited<ReturnType<typeof testRender>> | undefined;
+    let mounted: Awaited<ReturnType<typeof mountClickableSidebar>> | undefined;
+
+    try {
+      recordTuiAgentModels(
+        { agentModels: { explorer: 'openai/gpt-6-luna-fast' } },
+        projectDir,
+      );
+      mounted = await mountClickableSidebar({
+        projectDir,
+        sessionID: 'conv-1',
+      });
+      setup = await testRender(
+        () => mounted?.slotPlugin?.slots.sidebar_content() as never,
+        { width: 52, height: 14 },
+      );
+
+      await setup.renderOnce();
+      const frame = setup.captureCharFrame().split('\n');
+      const header = frame.findIndex((line) => line.includes('OMO-Slim'));
+      expect(header).toBeGreaterThan(-1);
+      const headerCol = Math.max(frame[header].indexOf('OMO-Slim'), 0);
+      const agentRow = frame.findIndex((line) => line.includes('explorer'));
+      expect(agentRow).toBeGreaterThan(-1);
+
+      const bgOf = (row: number) =>
+        setup
+          ?.captureSpans()
+          .lines[row]?.spans.map((span) => [
+            span.bg.r,
+            span.bg.g,
+            span.bg.b,
+            span.bg.a,
+          ]);
+      // Park the pointer away from the header so the baseline is unhovered.
+      await setup.mockMouse.moveTo(2, agentRow);
+      await setup.renderOnce();
+      const beforeHover = bgOf(header);
+      await setup.mockMouse.moveTo(headerCol + 2, header);
+      await setup.renderOnce();
+      expect(bgOf(header)).toEqual(beforeHover);
+
+      // Activation is intact: clicking still collapses the sidebar.
+      await setup.mockMouse.click(2, header);
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain('OMO-Slim');
+      expect(setup.captureCharFrame()).not.toContain('explorer');
+    } finally {
+      setup?.renderer.destroy();
+      for (const dispose of mounted?.disposers ?? []) dispose();
+      restoreDataHome();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test('places the session disclosure after the agent name in both layouts', async () => {
     for (const compactSidebar of [true, false]) {
       const root = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-sidebar-row-'));
@@ -1503,7 +1796,9 @@ describe('clickable sidebar sessions', () => {
     }
   });
 
-  test('mounted sidebar: 1 session navigates', async () => {
+  // v2 only: guards the v2 route shape; the v1 shape is covered by the
+  // other click tests below.
+  test('mounted sidebar: 1 session navigates (v2)', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-click-'));
     const projectDir = path.join(root, 'project');
     fs.mkdirSync(projectDir, { recursive: true });
@@ -1529,6 +1824,7 @@ describe('clickable sidebar sessions', () => {
       );
 
       mounted = await mountClickableSidebar({
+        host: 'v2',
         projectDir,
         sessionID: 'conv-1',
         navigate: (...args) => {
@@ -1546,7 +1842,7 @@ describe('clickable sidebar sessions', () => {
       expect(oracleRow).toBeGreaterThan(-1);
       const col = Math.max(lines[oracleRow].indexOf('oracle'), 0);
       await setup.mockMouse.click(col + 2, oracleRow);
-      expect(navigated).toEqual([['session', { sessionID: 'ora-only' }]]);
+      expect(navigated).toEqual([[{ type: 'session', sessionID: 'ora-only' }]]);
     } finally {
       setup?.renderer.destroy();
       for (const dispose of mounted?.disposers ?? []) dispose();
@@ -1578,7 +1874,6 @@ describe('clickable sidebar sessions', () => {
           active: true,
           details: {
             alias: 'ora-1',
-            model: 'openai/gpt-6-astra-xhigh',
             status: 'busy',
           },
         },
@@ -1591,7 +1886,6 @@ describe('clickable sidebar sessions', () => {
           active: true,
           details: {
             alias: 'ora-2',
-            model: 'anthropic/claude-opus-long-context',
             status: 'retry',
           },
         },
@@ -1638,9 +1932,7 @@ describe('clickable sidebar sessions', () => {
       expect(secondChildLine.indexOf(secondIndicator ?? '')).toBeLessThan(
         secondChildLine.indexOf('ora-2'),
       );
-      expect(firstChildLine).not.toContain('gpt-6-astra-xhigh');
       expect(firstChildLine).not.toContain('active');
-      expect(secondChildLine).not.toContain('claude-opus-long-context');
       expect(secondChildLine).not.toContain('retrying');
 
       const beforeHover = setup
@@ -1797,6 +2089,115 @@ describe('clickable sidebar sessions', () => {
 
       await setup.mockMouse.click(nameCol + 1, oracleRow);
       expect(navigated).toEqual([['session', { sessionID: 'ora-latest' }]]);
+    } finally {
+      setup?.renderer.destroy();
+      for (const dispose of mounted?.disposers ?? []) dispose();
+      restoreDataHome();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('mounted sidebar marks only the stopped session row with ⚰', async () => {
+    expect(Bun.stringWidth(STATUS_STOPPED_GLYPH)).toBe(1);
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-stopped-'));
+    const projectDir = path.join(root, 'project');
+    fs.mkdirSync(projectDir, { recursive: true });
+    const restoreDataHome = withIsolatedDataHome(root);
+    const navigated: unknown[] = [];
+    let setup: Awaited<ReturnType<typeof testRender>> | undefined;
+    let mounted: Awaited<ReturnType<typeof mountClickableSidebar>> | undefined;
+
+    try {
+      recordTuiAgentModels(
+        { agentModels: { oracle: 'openai/gpt-6', fixer: 'openai/gpt-6' } },
+        projectDir,
+      );
+      updateSnapshot(projectDir, (snapshot) => {
+        snapshot.reusableByAgent = {
+          'conv-1': {
+            oracle: [
+              {
+                taskID: 'ses_stopped',
+                alias: 'ora-2',
+                terminalState: 'stopped',
+                lastUsedAt: 400,
+              },
+              {
+                taskID: 'ses_completed',
+                alias: 'ora-1',
+                terminalState: 'completed',
+                lastUsedAt: 300,
+              },
+            ],
+            fixer: [
+              {
+                taskID: 'ses_only_stopped',
+                alias: 'fix-1',
+                terminalState: 'stopped',
+                lastUsedAt: 500,
+              },
+            ],
+          },
+        };
+      });
+      mounted = await mountClickableSidebar({
+        projectDir,
+        sessionID: 'conv-1',
+        navigate: (...args) => navigated.push(args),
+      });
+      setup = await testRender(
+        () => mounted?.slotPlugin?.slots.sidebar_content() as never,
+        { width: 52, height: 16 },
+      );
+      await setup.renderOnce();
+      let lines = setup.captureCharFrame().split('\n');
+      const oracleRow = lines.findIndex((line) => line.includes('oracle'));
+      const fixerRow = lines.findIndex((line) => line.includes('fixer'));
+      expect(oracleRow).toBeGreaterThan(-1);
+      expect(fixerRow).toBeGreaterThan(-1);
+      expect(lines[fixerRow]).toContain('✦');
+      expect(lines[fixerRow]).not.toContain('⚰');
+      expect(lines[oracleRow]).toContain('✦');
+      expect(lines[oracleRow]).not.toContain('⚰');
+      expect(setup.captureCharFrame()).not.toContain('⚰');
+      await setup.mockMouse.click(
+        lines[fixerRow].indexOf('fixer') + 1,
+        fixerRow,
+      );
+      expect(navigated).toEqual([
+        ['session', { sessionID: 'ses_only_stopped' }],
+      ]);
+      await setup.mockMouse.click(
+        lines[oracleRow].indexOf('oracle') + 1,
+        oracleRow,
+      );
+      await setup.renderOnce();
+      lines = setup.captureCharFrame().split('\n');
+      const completedRow = lines.findIndex((line) => line.includes('ora-1'));
+      const stoppedRow = lines.findIndex((line) => line.includes('ora-2'));
+      expect(completedRow).toBeGreaterThan(-1);
+      expect(stoppedRow).toBeGreaterThan(-1);
+      expect(lines[completedRow]).toContain('• ora-1');
+      expect(lines[stoppedRow]).toContain('⚰ ora-2');
+      expect(lines[oracleRow]).toContain('✦');
+      expect(lines[oracleRow]).not.toContain('⚰');
+      const spans = setup.captureSpans().lines;
+      const glyphColor = (row: number, glyph: string) =>
+        spans[row]?.spans
+          .find((span) => span.text.includes(glyph))
+          ?.fg.toInts();
+      expect(glyphColor(completedRow, STATUS_DOT_GLYPH)).toBeDefined();
+      expect(glyphColor(stoppedRow, STATUS_STOPPED_GLYPH)).toEqual(
+        glyphColor(completedRow, STATUS_DOT_GLYPH),
+      );
+      await setup.mockMouse.click(
+        lines[stoppedRow].indexOf('ora-2'),
+        stoppedRow,
+      );
+      expect(navigated.at(-1)).toEqual([
+        'session',
+        { sessionID: 'ses_stopped' },
+      ]);
     } finally {
       setup?.renderer.destroy();
       for (const dispose of mounted?.disposers ?? []) dispose();
@@ -1967,6 +2368,100 @@ describe('clickable sidebar sessions', () => {
       fs.rmSync(root, { recursive: true, force: true });
     }
   });
+
+  test('sidebar frame text and colors remain byte-identical (v2)', async () => {
+    const hashes: Record<string, string> = {};
+    for (const compactSidebar of [false, true]) {
+      for (const state of ['active', 'retry', 'history', 'idle'] as const) {
+        for (const disclosure of ['one', 'closed', 'open'] as const) {
+          const root = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-frame-'));
+          const projectDir = path.join(root, 'project');
+          fs.mkdirSync(path.join(projectDir, '.opencode'), {
+            recursive: true,
+          });
+          fs.writeFileSync(
+            path.join(projectDir, '.opencode', 'oh-my-opencode-slim.json'),
+            JSON.stringify({ compactSidebar }),
+          );
+          const restoreDataHome = withIsolatedDataHome(root);
+          let setup: Awaited<ReturnType<typeof testRender>> | undefined;
+          let mounted:
+            | Awaited<ReturnType<typeof mountClickableSidebar>>
+            | undefined;
+          try {
+            updateSnapshot(projectDir, (snapshot) => {
+              snapshot.agentModels = { oracle: 'openai/gpt-6' };
+              const count = disclosure === 'one' ? 1 : 2;
+              if (state === 'history') {
+                snapshot.reusableByAgent['conv-1'] = {
+                  oracle: Array.from({ length: count }, (_, index) => ({
+                    taskID: `ses_${index + 1}`,
+                    alias: `ora-${index + 1}`,
+                    terminalState: 'completed',
+                    lastUsedAt: 100 - index,
+                  })),
+                };
+              } else if (state !== 'idle') {
+                for (let index = 1; index <= count; index++) {
+                  const id = `ses_${index}`;
+                  snapshot.activeSessions[id] = 'oracle';
+                  snapshot.sessionParents[id] = 'conv-1';
+                  snapshot.sessionDetails[id] = {
+                    alias: `ora-${index}`,
+                    status: state === 'retry' ? 'retry' : 'busy',
+                  };
+                }
+              }
+            });
+            mounted = await mountClickableSidebar({
+              host: 'v2',
+              projectDir,
+              sessionID: 'conv-1',
+              navigate: () => {},
+            });
+            setup = await testRender(
+              () => mounted?.slotPlugin?.slots.sidebar_content() as never,
+              { width: 60, height: 18 },
+            );
+            await setup.renderOnce();
+            if (disclosure === 'open' && state !== 'idle') {
+              const lines = setup.captureCharFrame().split('\n');
+              const row = lines.findIndex((line) => line.includes('oracle'));
+              await setup.mockMouse.click(
+                lines[row].indexOf('oracle') + 1,
+                row,
+              );
+              await setup.renderOnce();
+            }
+            const normalize = (value: string) =>
+              value.replace(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/g, '⠋');
+            const frame = normalize(setup.captureCharFrame());
+            const spans = setup
+              .captureSpans()
+              .lines.map((line) =>
+                line.spans.map((span) => [
+                  normalize(span.text),
+                  span.fg.toInts(),
+                  span.bg.toInts(),
+                ]),
+              );
+            const key = `${compactSidebar ? 'compact' : 'full'}/${state}/${disclosure}`;
+            hashes[key] = createHash('sha256')
+              .update(JSON.stringify({ frame, spans }))
+              .digest('hex');
+          } finally {
+            setup?.renderer.destroy();
+            for (const dispose of mounted?.disposers ?? []) dispose();
+            restoreDataHome();
+            fs.rmSync(root, { recursive: true, force: true });
+          }
+        }
+      }
+    }
+    // Baseline captured before F6; v2 only because both hosts share the
+    // renderer and the v1-only adapter paths are covered by v1 tests.
+    expect(hashes).toEqual(sidebarFrameGolden);
+  }, 20_000);
 });
 
 describe('resolveSidebarSlotOrder', () => {

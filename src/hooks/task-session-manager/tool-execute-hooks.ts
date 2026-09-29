@@ -22,6 +22,8 @@ import {
 import type { BackgroundJobTerminalGate } from '../../utils/background-job-terminal-gate';
 import { isRecord as isObjectRecord } from '../../utils/guards';
 import { log } from '../../utils/logger';
+import { controlParamName } from '../../v2/adapters';
+import { type DelegationWording, delegationWording } from '../../v2/delegation';
 import { isMissingRememberedSessionError } from './board-injection';
 import type { PendingTaskCall } from './pending-call-tracker';
 import { convertSameProviderBackgroundTask } from './same-provider-policy';
@@ -68,12 +70,13 @@ function refuseKnownTaskResume(
   requested: string,
   job: ResumeRefusalJob,
   agentType: string,
+  delegation: DelegationWording,
 ): never {
   const label = `${job.alias} / ${job.taskID}`;
   if (job.agent !== agentType) {
     refuseExplicitTaskId(
       requested,
-      `${label}: agent is ${job.agent}, not ${agentType}. task() cannot resume this session. No new session was created.`,
+      `${label}: agent is ${job.agent}, not ${agentType}. ${delegation.tool}() cannot resume this session. No new session was created.`,
       { state: job.state, agent: job.agent, requestedAgent: agentType },
     );
   }
@@ -81,20 +84,20 @@ function refuseKnownTaskResume(
     const ack = job.terminalUnreconciled ? 'unreconciled' : 'acknowledged';
     refuseExplicitTaskId(
       requested,
-      `${label}: stopped, ${ack}; task() cannot resume this session. Use task_revive with a new prompt. No new session was created.`,
+      `${label}: stopped, ${ack}; ${delegation.tool}() cannot resume this session. Use task_revive with a new prompt. No new session was created.`,
       { state: job.state, acknowledged: !job.terminalUnreconciled },
     );
   }
   if (job.terminalUnreconciled) {
     refuseExplicitTaskId(
       requested,
-      `${label}: ${job.state}, unreconciled; task() cannot resume until acknowledgement. Use task_revive now, or wait for ack then task(). No new session was created.`,
+      `${label}: ${job.state}, unreconciled; ${delegation.tool}() cannot resume until acknowledgement. Use task_revive now, or wait for ack then ${delegation.tool}(). No new session was created.`,
       { state: job.state, terminalUnreconciled: true },
     );
   }
   refuseExplicitTaskId(
     requested,
-    `${label}: ${job.state}; task() cannot resume this session. Use task_revive with a new prompt. No new session was created.`,
+    `${label}: ${job.state}; ${delegation.tool}() cannot resume this session. Use task_revive with a new prompt. No new session was created.`,
     { state: job.state },
   );
 }
@@ -129,6 +132,10 @@ export async function handleToolExecuteBefore(
     /** Opt-in provider → "foreground" map for same-provider conversion. */
     sameProviderPolicy?: Record<string, 'foreground'>;
     getLifecycleEpoch?: () => number;
+    /** Host flavor marker ('v2' on OpenCode v2 hosts); selects the native
+     * delegation vocabulary for model-visible refusal guidance. Defaults to
+     * v1 wording. */
+    hostFlavor?: string;
     /**
      * Host-truth probe: does the parent conversation have a running child
      * session that the in-memory board does not track (e.g. after a plugin
@@ -141,6 +148,7 @@ export async function handleToolExecuteBefore(
   const toolName = input.tool.toLowerCase();
   if (toolName !== 'task') return;
   if (!input.sessionID) return;
+  const delegation = delegationWording(deps.hostFlavor);
   if (!deps.shouldManageSession(input.sessionID)) {
     // ponytail: no agent-identity guard here — at tool.execute.before
     // time there's no message to inspect. Only orchestrators call `task`
@@ -163,7 +171,7 @@ export async function handleToolExecuteBefore(
       const requested = args.task_id.trim();
       refuseExplicitTaskId(
         requested,
-        `Task ${requested}: task() requires a valid subagent_type with an explicit task_id. The task_id was not dropped; no new session was created.`,
+        `Task ${requested}: ${delegation.tool}() requires a valid ${delegation.agentParam} with an explicit ${delegation.resumeParam}. The ${delegation.resumeParam} was not dropped; no new session was created.`,
       );
     }
     return;
@@ -239,12 +247,17 @@ export async function handleToolExecuteBefore(
       );
       if (knownManagedTask?.state === 'running') {
         throw new Error(
-          `Task ${requested} is still running and cannot be resumed or amended with task(). Do not spawn or cancel a duplicate for an additive request. Wait for its terminal result, then resume the session after that terminal notification is acknowledged if follow-up work is still needed.`,
+          `Task ${requested} is still running and cannot be resumed or amended with ${delegation.tool}(). Do not spawn or cancel a duplicate for an additive request. Wait for its terminal result, then resume the session after that terminal notification is acknowledged if follow-up work is still needed.`,
         );
       }
 
       if (knownManagedTask) {
-        refuseKnownTaskResume(requested, knownManagedTask, agentType);
+        refuseKnownTaskResume(
+          requested,
+          knownManagedTask,
+          agentType,
+          delegation,
+        );
       } else if (UUID_SHAPE.test(requested)) {
         // Hallucinated id: random UUIDs name nothing in this board and are the
         // known failure signature of degraded fallback providers (2026-09-19:
@@ -271,7 +284,7 @@ export async function handleToolExecuteBefore(
         if (untrackedRunning) {
           refuseExplicitTaskId(
             requested,
-            `Unknown task ID or alias: ${requested}. The board may have lost its mapping (plugin restart) while a child session may still be running or retrying; task() will not silently spawn a duplicate. Omit task_id to deliberately spawn a fresh session, or resume with the exact ses_* session id.`,
+            `Unknown task ID or alias: ${requested}. The board may have lost its mapping (plugin restart) while a child session may still be running or retrying; ${delegation.tool}() will not silently spawn a duplicate. Omit ${delegation.resumeParam} to deliberately spawn a fresh session, or resume with the exact ses_* session id.`,
             { unknownAlias: true, probe: 'untracked-running-child' },
           );
         }
@@ -292,7 +305,7 @@ export async function handleToolExecuteBefore(
       );
       if (!relaunchLease) {
         throw new Error(
-          `Task ${requested} cannot be resumed safely: its current generation is already owned by another lifecycle operation. Do not launch a duplicate with the same task_id.`,
+          `Task ${requested} cannot be resumed safely: its current generation is already owned by another lifecycle operation. Do not launch a duplicate with the same ${delegation.resumeParam}.`,
         );
       }
       args.task_id = remembered.taskID;
@@ -328,7 +341,7 @@ export async function handleToolExecuteBefore(
       );
     if (duplicate) {
       throw new Error(
-        `A background task with the same objective already finished and its result is awaiting acknowledgment: ${duplicate.alias} / ${duplicate.taskID}. Call task_result with task_id "${duplicate.taskID}" to retrieve it instead of spawning a duplicate. If the retrieved result is insufficient, retry the spawn after retrieval — retrieval authorizes the retry.`,
+        `A background task with the same objective already finished and its result is awaiting acknowledgment: ${duplicate.alias} / ${duplicate.taskID}. Call task_result with ${delegation.resumeParam} "${duplicate.taskID}" to retrieve it instead of spawning a duplicate. If the retrieved result is insufficient, retry the spawn after retrieval — retrieval authorizes the retry.`,
       );
     }
   }
@@ -430,6 +443,9 @@ export async function handleToolExecuteAfter(
       taskID: string,
       lifecycleEpoch: number,
     ) => boolean;
+    /** Host flavor marker ('v2' on OpenCode v2 hosts); selects the native
+     * control-tool identifier param for model-visible output. Defaults v1. */
+    hostFlavor?: string;
   },
 ): Promise<void> {
   if (input.tool.toLowerCase() === 'read') {
@@ -615,7 +631,11 @@ export async function handleToolExecuteAfter(
       if (!record) return;
       deps.bindConcurrencyTicket?.(record.taskID, pending);
       deps.clearRehydrateTombstone?.(status.taskID);
-      normalizeLateCancelledTaskOutput(output, deps.backgroundJobBoard);
+      normalizeLateCancelledTaskOutput(
+        output,
+        deps.backgroundJobBoard,
+        controlParamName(deps.hostFlavor),
+      );
       if (exactCallConfirmed) deps.backgroundJobSupervisor?.onLaunch(record);
       await deps.terminalGate.reconcile(record, {
         kind: 'output',

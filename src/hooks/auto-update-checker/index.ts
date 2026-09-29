@@ -7,6 +7,7 @@ import {
 import { TOAST_DURATION_MS } from '../../config/constants';
 import { crossSpawn } from '../../utils/compat';
 import { log } from '../../utils/logger';
+import { resolvePackageInstallCommand } from '../../utils/package-manager';
 import {
   discardPreparedPackageUpdate,
   getTargetInstallContext,
@@ -224,7 +225,7 @@ async function runBackgroundUpdateCheck(
   }
 
   const installSuccess =
-    (await runBunInstallSafe(prepared.stagingDir)) &&
+    (await runPackageInstallSafe(prepared.stagingDir)) &&
     verifyInstalledPackage(prepared.stagingDir, latestVersion);
   const installDir = installSuccess
     ? publishPackageUpdate(prepared, latestVersion)
@@ -306,7 +307,7 @@ async function runBackgroundUpdateCheck(
       'error',
       8000,
     );
-    log('[auto-update-checker] bun install failed; update not installed');
+    log('[auto-update-checker] package install failed; update not installed');
   }
 }
 
@@ -348,19 +349,25 @@ export function getAutoUpdateInstallDir(): string {
 }
 
 /**
- * Spawns a background process to run 'bun install'.
+ * Spawns a background package install (see resolvePackageInstallCommand).
  * Includes a timeout to prevent stalling OpenCode. The install runs in
  * the background and does not block startup, so the limit is generous:
  * a cold bun cache on a slow registry link can exceed a minute.
  * @param installDir The directory whose package manager context should be refreshed.
  * @returns True if the installation succeeded within the timeout.
  */
-async function runBunInstallSafe(installDir: string): Promise<boolean> {
+async function runPackageInstallSafe(installDir: string): Promise<boolean> {
   try {
-    const proc = crossSpawn(['bun', 'install'], {
+    const install = resolvePackageInstallCommand();
+    if (!install) {
+      log('[auto-update-checker] No bun or npm found; cannot install update');
+      return false;
+    }
+    const proc = crossSpawn(install.command, {
       cwd: installDir,
       stdout: 'pipe',
       stderr: 'pipe',
+      env: install.env,
     });
 
     const timeoutPromise = new Promise<'timeout'>((resolve) =>
@@ -380,7 +387,7 @@ async function runBunInstallSafe(installDir: string): Promise<boolean> {
 
     return proc.exitCode === 0;
   } catch (err) {
-    log('[auto-update-checker] bun install error:', err);
+    log('[auto-update-checker] package install error:', err);
     return false;
   }
 }

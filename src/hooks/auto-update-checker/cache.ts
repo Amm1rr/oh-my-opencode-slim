@@ -53,7 +53,7 @@ export function resolveInstallContext(
 
 /**
  * Prepares the current install root for a clean re-install of the target version.
- * Returns the install directory to run `bun install` in.
+ * Returns the install directory to run the package install in.
  */
 export function preparePackageUpdate(
   version: string,

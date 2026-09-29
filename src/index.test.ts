@@ -24,7 +24,11 @@ import { BACKGROUND_JOB_BOARD_METADATA_KEY } from './hooks/task-session-manager'
 import type { MessageWithParts } from './hooks/types';
 import pluginModuleDefault, { OhMyOpenCodeLite as plugin } from './index';
 import { MarketplaceStore } from './marketplace/store';
-import { readTuiSnapshot, snapshotSectionsEqual } from './tui-state';
+import {
+  getTuiStatePath,
+  readTuiSnapshot,
+  snapshotSectionsEqual,
+} from './tui-state';
 import { BackgroundJobCoordinator } from './utils/background-job-coordinator';
 import { BackgroundJobBoard } from './utils/background-job-fixture';
 import { createInternalAgentTextPart } from './utils/internal-initiator';
@@ -999,6 +1003,64 @@ describe('plugin tool registration', () => {
       await rm(configDir, { recursive: true, force: true });
     }
   });
+
+  test('disposing a plugin generation retracts its board spinner before same-PID re-init', async () => {
+    const originalEnv = { ...process.env };
+    const projectDir = await mkdtemp('/tmp/oh-my-opencode-slim-generation-');
+    process.env = {
+      ...originalEnv,
+      OPENCODE_CONFIG_DIR: projectDir,
+      XDG_DATA_HOME: `${projectDir}/data`,
+      XDG_CACHE_HOME: `${projectDir}/cache`,
+      OPENCODE_LOG_DIR: `${projectDir}/logs`,
+    };
+    delete process.env.OH_MY_OPENCODE_SLIM_DISABLE;
+    await Bun.write(
+      `${projectDir}/oh-my-opencode-slim.json`,
+      JSON.stringify({ companion: { enabled: false } }),
+    );
+    const createHooks = () =>
+      plugin({
+        client: createPluginClient(async () => ({})),
+        directory: projectDir,
+        worktree: projectDir,
+        serverUrl: new URL('http://127.0.0.1:4096'),
+      } as never);
+    let first: Awaited<ReturnType<typeof plugin>> | undefined;
+    let second: Awaited<ReturnType<typeof plugin>> | undefined;
+    try {
+      first = await createHooks();
+      await first['tool.execute.before']?.(
+        { tool: 'task', sessionID: 'parent-1', callID: 'call-1' },
+        {
+          args: {
+            subagent_type: 'explorer',
+            background: true,
+            description: 'generation one child',
+          },
+        },
+      );
+      await first['tool.execute.after']?.(
+        { tool: 'task', sessionID: 'parent-1', callID: 'call-1' },
+        { output: 'task_id: child-generation-1\nstate: running' },
+      );
+      expect(
+        readTuiSnapshot(projectDir).reusableByAgent['parent-1']?.explorer?.[0]
+          ?.taskID,
+      ).toBe('child-generation-1');
+
+      await first.dispose?.();
+      second = await createHooks();
+      expect(
+        readTuiSnapshot(projectDir).reusableByAgent['parent-1'],
+      ).toBeUndefined();
+    } finally {
+      await second?.dispose?.();
+      await first?.dispose?.();
+      process.env = originalEnv;
+      await rm(projectDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('plugin reload generation cleanup', () => {
@@ -1836,7 +1898,7 @@ describe('plugin TUI agent activity', () => {
     });
   });
 
-  test('message.part.delta does not write TUI activity or session model', async () => {
+  test('message.part.delta does not write TUI activity or agent model', async () => {
     await hooks?.['chat.message']?.(
       {
         sessionID: 'stream-1',
@@ -1866,64 +1928,34 @@ describe('plugin TUI agent activity', () => {
     expect(snapshotSectionsEqual(after, before)).toBe(true);
   });
 
-  test('chat.message model is published to sessionDetails when the session is already busy', async () => {
-    await busy('ora-child');
-    await hooks?.['chat.message']?.(
-      {
-        sessionID: 'ora-child',
-        agent: 'oracle',
-        model: { providerID: 'openai', modelID: 'gpt-6' },
-      } as never,
-      {} as never,
-    );
+  test('observed models never enter raw per-session TUI details', async () => {
+    const chat = (modelID: string) =>
+      hooks?.['chat.message']?.(
+        {
+          sessionID: 'ora-m',
+          agent: 'oracle',
+          model: { providerID: 'openai', modelID },
+        } as never,
+        {} as never,
+      );
+    await chat('gpt-6');
+    await busy('ora-m');
+    await chat('gpt-6-luna');
+    await hooks?.event?.({
+      event: {
+        type: 'message.updated',
+        properties: {
+          info: {
+            sessionID: 'ora-m',
+            providerID: 'openai',
+            modelID: 'gpt-6-sol',
+          },
+        },
+      },
+    } as never);
 
-    expect(readTuiSnapshot(projectDir).sessionDetails['ora-child']).toEqual({
-      model: 'openai/gpt-6',
-      status: 'busy',
-    });
-  });
-
-  test('model observed before busy is recovered on activation (v2 order)', async () => {
-    await hooks?.['chat.message']?.(
-      {
-        sessionID: 'ora-early',
-        agent: 'oracle',
-        model: { providerID: 'openai', modelID: 'gpt-6' },
-      } as never,
-      {} as never,
-    );
-    expect(readTuiSnapshot(projectDir).sessionDetails).toEqual({});
-
-    await busy('ora-early');
-    expect(readTuiSnapshot(projectDir).sessionDetails['ora-early']).toEqual({
-      model: 'openai/gpt-6',
-      status: 'busy',
-    });
-  });
-
-  test('two same-agent sessions keep distinct models in sessionDetails', async () => {
-    await hooks?.['chat.message']?.(
-      {
-        sessionID: 'ora-a',
-        agent: 'oracle',
-        model: { providerID: 'openai', modelID: 'gpt-6' },
-      } as never,
-      {} as never,
-    );
-    await hooks?.['chat.message']?.(
-      {
-        sessionID: 'ora-b',
-        agent: 'oracle',
-        model: { providerID: 'anthropic', modelID: 'claude-opus' },
-      } as never,
-      {} as never,
-    );
-    await busy('ora-a');
-    await busy('ora-b');
-
-    const details = readTuiSnapshot(projectDir).sessionDetails;
-    expect(details['ora-a']?.model).toBe('openai/gpt-6');
-    expect(details['ora-b']?.model).toBe('anthropic/claude-opus');
+    const raw = JSON.parse(readFileSync(getTuiStatePath(projectDir), 'utf8'));
+    expect(raw.sessionDetails['ora-m']).toEqual({ status: 'busy' });
   });
 
   test('chat.message model after idle does not resurrect sessionDetails', async () => {
@@ -3454,6 +3486,80 @@ describe('plugin foreground fallback host gating', () => {
       await hooks.dispose?.();
     } finally {
       capture.mockRestore();
+    }
+  });
+
+  test('plugin fallback chain forwards configured variants to replay prompts', async () => {
+    await Bun.write(
+      `${projectDir}/oh-my-opencode-slim.json`,
+      JSON.stringify({
+        companion: { enabled: false },
+        fallback: { enabled: true, maxRetries: 0 },
+        agents: {
+          orchestrator: {
+            model: [
+              'openai/gpt-b',
+              { id: 'openai/gpt-c', variant: 'reasoning-high' },
+            ],
+          },
+        },
+      }),
+    );
+    const { client, messages, promptAsync } = createFallbackClient();
+    messages.mockResolvedValue({
+      data: [
+        {
+          info: { id: 'user-variant', role: 'user' },
+          parts: [{ type: 'text', text: 'hello' }],
+        },
+      ],
+    });
+    const hooks = await plugin({
+      client,
+      directory: projectDir,
+      worktree: projectDir,
+      serverUrl: new URL('http://127.0.0.1:4096'),
+    } as never);
+
+    try {
+      await hooks.event?.({
+        event: {
+          type: 'message.updated',
+          properties: {
+            info: {
+              id: 'assistant-variant',
+              sessionID: 'session-variant',
+              role: 'assistant',
+              agent: 'orchestrator',
+              providerID: 'openai',
+              modelID: 'gpt-b',
+            },
+          },
+        },
+      } as never);
+      await hooks.event?.({
+        event: {
+          type: 'session.error',
+          properties: {
+            sessionID: 'session-variant',
+            info: { id: 'assistant-variant' },
+            error: { message: 'rate limit' },
+          },
+        },
+      } as never);
+
+      expect(promptAsync).toHaveBeenCalledTimes(1);
+      expect(promptAsync.mock.calls[0]?.[0]).toMatchObject({
+        body: {
+          model: {
+            providerID: 'openai',
+            modelID: 'gpt-c',
+          },
+          variant: 'reasoning-high',
+        },
+      });
+    } finally {
+      await hooks.dispose?.();
     }
   });
 

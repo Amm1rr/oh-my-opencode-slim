@@ -130,6 +130,7 @@ type HookOptions = {
   backgroundTaskConcurrency?: BackgroundTaskConcurrency;
   pendingCallTracker?: PendingCallTracker;
   getModelForAgent?: (agentType: string) => string | undefined;
+  hostFlavor?: string;
 };
 
 function createHook(options?: HookOptions) {
@@ -212,6 +213,7 @@ function createHook(options?: HookOptions) {
       idleReconcileDelayMs: options?.idleReconcileDelayMs,
       runtimeStatusReconcileDelayMs: options?.runtimeStatusReconcileDelayMs,
       hasUntrackedRunningChild: options?.hasUntrackedRunningChild,
+      hostFlavor: options?.hostFlavor,
     },
   );
 
@@ -5780,6 +5782,116 @@ describe('task-session-manager hook', () => {
       ),
     ).rejects.toThrow(/requires a valid subagent_type/);
     expect(resume.args.task_id).toBe('exp-1');
+  });
+
+  test('missing-agent refusal wording names the host delegation tool', async () => {
+    const v1 = createHook({ backgroundJobBoard: new BackgroundJobBoard() });
+    const v1Args = { args: { task_id: 'child-1' } };
+    await expect(
+      v1.hook['tool.execute.before'](
+        { tool: 'task', sessionID: 'parent-1', callID: 'r' },
+        v1Args,
+      ),
+    ).rejects.toThrow(
+      'task() requires a valid subagent_type with an explicit task_id',
+    );
+    expect(v1Args.args.task_id).toBe('child-1');
+
+    const v2 = createHook({
+      backgroundJobBoard: new BackgroundJobBoard(),
+      hostFlavor: 'v2',
+    });
+    const v2Args = { args: { task_id: 'child-1' } };
+    let message = '';
+    try {
+      await v2.hook['tool.execute.before'](
+        { tool: 'task', sessionID: 'parent-1', callID: 'r' },
+        v2Args,
+      );
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toContain(
+      'subagent() requires a valid agent with an explicit sessionID',
+    );
+    expect(message).not.toContain('task()');
+    expect(message).not.toContain('subagent_type');
+    expect(message).not.toContain('task_id');
+    expect(v2Args.args.task_id).toBe('child-1');
+  });
+
+  test('known-task refusal wording names the host delegation tool', async () => {
+    const board = new BackgroundJobBoard();
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'map hooks',
+    });
+    board.updateStatus({ taskID: 'child-1', state: 'completed' });
+    board.markReconciled('child-1');
+    const v2 = createHook({ backgroundJobBoard: board, hostFlavor: 'v2' });
+    let message = '';
+    try {
+      await v2.hook['tool.execute.before'](
+        { tool: 'task', sessionID: 'parent-1', callID: 'resume' },
+        { args: { subagent_type: 'oracle', task_id: 'exp-1' } },
+      );
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toContain('subagent() cannot resume this session');
+    expect(message).not.toContain('task()');
+  });
+
+  test('duplicate-objective refusal names the control-tool identifier param', async () => {
+    const v1Board = new BackgroundJobBoard();
+    setupCompletedJob(v1Board, {
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+    });
+    const v1 = createHook({ backgroundJobBoard: v1Board });
+    let v1Message = '';
+    try {
+      await v1.hook['tool.execute.before'](
+        { tool: 'task', sessionID: 'parent-1', callID: 'dup-1' },
+        {
+          args: {
+            subagent_type: 'oracle',
+            background: true,
+            description: 'Review Plan',
+          },
+        },
+      );
+    } catch (error) {
+      v1Message = (error as Error).message;
+    }
+    expect(v1Message).toContain('Call task_result with task_id "child-1"');
+
+    const board = new BackgroundJobBoard();
+    setupCompletedJob(board, {
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+    });
+    const v2 = createHook({ backgroundJobBoard: board, hostFlavor: 'v2' });
+
+    let message = '';
+    try {
+      await v2.hook['tool.execute.before'](
+        { tool: 'task', sessionID: 'parent-1', callID: 'dup-1' },
+        {
+          args: {
+            subagent_type: 'oracle',
+            background: true,
+            description: 'Review Plan',
+          },
+        },
+      );
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toContain('Call task_result with sessionID "child-1"');
+    expect(message).not.toContain('task_id');
   });
 
   test('custom subagent unknown native task_id drops the id and spawns fresh', async () => {

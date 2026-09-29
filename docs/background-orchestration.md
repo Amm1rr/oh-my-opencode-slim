@@ -43,6 +43,10 @@ The task API and background-control tools are:
 | `task_revive` | Resume a retained session with a new instruction |
 | `wait_for_user` | Plugin-provided orchestrator tool that pauses automatic orchestrator wakes while the user performs external manual work |
 
+The delegation tool named `task()` here is `subagent()` on v2, with
+`task_id`/`sessionID` as the matching resume id; bare `task()` mentions on this
+page refer to that host-specific delegation tool.
+
 If these are not available, the scheduler cannot use the default background
 workflow. Configure the environment variable through the installer or use the
 one-shot export above before starting OpenCode.
@@ -184,7 +188,8 @@ new instruction.
 A cancelled, errored, or stopped retained session may be revived immediately
 once its retained state has been verified safe. Acknowledgement controls parent
 and job-board consumption and reusable-pool display, not same-session revival.
-`task()` never drops an explicit `task_id` to spawn another session.
+The delegation tool (`task()` on v1, `subagent()` on v2) never drops an explicit
+resume id (`task_id` on v1, `sessionID` on v2) to spawn another session.
 
 Terminal jobs are reconciled automatically after their result is injected into
 the orchestrator session. That lifecycle state is not proof the output was used;
