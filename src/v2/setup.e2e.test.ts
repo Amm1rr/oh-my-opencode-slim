@@ -20,9 +20,10 @@
  *   trip its bust warning, which is written to the plugin log
  *   (`OPENCODE_LOG_DIR` fixture + `flushLoggerForTesting`).
  */
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
+import * as fs from 'node:fs';
 import { existsSync, readdirSync as readDirSync, readFileSync } from 'node:fs';
-import { chmod, mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import * as path from 'node:path';
 import type { BundledSkillInfo } from '../cli/custom-skills';
 import { MarketplaceStore } from '../marketplace/store';
@@ -436,35 +437,48 @@ describe('createV2Setup e2e', () => {
     expect(calls.disposed).toContain('skill.transform');
   }, 20_000);
 
-  test('retries a throwing legacy skill cleanup but latches after it succeeds', async () => {
+  test('retries a throwing legacy skill cleanup on a later rebuild', async () => {
     const legacyDir = path.join(configDir, '.oh-my-opencode-slim');
     await mkdir(legacyDir, { recursive: true });
     await Bun.write(
       path.join(legacyDir, 'skills-manifest.json'),
       JSON.stringify({ skills: {} }),
     );
-    // A read-only config dir makes the trailing directory removal throw.
-    await chmod(configDir, 0o555);
     const { ctx, calls } = makeMockV2Context(projectDir);
     const cleanup = await createV2Setup()(ctx);
 
-    calls.rebuildSkills();
-    await flushLoggerForTesting();
-    expect(readPluginLog().match(/legacy skill cleanup failed/g)).toHaveLength(
-      1,
-    );
-    expect(existsSync(legacyDir)).toBe(true);
+    try {
+      // A path-filtered spy, as the marketplace cleanup tests use, so the
+      // failure is induced the same way for every uid. chmod would not
+      // constrain root, and replacing the module breaks this file's imports.
+      const realRmSync = fs.rmSync;
+      const removeSpy = spyOn(fs, 'rmSync').mockImplementation(((
+        target: fs.PathLike,
+        options: fs.RmOptions,
+      ) => {
+        if (target === legacyDir) {
+          throw new Error('injected legacy cleanup failure');
+        }
+        return realRmSync(target, options);
+      }) as typeof fs.rmSync);
+      try {
+        calls.rebuildSkills();
+      } finally {
+        removeSpy.mockRestore();
+      }
 
-    // The guard must not latch on failure: a later rebuild retries.
-    await chmod(configDir, 0o755);
-    calls.rebuildSkills();
-    await flushLoggerForTesting();
-    expect(existsSync(legacyDir)).toBe(false);
-    expect(readPluginLog().match(/legacy skill cleanup failed/g)).toHaveLength(
-      1,
-    );
+      await flushLoggerForTesting();
+      expect(
+        readPluginLog().match(/legacy skill cleanup failed/g),
+      ).toHaveLength(1);
+      expect(existsSync(legacyDir)).toBe(true);
 
-    await cleanup();
+      // The guard must not latch on failure: a later rebuild retries.
+      calls.rebuildSkills();
+      expect(existsSync(legacyDir)).toBe(false);
+    } finally {
+      await cleanup();
+    }
   }, 20_000);
 
   test('does not migrate legacy skills when the deferred draft lacks add()', async () => {
