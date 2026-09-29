@@ -850,7 +850,8 @@ On `--server` hosts the viewer's `OPENCODE_PASSWORD` secret is injected at
 pane creation through the multiplexer's native spawn-time environment
 (tmux/herdr/kitty) or a Linux + POSIX-shell `/proc` bridge (zellij/cmux-tui),
 never through the viewer's command line; unsupported host/shell combinations
-fail closed. See
+fail closed. The value must be present in the environment that starts the TUI
+(the same credential the TUI uses to connect). See
 [Secret handling](multiplexer-integration.md#known-limitations).
 See [Deployment Modes](multiplexer-integration.md#deployment-modes).
 
