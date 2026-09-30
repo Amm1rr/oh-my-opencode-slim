@@ -1417,8 +1417,8 @@ export function createOrchestratorWakeScheduler(
    * v1 check sequence (host status map → active-child suppression →
    * incomplete-todo condition); children mode replaces the status-map
    * lookups with the event-tracked parent guard and the outcome-based child
-   * check (active children ARE the wake condition there — recovery and
-   * terminal-publication wakes bypass it, as on v1).
+   * check (active children are inspected for periodic progress before a wake;
+   * recovery and terminal-publication wakes bypass that check, as on v1).
    *
    * `forceWake` covers both non-periodic reasons (stopped-job recovery and
    * terminal publication): each is externally evidenced work whose wake
@@ -1488,6 +1488,43 @@ export function createOrchestratorWakeScheduler(
           snapshot.children,
           snapshot.status,
         );
+  }
+
+  /**
+   * Normal child progress is not actionable. Keep periodic wakes for a stable
+   * fingerprint so the existing unchanged cap can inspect a stalled child.
+   */
+  function deferPeriodicProgressWake(
+    sessionID: string,
+    reason: WakeReason,
+    checkpoint: 'initial' | 'recheck',
+    verdict: SnapshotVerdict,
+    fingerprint: string,
+  ): SnapshotVerdict {
+    if (
+      reason !== 'periodic' ||
+      wakeMode !== 'children' ||
+      verdict !== 'wake'
+    ) {
+      return verdict;
+    }
+
+    const progress = getWakeProgress(sessionID);
+    if (
+      progress.lastFingerprint === undefined ||
+      progress.lastFingerprint === fingerprint
+    ) {
+      return verdict;
+    }
+
+    noteHostProgress(sessionID, fingerprint);
+    log('[orchestrator-wake] periodic wake deferred', {
+      sessionID,
+      trigger: reason,
+      checkpoint,
+      reason: 'child-progress',
+    });
+    return 'children-active';
   }
 
   /** Apply a checkpoint verdict; false means the evaluation ended. */
@@ -1590,24 +1627,24 @@ export function createOrchestratorWakeScheduler(
         return false;
       }
 
-      if (
-        !applySnapshotVerdict(
+      const fingerprint = buildSnapshotFingerprint(snapshot);
+      const verdict = deferPeriodicProgressWake(
+        sessionID,
+        reason,
+        'initial',
+        classifySnapshot(
+          snapshot,
           sessionID,
-          classifySnapshot(
-            snapshot,
-            sessionID,
-            reason !== 'periodic',
-            'initial',
-            reason,
-          ),
+          reason !== 'periodic',
           'initial',
           reason,
-        )
-      ) {
+        ),
+        fingerprint,
+      );
+      if (!applySnapshotVerdict(sessionID, verdict, 'initial', reason)) {
         return false;
       }
 
-      const fingerprint = buildSnapshotFingerprint(snapshot);
       noteHostProgress(sessionID, fingerprint);
 
       const progress = getWakeProgress(sessionID);
@@ -1647,24 +1684,24 @@ export function createOrchestratorWakeScheduler(
         suppress(sessionID);
         return false;
       }
-      if (
-        !applySnapshotVerdict(
+      const latestFingerprint = buildSnapshotFingerprint(latest);
+      const latestVerdict = deferPeriodicProgressWake(
+        sessionID,
+        reason,
+        'recheck',
+        classifySnapshot(
+          latest,
           sessionID,
-          classifySnapshot(
-            latest,
-            sessionID,
-            reason !== 'periodic',
-            'recheck',
-            reason,
-          ),
+          reason !== 'periodic',
           'recheck',
           reason,
-        )
-      ) {
+        ),
+        latestFingerprint,
+      );
+      if (!applySnapshotVerdict(sessionID, latestVerdict, 'recheck', reason)) {
         return false;
       }
 
-      const latestFingerprint = buildSnapshotFingerprint(latest);
       noteHostProgress(sessionID, latestFingerprint);
 
       const latestProgress = getWakeProgress(sessionID);

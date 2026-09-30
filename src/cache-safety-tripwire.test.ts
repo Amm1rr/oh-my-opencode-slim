@@ -33,6 +33,7 @@ const VOLATILE_PATTERNS: Array<{ name: string; regex: RegExp }> = [
   { name: 'new Date(...)', regex: /\bnew Date\(/ },
   { name: 'Math.random()', regex: /\bMath\.random\(/ },
   { name: 'randomUUID()', regex: /\brandomUUID\b/ },
+  { name: 'randomBytes(...)', regex: /\brandomBytes\(/ },
   { name: 'performance.now()', regex: /\bperformance\.now\(/ },
 ];
 
@@ -57,6 +58,10 @@ const ALLOWLIST = new Map<string, string>([
   [
     'hooks/task-session-manager/event-router.ts',
     'Date.now() captures idleObservedAt to detect post-idle busy recovery from foreground-fallback re-prompts; never serialized into prompt content.',
+  ],
+  [
+    'hooks/task-session-manager/board-injection.ts',
+    'randomBytes(4) names each process instance of checkpoint board snapshot ids (#1368): the epoch is restart-scoped identity metadata on injected message ids. snapshotID metadata is dropped by the host converter and never reaches provider bytes (pinned by board-injection-cache-safety.test.ts); board text itself is deterministic.',
   ],
   [
     'hooks/task-session-manager/revived-run-tracker.ts',

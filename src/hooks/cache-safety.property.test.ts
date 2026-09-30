@@ -322,8 +322,26 @@ describe.each(BOARD_STRATEGIES)(
         }
       };
 
-      const first = await render(FIXTURE_NOW, 0.1234);
-      const second = await render(FIXTURE_NOW + 987_654_321, 0.9876);
+      // Checkpoint snapshot ids carry a deliberate per-instance epoch
+      // (#1368/#1369: ids must differ across restarts). The epoch lives in
+      // exactly two host-side fields — the injected message "id" and its
+      // "snapshotID" metadata — and never reaches provider content (the
+      // host converter drops snapshotID; pinned by
+      // board-injection-cache-safety.test.ts). Normalize ONLY that segment
+      // inside those fields: every other byte, including all board text,
+      // stays pinned, and any future random segment elsewhere still fails.
+      const normalizeSnapshotEpoch = (line: string) =>
+        line.replace(
+          /("(?:id|snapshotID)":"oh-my-opencode-slim:background-job-board:[^:"]+:)[0-9a-f]{8}(:[0-9]+")/g,
+          '$1EPOCH$2',
+        );
+
+      const first = (await render(FIXTURE_NOW, 0.1234)).map(
+        normalizeSnapshotEpoch,
+      );
+      const second = (await render(FIXTURE_NOW + 987_654_321, 0.9876)).map(
+        normalizeSnapshotEpoch,
+      );
 
       expect(second).toEqual(first);
     });

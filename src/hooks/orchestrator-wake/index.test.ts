@@ -2321,7 +2321,7 @@ describe('children-driven degraded mode (v2)', () => {
     expect(promptAsync).toHaveBeenCalledTimes(ORCHESTRATOR_WAKE_UNCHANGED_CAP);
   });
 
-  test('child update progress resets the unchanged cap', async () => {
+  test('defers periodic wakes while a child keeps making progress', async () => {
     const promptAsync = mock(async () => ({}));
     let updated = Date.now();
     const { scheduler } = createScheduler({
@@ -2339,15 +2339,51 @@ describe('children-driven degraded mode (v2)', () => {
     });
     await clock.advance(60_000);
     expect(promptAsync).toHaveBeenCalledTimes(1);
-    // Each interval the host reports fresh child progress: every wake sees a
-    // new fingerprint, so the two-wake cap keeps resetting.
+
     updated += 5_000;
     await clock.advance(60_000);
     updated += 5_000;
     await clock.advance(60_000);
-    expect(promptAsync).toHaveBeenCalledTimes(3);
+
+    expect(promptAsync).toHaveBeenCalledTimes(1);
+    expect(clock.pendingCount()).toBe(1);
     expect(getWakeProgress('p1').stopped).toBe(false);
-    expect(getWakeProgress('p1').unchangedWakeCount).toBe(1);
+    expect(getWakeProgress('p1').unchangedWakeCount).toBe(0);
+  });
+
+  test('defers when a child progresses during the latest snapshot recheck', async () => {
+    const promptAsync = mock(async () => ({}));
+    const updated = Date.now();
+    let listCalls = 0;
+    const { scheduler } = createScheduler({
+      hostFlavor: 'v2',
+      intervalMs: 60_000,
+      sessionClient: makeV2Client({
+        promptAsync,
+        listImpl: mock(async () => {
+          listCalls += 1;
+          return {
+            data: [
+              {
+                id: 'c1',
+                time: { updated: updated + (listCalls > 1 ? 5_000 : 0) },
+              },
+            ],
+          };
+        }),
+      }),
+    });
+
+    await scheduler.event({
+      event: { type: 'session.idle', properties: { sessionID: 'p1' } },
+    });
+    await clock.advance(60_000);
+
+    expect(listCalls).toBeGreaterThanOrEqual(2);
+    expect(promptAsync).not.toHaveBeenCalled();
+    expect(clock.pendingCount()).toBe(1);
+    expect(getWakeProgress('p1').stopped).toBe(false);
+    expect(getWakeProgress('p1').unchangedWakeCount).toBe(0);
   });
 
   test('recovery wake bypasses the children condition', async () => {
@@ -2599,8 +2635,9 @@ describe('children enumeration fallback (v2)', () => {
 
   test('fallback child without an outcome still wakes on fresh evidence', async () => {
     const promptAsync = mock(async () => ({}));
+    const updated = Date.now();
     const get = mock(async () => ({
-      data: { time: { updated: Date.now() } },
+      data: { time: { updated } },
     }));
     const { scheduler } = createScheduler({
       hostFlavor: 'v2',
@@ -2665,8 +2702,9 @@ describe('children enumeration fallback (v2)', () => {
 
   test('host evidence keeps a child active despite stale local evidence', async () => {
     const promptAsync = mock(async () => ({}));
+    const updated = Date.now();
     const get = mock(async () => ({
-      data: { time: { updated: Date.now() } },
+      data: { time: { updated } },
     }));
     const { scheduler } = createScheduler({
       hostFlavor: 'v2',
@@ -2695,15 +2733,16 @@ describe('children enumeration fallback (v2)', () => {
 
   test('mixed fallback children: terminal suppressed, running wakes, get failure is fail-soft', async () => {
     const promptAsync = mock(async () => ({}));
+    const runningUpdated = Date.now();
     const get = mock(async (args: { path?: { id?: string } }) => {
       const id = args?.path?.id;
       if (id === 'c-terminal') {
         return {
-          data: { outcome: 'succeeded', time: { updated: Date.now() } },
+          data: { outcome: 'succeeded', time: { updated: 5_000 } },
         };
       }
       if (id === 'c-running') {
-        return { data: { time: { updated: Date.now() } } };
+        return { data: { time: { updated: runningUpdated } } };
       }
       if (id === 'c-throws') throw new Error('get unavailable');
       return { data: {} };
@@ -2932,8 +2971,9 @@ describe('children enumeration fallback (v2)', () => {
 describe('children mode on v1 (explicit opt-in)', () => {
   test('enumerates via session.children and keeps the v1 promptAsync call shape', async () => {
     const promptAsync = mock(async () => ({}));
+    const updated = Date.now();
     const children = mock(async () => ({
-      data: [{ id: 'c1', time: { updated: Date.now() } }],
+      data: [{ id: 'c1', time: { updated } }],
     }));
     const status = mock(async () => ({ data: {} }));
     const { scheduler } = createScheduler({
