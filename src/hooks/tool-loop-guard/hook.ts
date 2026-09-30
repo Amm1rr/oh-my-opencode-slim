@@ -110,8 +110,8 @@ STOP repeating this call. Instead:
 3. If the task is actually done, produce your final answer now instead of calling more tools.
 `;
 
-/** Max sessions tracked before evicting the least-recently-observed session. */
-const MAX_TRACKED_SESSIONS = 512;
+/** Max entries per tracking map before FIFO eviction. */
+export const MAX_TRACKED_SESSIONS = 512;
 
 /** Deterministic fingerprint of tool + args, insensitive to key order. */
 function fingerprint(tool: string, args: unknown): string {
@@ -213,17 +213,12 @@ export function createToolLoopGuardHook(): ToolLoopGuardHook {
     taskSupervision.delete(sessionID);
   }
 
-  /** Prune the session maps to MAX_TRACKED_SESSIONS (FIFO by insertion). */
+  /** FIFO-cap tracked maps; a throwing tool never runs `after` (callKeys). */
   function keepSessionsBounded(): void {
-    while (sessions.size > MAX_TRACKED_SESSIONS) {
-      const oldest = sessions.keys().next().value as string | undefined;
-      if (oldest === undefined) break;
-      sessions.delete(oldest);
-    }
-    while (waitRuns.size > MAX_TRACKED_SESSIONS) {
-      const oldest = waitRuns.keys().next().value as string | undefined;
-      if (oldest === undefined) break;
-      waitRuns.delete(oldest);
+    for (const map of [sessions, waitRuns, callKeys]) {
+      while (map.size > MAX_TRACKED_SESSIONS) {
+        map.delete(map.keys().next().value as string);
+      }
     }
   }
 
@@ -234,6 +229,7 @@ export function createToolLoopGuardHook(): ToolLoopGuardHook {
     ): Promise<void> => {
       const sessionID = input.sessionID;
       if (!sessionID) return;
+      keepSessionsBounded();
       const tool = input.tool.toLowerCase();
 
       // Wait tools: refuse once the per-turn wait counter confirms a loop.
