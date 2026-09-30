@@ -398,6 +398,7 @@ describe('terminal-publication wake', () => {
       event: { type: 'session.idle', properties: { sessionID: 'p1' } },
     });
     await clock.advance(60_000);
+    await clock.advance(60_000);
     expect(promptAsync).toHaveBeenCalledTimes(1);
     await scheduler.triggerTerminalPublicationWake('p1', 'child-1', 1);
     expect(promptAsync).toHaveBeenCalledTimes(2);

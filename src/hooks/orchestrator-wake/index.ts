@@ -1481,8 +1481,13 @@ export function createOrchestratorWakeScheduler(
   }
 
   /**
-   * Normal child progress is not actionable. Keep periodic wakes for a stable
-   * fingerprint so the existing unchanged cap can inspect a stalled child.
+   * Periodic wakes are a pure stalled-child watchdog. Normal progress is
+   * not actionable, and neither is the first baseline observation: the
+   * parent just dispatched its children and knows they are running, and
+   * every real delta arrives through forced event paths (terminal
+   * publication, stopped-job recovery, child input). Only a stable
+   * fingerprint — no evidence change since the previous checkpoint —
+   * keeps the wake, so the existing unchanged cap bounds the probes.
    */
   function deferPeriodicProgressWake(
     sessionID: string,
@@ -1500,19 +1505,17 @@ export function createOrchestratorWakeScheduler(
     }
 
     const progress = getWakeProgress(sessionID);
-    if (
-      progress.lastFingerprint === undefined ||
-      progress.lastFingerprint === fingerprint
-    ) {
+    if (progress.lastFingerprint === fingerprint) {
       return verdict;
     }
 
+    const firstBaseline = progress.lastFingerprint === undefined;
     noteHostProgress(sessionID, fingerprint);
     log('[orchestrator-wake] periodic wake deferred', {
       sessionID,
       trigger: reason,
       checkpoint,
-      reason: 'child-progress',
+      reason: firstBaseline ? 'baseline-established' : 'child-progress',
     });
     return 'children-active';
   }

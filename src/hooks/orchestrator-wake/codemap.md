@@ -50,7 +50,9 @@ fallback), the wake condition is children without a terminal `outcome`
     check order (parent-active → active-child suppression → todo
     condition); children mode uses the event-tracked parent race guard
     (fail-open) and outcome-based child activity, then defers periodic wakes
-    when a child fingerprint changes. Stable fingerprints retain the bounded
+    whenever the child fingerprint is not stable — first baseline
+    observation and normal progress alike. Stable fingerprints retain the
+    bounded
     stalled-child check; forced publication/recovery wakes bypass it.
   - Event bookkeeping: `lastStatusBySession` (busy-set + race guard),
     `childSessions`/`childEvidence` from `session.created` parentID links
@@ -102,6 +104,7 @@ evaluate() (one-flight via gate)
     ├─ active status? → end idle spell
     ├─ todo mode: active child? → schedule later; no incomplete todos? → end
     ├─ children mode: no active (outcome-less, fresh) child? → end
+    ├─ children mode: fingerprint not seen before? → record baseline, defer
     ├─ children mode: changing fingerprint? → defer to next interval
     ├─ stable fingerprint → bounded stalled-child wake, then cap
     ├─ fingerprint unchanged ≥ cap? → stop

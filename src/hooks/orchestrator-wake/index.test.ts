@@ -1729,6 +1729,10 @@ describe('orchestrator wake scheduler', () => {
       await scheduler.event({
         event: { type: 'session.idle', properties: { sessionID: 'p1' } },
       });
+      if (flavor === 'v2') {
+        // The first periodic evaluation only records the baseline fingerprint.
+        await clock.advance(60_000);
+      }
       for (let i = 0; i < 4; i++) {
         await clock.advance(60_000);
         expect(promptAsync).toHaveBeenCalledTimes(i + 1);
@@ -2008,6 +2012,7 @@ describe('children-driven degraded mode (v2)', () => {
       event: { type: 'session.idle', properties: { sessionID: 'p1' } },
     });
     await clock.advance(60_000);
+    await clock.advance(60_000);
 
     expect(promptAsync).toHaveBeenCalledTimes(1);
     const call = (
@@ -2051,6 +2056,7 @@ describe('children-driven degraded mode (v2)', () => {
       event: { type: 'session.idle', properties: { sessionID: 'p1' } },
     });
     await clock.advance(60_000);
+    await clock.advance(60_000);
     const call = (
       promptAsync.mock.calls as unknown as Array<[Record<string, unknown>]>
     )[0]?.[0] as { modelVariant?: string };
@@ -2081,6 +2087,7 @@ describe('children-driven degraded mode (v2)', () => {
       event: { type: 'session.idle', properties: { sessionID: 'p1' } },
     });
     await clock.advance(60_000);
+    await clock.advance(60_000);
     const call = (
       promptAsync.mock.calls as unknown as Array<[Record<string, unknown>]>
     )[0]?.[0] as {
@@ -2108,6 +2115,7 @@ describe('children-driven degraded mode (v2)', () => {
     await scheduler.event({
       event: { type: 'session.idle', properties: { sessionID: 'p1' } },
     });
+    await clock.advance(60_000);
     await clock.advance(60_000);
     const call = (
       promptAsync.mock.calls as unknown as Array<[Record<string, unknown>]>
@@ -2159,6 +2167,7 @@ describe('children-driven degraded mode (v2)', () => {
       event: { type: 'session.idle', properties: { sessionID: 'p1' } },
     });
     await clock.advance(60_000);
+    await clock.advance(60_000);
 
     expect(promptAsync).toHaveBeenCalledTimes(1);
     const call = (
@@ -2188,6 +2197,7 @@ describe('children-driven degraded mode (v2)', () => {
       event: { type: 'session.idle', properties: { sessionID: 'p1' } },
     });
     await clock.advance(60_000);
+    await clock.advance(60_000);
     expect(promptAsync).not.toHaveBeenCalled();
 
     await scheduler.event({
@@ -2199,6 +2209,8 @@ describe('children-driven degraded mode (v2)', () => {
     await scheduler.event({
       event: { type: 'session.idle', properties: { sessionID: 'p1' } },
     });
+    // Restore re-enters with no baseline: the first evaluation records it.
+    await clock.advance(60_000);
     await clock.advance(60_000);
 
     expect(promptAsync).toHaveBeenCalledTimes(1);
@@ -2273,6 +2285,7 @@ describe('children-driven degraded mode (v2)', () => {
       event: { type: 'session.idle', properties: { sessionID: 'p1' } },
     });
     await clock.advance(60_000);
+    await clock.advance(60_000);
     expect(promptAsyncLocal).toHaveBeenCalledTimes(1); // local child qualifies
 
     // Only a foreign-directory child: scoped out → no wake, spell ends.
@@ -2315,6 +2328,7 @@ describe('children-driven degraded mode (v2)', () => {
     });
     await clock.advance(60_000);
     await clock.advance(60_000);
+    await clock.advance(60_000);
     expect(promptAsync).toHaveBeenCalledTimes(ORCHESTRATOR_WAKE_UNCHANGED_CAP);
     expect(getWakeProgress('p1').stopped).toBe(true);
     await clock.advance(180_000);
@@ -2337,15 +2351,23 @@ describe('children-driven degraded mode (v2)', () => {
     await scheduler.event({
       event: { type: 'session.idle', properties: { sessionID: 'p1' } },
     });
+    // The first periodic evaluation only records the baseline fingerprint:
+    // the parent just dispatched the child, so there is nothing actionable.
     await clock.advance(60_000);
-    expect(promptAsync).toHaveBeenCalledTimes(1);
+    expect(promptAsync).toHaveBeenCalledTimes(0);
+    expect(getWakeProgress('p1').lastFingerprint).toBeDefined();
+    // Baseline observation must not consume wake accounting or the busy
+    // marker, and the backstop timer stays armed for the stalled check.
+    expect(getWakeProgress('p1').unchangedWakeCount).toBe(0);
+    expect(getWakeProgress('p1').expectingWakeBusy).toBe(false);
+    expect(clock.pendingCount()).toBe(1);
 
     updated += 5_000;
     await clock.advance(60_000);
     updated += 5_000;
     await clock.advance(60_000);
 
-    expect(promptAsync).toHaveBeenCalledTimes(1);
+    expect(promptAsync).toHaveBeenCalledTimes(0);
     expect(clock.pendingCount()).toBe(1);
     expect(getWakeProgress('p1').stopped).toBe(false);
     expect(getWakeProgress('p1').unchangedWakeCount).toBe(0);
@@ -2366,7 +2388,7 @@ describe('children-driven degraded mode (v2)', () => {
             data: [
               {
                 id: 'c1',
-                time: { updated: updated + (listCalls > 1 ? 5_000 : 0) },
+                time: { updated: updated + (listCalls > 2 ? 5_000 : 0) },
               },
             ],
           };
@@ -2378,8 +2400,9 @@ describe('children-driven degraded mode (v2)', () => {
       event: { type: 'session.idle', properties: { sessionID: 'p1' } },
     });
     await clock.advance(60_000);
+    await clock.advance(60_000);
 
-    expect(listCalls).toBeGreaterThanOrEqual(2);
+    expect(listCalls).toBe(3);
     expect(promptAsync).not.toHaveBeenCalled();
     expect(clock.pendingCount()).toBe(1);
     expect(getWakeProgress('p1').stopped).toBe(false);
@@ -2457,6 +2480,7 @@ describe('children-driven degraded mode (v2)', () => {
       event: { type: 'session.idle', properties: { sessionID: 'p1' } },
     });
     await clock.advance(60_000);
+    await clock.advance(60_000);
     expect(promptAsync).toHaveBeenCalledTimes(1);
   });
 
@@ -2509,6 +2533,7 @@ describe('children enumeration fallback (v2)', () => {
       event: { type: 'session.idle', properties: { sessionID: 'p1' } },
     });
     await clock.advance(60_000);
+    await clock.advance(60_000);
     expect(promptAsync).toHaveBeenCalledTimes(1);
   });
 
@@ -2528,6 +2553,7 @@ describe('children enumeration fallback (v2)', () => {
     await scheduler.event({
       event: { type: 'session.idle', properties: { sessionID: 'p1' } },
     });
+    await clock.advance(60_000);
     await clock.advance(60_000);
     expect(promptAsync).toHaveBeenCalledTimes(1);
   });
@@ -2553,6 +2579,7 @@ describe('children enumeration fallback (v2)', () => {
     await scheduler.event({
       event: { type: 'session.idle', properties: { sessionID: 'p1' } },
     });
+    await clock.advance(60_000);
     await clock.advance(60_000);
     expect(promptAsync).toHaveBeenCalledTimes(1);
   });
@@ -2654,6 +2681,7 @@ describe('children enumeration fallback (v2)', () => {
       event: { type: 'session.idle', properties: { sessionID: 'p1' } },
     });
     await clock.advance(60_000);
+    await clock.advance(60_000);
     expect(promptAsync).toHaveBeenCalledTimes(1);
   });
 
@@ -2677,6 +2705,7 @@ describe('children enumeration fallback (v2)', () => {
       event: { type: 'session.idle', properties: { sessionID: 'p1' } },
     });
     await clock.advance(60_000);
+    await clock.advance(60_000);
     expect(promptAsync).toHaveBeenCalledTimes(1);
   });
 
@@ -2696,6 +2725,7 @@ describe('children enumeration fallback (v2)', () => {
     await scheduler.event({
       event: { type: 'session.idle', properties: { sessionID: 'p1' } },
     });
+    await clock.advance(60_000);
     await clock.advance(60_000);
     expect(promptAsync).toHaveBeenCalledTimes(1);
   });
@@ -2727,6 +2757,7 @@ describe('children enumeration fallback (v2)', () => {
     await scheduler.event({
       event: { type: 'session.idle', properties: { sessionID: 'p1' } },
     });
+    await clock.advance(60_000);
     await clock.advance(60_000);
     expect(promptAsync).toHaveBeenCalledTimes(1);
   });
@@ -2763,6 +2794,7 @@ describe('children enumeration fallback (v2)', () => {
     await scheduler.event({
       event: { type: 'session.idle', properties: { sessionID: 'p1' } },
     });
+    await clock.advance(60_000);
     await clock.advance(60_000);
     expect(promptAsync).toHaveBeenCalledTimes(1);
   });
@@ -2985,6 +3017,7 @@ describe('children mode on v1 (explicit opt-in)', () => {
       event: { type: 'session.idle', properties: { sessionID: 'p1' } },
     });
     await clock.advance(60_000);
+    await clock.advance(60_000);
     expect(promptAsync).toHaveBeenCalledTimes(1);
     const call = (
       promptAsync.mock.calls as unknown as Array<[Record<string, unknown>]>
@@ -3157,10 +3190,15 @@ describe('evaluate verdict observability (INFO logs)', () => {
       await scheduler.event({
         event: { type: 'session.idle', properties: { sessionID: 'p1' } },
       });
+      // The first periodic evaluation only records the baseline fingerprint;
+      // its classification is logged but not delivered, so the captured
+      // verdicts below are the delivered wake's two checkpoints.
+      await clock.advance(60_000);
       await clock.advance(60_000);
       const verdicts = capture.verdicts();
-      expect(verdicts.length).toBeGreaterThanOrEqual(2);
-      expect(verdicts[0]?.data).toMatchObject({
+      expect(verdicts.length).toBe(3);
+      const delivered = verdicts.slice(-2);
+      expect(delivered[0]?.data).toMatchObject({
         sessionID: 'p1',
         verdict: 'wake',
         mode: 'children',
@@ -3168,7 +3206,7 @@ describe('evaluate verdict observability (INFO logs)', () => {
         recoveryWake: false,
         childCount: 1,
       });
-      expect(verdicts[1]?.data).toMatchObject({
+      expect(delivered[1]?.data).toMatchObject({
         sessionID: 'p1',
         verdict: 'wake',
         checkpoint: 'recheck',
