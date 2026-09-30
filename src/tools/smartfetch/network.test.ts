@@ -232,49 +232,57 @@ describe('smartfetch/network', () => {
     ]);
   });
 
-  test('retries a Cloudflare challenge from the original URL with opencode UA and closes its body', async () => {
-    const challenged = new Response('challenge', {
-      status: 403,
-      headers: { 'cf-mitigated': 'challenge' },
-    });
+  test('retries a Cloudflare challenge once per scheme with the cookies it set and closes its body', async () => {
+    const responses: Response[] = [];
     const calls: Array<{ url: string; headers: Headers }> = [];
     globalThis.fetch = mock(
       async (url: string | URL | Request, init?: RequestInit) => {
         calls.push({ url: String(url), headers: new Headers(init?.headers) });
-        return calls.length === 1 ? challenged : new Response('allowed');
+        const response = new Response('challenge', {
+          status: 403,
+          headers: [
+            ['cf-mitigated', 'challenge'],
+            ['set-cookie', '__cf_bm=abc; Path=/; HttpOnly; Secure'],
+            ['set-cookie', '_cfuvid=def'],
+          ],
+        });
+        responses.push(response);
+        return response;
       },
     ) as typeof fetch;
     const { result } = await fetchWithUpgradeFallback(
-      normalizeUrl('https://example.com/page'),
+      normalizeUrl('http://example.com/page'),
       new AbortController().signal,
       { Accept: 'text/markdown', 'If-None-Match': '"old"' },
     );
-    expect('blockedRedirect' in result).toBe(false);
     if ('blockedRedirect' in result) throw new Error('unexpected redirect');
-    expect(result.response.status).toBe(200);
-    expect(challenged.bodyUsed).toBe(true);
+    expect(result.response).toBe(responses[3]);
+    expect(responses[0]?.bodyUsed).toBe(true);
     expect(calls.map(({ url }) => url)).toEqual([
       'https://example.com/page',
       'https://example.com/page',
+      'http://example.com/page',
+      'http://example.com/page',
     ]);
-    expect(calls.map(({ headers }) => headers.get('User-Agent'))).toEqual([
-      'opencode-smartfetch/1.0',
-      'opencode',
+    expect(calls.map(({ headers }) => headers.get('Cookie'))).toEqual([
+      null,
+      '__cf_bm=abc; _cfuvid=def',
+      null,
+      '__cf_bm=abc; _cfuvid=def',
     ]);
     for (const { headers } of calls) {
+      expect(headers.get('User-Agent')).toBe('opencode-smartfetch/1.0');
       expect(headers.get('Accept')).toBe('text/markdown');
       expect(headers.get('If-None-Match')).toBe('"old"');
     }
   });
 
-  test('limits Cloudflare retry to two attempts per scheme and never retries an ordinary 403 or the llms probe', async () => {
+  test('never retries a cookieless Cloudflare challenge, an ordinary 403 or the llms probe', async () => {
     const calls: string[] = [];
+    const headers: Array<[string, string]> = [['cf-mitigated', 'challenge']];
     globalThis.fetch = mock(async (url: string | URL | Request) => {
       calls.push(String(url));
-      return new Response('challenge', {
-        status: 403,
-        headers: { 'cf-mitigated': 'challenge' },
-      });
+      return new Response('challenge', { status: 403, headers });
     }) as typeof fetch;
     await fetchWithUpgradeFallback(
       normalizeUrl('http://example.com/page'),
@@ -282,24 +290,17 @@ describe('smartfetch/network', () => {
     );
     expect(calls).toEqual([
       'https://example.com/page',
-      'https://example.com/page',
-      'http://example.com/page',
       'http://example.com/page',
     ]);
     calls.length = 0;
+    headers.push(['set-cookie', 'a=b']);
     await probeLlmsText(
       new URL('https://example.com/page'),
       new AbortController().signal,
     );
     expect(calls).toHaveLength(2);
     calls.length = 0;
-    globalThis.fetch = mock(async (url: string | URL | Request) => {
-      calls.push(String(url));
-      return new Response('forbidden', {
-        status: 403,
-        headers: { 'cf-mitigated': 'other' },
-      });
-    }) as typeof fetch;
+    headers[0] = ['cf-mitigated', 'other'];
     await fetchWithUpgradeFallback(
       normalizeUrl('https://example.com/page'),
       new AbortController().signal,
