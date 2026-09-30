@@ -543,10 +543,13 @@ export function updateSnapshot(
       return true;
     }
     snapshot.updatedAt = Date.now();
-    // Any write retires the oldest links past the cap; active ones stay.
+    // Any write drops the oldest links past the cap but keeps active chains.
     const { sessionParents: parents, activeSessions } = snapshot;
+    const keep = new Set<string>();
+    for (let id of Object.keys(activeSessions))
+      for (; parents[id] && !keep.has(id); id = parents[id]) keep.add(id);
     for (const key of Object.keys(parents).slice(0, -TUI_SESSION_PARENTS_MAX))
-      if (activeSessions[key] === undefined) delete parents[key];
+      if (!keep.has(key)) delete parents[key];
     if (writeTuiSnapshot(snapshot, projectDir)) {
       rememberSnapshot(statePath, snapshot);
       return true;

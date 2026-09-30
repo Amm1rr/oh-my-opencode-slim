@@ -355,7 +355,10 @@ describe('tui-state persistence', () => {
       JSON.stringify({
         ...readTuiSnapshot(tempDir),
         sessionParents: Object.fromEntries(
-          Array.from({ length: count }, (_, i) => [`ses_${i}`, 'root']),
+          Array.from({ length: count }, (_, i) => [
+            `ses_${i}`,
+            i ? `ses_${i - 1}` : 'root',
+          ]),
         ),
       }),
     );
@@ -376,16 +379,16 @@ describe('tui-state persistence', () => {
     expect(sessionParents.ses_new).toBe('root');
   });
 
-  test('keeps the parent link of an active session past the cap', () => {
-    seedSessionParents(TUI_SESSION_PARENTS_MAX);
+  test('keeps the ancestry of an active session past the cap', () => {
+    seedSessionParents(TUI_SESSION_PARENTS_MAX + 1);
     recordTuiAgentActivity(
-      { sessionID: 'ses_0', agentName: 'explorer', active: true },
+      { sessionID: 'ses_1', agentName: 'explorer', active: true },
       tempDir,
     );
 
     recordTuiSessionParent('ses_new', 'root', tempDir);
 
-    expect(readTuiSnapshot(tempDir).sessionParents.ses_0).toBe('root');
+    expect(resolveTuiSessionRoot('ses_1', tempDir)).toBe('root');
   });
 
   test('resolves multi-level ancestry through the index', () => {
