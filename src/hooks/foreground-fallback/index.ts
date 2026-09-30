@@ -615,8 +615,7 @@ export class ForegroundFallbackManager {
     return true;
   }
 
-  private noteExternalTurn(sessionID: string, messageID: string): boolean {
-    if (this.lastUserMessageID.get(sessionID) === messageID) return false;
+  private noteExternalTurn(sessionID: string, messageID: string): void {
     this.lastUserMessageID.set(sessionID, messageID);
     this.turnEpoch.set(sessionID, (this.turnEpoch.get(sessionID) ?? 0) + 1);
     this.lastTrigger.delete(sessionID);
@@ -629,7 +628,6 @@ export class ForegroundFallbackManager {
     this.sessionRetries.delete(sessionID);
     this.retryAttempt.delete(sessionID);
     this.cancelInitialDelay(sessionID);
-    return true;
   }
 
   private nextUserEventSequence(sessionID: string): number {
@@ -756,22 +754,9 @@ export class ForegroundFallbackManager {
     eventParts: unknown[],
     partsAvailable: boolean,
   ): Promise<boolean> {
-    if (this.replayMessageIds.get(sessionID)?.has(messageID)) return true;
-    if (
-      eventParts.some(
-        (part) =>
-          isInternalInitiatorPart(part) ||
-          (isRecord(part) &&
-            typeof part.text === 'string' &&
-            part.text.includes(SLIM_INTERNAL_INITIATOR_MARKER)),
-      )
-    ) {
-      this.rememberReplayMessage(sessionID, messageID);
-      return true;
-    }
     // In v1, message.updated can carry only info while message parts are
     // emitted separately. When parts are present on this event and contain
-    // no internal marker, the message is an external turn.
+    // no internal marker (the caller checked them), it is an external turn.
     if (partsAvailable && eventParts.length > 0) return false;
 
     try {
@@ -939,6 +924,10 @@ export class ForegroundFallbackManager {
             typeof info.id === 'string' &&
             !this.isKnownInternalReplayUserMessage(sessionID, info.id, parts)
           ) {
+            // A re-emitted update of the observed turn (v1: one per step
+            // finish) is inert: no transcript probe, no model re-seed (fallback
+            // may have advanced it), no sequence bump superseding a newer turn.
+            if (this.lastUserMessageID.get(sessionID) === info.id) break;
             const eventSequence = this.nextUserEventSequence(sessionID);
             const isInternal = await this.isInternalReplayUserMessage(
               sessionID,
@@ -949,9 +938,8 @@ export class ForegroundFallbackManager {
             if (this.userEventSequence.get(sessionID) !== eventSequence) {
               break;
             }
-            const isNewExternalTurn =
-              !isInternal && this.noteExternalTurn(sessionID, info.id);
-            if (isNewExternalTurn && isRecord(info.model)) {
+            if (!isInternal) this.noteExternalTurn(sessionID, info.id);
+            if (!isInternal && isRecord(info.model)) {
               const providerID = info.model.providerID;
               const modelID = info.model.modelID ?? info.model.id;
               if (
@@ -961,10 +949,6 @@ export class ForegroundFallbackManager {
                 this.sessionModel.set(sessionID, `${providerID}/${modelID}`);
               }
             }
-            // User-message update events can be re-emitted for an already
-            // observed message after fallback has advanced the session model.
-            // Only a newly confirmed external turn may seed its model.
-            if (!isInternal && !isNewExternalTurn) break;
           }
         }
         // Capture agent name when available (OpenCode includes it on subagent messages)

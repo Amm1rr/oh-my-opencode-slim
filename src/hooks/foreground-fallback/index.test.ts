@@ -350,6 +350,35 @@ describe('foreground fallback redo harness', () => {
     });
   });
 
+  test('a re-emitted user-message update is inert while a newer turn classifies', async () => {
+    // v1 republishes a turn's user message (info only) on every step finish.
+    const { manager, mocks } = makeManager();
+    const newerTurnRead = deferred<unknown>();
+    mocks.messages
+      .mockImplementationOnce(async () => ({ data: [] }))
+      .mockImplementationOnce(() => newerTurnRead.promise);
+    const update = (id: string, modelID: string) => ({
+      type: 'message.updated',
+      properties: {
+        info: {
+          id,
+          sessionID: 'reemitted',
+          role: 'user',
+          model: { providerID: 'test', modelID },
+        },
+      },
+    });
+
+    await manager.handleEvent(update('turn-1', 'a'));
+    const newerTurn = manager.handleEvent(update('turn-2', 'b'));
+    await manager.handleEvent(update('turn-1', 'a'));
+    newerTurnRead.resolve({ data: [] });
+    await newerTurn;
+
+    expect(mocks.messages).toHaveBeenCalledTimes(2);
+    expect((manager as any).sessionModel.get('reemitted')).toBe('test/b');
+  });
+
   test('v1 info-only replay notification is claimed by its reserved message ID', async () => {
     const transcript: unknown[] = [
       {
