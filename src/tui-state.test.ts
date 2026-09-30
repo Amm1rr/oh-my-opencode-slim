@@ -14,6 +14,7 @@ import {
   recordTuiSessionParent,
   resolveTuiSessionRoot,
   snapshotSectionsEqual,
+  TUI_SESSION_PARENTS_MAX,
   updateTuiSessionDetails,
 } from './tui-state';
 
@@ -311,6 +312,19 @@ describe('tui-state persistence', () => {
     expect(fs.existsSync(lockPath)).toBe(false);
   });
 
+  test('recovers an aged state lock whose recorded PID is alive', () => {
+    const lockPath = `${getTuiStatePath(tempDir)}.lock`;
+    fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+    fs.writeFileSync(lockPath, JSON.stringify({ pid: process.pid }));
+    const staleTime = new Date('2000-01-01T00:00:00Z');
+    fs.utimesSync(lockPath, staleTime, staleTime);
+
+    recordLuna();
+
+    expect(readTuiSnapshot(tempDir).agentModels.explorer).toBe(LUNA.model);
+    expect(fs.existsSync(lockPath)).toBe(false);
+  });
+
   test('scopes recorded activity to the owning conversation tree', () => {
     recordTuiSessionParent('child-a', 'conv-1', tempDir);
     recordTuiSessionParent('child-b', 'conv-2', tempDir);
@@ -331,6 +345,32 @@ describe('tui-state persistence', () => {
       'child-a': 'oracle',
       'child-b': 'fixer',
     });
+  });
+
+  test('caps session parents while refreshing a re-registered link', () => {
+    const statePath = getTuiStatePath(tempDir);
+    fs.mkdirSync(path.dirname(statePath), { recursive: true });
+    fs.writeFileSync(
+      statePath,
+      JSON.stringify({
+        ...readTuiSnapshot(tempDir),
+        sessionParents: Object.fromEntries(
+          Array.from({ length: TUI_SESSION_PARENTS_MAX + 2 }, (_, i) => [
+            `ses_${i}`,
+            'root',
+          ]),
+        ),
+      }),
+    );
+
+    recordTuiSessionParent('ses_0', 'root', tempDir);
+    recordTuiSessionParent('ses_new', 'root', tempDir);
+
+    const { sessionParents } = readTuiSnapshot(tempDir);
+    expect(Object.keys(sessionParents)).toHaveLength(TUI_SESSION_PARENTS_MAX);
+    expect(sessionParents.ses_0).toBe('root');
+    expect(sessionParents.ses_1).toBeUndefined();
+    expect(sessionParents.ses_new).toBe('root');
   });
 
   test('resolves multi-level ancestry through the index', () => {
