@@ -665,6 +665,94 @@ describe('createV2Setup e2e', () => {
     20_000,
   );
 
+  test('#1374 an agent pass that ran before the MCP snapshot is rebuilt so host config rules reach plugin agents', async () => {
+    const { ctx } = makeMockV2Context(projectDir);
+    const globalRules: V2PermissionRule[] = [
+      {
+        action: 'external_directory',
+        resource: '/approved/*',
+        effect: 'allow',
+      },
+    ];
+    let pluginAgentTransform: ((draft: unknown) => void) | undefined;
+    let pluginMcpTransform: ((draft: unknown) => void) | undefined;
+    let agents = new Map<string, Record<string, unknown>>();
+    let reloads = 0;
+    // Host State semantics: every read rebuilds a fresh candidate by running
+    // transforms in order; the host config transform (internal post plugin)
+    // appends global rules to every agent present at that point.
+    const rebuild = () => {
+      const next = new Map<string, Record<string, unknown>>([
+        ['build', { id: 'build', permissions: [] }],
+      ]);
+      const editor = {
+        list: () => [...next.values()],
+        get: (id: string) => next.get(id),
+        update: (
+          id: string,
+          mutate: (agent: Record<string, unknown>) => void,
+        ) => {
+          const agent = next.get(id) ?? { id, permissions: [] };
+          mutate(agent);
+          next.set(id, agent);
+        },
+        default: () => {},
+        remove: (id: string) => next.delete(id),
+      };
+      pluginAgentTransform?.(editor);
+      for (const agent of editor.list()) {
+        (agent.permissions as V2PermissionRule[]).push(...globalRules);
+      }
+      agents = next;
+    };
+    ctx.agent.transform = async (callback) => {
+      pluginAgentTransform = callback as (draft: unknown) => void;
+      return { dispose: () => {} };
+    };
+    ctx.agent.reload = async () => {
+      reloads += 1;
+      rebuild();
+    };
+    ctx.agent.list = async () => [...agents.values()] as never;
+    (
+      ctx.mcp as unknown as {
+        transform: (callback: (draft: unknown) => void) => Promise<{
+          dispose: () => void;
+        }>;
+      }
+    ).transform = async (callback) => {
+      pluginMcpTransform = callback;
+      return { dispose: () => {} };
+    };
+
+    const cleanup = await createV2Setup()(ctx);
+    try {
+      // The agent pass runs before the MCP inventory is known.
+      rebuild();
+      expect(agents.has('explorer')).toBe(false);
+      pluginMcpTransform?.({
+        list: () => [],
+        get: () => undefined,
+        set: () => {},
+        update: () => {},
+        remove: () => {},
+      });
+      await settlePump();
+
+      expect(reloads).toBe(1);
+      const explorer = agents.get('explorer');
+      expect(explorer).toBeDefined();
+      expect(
+        compilePermissionPolicy({
+          baselineRules: explorer?.permissions as V2PermissionRule[],
+          hostRules: [],
+        }).decide('external_directory', '/approved/report.txt'),
+      ).toBe('allow');
+    } finally {
+      await cleanup();
+    }
+  }, 20_000);
+
   test('native agents without a permissions field register normally', async () => {
     const { ctx } = makeMockV2Context(projectDir);
     let deferred: ((draft: unknown) => void) | undefined;

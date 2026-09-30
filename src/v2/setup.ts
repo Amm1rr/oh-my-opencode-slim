@@ -2042,6 +2042,10 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
         resolvePermissionSnapshotReady = resolve;
       });
       let pendingAgentDraft: V2AgentDraft | undefined;
+      // An agent pass that ended before the MCP snapshot existed: our agents
+      // were added to it afterwards, missing later host transforms.
+      let agentPassDeferred = false;
+      let agentRebuild: Promise<unknown> | undefined;
       let nativeAgentSnapshot:
         | {
             agents: Record<string, Record<string, unknown>>;
@@ -2133,6 +2137,21 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
         permissionSnapshotReady = true;
         resolvePermissionSnapshotReady();
       };
+      // The host rebuilds agents by running every transform in order; its
+      // config transform (global and per-agent permissions) runs after ours.
+      // When our agents were added to a pass that already finished, they
+      // missed those rules (#1374). Rebuild once so they exist in-pass.
+      const requestAgentRebuild = () => {
+        if (typeof ctx.agent?.reload !== 'function') return;
+        agentRebuild = Promise.resolve()
+          .then(() => (generationDisposed ? undefined : ctx.agent.reload()))
+          .catch((err) =>
+            log(
+              '[v2] agent rebuild after deferred finalization failed',
+              String(err),
+            ),
+          );
+      };
       const captureAgentDraft = (draft: V2AgentDraft) => {
         if (permissionSnapshotFailure) {
           if (generationDisposed) {
@@ -2178,6 +2197,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
             nativeSnapshotCaptured = true;
           }
           finalizeAgentDraft(draft);
+          agentPassDeferred = !permissionSnapshotReady;
         } catch (error) {
           if (generationDisposed) throw error;
           permissionSnapshotFailure =
@@ -2204,6 +2224,10 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
               draft.set(name, adaptMcpServer(config));
             }
             if (pendingAgentDraft) finalizeAgentDraft(pendingAgentDraft);
+            if (agentPassDeferred && permissionSnapshotReady) {
+              agentPassDeferred = false;
+              requestAgentRebuild();
+            }
           });
           disposers.push(() => reg.dispose());
         }
@@ -2709,6 +2733,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
                   // user's globals. Project the finalized agent instead and
                   // re-apply only plugin-owned ceilings.
                   try {
+                    if (agentRebuild) await agentRebuild;
                     const finalized = await readFinalizedAgentPermissions(
                       ctx.agent,
                       agent,
