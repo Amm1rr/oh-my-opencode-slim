@@ -303,10 +303,10 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     ownedTuiActivitySessions.set(sessionID, directory);
     void hydrateTuiSessionParent(sessionID, directory);
   };
-  // Sessions that predate this fix or whose session.created event was
-  // missed have no link in the persistent index. Ask the host once per
-  // session and walk up to a confirmed root; absence of parentID on a
-  // valid response is a final answer (top-level chat).
+  // Sessions whose child→parent link is missing ask the host and walk up
+  // to a confirmed root. Only confirmed roots and in-flight lookups stay
+  // in this set; a valid response without parentID is a final answer
+  // (top-level chat).
   const hydratedTuiParents = new Set<string>();
   const hydrateTuiSessionParent = async (
     startSessionID: string,
@@ -359,6 +359,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       }
       if (typeof parentID === 'string' && parentID !== current) {
         recordTuiSessionParent(current, parentID, directory);
+        hydratedTuiParents.delete(current);
         current = parentID;
         continue;
       }
