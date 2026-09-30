@@ -1,5 +1,6 @@
 import { describe, expect, mock, test } from 'bun:test';
 import {
+  AGED_ENTRY_RENDER_TTL_MS,
   BackgroundJobBoard as ProductionBoard,
   STATUS_UNCERTAIN_DEMOTE_AFTER_MS,
 } from './background-job-board';
@@ -572,7 +573,9 @@ describe('BackgroundJobBoard', () => {
       terminalUnreconciled: false,
       updatedAt: 300,
     });
-    expect(board.formatForPrompt('parent-1')).toContain('Reusable Sessions');
+    expect(board.formatForPrompt('parent-1', 400)).toContain(
+      'Reusable Sessions',
+    );
   });
 
   test('lists acknowledged stopped sessions as retained recovery, not reusable', () => {
@@ -1758,7 +1761,9 @@ describe('BackgroundJobBoard', () => {
       terminalUnreconciled: false,
     });
 
-    expect(board.formatForPrompt('parent-1')).toContain('Reusable Sessions');
+    expect(board.formatForPrompt('parent-1', 400)).toContain(
+      'Reusable Sessions',
+    );
   });
 
   test('keeps initial running prompt output stable regardless of now', () => {
@@ -2564,6 +2569,87 @@ describe('BackgroundJobBoard', () => {
       sidebarHistory(board, 'parent-1');
 
       expect(board.get('ses_1')?.lastUsedAt).toBe(before);
+    });
+  });
+
+  describe('aged entry render TTL (#1314 family)', () => {
+    function reconciledBoard(reconciledAt: number) {
+      const board = new BackgroundJobBoard();
+      board.registerLaunch({
+        taskID: 'ses_done',
+        parentSessionID: 'parent-1',
+        agent: 'oracle',
+        description: 'review plan',
+        now: 1_000,
+      });
+      board.updateStatus({
+        taskID: 'ses_done',
+        state: 'completed',
+        now: 1_500,
+      });
+      board.markReconciled('ses_done', reconciledAt);
+      return board;
+    }
+
+    test('a sole reusable entry renders fresh, ages off the board past TTL, store intact', () => {
+      const board = reconciledBoard(2_000);
+      const fresh = board.formatForPrompt(
+        'parent-1',
+        2_000 + AGED_ENTRY_RENDER_TTL_MS - 1,
+      );
+      expect(fresh).toContain('ses_done / oracle / completed, reconciled');
+
+      expect(
+        board.formatForPrompt('parent-1', 2_000 + AGED_ENTRY_RENDER_TTL_MS),
+      ).toBeUndefined();
+      expect(board.get('ses_done')).toBeDefined();
+    });
+
+    test('an aged retained entry also leaves the board', () => {
+      const board = new BackgroundJobBoard();
+      board.registerLaunch({
+        taskID: 'ses_stopped',
+        parentSessionID: 'parent-1',
+        agent: 'oracle',
+        description: 'idle review',
+        now: 100,
+      });
+      board.markStopped('ses_stopped', 'no native result', 110, undefined, 110);
+      board.markReconciled('ses_stopped', 2_000);
+      expect(board.formatForPrompt('parent-1', 2_000)).toContain(
+        '#### Retained / Recovery',
+      );
+      expect(
+        board.formatForPrompt('parent-1', 2_000 + AGED_ENTRY_RENDER_TTL_MS),
+      ).toBeUndefined();
+    });
+
+    test('a retrieval touch (markUsed) resurfaces an aged entry', () => {
+      const board = reconciledBoard(2_000);
+      const agedAt = 2_000 + AGED_ENTRY_RENDER_TTL_MS;
+      expect(board.formatForPrompt('parent-1', agedAt)).toBeUndefined();
+
+      board.markUsed('parent-1', 'ora-1', agedAt);
+      expect(board.formatForPrompt('parent-1', agedAt)).toContain('ses_done');
+    });
+
+    test('actionable entries never age out: terminalUnreconciled renders past TTL', () => {
+      const board = new BackgroundJobBoard();
+      board.registerLaunch({
+        taskID: 'ses_hot',
+        parentSessionID: 'parent-1',
+        agent: 'explorer',
+        description: 'map hooks',
+        now: 1_000,
+      });
+      board.updateStatus({
+        taskID: 'ses_hot',
+        state: 'completed',
+        now: 2_000,
+      });
+
+      const far = 2_000 + AGED_ENTRY_RENDER_TTL_MS * 10;
+      expect(board.formatForPrompt('parent-1', far)).toContain('ses_hot');
     });
   });
 });

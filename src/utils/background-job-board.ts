@@ -204,6 +204,13 @@ const CANONICAL_TERMINAL_STATES = new Set<TaskOutputState>([
  */
 export const STATUS_UNCERTAIN_DEMOTE_AFTER_MS = 30 * 60_000;
 
+/**
+ * Render-only discoverability window (store survives for reconciler/revive;
+ * only real retrieval via markUsed refreshes it, rendering never does).
+ * Different layer than STATUS_UNCERTAIN_DEMOTE_AFTER_MS (lifecycle grace).
+ */
+export const AGED_ENTRY_RENDER_TTL_MS = 6 * 60 * 60_000;
+
 const AGENT_PREFIX: Record<string, string> = {
   council: 'cou',
   designer: 'des',
@@ -1342,14 +1349,20 @@ export class BackgroundJobBoard implements BackgroundJobStore {
         (job.state === 'running' || job.terminalUnreconciled) &&
         !isStaleUncertain(job),
     );
+    // Aged ballast leaves the render (#1314 family). Applied only to
+    // reusable/retained below — the active filter's exemption is structural.
+    const isRenderAgedOut = (job: BackgroundJobRecord) =>
+      now - job.lastUsedAt >= AGED_ENTRY_RENDER_TTL_MS;
     // listReusable predates the provisional provenance contract and is
     // unaware of it: without this filter a reconciled completed
     // placeholder would surface in the Reusable Sessions section even
     // though it was never attributed (same exclusion as `jobs` above).
     const reusable = this.listReusable(parentSessionID).filter(
-      (job) => job.provisional !== true,
+      (job) => job.provisional !== true && !isRenderAgedOut(job),
     );
-    const retained = jobs.filter(isRetainedStopped);
+    const retained = jobs.filter(
+      (job) => isRetainedStopped(job) && !isRenderAgedOut(job),
+    );
     const acknowledgedFailedSession = reusable.some((job) => {
       const terminal = job.terminalState ?? terminalStateOf(job.state);
       return terminal === 'cancelled' || terminal === 'error';
