@@ -1061,9 +1061,44 @@ describe('onWarning callback', () => {
     );
   });
 
-  test('keeps a user-level disable list when a project-level value has only unknown names', () => {
+  test.each([
+    [
+      'disabled_hooks',
+      ['phase-reminder'],
+      ['auto-update-checker'],
+      ['phase-reminder'],
+    ],
+    ['disabled_commands', ['reflect'], ['council'], ['reflect']],
+  ])(
+    'keeps the user-level %s list when the project-level value has only unknown names',
+    (key, userValue, projectValue, expected) => {
+      const userConfigPath = path.join(tempDir, 'opencode');
+      const projectDir = path.join(tempDir, `project-${key}`);
+      const projectConfigDir = path.join(projectDir, '.opencode');
+      fs.mkdirSync(userConfigPath, { recursive: true });
+      fs.mkdirSync(projectConfigDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(userConfigPath, 'oh-my-opencode-slim.json'),
+        JSON.stringify({ [key]: userValue }),
+      );
+      fs.writeFileSync(
+        path.join(projectConfigDir, 'oh-my-opencode-slim.json'),
+        JSON.stringify({ [key]: projectValue }),
+      );
+
+      const config = loadPluginConfig(projectDir, { silent: true });
+
+      // The all-unknown project value is treated as unset, so the user
+      // layer's opt-out survives the layer merge.
+      expect(config[key as 'disabled_hooks' | 'disabled_commands']).toEqual(
+        expected,
+      );
+    },
+  );
+
+  test('an explicit empty project disabled list overrides the user list', () => {
     const userConfigPath = path.join(tempDir, 'opencode');
-    const projectDir = path.join(tempDir, 'project');
+    const projectDir = path.join(tempDir, 'project-empty-disabled-hooks');
     const projectConfigDir = path.join(projectDir, '.opencode');
     fs.mkdirSync(userConfigPath, { recursive: true });
     fs.mkdirSync(projectConfigDir, { recursive: true });
@@ -1073,14 +1108,12 @@ describe('onWarning callback', () => {
     );
     fs.writeFileSync(
       path.join(projectConfigDir, 'oh-my-opencode-slim.json'),
-      JSON.stringify({ disabled_hooks: ['auto-update-checker'] }),
+      JSON.stringify({ disabled_hooks: [] }),
     );
 
-    const config = loadPluginConfig(projectDir);
+    const config = loadPluginConfig(projectDir, { silent: true });
 
-    // The all-unknown project value is treated as unset, so the user
-    // layer's opt-out survives the layer merge
-    expect(config.disabled_hooks).toEqual(['phase-reminder']);
+    expect(config.disabled_hooks).toEqual([]);
   });
 
   test('strips unknown disabled_hooks entries instead of rejecting the config', () => {

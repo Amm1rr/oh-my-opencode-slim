@@ -167,15 +167,18 @@ export function normalizeDisabledArrayKeys(
       continue;
     }
     const normalizedValues = configRecord[key] as unknown[];
-    const stripped = normalizedValues.filter(
-      (entry) => !validValues.includes(entry as string),
-    );
+    const stripped: unknown[] = [];
+    const kept: unknown[] = [];
+    for (const entry of normalizedValues) {
+      if (validValues.includes(entry as string)) {
+        kept.push(entry);
+      } else {
+        stripped.push(entry);
+      }
+    }
     if (stripped.length === 0) {
       continue;
     }
-    const kept = normalizedValues.filter((entry) =>
-      validValues.includes(entry as string),
-    );
     if (kept.length === 0) {
       // Every entry was unknown: emit no opt-out signal, so a lower config
       // layer's valid list survives the layer merge.
