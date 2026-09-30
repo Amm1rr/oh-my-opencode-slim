@@ -122,7 +122,9 @@ export function interpolateEnvironmentVariables(value: string): string {
  * is dropped. Array values of enum-backed keys (disabled_hooks,
  * disabled_commands), including strings after shape normalization, are
  * filtered to their valid values, stripping unknown entries instead of
- * failing schema validation. Undefined values are left
+ * failing schema validation; a value consisting only of unknown entries is
+ * treated as unset so a lower config layer's list still applies. Undefined
+ * values are left
  * untouched. Each normalization is reported through `warn` (if provided)
  * with a plain message; callers wrap it in their own warning channel
  * (loader uses onWarning + console.warn, doctor just reports the message).
@@ -171,9 +173,22 @@ export function normalizeDisabledArrayKeys(
     if (stripped.length === 0) {
       continue;
     }
-    configRecord[key] = normalizedValues.filter((entry) =>
+    const kept = normalizedValues.filter((entry) =>
       validValues.includes(entry as string),
     );
+    if (kept.length === 0) {
+      // Every entry was unknown: emit no opt-out signal, so a lower config
+      // layer's valid list survives the layer merge.
+      delete configRecord[key];
+      warn?.(
+        `Config key "${key}" contains only unknown values ` +
+          `(${JSON.stringify(stripped)}); ignoring the key entirely so a ` +
+          `lower config layer still applies. ` +
+          `Valid values: ${validValues.join(', ')}.`,
+      );
+      continue;
+    }
+    configRecord[key] = kept;
     warn?.(
       `Config key "${key}" contains unknown values ` +
         `(${JSON.stringify(stripped)}); ignoring them. ` +

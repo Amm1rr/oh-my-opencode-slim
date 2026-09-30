@@ -1021,9 +1021,9 @@ describe('onWarning callback', () => {
       onWarning: (warning) => warnings.push(warning),
     });
 
-    // String is normalized to an array, then the unknown entry is stripped;
-    // siblings and the rest of the config still load
-    expect(config.disabled_hooks).toEqual([]);
+    // String is normalized to an array; every entry is unknown, so the key
+    // is dropped entirely (siblings and the rest of the config still load)
+    expect(config.disabled_hooks).toBeUndefined();
     expect(config.disabled_tools).toEqual(['webfetch']);
     expect(config.agents?.oracle?.model).toBe('test/model');
     expect(warnings).toHaveLength(2);
@@ -1031,7 +1031,7 @@ describe('onWarning callback', () => {
     expect(warnings[0]?.message).toContain('should be an array; normalized');
     expect(warnings[1]?.kind).toBe('normalized');
     expect(warnings[1]?.message).toContain(
-      'unknown values (["auto-update-checker"])',
+      'contains only unknown values (["auto-update-checker"])',
     );
     expect(warnings[1]?.message).toContain('Valid values');
   });
@@ -1053,10 +1053,34 @@ describe('onWarning callback', () => {
       onWarning: (warning) => warnings.push(warning),
     });
 
-    expect(config.disabled_commands).toEqual([]);
+    expect(config.disabled_commands).toBeUndefined();
     expect(config.agents?.oracle?.model).toBe('test/model');
     expect(warnings).toHaveLength(2);
-    expect(warnings[1]?.message).toContain('unknown values (["council"])');
+    expect(warnings[1]?.message).toContain(
+      'contains only unknown values (["council"])',
+    );
+  });
+
+  test('keeps a user-level disable list when a project-level value has only unknown names', () => {
+    const userConfigPath = path.join(tempDir, 'opencode');
+    const projectDir = path.join(tempDir, 'project');
+    const projectConfigDir = path.join(projectDir, '.opencode');
+    fs.mkdirSync(userConfigPath, { recursive: true });
+    fs.mkdirSync(projectConfigDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(userConfigPath, 'oh-my-opencode-slim.json'),
+      JSON.stringify({ disabled_hooks: ['phase-reminder'] }),
+    );
+    fs.writeFileSync(
+      path.join(projectConfigDir, 'oh-my-opencode-slim.json'),
+      JSON.stringify({ disabled_hooks: ['auto-update-checker'] }),
+    );
+
+    const config = loadPluginConfig(projectDir);
+
+    // The all-unknown project value is treated as unset, so the user
+    // layer's opt-out survives the layer merge
+    expect(config.disabled_hooks).toEqual(['phase-reminder']);
   });
 
   test('strips unknown disabled_hooks entries instead of rejecting the config', () => {
