@@ -1763,7 +1763,10 @@ function injectCheckpointBoard(
       ? undefined
       : state.backgroundJobBoard.formatForPromptWithMetadata(sessionID);
   const reminder = boardMeta?.text;
-  const canCreateSnapshot = canSurface && reminder !== undefined;
+  const canCreateSnapshot =
+    canSurface &&
+    reminder !== undefined &&
+    !hasPendingToolResults(currentMessages);
 
   const replayBaseMessage = triggeringMessage ?? tailMessage;
   const snapshotState = updateBoardHistoryState(
@@ -1815,6 +1818,29 @@ function injectCheckpointBoard(
   // the parent run on an internal trigger, and the correction is exactly
   // what that turn needs (the fresh snapshot is what internal turns lack).
   deliverReopenCorrections(state, sessionID, messages, replayBaseMessage.info);
+}
+
+/** Defer new boards until the latest tool-call batch has all its results. */
+function hasPendingToolResults(messages: MessageWithParts[]): boolean {
+  const assistantIndex = messages.findLastIndex(
+    (message) => message.info.role === 'assistant',
+  );
+  if (assistantIndex < 0) return false;
+  const pending = new Set(
+    messages[assistantIndex].parts.flatMap((part) =>
+      part.type === 'tool-call' && typeof part.toolCallId === 'string'
+        ? [part.toolCallId]
+        : [],
+    ),
+  );
+  for (const message of messages.slice(assistantIndex + 1)) {
+    for (const part of message.parts) {
+      if (part.type === 'tool-result' && typeof part.toolCallId === 'string') {
+        pending.delete(part.toolCallId);
+      }
+    }
+  }
+  return pending.size > 0;
 }
 
 function findLastMessageAnchorKey(

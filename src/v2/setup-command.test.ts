@@ -563,6 +563,103 @@ describe('createSessionContextHandler (merged context hook seam)', () => {
 });
 
 describe('context bridge: transcript identity enrichment', () => {
+  test('checkpoint board changes wait for all tool results without splitting pairs', async () => {
+    const pipeline = createPipeline({ strategy: 'checkpoint-compatible' });
+    const launch = (taskID: string) =>
+      pipeline.board.registerLaunch({
+        taskID,
+        parentSessionID: SESSION_ID,
+        agent: 'fixer',
+        description: taskID,
+        background: true,
+      });
+    launch('ses_first_child');
+    const handler = createSessionContextHandler({
+      interviewHandleContext: async () => {},
+      messagesTransform: async (_input, output) => pipeline.run(output),
+    });
+    const history: V2SessionContextEvent['messages'] = [
+      {
+        id: 'user',
+        role: 'user',
+        content: [{ type: 'text', text: 'Continue.' }],
+      },
+    ];
+    const transform = async () => {
+      const event = makeEvent(structuredClone(history), {
+        sessionID: SESSION_ID,
+      });
+      await handler(event);
+      return event.messages;
+    };
+    const boards = (messages: V2SessionContextEvent['messages']) =>
+      messages.filter((message) =>
+        message.content.some((part) =>
+          isTaggedPart(part, BACKGROUND_JOB_BOARD_METADATA_KEY),
+        ),
+      );
+    const projection = (messages: V2SessionContextEvent['messages']) =>
+      messages.map((message) => [
+        message.role,
+        message.content.map((part) => {
+          const { cache, metadata, synthetic, ...content } = part;
+          return content;
+        }),
+      ]);
+    const initial = await transform();
+    expect(boards(initial)).toHaveLength(1);
+    launch('ses_second_child');
+    history.push({
+      id: 'assistant-call',
+      role: 'assistant',
+      content: ['call-1', 'call-2'].map((toolCallId) => ({
+        type: 'tool-call',
+        toolCallId,
+        toolName: 'read',
+        input: {},
+      })),
+    });
+    const pending = await transform();
+    expect(boards(pending)).toHaveLength(1);
+    expect(projection(pending).slice(0, initial.length)).toEqual(
+      projection(initial),
+    );
+    for (const toolCallId of ['call-1', 'call-2']) {
+      history.push({
+        role: 'tool',
+        content: [
+          {
+            type: 'tool-result',
+            toolCallId,
+            toolName: 'read',
+            output: { type: 'text', value: 'contents' },
+          },
+        ],
+      });
+      const current = await transform();
+      expect(boards(current)).toHaveLength(toolCallId === 'call-1' ? 1 : 2);
+      expect(projection(current).slice(0, pending.length)).toEqual(
+        projection(pending),
+      );
+      const callIndex = current.findIndex(
+        (message) => message.id === 'assistant-call',
+      );
+      expect(current[callIndex + 1].role).toBe('tool');
+      if (toolCallId === 'call-2') {
+        expect(current[callIndex + 2].role).toBe('tool');
+        history.push({
+          id: 'after',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Done.' }],
+        });
+        const replay = await transform();
+        expect(projection(replay).slice(0, current.length)).toEqual(
+          projection(current),
+        );
+      }
+    }
+  });
+
   test('checkpoint board survives completion followed by tool-result continuations', async () => {
     const pipeline = createPipeline({ strategy: 'checkpoint-compatible' });
     pipeline.board.registerLaunch({
@@ -612,7 +709,14 @@ describe('context bridge: transcript identity enrichment', () => {
         {
           id: `a${step}`,
           role: 'assistant',
-          content: [{ type: 'text', text: `Read file ${step}.` }],
+          content: [
+            {
+              type: 'tool-call',
+              toolCallId: `call-${step}`,
+              toolName: 'read',
+              input: {},
+            },
+          ],
         },
         {
           role: 'tool',
