@@ -7,7 +7,7 @@
  * All injection logic must go through the cache-safe helpers in
  * ../cache-safe-injection.ts to ensure prompt cache safety.
  */
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { formatSystemReminder } from '../../config/constants';
 import type {
   BackgroundJobExecution,
@@ -65,6 +65,8 @@ type RetainedBoardSnapshot = {
 
 export type RetainedBoardSnapshotState = {
   snapshots: RetainedBoardSnapshot[];
+  /** Random per state instance, so ids differ across restarts and resets. */
+  epoch: string;
   nextSnapshotSequence: number;
   realMessageCount: number;
   firstRealMessageAnchorKey?: string;
@@ -1789,7 +1791,7 @@ function injectCheckpointBoard(
       }
       snapshotState.snapshots.push({
         anchorKey,
-        id: `oh-my-opencode-slim:background-job-board:${encodedSessionID}:${sequence}`,
+        id: `oh-my-opencode-slim:background-job-board:${encodedSessionID}:${snapshotState.epoch}:${sequence}`,
         text: reminder,
         terminalUnreconciledTaskIDs: boardMeta.terminalUnreconciledTaskIDs,
       });
@@ -1937,6 +1939,7 @@ function updateBoardHistoryState(
 
   const current = state.retainedBoardSnapshots.get(sessionID) ?? {
     snapshots: [],
+    epoch: randomBytes(4).toString('hex'),
     nextSnapshotSequence: 0,
     realMessageCount: 0,
     firstRealMessageAnchorKey: undefined,
