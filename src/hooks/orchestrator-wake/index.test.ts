@@ -2635,8 +2635,9 @@ describe('children enumeration fallback (v2)', () => {
 
   test('fallback child without an outcome still wakes on fresh evidence', async () => {
     const promptAsync = mock(async () => ({}));
+    const updated = Date.now();
     const get = mock(async () => ({
-      data: { time: { updated: Date.now() } },
+      data: { time: { updated } },
     }));
     const { scheduler } = createScheduler({
       hostFlavor: 'v2',
@@ -2701,8 +2702,9 @@ describe('children enumeration fallback (v2)', () => {
 
   test('host evidence keeps a child active despite stale local evidence', async () => {
     const promptAsync = mock(async () => ({}));
+    const updated = Date.now();
     const get = mock(async () => ({
-      data: { time: { updated: Date.now() } },
+      data: { time: { updated } },
     }));
     const { scheduler } = createScheduler({
       hostFlavor: 'v2',
@@ -2731,15 +2733,16 @@ describe('children enumeration fallback (v2)', () => {
 
   test('mixed fallback children: terminal suppressed, running wakes, get failure is fail-soft', async () => {
     const promptAsync = mock(async () => ({}));
+    const runningUpdated = Date.now();
     const get = mock(async (args: { path?: { id?: string } }) => {
       const id = args?.path?.id;
       if (id === 'c-terminal') {
         return {
-          data: { outcome: 'succeeded', time: { updated: Date.now() } },
+          data: { outcome: 'succeeded', time: { updated: 5_000 } },
         };
       }
       if (id === 'c-running') {
-        return { data: { time: { updated: Date.now() } } };
+        return { data: { time: { updated: runningUpdated } } };
       }
       if (id === 'c-throws') throw new Error('get unavailable');
       return { data: {} };
@@ -2968,8 +2971,9 @@ describe('children enumeration fallback (v2)', () => {
 describe('children mode on v1 (explicit opt-in)', () => {
   test('enumerates via session.children and keeps the v1 promptAsync call shape', async () => {
     const promptAsync = mock(async () => ({}));
+    const updated = Date.now();
     const children = mock(async () => ({
-      data: [{ id: 'c1', time: { updated: Date.now() } }],
+      data: [{ id: 'c1', time: { updated } }],
     }));
     const status = mock(async () => ({ data: {} }));
     const { scheduler } = createScheduler({
