@@ -9,6 +9,8 @@ import {
 } from 'bun:test';
 import { z } from 'zod';
 import {
+  DISABLED_COMMANDS_VALUES,
+  DISABLED_HOOKS_VALUES,
   InterviewConfigSchema,
   MarketplaceActivationSchema,
   MultiplexerConfigSchema,
@@ -237,7 +239,23 @@ describe('PluginConfigSchema disabled_hooks and disabled_commands', () => {
     }
   });
 
-  it('rejects hook and command names outside the whitelist', () => {
+  it('exports the valid value lists as the enum source of truth', () => {
+    expect(DISABLED_HOOKS_VALUES).toEqual([
+      'phase-reminder',
+      'foreground-fallback',
+    ]);
+    expect(DISABLED_COMMANDS_VALUES).toEqual([
+      'interview',
+      'deepwork',
+      'reflect',
+      'loop',
+    ]);
+  });
+
+  it('keeps the strict enum for direct schema consumers (loader strips first)', () => {
+    // Config loading strips unknown entries before validation and warns
+    // (see loader.test.ts). The enum remains as defense in depth and for
+    // editor completion.
     expect(
       PluginConfigSchema.safeParse({ disabled_hooks: ['auto-update-checker'] })
         .success,

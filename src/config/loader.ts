@@ -14,6 +14,8 @@ import {
 } from './presets';
 import {
   BackgroundJobsConfigSchema,
+  DISABLED_COMMANDS_VALUES,
+  DISABLED_HOOKS_VALUES,
   InterviewConfigSchema,
   LEGACY_FALLBACK_KEYS,
   type MarketplaceActivation,
@@ -94,6 +96,16 @@ const DISABLED_CONFIG_KEYS = [
   'disabled_commands',
 ] as const;
 
+// Enum-backed disabled_* keys: unknown entries are stripped from the array
+// (with a warning) instead of rejecting the whole config layer through the
+// schema's editor-completion enum. Single source: the schema value lists.
+const DISABLED_CONFIG_VALUE_SETS: Partial<
+  Record<(typeof DISABLED_CONFIG_KEYS)[number], readonly string[]>
+> = {
+  disabled_hooks: DISABLED_HOOKS_VALUES,
+  disabled_commands: DISABLED_COMMANDS_VALUES,
+};
+
 /** Apply the environment placeholder syntax shared by config consumers. */
 export function interpolateEnvironmentVariables(value: string): string {
   return value.replace(
@@ -107,10 +119,12 @@ export function interpolateEnvironmentVariables(value: string): string {
  * reject the whole config object during schema validation. A string value
  * (e.g. "explorer") becomes a single-element array so the user's disable
  * intent survives; any other non-array value (number, boolean, object, ...)
- * is dropped. Array and undefined values are left untouched. Each
- * normalization is reported through `warn` (if provided) with a plain
- * message; callers wrap it in their own warning channel (loader uses
- * onWarning + console.warn, doctor just reports the message).
+ * is dropped. Array values of enum-backed keys (disabled_hooks,
+ * disabled_commands) are filtered to their valid values, stripping unknown
+ * entries instead of failing schema validation. Undefined values are left
+ * untouched. Each normalization is reported through `warn` (if provided)
+ * with a plain message; callers wrap it in their own warning channel
+ * (loader uses onWarning + console.warn, doctor just reports the message).
  *
  * @param rawConfig - Parsed config to normalize (mutated in place)
  * @param warn - Optional callback invoked with each warning message
@@ -130,7 +144,28 @@ export function normalizeDisabledArrayKeys(
   const configRecord = rawConfig as Record<string, unknown>;
   for (const key of DISABLED_CONFIG_KEYS) {
     const value = configRecord[key];
-    if (value === undefined || Array.isArray(value)) {
+    if (value === undefined) {
+      continue;
+    }
+    if (Array.isArray(value)) {
+      const validValues = DISABLED_CONFIG_VALUE_SETS[key];
+      if (!validValues) {
+        continue;
+      }
+      const stripped = value.filter(
+        (entry) => !validValues.includes(entry as string),
+      );
+      if (stripped.length === 0) {
+        continue;
+      }
+      configRecord[key] = value.filter((entry) =>
+        validValues.includes(entry as string),
+      );
+      warn?.(
+        `Config key "${key}" contains unknown values ` +
+          `(${JSON.stringify(stripped)}); ignoring them. ` +
+          `Valid values: ${validValues.join(', ')}.`,
+      );
       continue;
     }
     if (typeof value === 'string') {

@@ -1002,6 +1002,56 @@ describe('onWarning callback', () => {
       'must be an array; ignoring invalid value',
     );
   });
+
+  test('strips unknown disabled_hooks entries instead of rejecting the config', () => {
+    const projectDir = path.join(tempDir, 'project');
+    const projectConfigDir = path.join(projectDir, '.opencode');
+    fs.mkdirSync(projectConfigDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectConfigDir, 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        disabled_hooks: ['auto-update-checker', 'phase-reminder'],
+        disabled_tools: ['webfetch'],
+      }),
+    );
+
+    const warnings: ConfigLoadWarning[] = [];
+    const config = loadPluginConfig(projectDir, {
+      onWarning: (warning) => warnings.push(warning),
+    });
+
+    // Unknown enum entries are stripped one by one; valid entries and the
+    // rest of the config layer survive the typo.
+    expect(config.disabled_hooks).toEqual(['phase-reminder']);
+    expect(config.disabled_tools).toEqual(['webfetch']);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.kind).toBe('normalized');
+    expect(warnings[0]?.message).toContain('auto-update-checker');
+    expect(warnings[0]?.message).toContain('Valid values');
+  });
+
+  test('strips unknown disabled_commands entries instead of rejecting the config', () => {
+    const projectDir = path.join(tempDir, 'project');
+    const projectConfigDir = path.join(projectDir, '.opencode');
+    fs.mkdirSync(projectConfigDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectConfigDir, 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        disabled_commands: ['council', 'reflect'],
+      }),
+    );
+
+    const warnings: ConfigLoadWarning[] = [];
+    const config = loadPluginConfig(projectDir, {
+      onWarning: (warning) => warnings.push(warning),
+    });
+
+    expect(config.disabled_commands).toEqual(['reflect']);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.kind).toBe('normalized');
+    expect(warnings[0]?.message).toContain('council');
+    expect(warnings[0]?.message).toContain('Valid values');
+  });
 });
 
 describe('disabled_* key normalization', () => {

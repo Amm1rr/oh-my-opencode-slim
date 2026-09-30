@@ -895,6 +895,20 @@ function rejectOrchestratorPromptOnOrchestrator(
   }
 }
 
+/** Valid `disabled_hooks` entries; single source for the enum and the loader. */
+export const DISABLED_HOOKS_VALUES = [
+  'phase-reminder',
+  'foreground-fallback',
+] as const;
+
+/** Valid `disabled_commands` entries; single source for the enum and the loader. */
+export const DISABLED_COMMANDS_VALUES = [
+  'interview',
+  'deepwork',
+  'reflect',
+  'loop',
+] as const;
+
 export const RawPluginConfigSchema = z
   .object({
     preset: z.string().optional(),
@@ -959,16 +973,16 @@ export const RawPluginConfigSchema = z
         'Skill names to disable completely. Disabled skills are not granted to agents, even when referenced by presets or agent overrides.',
       ),
     disabled_hooks: z
-      .array(z.enum(['phase-reminder', 'foreground-fallback']))
+      .array(z.enum(DISABLED_HOOKS_VALUES))
       .optional()
       .describe(
-        'Hook names to disable completely. "phase-reminder" is not registered, so orchestrator phase reminders are never injected. "foreground-fallback" marks the fallback manager inert: it is still constructed but never triggers automatic intervention, same effect as fallback.enabled = false.',
+        'Hook names to disable completely. Valid values: "phase-reminder" (not registered, so orchestrator phase reminders are never injected) and "foreground-fallback" (marks the fallback manager inert: it is still constructed but never triggers automatic intervention, same effect as fallback.enabled = false). Unknown values are stripped with a warning when the config loads.',
       ),
     disabled_commands: z
-      .array(z.enum(['interview', 'deepwork', 'reflect', 'loop']))
+      .array(z.enum(DISABLED_COMMANDS_VALUES))
       .optional()
       .describe(
-        'Slash-command names to disable completely. Disabled commands are not registered with OpenCode and cannot be invoked. The /reflect command is also disabled when "reflect" is listed in disabled_skills.',
+        'Slash-command names to disable completely. Valid values: "interview", "deepwork", "reflect", "loop". Disabled commands are neither registered nor intercepted at execution time, so a user-defined command with the same name is left untouched. The /reflect command is also disabled when "reflect" is listed in disabled_skills. Unknown values are stripped with a warning when the config loads.',
       ),
     // Multiplexer config
     multiplexer: MultiplexerConfigSchema.optional(),

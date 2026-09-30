@@ -1974,41 +1974,58 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     },
 
     'command.execute.before': async (input, output) => {
-      await interviewManager.handleCommandExecuteBefore(
-        input as {
-          command: string;
-          sessionID: string;
-          arguments: string;
-        },
-        output as { parts: Array<{ type: string; text?: string }> },
-      );
+      // Registration gating alone cannot make a disabled command inert: with
+      // a user-defined command of the same name, the dispatches below would
+      // still replace its output. Every dispatch shares the command gates.
+      const commandEnabled = (commandName: string): boolean =>
+        isCommandEnabled(commandName, {
+          disabledCommands: runtime.disabledCommands,
+          disabledSkills: runtime.disabledSkills,
+        });
 
-      await deepworkCommandHook.handleCommandExecuteBefore(
-        input as {
-          command: string;
-          sessionID: string;
-          arguments: string;
-        },
-        output as { parts: Array<{ type: string; text?: string }> },
-      );
+      if (commandEnabled('interview')) {
+        await interviewManager.handleCommandExecuteBefore(
+          input as {
+            command: string;
+            sessionID: string;
+            arguments: string;
+          },
+          output as { parts: Array<{ type: string; text?: string }> },
+        );
+      }
 
-      await reflectCommandHook.handleCommandExecuteBefore(
-        input as {
-          command: string;
-          sessionID: string;
-          arguments: string;
-        },
-        output as { parts: Array<{ type: string; text?: string }> },
-      );
+      if (commandEnabled('deepwork')) {
+        await deepworkCommandHook.handleCommandExecuteBefore(
+          input as {
+            command: string;
+            sessionID: string;
+            arguments: string;
+          },
+          output as { parts: Array<{ type: string; text?: string }> },
+        );
+      }
 
-      await loopCommandHook.handleCommandExecuteBefore(
-        input as {
-          command: string;
-          sessionID: string;
-          arguments: string;
-        },
-        output as { parts: Array<{ type: string; text?: string }> },
-      );
+      if (commandEnabled('reflect')) {
+        await reflectCommandHook.handleCommandExecuteBefore(
+          input as {
+            command: string;
+            sessionID: string;
+            arguments: string;
+          },
+          output as { parts: Array<{ type: string; text?: string }> },
+        );
+      }
+
+      if (commandEnabled('loop')) {
+        await loopCommandHook.handleCommandExecuteBefore(
+          input as {
+            command: string;
+            sessionID: string;
+            arguments: string;
+          },
+          output as { parts: Array<{ type: string; text?: string }> },
+        );
+      }
     },
 
     'chat.headers': chatHeadersHook['chat.headers'],

@@ -3752,13 +3752,16 @@ describe('plugin command registration gating', () => {
       JSON.stringify({ companion: { enabled: false }, ...config }),
     );
 
-  const prepareCommands = async (): Promise<Record<string, unknown>> => {
-    const hooks = await plugin({
+  const createHooks = async () =>
+    plugin({
       client: createClient(),
       directory: projectDir,
       worktree: projectDir,
       serverUrl: new URL('http://127.0.0.1:4096'),
     } as never);
+
+  const prepareCommands = async (): Promise<Record<string, unknown>> => {
+    const hooks = await createHooks();
     try {
       const draft: Record<string, unknown> = { agent: {}, mcp: {} };
       (
@@ -3814,5 +3817,44 @@ describe('plugin command registration gating', () => {
       'interview',
       'loop',
     ]);
+  });
+
+  test('disabled commands stay execution-inert while enabled ones intercept', async () => {
+    await writeConfig({ disabled_commands: ['deepwork'] });
+    const hooks = await createHooks();
+    try {
+      // A user-defined command with the same name must not be rewritten by
+      // the disabled omos workflow (the twin of the registration gate).
+      const userOwnedOutput = {
+        parts: [{ type: 'text', text: 'user-owned /deepwork output' }],
+      };
+      await hooks['command.execute.before']?.(
+        {
+          command: 'deepwork',
+          sessionID: 'sess-command-gate',
+          arguments: 'do work',
+        } as never,
+        userOwnedOutput as never,
+      );
+      expect(userOwnedOutput.parts).toEqual([
+        { type: 'text', text: 'user-owned /deepwork output' },
+      ]);
+
+      // Negative control: an enabled command is still intercepted.
+      const enabledOutput = {
+        parts: [] as Array<{ type: string; text?: string }>,
+      };
+      await hooks['command.execute.before']?.(
+        {
+          command: 'loop',
+          sessionID: 'sess-command-gate',
+          arguments: '',
+        } as never,
+        enabledOutput as never,
+      );
+      expect(enabledOutput.parts.length).toBeGreaterThan(0);
+    } finally {
+      await hooks.dispose?.();
+    }
   });
 });
