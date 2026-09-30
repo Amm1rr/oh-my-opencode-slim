@@ -204,7 +204,12 @@ interface FakeClientState {
   statuses: Record<string, { type: string }>;
   statusCalls: string[];
   statusHeaders: Array<Record<string, string> | undefined>;
-  sessions: Array<{ id: string; parentID?: string; agent?: string }>;
+  sessions: Array<{
+    id: string;
+    parentID?: string;
+    agent?: string;
+    title?: string;
+  }>;
   listCalls: string[];
   listHeaders: Array<Record<string, string> | undefined>;
   /** `session.get` outcomes for the FR-8 terminal probe. */
@@ -264,7 +269,9 @@ function fakeFetch(state: FakeClientState): FetchLike {
       return {
         ok: true,
         json: async () =>
-          state.sessions.filter((session) => session.parentID === parentID),
+          state.sessions
+            .filter((session) => session.parentID === parentID)
+            .map((session) => ({ title: 'Child session', ...session })),
       };
     }
     return { ok: false };
@@ -320,6 +327,7 @@ function createdEvent(
         id: sessionId,
         directory,
         parentID: parentSessionId,
+        title: 'Child session',
         ...(agent === undefined ? {} : { agent }),
       },
     },
@@ -1379,6 +1387,24 @@ describe('FR-7 reconcile trigger', () => {
     h.bus.emit('session.status', statusEvent());
     await flush();
     expect(h.adapters.get('tmux')?.spawns).toHaveLength(1);
+    await h.wiring.dispose();
+  });
+
+  test('never opens a pane for a smartfetch secondary session', async () => {
+    const title = 'smartfetch-secondary';
+    const state = createClientState({
+      statuses: { [CHILD]: { type: 'busy' } },
+      sessions: [{ id: CHILD, parentID: PARENT, title }],
+    });
+    const h = await createHarness({ state });
+    await flush();
+    const created = createdEvent();
+    h.bus.emit('session.created', {
+      ...created,
+      properties: { info: { ...created.properties.info, title } },
+    });
+    await flush();
+    expect(h.adapters.get('tmux')?.spawns).toHaveLength(0);
     await h.wiring.dispose();
   });
 

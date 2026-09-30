@@ -1612,6 +1612,72 @@ describe('plugin TUI agent activity', () => {
     expect(readTuiSnapshot(projectDir).activeSessions).toEqual({});
   });
 
+  test('ignores smartfetch secondary sessions until they are deleted', async () => {
+    const event = (type: string, properties: Record<string, unknown>) =>
+      hooks?.event?.({ event: { type, properties } } as never);
+    // State recorded before the session is recognised must still be released.
+    await hooks?.['chat.message']?.(
+      { sessionID: 'sf-0', agent: 'orchestrator' } as never,
+      {} as never,
+    );
+    await event('session.created', {
+      info: { id: 'sf-0', parentID: 'root', title: 'smartfetch-secondary' },
+    });
+    await event('session.created', {
+      info: { id: 'task-1', parentID: 'root', title: 'Explore docs' },
+    });
+    // The host fires event hooks without awaiting them.
+    const created = event('session.created', {
+      info: { id: 'sf-1', parentID: 'root', title: 'smartfetch-secondary' },
+    });
+    await hooks?.['chat.message']?.(
+      { sessionID: 'sf-1', agent: 'orchestrator' } as never,
+      {} as never,
+    );
+    await created;
+    await busy('sf-1');
+    await event('message.updated', {
+      info: {
+        sessionID: 'sf-1',
+        agent: 'orchestrator',
+        providerID: 'cheap',
+        modelID: 'small',
+      },
+    });
+    const messages = [
+      {
+        info: { role: 'user', agent: 'orchestrator', sessionID: 'sf-1' },
+        parts: [{ type: 'text', text: 'Question' }],
+      },
+    ];
+    await hooks?.['experimental.chat.messages.transform']?.(
+      {} as never,
+      { messages } as never,
+    );
+
+    const snapshot = readTuiSnapshot(projectDir);
+    expect(snapshot.activeSessions).toEqual({});
+    expect(snapshot.sessionParents).toEqual({ 'task-1': 'root' });
+    expect(snapshot.agentModels.orchestrator).not.toBe('cheap/small');
+    expect(
+      messages[0]?.parts.some((part) =>
+        isTaggedPart(part, PHASE_REMINDER_METADATA_KEY),
+      ),
+    ).toBe(false);
+
+    await event('session.deleted', { info: { id: 'sf-0' } });
+    await event('session.deleted', { info: { id: 'sf-1' } });
+    await busy('sf-0');
+    await hooks?.['chat.message']?.(
+      { sessionID: 'sf-1', agent: 'oracle' } as never,
+      {} as never,
+    );
+    await busy('sf-1');
+    expect(readTuiSnapshot(projectDir).activeSessions).toEqual({
+      'sf-1': 'oracle',
+    });
+  });
+
   test('clears active sessions when plugin disposes', async () => {
     await hooks?.['chat.message']?.(
       { sessionID: 'oracle-a', agent: 'oracle' } as never,

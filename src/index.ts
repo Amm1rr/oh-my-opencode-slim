@@ -25,6 +25,7 @@ import { ensureCompanionVersion } from './companion/updater';
 import { deepMerge, loadPluginConfig, type Preset } from './config';
 import {
   DEFAULT_MAX_SESSION_METADATA_ENTRIES,
+  SMARTFETCH_SECONDARY_SESSION_TITLE,
   TOAST_DURATION_MS,
 } from './config/constants';
 import type { ConfigLoadWarningKind } from './config/loader';
@@ -248,6 +249,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     },
   });
   const compactingSessionIds = new Set<string>();
+  // smartfetch's temporary secondary-model sessions run under the default
+  // agent; they must never reach the sidebar, metadata or session hooks.
+  const internalSessionIds = new Set<string>();
   const ownedTuiActivitySessions = new Map<string, string>();
   // #1079: lifecycle continuations (orchestrator wake, terminal
   // notifications) resolve the session's CURRENT agent/model at send
@@ -1664,8 +1668,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         return;
       }
 
-      await cacheMonitor.event(input);
-
       const event = input.event as {
         type: string;
         properties?: {
@@ -1695,6 +1697,18 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       // message id in info.id and the session id in info.sessionID. Resolve
       // by session so child activity refreshes the correct stuck timer.
       const eventSessionID = resolveEventSessionID(event);
+      if (
+        eventSessionID &&
+        event.type === 'session.created' &&
+        event.properties?.info?.title === SMARTFETCH_SECONDARY_SESSION_TITLE
+      ) {
+        internalSessionIds.add(eventSessionID);
+      }
+      if (eventSessionID && internalSessionIds.has(eventSessionID)) {
+        if (event.type !== 'session.deleted') return;
+        internalSessionIds.delete(eventSessionID);
+      }
+      await cacheMonitor.event(input);
       const rawStatus = event.properties?.status;
       const statusType =
         typeof rawStatus === 'string'
@@ -2066,6 +2080,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         parts?: unknown[];
       },
     ) => {
+      if (internalSessionIds.has(input.sessionID)) return;
       // A fresh user message proves no compaction transform is coming for a
       // pending mark (the host runs compacting → transform back to back):
       // drop it so a stale mark can never strip reminders from an ordinary

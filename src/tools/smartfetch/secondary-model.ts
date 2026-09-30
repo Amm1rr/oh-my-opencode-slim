@@ -1,4 +1,5 @@
 import type { PluginInput } from '@opencode-ai/plugin';
+import { SMARTFETCH_SECONDARY_SESSION_TITLE } from '../../config/constants';
 import { getClient } from '../../utils/opencode-client';
 import { abortSessionWithTimeout } from '../../utils/session';
 import { MAX_MODEL_CONTENT_CHARS } from './constants';
@@ -272,7 +273,7 @@ async function runSecondaryModel(
     const sessionResponse = await client.session.create({
       query: { directory },
       body: {
-        title: 'smartfetch-secondary',
+        title: SMARTFETCH_SECONDARY_SESSION_TITLE,
         ...(parentSessionID ? { parentID: parentSessionID } : {}),
       },
       throwOnError: true,
