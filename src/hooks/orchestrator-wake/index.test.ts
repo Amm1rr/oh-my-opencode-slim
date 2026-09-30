@@ -2321,7 +2321,7 @@ describe('children-driven degraded mode (v2)', () => {
     expect(promptAsync).toHaveBeenCalledTimes(ORCHESTRATOR_WAKE_UNCHANGED_CAP);
   });
 
-  test('child update progress resets the unchanged cap', async () => {
+  test('defers periodic wakes while a child keeps making progress', async () => {
     const promptAsync = mock(async () => ({}));
     let updated = Date.now();
     const { scheduler } = createScheduler({
@@ -2339,15 +2339,51 @@ describe('children-driven degraded mode (v2)', () => {
     });
     await clock.advance(60_000);
     expect(promptAsync).toHaveBeenCalledTimes(1);
-    // Each interval the host reports fresh child progress: every wake sees a
-    // new fingerprint, so the two-wake cap keeps resetting.
+
     updated += 5_000;
     await clock.advance(60_000);
     updated += 5_000;
     await clock.advance(60_000);
-    expect(promptAsync).toHaveBeenCalledTimes(3);
+
+    expect(promptAsync).toHaveBeenCalledTimes(1);
+    expect(clock.pendingCount()).toBe(1);
     expect(getWakeProgress('p1').stopped).toBe(false);
-    expect(getWakeProgress('p1').unchangedWakeCount).toBe(1);
+    expect(getWakeProgress('p1').unchangedWakeCount).toBe(0);
+  });
+
+  test('defers when a child progresses during the latest snapshot recheck', async () => {
+    const promptAsync = mock(async () => ({}));
+    const updated = Date.now();
+    let listCalls = 0;
+    const { scheduler } = createScheduler({
+      hostFlavor: 'v2',
+      intervalMs: 60_000,
+      sessionClient: makeV2Client({
+        promptAsync,
+        listImpl: mock(async () => {
+          listCalls += 1;
+          return {
+            data: [
+              {
+                id: 'c1',
+                time: { updated: updated + (listCalls > 1 ? 5_000 : 0) },
+              },
+            ],
+          };
+        }),
+      }),
+    });
+
+    await scheduler.event({
+      event: { type: 'session.idle', properties: { sessionID: 'p1' } },
+    });
+    await clock.advance(60_000);
+
+    expect(listCalls).toBeGreaterThanOrEqual(2);
+    expect(promptAsync).not.toHaveBeenCalled();
+    expect(clock.pendingCount()).toBe(1);
+    expect(getWakeProgress('p1').stopped).toBe(false);
+    expect(getWakeProgress('p1').unchangedWakeCount).toBe(0);
   });
 
   test('recovery wake bypasses the children condition', async () => {
