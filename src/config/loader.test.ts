@@ -1003,6 +1003,62 @@ describe('onWarning callback', () => {
     );
   });
 
+  test('strips invalid string disabled_hooks values instead of rejecting the config', () => {
+    const projectDir = path.join(tempDir, 'project');
+    const projectConfigDir = path.join(projectDir, '.opencode');
+    fs.mkdirSync(projectConfigDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectConfigDir, 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        disabled_hooks: 'auto-update-checker',
+        disabled_tools: ['webfetch'],
+        agents: { oracle: { model: 'test/model' } },
+      }),
+    );
+
+    const warnings: ConfigLoadWarning[] = [];
+    const config = loadPluginConfig(projectDir, {
+      onWarning: (warning) => warnings.push(warning),
+    });
+
+    // String is normalized to an array, then the unknown entry is stripped;
+    // siblings and the rest of the config still load
+    expect(config.disabled_hooks).toEqual([]);
+    expect(config.disabled_tools).toEqual(['webfetch']);
+    expect(config.agents?.oracle?.model).toBe('test/model');
+    expect(warnings).toHaveLength(2);
+    expect(warnings[0]?.kind).toBe('normalized');
+    expect(warnings[0]?.message).toContain('should be an array; normalized');
+    expect(warnings[1]?.kind).toBe('normalized');
+    expect(warnings[1]?.message).toContain(
+      'unknown values (["auto-update-checker"])',
+    );
+    expect(warnings[1]?.message).toContain('Valid values');
+  });
+
+  test('strips invalid string disabled_commands values instead of rejecting the config', () => {
+    const projectDir = path.join(tempDir, 'project');
+    const projectConfigDir = path.join(projectDir, '.opencode');
+    fs.mkdirSync(projectConfigDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectConfigDir, 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        disabled_commands: 'council',
+        agents: { oracle: { model: 'test/model' } },
+      }),
+    );
+
+    const warnings: ConfigLoadWarning[] = [];
+    const config = loadPluginConfig(projectDir, {
+      onWarning: (warning) => warnings.push(warning),
+    });
+
+    expect(config.disabled_commands).toEqual([]);
+    expect(config.agents?.oracle?.model).toBe('test/model');
+    expect(warnings).toHaveLength(2);
+    expect(warnings[1]?.message).toContain('unknown values (["council"])');
+  });
+
   test('strips unknown disabled_hooks entries instead of rejecting the config', () => {
     const projectDir = path.join(tempDir, 'project');
     const projectConfigDir = path.join(projectDir, '.opencode');

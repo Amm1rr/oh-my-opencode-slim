@@ -120,8 +120,9 @@ export function interpolateEnvironmentVariables(value: string): string {
  * (e.g. "explorer") becomes a single-element array so the user's disable
  * intent survives; any other non-array value (number, boolean, object, ...)
  * is dropped. Array values of enum-backed keys (disabled_hooks,
- * disabled_commands) are filtered to their valid values, stripping unknown
- * entries instead of failing schema validation. Undefined values are left
+ * disabled_commands), including strings after shape normalization, are
+ * filtered to their valid values, stripping unknown entries instead of
+ * failing schema validation. Undefined values are left
  * untouched. Each normalization is reported through `warn` (if provided)
  * with a plain message; callers wrap it in their own warning channel
  * (loader uses onWarning + console.warn, doctor just reports the message).
@@ -147,37 +148,37 @@ export function normalizeDisabledArrayKeys(
     if (value === undefined) {
       continue;
     }
-    if (Array.isArray(value)) {
-      const validValues = DISABLED_CONFIG_VALUE_SETS[key];
-      if (!validValues) {
-        continue;
-      }
-      const stripped = value.filter(
-        (entry) => !validValues.includes(entry as string),
-      );
-      if (stripped.length === 0) {
-        continue;
-      }
-      configRecord[key] = value.filter((entry) =>
-        validValues.includes(entry as string),
-      );
-      warn?.(
-        `Config key "${key}" contains unknown values ` +
-          `(${JSON.stringify(stripped)}); ignoring them. ` +
-          `Valid values: ${validValues.join(', ')}.`,
-      );
-      continue;
-    }
     if (typeof value === 'string') {
       configRecord[key] = [value];
       warn?.(
         `Config key "${key}" should be an array; ` +
           `normalized to ["${value}"].`,
       );
-    } else {
+    } else if (!Array.isArray(value)) {
       delete configRecord[key];
       warn?.(`Config key "${key}" must be an array; ignoring invalid value.`);
+      continue;
     }
+
+    const validValues = DISABLED_CONFIG_VALUE_SETS[key];
+    if (!validValues) {
+      continue;
+    }
+    const normalizedValues = configRecord[key] as unknown[];
+    const stripped = normalizedValues.filter(
+      (entry) => !validValues.includes(entry as string),
+    );
+    if (stripped.length === 0) {
+      continue;
+    }
+    configRecord[key] = normalizedValues.filter((entry) =>
+      validValues.includes(entry as string),
+    );
+    warn?.(
+      `Config key "${key}" contains unknown values ` +
+        `(${JSON.stringify(stripped)}); ignoring them. ` +
+        `Valid values: ${validValues.join(', ')}.`,
+    );
   }
 }
 
