@@ -54,6 +54,7 @@ import {
   stoppedJobRecoveryReason,
 } from './hooks';
 import { stripTaggedContent } from './hooks/cache-safe-injection';
+import { isCommandEnabled } from './hooks/command-hook-utils';
 import { processImageAttachments } from './hooks/image-hook';
 import { clearAllWakeSessions } from './hooks/orchestrator-wake/wake-gate';
 import { PHASE_REMINDER_METADATA_KEY } from './hooks/phase-reminder';
@@ -1404,10 +1405,22 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       return resolvedAgentRegistry;
     },
     prepareCommands(opencodeConfig) {
-      interviewManager.registerCommand(opencodeConfig);
-      deepworkCommandHook.registerCommand(opencodeConfig);
-      reflectCommandHook.registerCommand(opencodeConfig);
-      loopCommandHook.registerCommand(opencodeConfig);
+      const commandGate = {
+        disabledCommands: runtime.disabledCommands,
+        disabledSkills: runtime.disabledSkills,
+      };
+      if (isCommandEnabled('interview', commandGate)) {
+        interviewManager.registerCommand(opencodeConfig);
+      }
+      if (isCommandEnabled('deepwork', commandGate)) {
+        deepworkCommandHook.registerCommand(opencodeConfig);
+      }
+      if (isCommandEnabled('reflect', commandGate)) {
+        reflectCommandHook.registerCommand(opencodeConfig);
+      }
+      if (isCommandEnabled('loop', commandGate)) {
+        loopCommandHook.registerCommand(opencodeConfig);
+      }
     },
     retire() {
       registryRetired = true;

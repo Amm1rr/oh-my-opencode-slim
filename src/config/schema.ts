@@ -958,6 +958,18 @@ export const RawPluginConfigSchema = z
       .describe(
         'Skill names to disable completely. Disabled skills are not granted to agents, even when referenced by presets or agent overrides.',
       ),
+    disabled_hooks: z
+      .array(z.enum(['phase-reminder', 'foreground-fallback']))
+      .optional()
+      .describe(
+        'Hook names to disable completely. Disabled hooks are not registered: "phase-reminder" stops injecting orchestrator phase reminders; "foreground-fallback" disables automatic foreground model fallback, like fallback.enabled = false.',
+      ),
+    disabled_commands: z
+      .array(z.enum(['interview', 'deepwork', 'reflect', 'loop']))
+      .optional()
+      .describe(
+        'Slash-command names to disable completely. Disabled commands are not registered with OpenCode and cannot be invoked. The /reflect command is also disabled when "reflect" is listed in disabled_skills.',
+      ),
     // Multiplexer config
     multiplexer: MultiplexerConfigSchema.optional(),
     interview: InterviewConfigSchema.optional(),

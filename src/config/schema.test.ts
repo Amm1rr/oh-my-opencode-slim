@@ -205,6 +205,54 @@ describe('PluginConfigSchema image_routing', () => {
   });
 });
 
+describe('PluginConfigSchema disabled_hooks and disabled_commands', () => {
+  it('accepts the whitelisted hook and command names', () => {
+    const result = PluginConfigSchema.safeParse({
+      disabled_hooks: ['phase-reminder', 'foreground-fallback'],
+      disabled_commands: ['interview', 'deepwork', 'reflect', 'loop'],
+    });
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.disabled_hooks).toEqual([
+        'phase-reminder',
+        'foreground-fallback',
+      ]);
+      expect(result.data.disabled_commands).toEqual([
+        'interview',
+        'deepwork',
+        'reflect',
+        'loop',
+      ]);
+    }
+  });
+
+  it('leaves both keys undefined when omitted', () => {
+    const result = PluginConfigSchema.safeParse({});
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.disabled_hooks).toBeUndefined();
+      expect(result.data.disabled_commands).toBeUndefined();
+    }
+  });
+
+  it('rejects hook and command names outside the whitelist', () => {
+    expect(
+      PluginConfigSchema.safeParse({ disabled_hooks: ['auto-update-checker'] })
+        .success,
+    ).toBe(false);
+    expect(
+      PluginConfigSchema.safeParse({ disabled_commands: ['council'] }).success,
+    ).toBe(false);
+    expect(
+      PluginConfigSchema.safeParse({
+        disabled_commands: ['deepwork', 'review'],
+      }).success,
+    ).toBe(false);
+  });
+});
+
 describe('PluginConfigSchema webfetch', () => {
   it('defaults the enhanced webfetch tool to enabled', () => {
     const result = PluginConfigSchema.safeParse({ webfetch: {} });

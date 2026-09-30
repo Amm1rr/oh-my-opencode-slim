@@ -3071,6 +3071,30 @@
         "type": "string"
       }
     },
+    "disabled_hooks": {
+      "description": "Hook names to disable completely. Disabled hooks are not registered: \"phase-reminder\" stops injecting orchestrator phase reminders; \"foreground-fallback\" disables automatic foreground model fallback, like fallback.enabled = false.",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "phase-reminder",
+          "foreground-fallback"
+        ]
+      }
+    },
+    "disabled_commands": {
+      "description": "Slash-command names to disable completely. Disabled commands are not registered with OpenCode and cannot be invoked. The /reflect command is also disabled when \"reflect\" is listed in disabled_skills.",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "interview",
+          "deepwork",
+          "reflect",
+          "loop"
+        ]
+      }
+    },
     "multiplexer": {
       "type": "object",
       "properties": {

@@ -1,5 +1,35 @@
 import { describe, expect, it } from 'bun:test';
-import { registerCommandHook } from './command-hook-utils';
+import { isCommandEnabled, registerCommandHook } from './command-hook-utils';
+
+describe('isCommandEnabled', () => {
+  it('enables a command when it is not disabled', () => {
+    expect(isCommandEnabled('deepwork')).toBe(true);
+    expect(
+      isCommandEnabled('deepwork', {
+        disabledCommands: new Set(['reflect']),
+        disabledSkills: ['reflect'],
+      }),
+    ).toBe(true);
+  });
+
+  it('disables a command listed in disabledCommands', () => {
+    expect(
+      isCommandEnabled('loop', { disabledCommands: new Set(['loop']) }),
+    ).toBe(false);
+  });
+
+  it('disables /reflect when the reflect skill is disabled', () => {
+    expect(isCommandEnabled('reflect', { disabledSkills: ['reflect'] })).toBe(
+      false,
+    );
+    expect(isCommandEnabled('reflect', { disabledSkills: ['deepwork'] })).toBe(
+      true,
+    );
+    expect(isCommandEnabled('deepwork', { disabledSkills: ['reflect'] })).toBe(
+      true,
+    );
+  });
+});
 
 describe('registerCommandHook', () => {
   it('registers a new command when none exists', () => {

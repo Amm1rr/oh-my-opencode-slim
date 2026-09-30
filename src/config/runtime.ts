@@ -333,6 +333,18 @@ export class RuntimeConfig {
     return Array.isArray(value) ? value : [];
   }
 
+  /** Hook names disabled via config; empty when none are configured. */
+  get disabledHooks(): ReadonlySet<string> {
+    const value = this.pluginConfig?.disabled_hooks;
+    return new Set(Array.isArray(value) ? value : []);
+  }
+
+  /** Command names disabled via config; empty when none are configured. */
+  get disabledCommands(): ReadonlySet<string> {
+    const value = this.pluginConfig?.disabled_commands;
+    return new Set(Array.isArray(value) ? value : []);
+  }
+
   /** Custom agent names declared in config.agents (was getCustomAgentNames). */
   get customAgentNames(): string[] {
     return getCustomAgentNames(this.pluginConfig);
