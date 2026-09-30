@@ -347,7 +347,7 @@ describe('tui-state persistence', () => {
     });
   });
 
-  test('caps session parents while refreshing a re-registered link', () => {
+  function seedSessionParents(count: number): void {
     const statePath = getTuiStatePath(tempDir);
     fs.mkdirSync(path.dirname(statePath), { recursive: true });
     fs.writeFileSync(
@@ -355,22 +355,37 @@ describe('tui-state persistence', () => {
       JSON.stringify({
         ...readTuiSnapshot(tempDir),
         sessionParents: Object.fromEntries(
-          Array.from({ length: TUI_SESSION_PARENTS_MAX + 2 }, (_, i) => [
-            `ses_${i}`,
-            'root',
-          ]),
+          Array.from({ length: count }, (_, i) => [`ses_${i}`, 'root']),
         ),
       }),
     );
+  }
 
-    recordTuiSessionParent('ses_0', 'root', tempDir);
+  test('caps session parents on any write, refreshing re-registered links', () => {
+    seedSessionParents(TUI_SESSION_PARENTS_MAX + 2);
+
+    recordLuna();
+    expect(readTuiSnapshot(tempDir).sessionParents.ses_1).toBeUndefined();
+    recordTuiSessionParent('ses_2', 'root', tempDir);
     recordTuiSessionParent('ses_new', 'root', tempDir);
 
     const { sessionParents } = readTuiSnapshot(tempDir);
     expect(Object.keys(sessionParents)).toHaveLength(TUI_SESSION_PARENTS_MAX);
-    expect(sessionParents.ses_0).toBe('root');
-    expect(sessionParents.ses_1).toBeUndefined();
+    expect(sessionParents.ses_2).toBe('root');
+    expect(sessionParents.ses_3).toBeUndefined();
     expect(sessionParents.ses_new).toBe('root');
+  });
+
+  test('keeps the parent link of an active session past the cap', () => {
+    seedSessionParents(TUI_SESSION_PARENTS_MAX);
+    recordTuiAgentActivity(
+      { sessionID: 'ses_0', agentName: 'explorer', active: true },
+      tempDir,
+    );
+
+    recordTuiSessionParent('ses_new', 'root', tempDir);
+
+    expect(readTuiSnapshot(tempDir).sessionParents.ses_0).toBe('root');
   });
 
   test('resolves multi-level ancestry through the index', () => {

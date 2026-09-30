@@ -543,6 +543,10 @@ export function updateSnapshot(
       return true;
     }
     snapshot.updatedAt = Date.now();
+    // Any write retires the oldest links past the cap; active ones stay.
+    const { sessionParents: parents, activeSessions } = snapshot;
+    for (const key of Object.keys(parents).slice(0, -TUI_SESSION_PARENTS_MAX))
+      if (activeSessions[key] === undefined) delete parents[key];
     if (writeTuiSnapshot(snapshot, projectDir)) {
       rememberSnapshot(statePath, snapshot);
       return true;
@@ -696,11 +700,8 @@ export function recordTuiSessionParent(
   projectDir: string,
 ): void {
   updateSnapshot(projectDir, (snapshot) => {
-    const parents = snapshot.sessionParents;
-    delete parents[sessionID];
-    parents[sessionID] = parentID;
-    for (const key of Object.keys(parents).slice(0, -TUI_SESSION_PARENTS_MAX))
-      delete parents[key];
+    delete snapshot.sessionParents[sessionID]; // Re-registered link is newest.
+    snapshot.sessionParents[sessionID] = parentID;
   });
 }
 
