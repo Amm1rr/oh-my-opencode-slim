@@ -962,7 +962,7 @@ export const RawPluginConfigSchema = z
       .array(z.enum(['phase-reminder', 'foreground-fallback']))
       .optional()
       .describe(
-        'Hook names to disable completely. Disabled hooks are not registered: "phase-reminder" stops injecting orchestrator phase reminders; "foreground-fallback" disables automatic foreground model fallback, like fallback.enabled = false.',
+        'Hook names to disable completely. "phase-reminder" is not registered, so orchestrator phase reminders are never injected. "foreground-fallback" marks the fallback manager inert: it is still constructed but never triggers automatic intervention, same effect as fallback.enabled = false.',
       ),
     disabled_commands: z
       .array(z.enum(['interview', 'deepwork', 'reflect', 'loop']))

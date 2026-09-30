@@ -90,6 +90,8 @@ const DISABLED_CONFIG_KEYS = [
   'disabled_tools',
   'disabled_mcps',
   'disabled_skills',
+  'disabled_hooks',
+  'disabled_commands',
 ] as const;
 
 /** Apply the environment placeholder syntax shared by config consumers. */

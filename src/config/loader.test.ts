@@ -950,6 +950,58 @@ describe('onWarning callback', () => {
       'must be an array; ignoring invalid value',
     );
   });
+
+  test('normalizes string disabled_commands instead of rejecting the config', () => {
+    const projectDir = path.join(tempDir, 'project');
+    const projectConfigDir = path.join(projectDir, '.opencode');
+    fs.mkdirSync(projectConfigDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectConfigDir, 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        disabled_commands: 'reflect',
+        agents: { oracle: { model: 'test/model' } },
+      }),
+    );
+
+    const warnings: ConfigLoadWarning[] = [];
+    const config = loadPluginConfig(projectDir, {
+      onWarning: (warning) => warnings.push(warning),
+    });
+
+    // String is normalized to a single-element array, rest of config loads
+    expect(config.disabled_commands).toEqual(['reflect']);
+    expect(config.agents?.oracle?.model).toBe('test/model');
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.kind).toBe('normalized');
+    expect(warnings[0]?.message).toContain('should be an array; normalized');
+  });
+
+  test('drops boolean disabled_hooks instead of rejecting the config', () => {
+    const projectDir = path.join(tempDir, 'project');
+    const projectConfigDir = path.join(projectDir, '.opencode');
+    fs.mkdirSync(projectConfigDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectConfigDir, 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        disabled_hooks: false,
+        agents: { oracle: { model: 'test/model' } },
+      }),
+    );
+
+    const warnings: ConfigLoadWarning[] = [];
+    const config = loadPluginConfig(projectDir, {
+      onWarning: (warning) => warnings.push(warning),
+    });
+
+    // Non-array, non-string value is dropped; the config still loads
+    expect(config.disabled_hooks).toBeUndefined();
+    expect(config.agents?.oracle?.model).toBe('test/model');
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.kind).toBe('normalized');
+    expect(warnings[0]?.message).toContain(
+      'must be an array; ignoring invalid value',
+    );
+  });
 });
 
 describe('disabled_* key normalization', () => {

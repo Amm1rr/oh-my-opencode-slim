@@ -3661,6 +3661,32 @@ describe('plugin foreground fallback host gating', () => {
     }
   });
 
+  test('v2 host with foreground-fallback hook disabled: no startup notice', async () => {
+    await Bun.write(
+      `${projectDir}/oh-my-opencode-slim.json`,
+      JSON.stringify({
+        companion: { enabled: false },
+        disabled_hooks: ['foreground-fallback'],
+        fallback: { enabled: true },
+      }),
+    );
+    const captured: string[] = [];
+    const capture = spyOn(loggerModule, 'log').mockImplementation(
+      (message: string) => {
+        captured.push(message);
+      },
+    );
+    try {
+      const hooks = await createHooks('v2');
+      expect(captured.filter((message) => message === V2_NOTICE)).toHaveLength(
+        0,
+      );
+      await hooks.dispose?.();
+    } finally {
+      capture.mockRestore();
+    }
+  });
+
   for (const hostFlavor of [undefined, 'v1'] as const) {
     test(`v1 host (${hostFlavor ?? 'absent'}): the manager stays enabled`, async () => {
       const captured: string[] = [];
@@ -3695,4 +3721,98 @@ describe('plugin foreground fallback host gating', () => {
       }
     });
   }
+});
+
+describe('plugin command registration gating', () => {
+  let originalEnv: typeof process.env;
+  let projectDir: string;
+
+  const createClient = () => {
+    const noop = async () => ({});
+    const session = new Proxy({}, { get: () => noop }) as Record<
+      string,
+      unknown
+    >;
+    return new Proxy(
+      { app: { log: noop }, session },
+      {
+        get(target, property) {
+          if (property in target) {
+            return target[property as keyof typeof target];
+          }
+          return new Proxy({}, { get: () => noop });
+        },
+      },
+    );
+  };
+
+  const writeConfig = (config: Record<string, unknown>) =>
+    Bun.write(
+      `${projectDir}/oh-my-opencode-slim.json`,
+      JSON.stringify({ companion: { enabled: false }, ...config }),
+    );
+
+  const prepareCommands = async (): Promise<Record<string, unknown>> => {
+    const hooks = await plugin({
+      client: createClient(),
+      directory: projectDir,
+      worktree: projectDir,
+      serverUrl: new URL('http://127.0.0.1:4096'),
+    } as never);
+    try {
+      const draft: Record<string, unknown> = { agent: {}, mcp: {} };
+      (
+        hooks as unknown as { registryBridge: RegistryFactoryBridge }
+      ).registryBridge.prepareCommands(draft);
+      return (draft.command as Record<string, unknown> | undefined) ?? {};
+    } finally {
+      await hooks.dispose?.();
+    }
+  };
+
+  beforeEach(async () => {
+    originalEnv = { ...process.env };
+    projectDir = await mkdtemp('/tmp/oh-my-opencode-slim-command-gate-');
+    process.env = {
+      ...originalEnv,
+      OPENCODE_CONFIG_DIR: projectDir,
+      XDG_CONFIG_HOME: projectDir,
+      XDG_DATA_HOME: `${projectDir}/data`,
+      XDG_CACHE_HOME: `${projectDir}/cache`,
+      OPENCODE_LOG_DIR: `${projectDir}/logs`,
+    };
+    delete process.env.OH_MY_OPENCODE_SLIM_DISABLE;
+  });
+
+  afterEach(async () => {
+    process.env = originalEnv;
+    await rm(projectDir, { recursive: true, force: true });
+  });
+
+  test('registers every command by default', async () => {
+    await writeConfig({});
+    expect(Object.keys(await prepareCommands()).sort()).toEqual([
+      'deepwork',
+      'interview',
+      'loop',
+      'reflect',
+    ]);
+  });
+
+  test('skips disabled_commands entries and keeps the rest', async () => {
+    await writeConfig({ disabled_commands: ['interview', 'loop'] });
+    expect(Object.keys(await prepareCommands()).sort()).toEqual([
+      'deepwork',
+      'reflect',
+    ]);
+  });
+
+  test('disabled reflect skill also unregisters /reflect', async () => {
+    await writeConfig({ disabled_skills: ['reflect'] });
+    expect(Object.keys(await prepareCommands()).sort()).toEqual([
+      'deepwork',
+      'interview',
+      'loop',
+    ]);
+  });
 });

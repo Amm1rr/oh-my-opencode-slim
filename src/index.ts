@@ -772,9 +772,13 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       runtime.fallback.enabled !== false &&
       !runtime.disabledHooks.has('foreground-fallback') &&
       hostFlavor !== 'v2';
-    if (runtime.fallback.enabled !== false && hostFlavor === 'v2') {
+    if (
+      runtime.fallback.enabled !== false &&
+      !runtime.disabledHooks.has('foreground-fallback') &&
+      hostFlavor === 'v2'
+    ) {
       // Deterministic notice: no timestamps or per-call ids. Do not log when
-      // the user explicitly disabled fallback.
+      // the user explicitly disabled fallback, including via disabled_hooks.
       log(
         '[foreground-fallback] automatic fallback disabled on v2 hosts (no atomic per-turn model switch)',
       );
