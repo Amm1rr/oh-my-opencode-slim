@@ -3219,7 +3219,9 @@ describe('task-session-manager hook', () => {
     ]);
     await transformMessages(hook, replayedRequest);
     expect(boardSnapshotIDs(replayedRequest)).toEqual([
-      'oh-my-opencode-slim:background-job-board:parent-1:0',
+      expect.stringMatching(
+        /^oh-my-opencode-slim:background-job-board:parent-1:[0-9a-f]+:0$/,
+      ),
     ]);
 
     await hook.event({
@@ -3263,7 +3265,9 @@ describe('task-session-manager hook', () => {
     const firstBoardText = boardText(firstRequest);
     expect(firstBoardText).toContain('Result: same result');
     expect(boardSnapshotIDs(firstRequest)).toEqual([
-      'oh-my-opencode-slim:background-job-board:parent-1:0',
+      expect.stringMatching(
+        /^oh-my-opencode-slim:background-job-board:parent-1:[0-9a-f]+:0$/,
+      ),
     ]);
 
     await hook.event({
@@ -3313,8 +3317,12 @@ describe('task-session-manager hook', () => {
     };
     await transformMessages(hook, secondRequest);
     expect(boardSnapshotIDs(secondRequest)).toEqual([
-      'oh-my-opencode-slim:background-job-board:parent-1:0',
-      'oh-my-opencode-slim:background-job-board:parent-1:1',
+      expect.stringMatching(
+        /^oh-my-opencode-slim:background-job-board:parent-1:[0-9a-f]+:0$/,
+      ),
+      expect.stringMatching(
+        /^oh-my-opencode-slim:background-job-board:parent-1:[0-9a-f]+:1$/,
+      ),
     ]);
 
     await hook.event({
@@ -3331,6 +3339,39 @@ describe('task-session-manager hook', () => {
       state: 'reconciled',
       terminalUnreconciled: false,
     });
+  });
+
+  test('checkpoint snapshot ids do not repeat after a restart', async () => {
+    const board = new BackgroundJobBoard();
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'restart check',
+    });
+    board.updateStatus({
+      taskID: 'child-1',
+      state: 'completed',
+      resultSummary: 'restart result',
+    });
+
+    const idsAfterStart = async () => {
+      // A fresh hook has empty in-memory snapshot state, like a new process.
+      const { hook } = createHook({
+        backgroundJobBoard: board,
+        strategy: 'checkpoint-compatible',
+      });
+      const request = createAnchoredMessages('parent-1', ['turn 1']);
+      await transformMessages(hook, request);
+      return boardSnapshotIDs(request);
+    };
+
+    const beforeRestart = await idsAfterStart();
+    const afterRestart = await idsAfterStart();
+
+    expect(beforeRestart).toHaveLength(1);
+    expect(afterRestart).toHaveLength(1);
+    expect(afterRestart[0]).not.toBe(beforeRestart[0]);
   });
 
   test('ignores non-synthetic user text that resembles task status', async () => {
