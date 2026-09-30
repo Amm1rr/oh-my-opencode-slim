@@ -1258,6 +1258,25 @@ describe('plugin reload generation cleanup', () => {
     }
   });
 
+  test('disabled_hooks phase-reminder leaves the payload untouched', async () => {
+    await Bun.write(
+      `${projectDir}/oh-my-opencode-slim.json`,
+      JSON.stringify({
+        companion: { enabled: false },
+        disabled_hooks: ['phase-reminder'],
+      }),
+    );
+    const hooks = await createHooks();
+    const sessionID = 'disabled-reminder-session';
+    try {
+      await registerOrchestrator(hooks, sessionID);
+      const output = await transform(hooks, reminderFixture(sessionID));
+      expect(reminderParts(output.messages)).toHaveLength(0);
+    } finally {
+      await hooks.dispose?.();
+    }
+  });
+
   test('v1 compaction strips only phase reminders, preserving the job board and other content', async () => {
     const hooks = await createHooks();
     const sessionID = 'compact-board-session';
@@ -3486,6 +3505,60 @@ describe('plugin foreground fallback host gating', () => {
       await hooks.dispose?.();
     } finally {
       capture.mockRestore();
+    }
+  });
+
+  test('disabled_hooks foreground-fallback performs no automatic intervention', async () => {
+    await Bun.write(
+      `${projectDir}/oh-my-opencode-slim.json`,
+      JSON.stringify({
+        companion: { enabled: false },
+        disabled_hooks: ['foreground-fallback'],
+        fallback: { enabled: true, maxRetries: 0 },
+        agents: {
+          orchestrator: { model: ['openai/gpt-b', 'openai/gpt-c'] },
+        },
+      }),
+    );
+    const { client, abort, promptAsync } = createFallbackClient();
+    const hooks = await plugin({
+      client,
+      directory: projectDir,
+      worktree: projectDir,
+      serverUrl: new URL('http://127.0.0.1:4096'),
+    } as never);
+
+    try {
+      await hooks.event?.({
+        event: {
+          type: 'message.updated',
+          properties: {
+            info: {
+              id: 'assistant-disabled-hook',
+              sessionID: 'session-disabled-hook',
+              role: 'assistant',
+              agent: 'orchestrator',
+              providerID: 'openai',
+              modelID: 'gpt-b',
+            },
+          },
+        },
+      } as never);
+      await hooks.event?.({
+        event: {
+          type: 'session.error',
+          properties: {
+            sessionID: 'session-disabled-hook',
+            info: { id: 'assistant-disabled-hook' },
+            error: { message: 'rate limit' },
+          },
+        },
+      } as never);
+
+      expect(abort).not.toHaveBeenCalled();
+      expect(promptAsync).not.toHaveBeenCalled();
+    } finally {
+      await hooks.dispose?.();
     }
   });
 

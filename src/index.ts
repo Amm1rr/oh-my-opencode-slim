@@ -397,7 +397,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   let reflectCommandHook: ReturnType<typeof createReflectCommandHook>;
   let loopCommandHook: ReturnType<typeof createLoopCommandHook>;
   let taskSessionManagerHook: ReturnType<typeof createTaskSessionManagerHook>;
-  let phaseReminder: ReturnType<typeof createPhaseReminderHook>;
+  let phaseReminder: ReturnType<typeof createPhaseReminderHook> | undefined;
   let applyPatch: ReturnType<typeof createApplyPatchHook>;
   let searchPathGuard: ReturnType<typeof createSearchPathGuardHook>;
   let absolutePathRescue: ReturnType<typeof createAbsolutePathRescueHook>;
@@ -769,7 +769,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // (unregistering only the retry hook is not enough: session.error,
     // message.updated and session.status retry all reach the replay path).
     const fallbackEnabled =
-      runtime.fallback.enabled !== false && hostFlavor !== 'v2';
+      runtime.fallback.enabled !== false &&
+      !runtime.disabledHooks.has('foreground-fallback') &&
+      hostFlavor !== 'v2';
     if (runtime.fallback.enabled !== false && hostFlavor === 'v2') {
       // Deterministic notice: no timestamps or per-call ids. Do not log when
       // the user explicitly disabled fallback.
@@ -1038,9 +1040,11 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     const shouldInjectOrchestratorReminder = (sessionID: string) =>
       sessionMetadata.getAgent(sessionID) === 'orchestrator';
 
-    phaseReminder = createPhaseReminderHook({
-      shouldInject: shouldInjectOrchestratorReminder,
-    });
+    if (!runtime.disabledHooks.has('phase-reminder')) {
+      phaseReminder = createPhaseReminderHook({
+        shouldInject: shouldInjectOrchestratorReminder,
+      });
+    }
 
     applyPatch = createApplyPatchHook(ctx);
 
@@ -2290,10 +2294,12 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         input as never,
         typedOutput as never,
       );
-      await phaseReminder['experimental.chat.messages.transform'](
-        input as never,
-        typedOutput as never,
-      );
+      if (phaseReminder) {
+        await phaseReminder['experimental.chat.messages.transform'](
+          input as never,
+          typedOutput as never,
+        );
+      }
       await taskSessionManagerHook.injectBackgroundJobBoard(input, typedOutput);
       if (compacting) {
         stripTaggedContent(typedOutput.messages, PHASE_REMINDER_METADATA_KEY);
