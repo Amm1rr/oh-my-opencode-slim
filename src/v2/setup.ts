@@ -849,9 +849,9 @@ export function resetV2GenerationWarnings(): void {
 
 /** Deps for the per-session permission rules bridge. */
 export interface V2PermissionRulesOptions {
-  /** Task-policy lookup: the v1 permission map governing a child agent
-   * (from the resolved agent configs). */
-  permissionForAgent: (agent: string) => unknown;
+  /** Task-policy lookup: the permission rules governing a child agent. May
+   * resolve asynchronously from the host's finalized agent registry. */
+  permissionForAgent: (agent: string) => unknown | Promise<unknown>;
   /** Plugin-defined agent ids — the plugin-managed child gate. A child
    * whose agent is not in this set was not spawned by the plugin's task
    * pipeline and must never have its session rules replaced. */
@@ -876,6 +876,52 @@ type PermissionSessionIdentity = {
   agent?: string;
   state: PermissionIdentityState;
 };
+
+/**
+ * Read one agent's ordered permission rules from the host's finalized agent
+ * registry (after every transform, including host config rules). Returns
+ * undefined when the host does not list the agent; throws on malformed rules
+ * so a partial policy is never installed.
+ */
+async function readFinalizedAgentPermissions(
+  agentApi: Partial<Pick<V2Context['agent'], 'list'>> | undefined,
+  agent: string,
+): Promise<V2PermissionRule[] | undefined> {
+  if (typeof agentApi?.list !== 'function') return undefined;
+  const response = await agentApi.list();
+  const listed =
+    isRecord(response) && Array.isArray(response.data)
+      ? response.data
+      : response;
+  if (!Array.isArray(listed)) return undefined;
+  const native = listed.find((entry) => isRecord(entry) && entry.id === agent);
+  if (!isRecord(native)) return undefined;
+  const permission = native.permissions;
+  if (!Array.isArray(permission)) {
+    throw new Error(
+      `native agent '${agent}' exposed a malformed permissions field`,
+    );
+  }
+  return permission.map((rule) => {
+    if (
+      !isRecord(rule) ||
+      typeof rule.action !== 'string' ||
+      typeof rule.resource !== 'string' ||
+      (rule.effect !== 'allow' &&
+        rule.effect !== 'ask' &&
+        rule.effect !== 'deny')
+    ) {
+      throw new Error(
+        `native agent '${agent}' exposed a malformed permission rule`,
+      );
+    }
+    return {
+      action: rule.action,
+      resource: rule.resource,
+      effect: rule.effect,
+    };
+  });
+}
 
 function classifyPermissionIdentity(
   parentKnown: boolean,
@@ -922,8 +968,10 @@ export function createPermissionRulesBridge(
   /** Compatibility seam for focused bridge tests and child creation paths. */
   observeSessionCreated(event: Record<string, unknown>): Promise<void>;
   /** Reclassify identities observed before the finalized plugin-agent roster
-   * was available, and apply rules for newly recognized managed children. */
-  refreshPluginAgents(): Promise<void> | undefined;
+   * was available. Runs inside the agent transform, so it must not resolve
+   * policy: the prompt barrier installs rules for newly managed children
+   * once the host has finalized every agent. */
+  refreshPluginAgents(): void;
   /** Cache-first prompt barrier. Unknown identities degrade if lookup is
    * unavailable; known managed identities fail closed on update failures.
    * Marketplace setups also require identity and policy resolution. */
@@ -1103,7 +1151,7 @@ export function createPermissionRulesBridge(
       }
       throw new Error('ctx.session.update unavailable');
     }
-    const permission = options.permissionForAgent(agent);
+    const permission = await options.permissionForAgent(agent);
     if (permission === undefined) {
       throw new Error(`permission policy unavailable for agent '${agent}'`);
     }
@@ -1340,8 +1388,7 @@ export function createPermissionRulesBridge(
     }
   }
 
-  function refreshPluginAgents(): Promise<void> | undefined {
-    const newlyManaged: Array<[string, PermissionSessionIdentity]> = [];
+  function refreshPluginAgents(): void {
     for (const [sessionID, identity] of identities) {
       if (!identity) continue;
       const state = classifyPermissionIdentity(
@@ -1351,24 +1398,8 @@ export function createPermissionRulesBridge(
         options.pluginAgents,
       );
       if (state === identity.state) continue;
-      const updated = { ...identity, state };
-      identities.set(sessionID, updated);
-      if (state === 'managed') newlyManaged.push([sessionID, updated]);
+      identities.set(sessionID, { ...identity, state });
     }
-    if (newlyManaged.length === 0) return;
-    return Promise.all(
-      newlyManaged.map(async ([sessionID, identity]) => {
-        try {
-          await enforceKnownIdentity(sessionID, identity);
-        } catch (err) {
-          // The later prompt barrier retries a failed child rules update.
-          log('[v2][permission-rules] deferred child projection failed', {
-            sessionID,
-            err: String(err),
-          });
-        }
-      }),
-    ).then(() => undefined);
   }
 
   return {
@@ -2023,7 +2054,6 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       let permissionRulesBridge:
         | ReturnType<typeof createPermissionRulesBridge>
         | undefined;
-      let permissionReadiness: Promise<void> | undefined;
       let synthCommands:
         | Record<string, { template?: string; description?: string }>
         | undefined;
@@ -2078,7 +2108,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
         pluginAgents.clear();
         for (const name of Object.keys(resolvedAgents)) pluginAgents.add(name);
         if (permissionRulesBridge) {
-          permissionReadiness = permissionRulesBridge.refreshPluginAgents();
+          permissionRulesBridge.refreshPluginAgents();
         }
         for (const [name, cfg] of Object.entries(resolvedAgents)) {
           if (
@@ -2511,7 +2541,6 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
             }
             const permissionBridge = permissionRulesBridge;
             if (permissionBridge) {
-              if (permissionReadiness) await permissionReadiness;
               await permissionBridge.ensurePromptPermission(event.sessionID);
             }
             // Freeze and switch the inference profile before the admitted
@@ -2669,8 +2698,31 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
             // with a one-time deterministic warning).
             if (permissionRulesBridgeEnabled) {
               permissionRulesBridge = createPermissionRulesBridge(ctx.session, {
-                permissionForAgent: (agent) => {
-                  return finalizedRegistry?.nativePolicies[agent]?.rules;
+                permissionForAgent: async (agent) => {
+                  const registry = finalizedRegistry;
+                  const registered = registry?.nativePolicies[agent]?.rules;
+                  if (!registry || !registered) return registered;
+                  // The host appends global and per-agent config rules AFTER
+                  // plugin agent transforms (#1374), so the registered policy
+                  // lacks them. Session rules are evaluated after agent rules:
+                  // installing the registered policy would override the
+                  // user's globals. Project the finalized agent instead and
+                  // re-apply only plugin-owned ceilings.
+                  try {
+                    const finalized = await readFinalizedAgentPermissions(
+                      ctx.agent,
+                      agent,
+                    );
+                    if (finalized) {
+                      return registry.compileChildPermissions(agent, finalized);
+                    }
+                  } catch (err) {
+                    log(
+                      '[v2][permission-rules] finalized agent policy unavailable; using registered policy',
+                      { agent, err: String(err) },
+                    );
+                  }
+                  return registered;
                 },
                 pluginAgents,
                 requireKnownIdentity: () =>
