@@ -562,7 +562,81 @@ describe('createSessionContextHandler (merged context hook seam)', () => {
   });
 });
 
-describe('context bridge: transcript user-message identity enrichment', () => {
+describe('context bridge: transcript identity enrichment', () => {
+  test('checkpoint board survives completion followed by tool-result continuations', async () => {
+    const pipeline = createPipeline({ strategy: 'checkpoint-compatible' });
+    pipeline.board.registerLaunch({
+      taskID: 'ses_remaining_child',
+      parentSessionID: SESSION_ID,
+      agent: 'fixer',
+      description: 'remaining job',
+      background: true,
+    });
+    const handler = createSessionContextHandler({
+      interviewHandleContext: async () => {},
+      messagesTransform: async (_input, output) => pipeline.run(output),
+    });
+    const history: V2SessionContextEvent['messages'] = [
+      {
+        id: 'msg_completion',
+        role: 'user',
+        content: [{ type: 'text', text: 'A background child completed.' }],
+      },
+    ];
+    const completion = makeEvent(structuredClone(history), {
+      sessionID: SESSION_ID,
+    });
+    await handler(completion);
+
+    const providerContent = (messages: V2SessionContextEvent['messages']) =>
+      messages.map((message) => [
+        message.role,
+        message.content.map((part) => {
+          const { cache, metadata, synthetic, ...content } = part;
+          return content;
+        }),
+      ]);
+    const boardMessages = (event: V2SessionContextEvent) =>
+      event.messages.filter((message) =>
+        message.content.some((part) =>
+          isTaggedPart(part, BACKGROUND_JOB_BOARD_METADATA_KEY),
+        ),
+      );
+    expect(boardMessages(completion)).toHaveLength(1);
+    let previous = providerContent(completion.messages);
+
+    for (let step = 1; step <= 2; step++) {
+      // Fresh host-shaped context: injected parts are not persisted, and
+      // neither the assistant nor the anonymous tool result has sessionID.
+      history.push(
+        {
+          id: `a${step}`,
+          role: 'assistant',
+          content: [{ type: 'text', text: `Read file ${step}.` }],
+        },
+        {
+          role: 'tool',
+          content: [
+            {
+              type: 'tool-result',
+              toolCallId: `call-${step}`,
+              toolName: 'read',
+              output: { type: 'text', value: `File ${step} contents.` },
+            },
+          ],
+        },
+      );
+      const continuation = makeEvent(structuredClone(history), {
+        sessionID: SESSION_ID,
+      });
+      await handler(continuation);
+      expect(boardMessages(continuation)).toHaveLength(1);
+      const current = providerContent(continuation.messages);
+      expect(current.slice(0, previous.length)).toEqual(previous);
+      previous = current;
+    }
+  });
+
   // Live v2 hosts carry only
   // {id, time, text, type} on transcript user messages; the v1 injection
   // gates (phase-reminder, board, nudge) key on info.sessionID/agent.
@@ -594,42 +668,52 @@ describe('context bridge: transcript user-message identity enrichment', () => {
     expect(user.agent).toBe('orchestrator');
   });
 
-  test('host-provided sessionID/agent values are preserved', async () => {
-    const user = {
-      id: 'u1',
-      role: 'user',
-      sessionID: 'host-ses',
-      agent: 'planner',
-      content: [{ type: 'text', text: 'hi' }],
-    };
-    const handler = createSessionContextHandler({
-      interviewHandleContext: async () => {},
-      messagesTransform: async () => {},
-    });
+  test.each(['user', 'assistant', 'tool'])(
+    '%s host-provided sessionID/agent values are preserved',
+    async (role) => {
+      const user = {
+        id: 'u1',
+        role,
+        sessionID: 'host-ses',
+        agent: 'planner',
+        content: [{ type: 'text', text: 'hi' }],
+      };
+      const handler = createSessionContextHandler({
+        interviewHandleContext: async () => {},
+        messagesTransform: async () => {},
+      });
 
-    await handler(makeEvent([user]));
+      await handler(makeEvent([user]));
 
-    expect(user.sessionID).toBe('host-ses');
-    expect(user.agent).toBe('planner');
-  });
+      expect(user.sessionID).toBe('host-ses');
+      expect(user.agent).toBe('planner');
+    },
+  );
 
-  test('assistant messages are left untouched', async () => {
-    const assistant = {
-      id: 'a1',
-      role: 'assistant',
-      time: 456,
-      content: [{ type: 'text', text: 'response' }],
-    };
-    const handler = createSessionContextHandler({
-      interviewHandleContext: async () => {},
-      messagesTransform: async () => {},
-    });
+  test.each(['assistant', 'tool'])(
+    '%s messages gain sessionID without changing agent or content',
+    async (role) => {
+      const assistant = {
+        id: 'a1',
+        role,
+        time: 456,
+        content: [{ type: 'text', text: 'response' }],
+      };
+      const contentBefore = structuredClone(assistant.content);
+      const handler = createSessionContextHandler({
+        interviewHandleContext: async () => {},
+        messagesTransform: async () => {},
+      });
 
-    await handler(makeEvent([assistant]));
+      await handler(makeEvent([assistant]));
 
-    expect(assistant.sessionID).toBeUndefined();
-    expect(assistant.agent).toBeUndefined();
-  });
+      expect(assistant.sessionID).toBe('ses_cmd');
+      expect(assistant.agent).toBeUndefined();
+      expect(assistant.content).toEqual(contentBefore);
+      await handler(makeEvent([assistant], { sessionID: 'ses_other' }));
+      expect(assistant.sessionID).toBe('ses_cmd');
+    },
+  );
 
   test('agent falls back to the prompt-bridge learned state when the event carries none', async () => {
     const user = {

@@ -42,6 +42,9 @@ mistakes that have not been made before:
 - `src/cache-safety-tripwire.test.ts` — scans prompt-assembly directories
   for volatile-input patterns (`Date.now`, `new Date`, `Math.random`,
   `randomUUID`, `performance.now`) outside a justified allowlist.
+- `src/v2/setup-command.test.ts` — runs the checkpoint pipeline through the
+  V2 context bridge across a completion notification and tool-result
+  continuations, asserting retained boards and unchanged prior content.
 
 All hook injections must go through `src/hooks/cache-safe-injection.ts`; see
 the Prompt Cache Safety section in `AGENTS.md` for the authoring rules.
