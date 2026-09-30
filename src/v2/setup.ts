@@ -2001,7 +2001,9 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       const interviewCommandEnabled = isCommandEnabled('interview', {
         disabledCommands: new Set(pluginConfig.disabled_commands ?? []),
       });
-      const interviewBridge = createV2InterviewBridge(ctx, interviewConfig);
+      const interviewBridge = createV2InterviewBridge(ctx, interviewConfig, {
+        commandEnabled: interviewCommandEnabled,
+      });
       disposers.push(() => interviewBridge.dispose());
 
       // Commands do not depend on agent finalization or host state.

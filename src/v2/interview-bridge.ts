@@ -79,6 +79,8 @@ export function createV2InterviewBridge(
   ctx: V2Context,
   config?: InterviewConfig,
   options: {
+    /** Whether the /interview command is enabled for this host. */
+    commandEnabled?: boolean;
     /** Already-listening server for the dashboard role to adopt. */
     server?: Server;
   } = {},
@@ -221,6 +223,9 @@ export function createV2InterviewBridge(
     const text =
       trailing?.role === 'user' ? textFromContent(trailing.content) : '';
     const match = text.match(MARKER_PATTERN);
+    if (match && options.commandEnabled === false) {
+      return;
+    }
     const managed = isManagedInterviewSession(event.sessionID);
     if (!match && !managed) return;
 
