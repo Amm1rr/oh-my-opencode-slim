@@ -659,6 +659,111 @@ function isInputWaitAskEvent(type: string): boolean {
   return type === 'permission.asked' || type === 'question.asked';
 }
 
+/** One wake kind's queued deltas for one parent session. */
+type DeltaBatch = {
+  deltas: Map<string, string>;
+  /** Number of detail entries coalesced beyond the bounded queue. */
+  overflowCount: number;
+};
+
+type DeltaQueuePolicy = {
+  /** Max deltas per parent; the oldest is dropped with an overflow bump. */
+  cap: number;
+  /** scheduleBlocker trigger name used when this queue's wake is blocked. */
+  blockerTrigger: 'stopped-job-recovery' | 'child-input';
+  /** Whether a queued delta is still actionable (unparseable keys are not). */
+  isCurrent?: (key: string) => boolean;
+};
+
+type DeltaQueue = DeltaQueuePolicy & {
+  batches: Map<string, DeltaBatch>;
+  add: (sessionID: string, delta: string, dedupeKey?: string) => void;
+  prune: (batch: DeltaBatch | undefined) => boolean;
+};
+
+/** A bounded, deduplicated delta queue feeding one delta wake kind. Both
+ * wake queues (stopped-job recovery, child-input) share one shape:
+ * per-parent batches, overflow expressed as a durable count plus an inline
+ * signal, and retire-only-what-was-sent on delivery. Differences (cap,
+ * blocker trigger, actionability predicate) are construction-time policy;
+ * the shared body stays branch-free. */
+function makeDeltaQueue(policy: DeltaQueuePolicy): DeltaQueue {
+  const batches = new Map<string, DeltaBatch>();
+
+  /** Queue a delta for the session's next wake of this kind. */
+  const add = (sessionID: string, delta: string, dedupeKey?: string): void => {
+    let batch = batches.get(sessionID);
+    if (!batch) {
+      batch = { deltas: new Map(), overflowCount: 0 };
+      batches.set(sessionID, batch);
+    }
+    const key = dedupeKey ?? delta;
+    if (batch.deltas.has(key)) {
+      batch.deltas.set(key, delta);
+      return;
+    }
+    while (batch.deltas.size >= policy.cap) {
+      const oldest = batch.deltas.keys().next().value;
+      if (oldest === undefined) break;
+      batch.deltas.delete(oldest);
+      batch.overflowCount += 1;
+    }
+    batch.deltas.set(key, delta);
+  };
+
+  /** Drop deltas that are no longer current. Repeat after every await so a
+   * delta answered or revived during selection resolve is not sent. Returns
+   * whether the batch held any details before pruning. */
+  const prune = (batch: DeltaBatch | undefined): boolean => {
+    if (!batch) return false;
+    const hadDetails = batch.deltas.size > 0;
+    if (policy.isCurrent) {
+      for (const key of batch.deltas.keys()) {
+        let current = false;
+        try {
+          current = policy.isCurrent(key);
+        } catch {
+          current = false;
+        }
+        if (!current) batch.deltas.delete(key);
+      }
+    }
+    return hadDetails;
+  };
+
+  return { ...policy, batches, add, prune };
+}
+
+/** Prune a batch and report whether its pruned details ran completely dry.
+ * Callers decide deletion and wake-end; an overflow marker keeps a batch
+ * alive even when every retained detail has gone stale. */
+function prunedToEmpty(queue: DeltaQueue, batch: DeltaBatch): boolean {
+  const hadDetails = queue.prune(batch);
+  return hadDetails && batch.deltas.size === 0 && batch.overflowCount === 0;
+}
+
+function parseChildInputKey(
+  key: string,
+): { taskID: string; requestID: string } | undefined {
+  const separator = key.indexOf(':');
+  if (separator <= 0) return undefined;
+  const taskID = key.slice(0, separator);
+  const requestID = key.slice(separator + 1);
+  return taskID && requestID ? { taskID, requestID } : undefined;
+}
+
+function parseRecoveryKey(
+  key: string,
+): { taskID: string; generation: number } | undefined {
+  const separator = key.lastIndexOf(':');
+  if (separator <= 0) return undefined;
+  const taskID = key.slice(0, separator);
+  const generation = Number(key.slice(separator + 1));
+  return taskID && Number.isSafeInteger(generation) && generation >= 0
+    ? { taskID, generation }
+    : undefined;
+}
+
 export function createOrchestratorWakeScheduler(
   ctx: PluginInput,
   options: OrchestratorWakeOptions,
@@ -692,12 +797,7 @@ export function createOrchestratorWakeScheduler(
   const reportedScheduleBlockers = new Map<string, Set<string>>();
   /** Reservations this hook owns and must release when it is disposed. */
   const localWakeOwners = new Map<string, symbol>();
-  type PendingStoppedRecovery = {
-    deltas: Map<string, string>;
-    /** Number of detail entries coalesced beyond the bounded queue. */
-    overflowCount: number;
-  };
-
+  const recoveryCurrent = options.isStoppedJobRecoveryCurrent;
   /** Sessions with a stopped job awaiting a recovery wake, carrying the
    * self-contained terminal deltas of the triggering stops (see
    * `formatStoppedJobDelta`), deduplicated per execution by
@@ -707,19 +807,26 @@ export function createOrchestratorWakeScheduler(
    * silently discarded. Deltas that arrive while a recovery wake is in flight
    * must survive its confirmation: only the keys actually sent are retired on
    * delivery. */
-  const pendingStoppedRecoveries = new Map<string, PendingStoppedRecovery>();
+  const stoppedRecoveryQueue = makeDeltaQueue({
+    cap: STOPPED_RECOVERY_QUEUE_CAP,
+    blockerTrigger: 'stopped-job-recovery',
+    isCurrent: recoveryCurrent
+      ? (key) => {
+          const parsed = parseRecoveryKey(key);
+          return parsed
+            ? recoveryCurrent(parsed.taskID, parsed.generation)
+            : false;
+        }
+      : undefined,
+  });
+  const pendingStoppedRecoveries = stoppedRecoveryQueue.batches;
 
   /** Last delivered publication wake per parent (epoch ms), for the
    * `publicationWakeMinIntervalMs` throttle. Direct, timer and waiter
    * deliveries all consume the window; failed attempts do not. */
   const lastPublicationWakeAt = new Map<string, number>();
 
-  type PendingChildInput = {
-    deltas: Map<string, string>;
-    /** Number of ask details coalesced beyond the bounded queue. */
-    overflowCount: number;
-  };
-
+  const childInputCurrent = options.isChildInputWaitCurrent;
   /** Sessions with a background child awaiting an input-wait wake, carrying
    * the self-contained ask deltas (see `formatChildInputWaitDelta`),
    * deduplicated per `(taskID, requestID)`. Bounded per parent
@@ -727,137 +834,20 @@ export function createOrchestratorWakeScheduler(
    * `CHILD_INPUT_WAKE_CHUNK` entries. Overflow is represented by a durable
    * count and an inline signal rather than being silently discarded. Same
    * retire-only-what-was-sent discipline as the stopped-job queue. */
-  const pendingChildInputWakes = new Map<string, PendingChildInput>();
-
-  function parseChildInputKey(
-    key: string,
-  ): { taskID: string; requestID: string } | undefined {
-    const separator = key.indexOf(':');
-    if (separator <= 0) return undefined;
-    const taskID = key.slice(0, separator);
-    const requestID = key.slice(separator + 1);
-    return taskID && requestID ? { taskID, requestID } : undefined;
-  }
-
-  /** Drop asks that resolved while queued. Repeat after every await so an
-   * ask answered during selection resolve is not sent. */
-  function pruneChildInputDeltas(
-    batch: PendingChildInput | undefined,
-  ): boolean {
-    if (!batch) return false;
-    const hadDetails = batch.deltas.size > 0;
-    if (options.isChildInputWaitCurrent) {
-      for (const key of batch.deltas.keys()) {
-        const parsed = parseChildInputKey(key);
-        if (!parsed) {
-          batch.deltas.delete(key);
-          continue;
+  const childInputQueue = makeDeltaQueue({
+    cap: CHILD_INPUT_QUEUE_CAP,
+    blockerTrigger: 'child-input',
+    isCurrent: childInputCurrent
+      ? (key) => {
+          const parsed = parseChildInputKey(key);
+          return parsed
+            ? childInputCurrent(parsed.taskID, parsed.requestID)
+            : false;
         }
-        let current = false;
-        try {
-          current = options.isChildInputWaitCurrent(
-            parsed.taskID,
-            parsed.requestID,
-          );
-        } catch {
-          current = false;
-        }
-        if (!current) batch.deltas.delete(key);
-      }
-    }
-    return hadDetails;
-  }
+      : undefined,
+  });
+  const pendingChildInputWakes = childInputQueue.batches;
 
-  /** Queue an ask delta for the session's next input-wait wake. */
-  const addChildInputDelta = (
-    sessionID: string,
-    delta: string,
-    dedupeKey?: string,
-  ): void => {
-    let batch = pendingChildInputWakes.get(sessionID);
-    if (!batch) {
-      batch = { deltas: new Map(), overflowCount: 0 };
-      pendingChildInputWakes.set(sessionID, batch);
-    }
-    const key = dedupeKey ?? delta;
-    if (batch.deltas.has(key)) {
-      batch.deltas.set(key, delta);
-      return;
-    }
-    while (batch.deltas.size >= CHILD_INPUT_QUEUE_CAP) {
-      const oldest = batch.deltas.keys().next().value;
-      if (oldest === undefined) break;
-      batch.deltas.delete(oldest);
-      batch.overflowCount += 1;
-    }
-    batch.deltas.set(key, delta);
-  };
-
-  function parseRecoveryKey(
-    key: string,
-  ): { taskID: string; generation: number } | undefined {
-    const separator = key.lastIndexOf(':');
-    if (separator <= 0) return undefined;
-    const taskID = key.slice(0, separator);
-    const generation = Number(key.slice(separator + 1));
-    return taskID && Number.isSafeInteger(generation) && generation >= 0
-      ? { taskID, generation }
-      : undefined;
-  }
-
-  /** Drop stop facts that are no longer current. Repeat after every
-   * await so a child revived during selection resolve is not sent. */
-  function pruneStoppedRecoveryDeltas(
-    batch: PendingStoppedRecovery | undefined,
-  ): boolean {
-    if (!batch) return false;
-    const hadRecoveryDetails = batch.deltas.size > 0;
-    if (options.isStoppedJobRecoveryCurrent) {
-      for (const key of batch.deltas.keys()) {
-        const parsed = parseRecoveryKey(key);
-        if (!parsed) {
-          batch.deltas.delete(key);
-          continue;
-        }
-        let current = false;
-        try {
-          current = options.isStoppedJobRecoveryCurrent(
-            parsed.taskID,
-            parsed.generation,
-          );
-        } catch {
-          current = false;
-        }
-        if (!current) batch.deltas.delete(key);
-      }
-    }
-    return hadRecoveryDetails;
-  }
-
-  /** Queue a stop delta for the session's next recovery wake. */
-  const addStoppedRecoveryDelta = (
-    sessionID: string,
-    delta: string,
-    dedupeKey?: string,
-  ): void => {
-    let batch = pendingStoppedRecoveries.get(sessionID);
-    if (!batch) {
-      batch = { deltas: new Map(), overflowCount: 0 };
-      pendingStoppedRecoveries.set(sessionID, batch);
-    }
-    const key = dedupeKey ?? delta;
-    if (batch.deltas.has(key)) {
-      batch.deltas.set(key, delta);
-      return;
-    }
-    while (batch.deltas.size >= STOPPED_RECOVERY_QUEUE_CAP) {
-      const oldest = batch.deltas.keys().next().value;
-      if (oldest === undefined) break;
-      batch.deltas.delete(oldest);
-      batch.overflowCount += 1;
-    }
-    batch.deltas.set(key, delta);
-  };
   /** Event-tracked session statuses (busy-set + parent race guard). */
   const lastStatusBySession = new Map<string, TrackedSessionStatus>();
   /** parentID → child session ids observed via session.created events. */
@@ -1729,30 +1719,19 @@ export function createOrchestratorWakeScheduler(
       // marker remains actionable even when all retained details have
       // since gone stale.
       const childInputDeltas = pendingChildInputWakes.get(sessionID);
-      if (childInputDeltas) {
-        const hadInputDetails = pruneChildInputDeltas(childInputDeltas);
-        if (
-          hadInputDetails &&
-          childInputDeltas.deltas.size === 0 &&
-          childInputDeltas.overflowCount === 0
-        ) {
-          pendingChildInputWakes.delete(sessionID);
-          if (!recoveryBatch) return false;
-        }
+      if (
+        childInputDeltas &&
+        prunedToEmpty(childInputQueue, childInputDeltas)
+      ) {
+        pendingChildInputWakes.delete(sessionID);
+        if (!recoveryBatch) return false;
       }
-      if (recoveryBatch) {
-        const hadRecoveryDetails = pruneStoppedRecoveryDeltas(recoveryBatch);
-        // A stale, revived, or already-reconciled detail must not cause a
-        // recovery wake by itself. An overflow marker remains actionable even
-        // when all retained details have since gone stale.
-        if (
-          hadRecoveryDetails &&
-          recoveryBatch.deltas.size === 0 &&
-          recoveryBatch.overflowCount === 0
-        ) {
-          pendingStoppedRecoveries.delete(sessionID);
-          return false;
-        }
+      // A stale, revived, or already-reconciled detail must not cause a
+      // recovery wake by itself. An overflow marker remains actionable even
+      // when all retained details have since gone stale.
+      if (recoveryBatch && prunedToEmpty(stoppedRecoveryQueue, recoveryBatch)) {
+        pendingStoppedRecoveries.delete(sessionID);
+        return false;
       }
 
       const modelSelection =
@@ -1792,29 +1771,18 @@ export function createOrchestratorWakeScheduler(
       // Re-prune stop facts after the selection await: a child can leave
       // stopped/unreconciled while parent generation stays put (#1079 r2).
       // Same for asks answered while queued.
-      if (recoveryBatch) {
-        const hadRecoveryDetails = pruneStoppedRecoveryDeltas(recoveryBatch);
-        if (
-          hadRecoveryDetails &&
-          recoveryBatch.deltas.size === 0 &&
-          recoveryBatch.overflowCount === 0
-        ) {
-          pendingStoppedRecoveries.delete(sessionID);
-          return false;
-        }
+      if (recoveryBatch && prunedToEmpty(stoppedRecoveryQueue, recoveryBatch)) {
+        pendingStoppedRecoveries.delete(sessionID);
+        return false;
       }
       const liveChildInputDeltas = pendingChildInputWakes.get(sessionID);
-      if (liveChildInputDeltas) {
-        const hadInputDetails = pruneChildInputDeltas(liveChildInputDeltas);
-        if (
-          hadInputDetails &&
-          liveChildInputDeltas.deltas.size === 0 &&
-          liveChildInputDeltas.overflowCount === 0 &&
-          !recoveryBatch
-        ) {
-          pendingChildInputWakes.delete(sessionID);
-          return false;
-        }
+      if (
+        liveChildInputDeltas &&
+        prunedToEmpty(childInputQueue, liveChildInputDeltas) &&
+        !recoveryBatch
+      ) {
+        pendingChildInputWakes.delete(sessionID);
+        return false;
       }
       // Keep model+variant as one selection. Mixing a new model with a
       // leftover variant from another model produces B/max from A/max.
@@ -2084,7 +2052,11 @@ export function createOrchestratorWakeScheduler(
    * native terminal result. This is deliberately separate from the periodic
    * TODO wake: stopped work needs recovery even when its parent has no todo.
    */
-  function triggerStoppedJobRecovery(
+  /** Queue a delta (if any) and evaluate the idle parent now. Shared
+   * delivery machinery for both delta wake kinds; per-kind policy (cap,
+   * blocker trigger, actionability) lives on the queue itself. */
+  function triggerDeltaWake(
+    queue: DeltaQueue,
     sessionID: string,
     delta?: string,
     dedupeKey?: string,
@@ -2098,9 +2070,9 @@ export function createOrchestratorWakeScheduler(
       return;
     }
     if (delta) {
-      addStoppedRecoveryDelta(sessionID, delta, dedupeKey);
-    } else if (!pendingStoppedRecoveries.has(sessionID)) {
-      pendingStoppedRecoveries.set(sessionID, {
+      queue.add(sessionID, delta, dedupeKey);
+    } else if (!queue.batches.has(sessionID)) {
+      queue.batches.set(sessionID, {
         deltas: new Map(),
         overflowCount: 0,
       });
@@ -2111,7 +2083,7 @@ export function createOrchestratorWakeScheduler(
     rearmWakeProgress(sessionID);
     const blocker = scheduleBlocker(sessionID);
     if (blocker) {
-      reportScheduleBlocker(sessionID, blocker, 'stopped-job-recovery');
+      reportScheduleBlocker(sessionID, blocker, queue.blockerTrigger);
       return;
     }
     const state = touchLocal(sessionID);
@@ -2119,6 +2091,14 @@ export function createOrchestratorWakeScheduler(
     bumpGeneration(state);
     state.continuousIdle = true;
     void evaluate(sessionID, state.generation, 'recovery');
+  }
+
+  function triggerStoppedJobRecovery(
+    sessionID: string,
+    delta?: string,
+    dedupeKey?: string,
+  ): void {
+    triggerDeltaWake(stoppedRecoveryQueue, sessionID, delta, dedupeKey);
   }
 
   /**
@@ -2257,36 +2237,7 @@ export function createOrchestratorWakeScheduler(
     delta?: string,
     dedupeKey?: string,
   ): void {
-    if (
-      disposed ||
-      !enabled ||
-      !capabilities.ready ||
-      !canObserveSelection(sessionID)
-    ) {
-      return;
-    }
-    if (delta) {
-      addChildInputDelta(sessionID, delta, dedupeKey);
-    } else if (!pendingChildInputWakes.has(sessionID)) {
-      pendingChildInputWakes.set(sessionID, {
-        deltas: new Map(),
-        overflowCount: 0,
-      });
-    }
-    if (localSessions.get(sessionID)?.archived) {
-      return;
-    }
-    rearmWakeProgress(sessionID);
-    const blocker = scheduleBlocker(sessionID);
-    if (blocker) {
-      reportScheduleBlocker(sessionID, blocker, 'child-input');
-      return;
-    }
-    const state = touchLocal(sessionID);
-    clearTimer(state);
-    bumpGeneration(state);
-    state.continuousIdle = true;
-    void evaluate(sessionID, state.generation, 'recovery');
+    triggerDeltaWake(childInputQueue, sessionID, delta, dedupeKey);
   }
 
   async function event(input: {
