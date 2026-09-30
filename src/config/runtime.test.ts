@@ -180,6 +180,8 @@ describe('RuntimeConfig', () => {
     expect(runtime.hostMcp()).toBeUndefined();
     expect(runtime.getRuntimePreset()).toBeNull();
     expect(runtime.hasModelSwitched('explorer')).toBe(false);
+    expect(runtime.disabledHooks).toEqual(new Set());
+    expect(runtime.disabledCommands).toEqual(new Set());
   });
 
   test('explicit config values override defaults', () => {
@@ -194,6 +196,8 @@ describe('RuntimeConfig', () => {
       disabled_tools: ['webfetch'],
       disabled_mcps: ['context7'],
       disabled_skills: ['clonedeps'],
+      disabled_hooks: ['foreground-fallback'],
+      disabled_commands: ['interview', 'loop'],
       fallback: { enabled: false, maxRetries: 5 },
       webfetch: { enabled: false },
       acpAgents: { myAcp: { command: 'echo' } },
@@ -210,6 +214,8 @@ describe('RuntimeConfig', () => {
     expect(runtime.disabledTools).toEqual(['webfetch']);
     expect(runtime.disabledMcps).toEqual(['context7']);
     expect(runtime.disabledSkills).toEqual(['clonedeps']);
+    expect(runtime.disabledHooks).toEqual(new Set(['foreground-fallback']));
+    expect(runtime.disabledCommands).toEqual(new Set(['interview', 'loop']));
     expect(runtime.fallback.enabled).toBe(false);
     expect(runtime.fallback.maxRetries).toBe(5);
     expect(runtime.webfetch.enabled).toBe(false);

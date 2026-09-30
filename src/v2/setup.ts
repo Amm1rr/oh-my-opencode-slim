@@ -34,6 +34,7 @@ import {
   CHAT_INITIATOR_HEADER_NAME,
   isCopilotProvider,
 } from '../hooks/chat-headers';
+import { isCommandEnabled } from '../hooks/command-hook-utils';
 import type { ForegroundFallbackManager } from '../hooks/foreground-fallback';
 import { PHASE_REMINDER_METADATA_KEY } from '../hooks/phase-reminder';
 import { BACKGROUND_JOB_BOARD_METADATA_KEY } from '../hooks/task-session-manager/board-injection';
@@ -1993,9 +1994,13 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
     // error unchanged. The success path's returned cleanup keeps its
     // own semantics.
     try {
+      const pluginConfig = loadPluginConfig(directory);
       const interviewConfig = InterviewConfigSchema.parse(
-        loadPluginConfig(directory).interview ?? {},
+        pluginConfig.interview ?? {},
       );
+      const interviewCommandEnabled = isCommandEnabled('interview', {
+        disabledCommands: new Set(pluginConfig.disabled_commands ?? []),
+      });
       const interviewBridge = createV2InterviewBridge(ctx, interviewConfig);
       disposers.push(() => interviewBridge.dispose());
 
@@ -2343,7 +2348,9 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       try {
         const reg = await ctx.command.transform((draft) => {
           try {
-            interviewBridge.registerCommand(draft);
+            if (interviewCommandEnabled) {
+              interviewBridge.registerCommand(draft);
+            }
           } catch (err) {
             log('[v2] interview command adapt failed', String(err));
           }

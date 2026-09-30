@@ -14,6 +14,8 @@ import {
 } from './presets';
 import {
   BackgroundJobsConfigSchema,
+  DISABLED_COMMANDS_VALUES,
+  DISABLED_HOOKS_VALUES,
   InterviewConfigSchema,
   LEGACY_FALLBACK_KEYS,
   type MarketplaceActivation,
@@ -90,7 +92,19 @@ const DISABLED_CONFIG_KEYS = [
   'disabled_tools',
   'disabled_mcps',
   'disabled_skills',
+  'disabled_hooks',
+  'disabled_commands',
 ] as const;
+
+// Enum-backed disabled_* keys: unknown entries are stripped from the array
+// (with a warning) instead of rejecting the whole config layer through the
+// schema's editor-completion enum. Single source: the schema value lists.
+const DISABLED_CONFIG_VALUE_SETS: Partial<
+  Record<(typeof DISABLED_CONFIG_KEYS)[number], readonly string[]>
+> = {
+  disabled_hooks: DISABLED_HOOKS_VALUES,
+  disabled_commands: DISABLED_COMMANDS_VALUES,
+};
 
 /** Apply the environment placeholder syntax shared by config consumers. */
 export function interpolateEnvironmentVariables(value: string): string {
@@ -105,10 +119,15 @@ export function interpolateEnvironmentVariables(value: string): string {
  * reject the whole config object during schema validation. A string value
  * (e.g. "explorer") becomes a single-element array so the user's disable
  * intent survives; any other non-array value (number, boolean, object, ...)
- * is dropped. Array and undefined values are left untouched. Each
- * normalization is reported through `warn` (if provided) with a plain
- * message; callers wrap it in their own warning channel (loader uses
- * onWarning + console.warn, doctor just reports the message).
+ * is dropped. Array values of enum-backed keys (disabled_hooks,
+ * disabled_commands), including strings after shape normalization, are
+ * filtered to their valid values, stripping unknown entries instead of
+ * failing schema validation; a value consisting only of unknown entries is
+ * treated as unset so a lower config layer's list still applies. Undefined
+ * values are left
+ * untouched. Each normalization is reported through `warn` (if provided)
+ * with a plain message; callers wrap it in their own warning channel
+ * (loader uses onWarning + console.warn, doctor just reports the message).
  *
  * @param rawConfig - Parsed config to normalize (mutated in place)
  * @param warn - Optional callback invoked with each warning message
@@ -128,7 +147,7 @@ export function normalizeDisabledArrayKeys(
   const configRecord = rawConfig as Record<string, unknown>;
   for (const key of DISABLED_CONFIG_KEYS) {
     const value = configRecord[key];
-    if (value === undefined || Array.isArray(value)) {
+    if (value === undefined) {
       continue;
     }
     if (typeof value === 'string') {
@@ -137,10 +156,44 @@ export function normalizeDisabledArrayKeys(
         `Config key "${key}" should be an array; ` +
           `normalized to ["${value}"].`,
       );
-    } else {
+    } else if (!Array.isArray(value)) {
       delete configRecord[key];
       warn?.(`Config key "${key}" must be an array; ignoring invalid value.`);
+      continue;
     }
+
+    const validValues = DISABLED_CONFIG_VALUE_SETS[key];
+    if (!validValues) {
+      continue;
+    }
+    const normalizedValues = configRecord[key] as unknown[];
+    const stripped = normalizedValues.filter(
+      (entry) => !validValues.includes(entry as string),
+    );
+    if (stripped.length === 0) {
+      continue;
+    }
+    const kept = normalizedValues.filter((entry) =>
+      validValues.includes(entry as string),
+    );
+    if (kept.length === 0) {
+      // Every entry was unknown: emit no opt-out signal, so a lower config
+      // layer's valid list survives the layer merge.
+      delete configRecord[key];
+      warn?.(
+        `Config key "${key}" contains only unknown values ` +
+          `(${JSON.stringify(stripped)}); ignoring the key entirely so a ` +
+          `lower config layer still applies. ` +
+          `Valid values: ${validValues.join(', ')}.`,
+      );
+      continue;
+    }
+    configRecord[key] = kept;
+    warn?.(
+      `Config key "${key}" contains unknown values ` +
+        `(${JSON.stringify(stripped)}); ignoring them. ` +
+        `Valid values: ${validValues.join(', ')}.`,
+    );
   }
 }
 

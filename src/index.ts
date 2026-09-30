@@ -54,6 +54,7 @@ import {
   stoppedJobRecoveryReason,
 } from './hooks';
 import { stripTaggedContent } from './hooks/cache-safe-injection';
+import { isCommandEnabled } from './hooks/command-hook-utils';
 import { processImageAttachments } from './hooks/image-hook';
 import { clearAllWakeSessions } from './hooks/orchestrator-wake/wake-gate';
 import { PHASE_REMINDER_METADATA_KEY } from './hooks/phase-reminder';
@@ -396,7 +397,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   let reflectCommandHook: ReturnType<typeof createReflectCommandHook>;
   let loopCommandHook: ReturnType<typeof createLoopCommandHook>;
   let taskSessionManagerHook: ReturnType<typeof createTaskSessionManagerHook>;
-  let phaseReminder: ReturnType<typeof createPhaseReminderHook>;
+  let phaseReminder: ReturnType<typeof createPhaseReminderHook> | undefined;
   let applyPatch: ReturnType<typeof createApplyPatchHook>;
   let searchPathGuard: ReturnType<typeof createSearchPathGuardHook>;
   let absolutePathRescue: ReturnType<typeof createAbsolutePathRescueHook>;
@@ -768,10 +769,16 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // (unregistering only the retry hook is not enough: session.error,
     // message.updated and session.status retry all reach the replay path).
     const fallbackEnabled =
-      runtime.fallback.enabled !== false && hostFlavor !== 'v2';
-    if (runtime.fallback.enabled !== false && hostFlavor === 'v2') {
+      runtime.fallback.enabled !== false &&
+      !runtime.disabledHooks.has('foreground-fallback') &&
+      hostFlavor !== 'v2';
+    if (
+      runtime.fallback.enabled !== false &&
+      !runtime.disabledHooks.has('foreground-fallback') &&
+      hostFlavor === 'v2'
+    ) {
       // Deterministic notice: no timestamps or per-call ids. Do not log when
-      // the user explicitly disabled fallback.
+      // the user explicitly disabled fallback, including via disabled_hooks.
       log(
         '[foreground-fallback] automatic fallback disabled on v2 hosts (no atomic per-turn model switch)',
       );
@@ -1037,9 +1044,11 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     const shouldInjectOrchestratorReminder = (sessionID: string) =>
       sessionMetadata.getAgent(sessionID) === 'orchestrator';
 
-    phaseReminder = createPhaseReminderHook({
-      shouldInject: shouldInjectOrchestratorReminder,
-    });
+    if (!runtime.disabledHooks.has('phase-reminder')) {
+      phaseReminder = createPhaseReminderHook({
+        shouldInject: shouldInjectOrchestratorReminder,
+      });
+    }
 
     applyPatch = createApplyPatchHook(ctx);
 
@@ -1404,10 +1413,22 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       return resolvedAgentRegistry;
     },
     prepareCommands(opencodeConfig) {
-      interviewManager.registerCommand(opencodeConfig);
-      deepworkCommandHook.registerCommand(opencodeConfig);
-      reflectCommandHook.registerCommand(opencodeConfig);
-      loopCommandHook.registerCommand(opencodeConfig);
+      const commandGate = {
+        disabledCommands: runtime.disabledCommands,
+        disabledSkills: runtime.disabledSkills,
+      };
+      if (isCommandEnabled('interview', commandGate)) {
+        interviewManager.registerCommand(opencodeConfig);
+      }
+      if (isCommandEnabled('deepwork', commandGate)) {
+        deepworkCommandHook.registerCommand(opencodeConfig);
+      }
+      if (isCommandEnabled('reflect', commandGate)) {
+        reflectCommandHook.registerCommand(opencodeConfig);
+      }
+      if (isCommandEnabled('loop', commandGate)) {
+        loopCommandHook.registerCommand(opencodeConfig);
+      }
     },
     retire() {
       registryRetired = true;
@@ -1953,41 +1974,58 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     },
 
     'command.execute.before': async (input, output) => {
-      await interviewManager.handleCommandExecuteBefore(
-        input as {
-          command: string;
-          sessionID: string;
-          arguments: string;
-        },
-        output as { parts: Array<{ type: string; text?: string }> },
-      );
+      // Registration gating alone cannot make a disabled command inert: with
+      // a user-defined command of the same name, the dispatches below would
+      // still replace its output. Every dispatch shares the command gates.
+      const commandEnabled = (commandName: string): boolean =>
+        isCommandEnabled(commandName, {
+          disabledCommands: runtime.disabledCommands,
+          disabledSkills: runtime.disabledSkills,
+        });
 
-      await deepworkCommandHook.handleCommandExecuteBefore(
-        input as {
-          command: string;
-          sessionID: string;
-          arguments: string;
-        },
-        output as { parts: Array<{ type: string; text?: string }> },
-      );
+      if (commandEnabled('interview')) {
+        await interviewManager.handleCommandExecuteBefore(
+          input as {
+            command: string;
+            sessionID: string;
+            arguments: string;
+          },
+          output as { parts: Array<{ type: string; text?: string }> },
+        );
+      }
 
-      await reflectCommandHook.handleCommandExecuteBefore(
-        input as {
-          command: string;
-          sessionID: string;
-          arguments: string;
-        },
-        output as { parts: Array<{ type: string; text?: string }> },
-      );
+      if (commandEnabled('deepwork')) {
+        await deepworkCommandHook.handleCommandExecuteBefore(
+          input as {
+            command: string;
+            sessionID: string;
+            arguments: string;
+          },
+          output as { parts: Array<{ type: string; text?: string }> },
+        );
+      }
 
-      await loopCommandHook.handleCommandExecuteBefore(
-        input as {
-          command: string;
-          sessionID: string;
-          arguments: string;
-        },
-        output as { parts: Array<{ type: string; text?: string }> },
-      );
+      if (commandEnabled('reflect')) {
+        await reflectCommandHook.handleCommandExecuteBefore(
+          input as {
+            command: string;
+            sessionID: string;
+            arguments: string;
+          },
+          output as { parts: Array<{ type: string; text?: string }> },
+        );
+      }
+
+      if (commandEnabled('loop')) {
+        await loopCommandHook.handleCommandExecuteBefore(
+          input as {
+            command: string;
+            sessionID: string;
+            arguments: string;
+          },
+          output as { parts: Array<{ type: string; text?: string }> },
+        );
+      }
     },
 
     'chat.headers': chatHeadersHook['chat.headers'],
@@ -2277,10 +2315,12 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         input as never,
         typedOutput as never,
       );
-      await phaseReminder['experimental.chat.messages.transform'](
-        input as never,
-        typedOutput as never,
-      );
+      if (phaseReminder) {
+        await phaseReminder['experimental.chat.messages.transform'](
+          input as never,
+          typedOutput as never,
+        );
+      }
       await taskSessionManagerHook.injectBackgroundJobBoard(input, typedOutput);
       if (compacting) {
         stripTaggedContent(typedOutput.messages, PHASE_REMINDER_METADATA_KEY);

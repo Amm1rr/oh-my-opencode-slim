@@ -9,6 +9,8 @@ import {
 } from 'bun:test';
 import { z } from 'zod';
 import {
+  DISABLED_COMMANDS_VALUES,
+  DISABLED_HOOKS_VALUES,
   InterviewConfigSchema,
   MarketplaceActivationSchema,
   MultiplexerConfigSchema,
@@ -202,6 +204,70 @@ describe('PluginConfigSchema image_routing', () => {
   it('accepts image_routing: auto when disabled_agents is omitted', () => {
     const result = PluginConfigSchema.safeParse({ image_routing: 'auto' });
     expect(result.success).toBe(true);
+  });
+});
+
+describe('PluginConfigSchema disabled_hooks and disabled_commands', () => {
+  it('accepts the whitelisted hook and command names', () => {
+    const result = PluginConfigSchema.safeParse({
+      disabled_hooks: ['phase-reminder', 'foreground-fallback'],
+      disabled_commands: ['interview', 'deepwork', 'reflect', 'loop'],
+    });
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.disabled_hooks).toEqual([
+        'phase-reminder',
+        'foreground-fallback',
+      ]);
+      expect(result.data.disabled_commands).toEqual([
+        'interview',
+        'deepwork',
+        'reflect',
+        'loop',
+      ]);
+    }
+  });
+
+  it('leaves both keys undefined when omitted', () => {
+    const result = PluginConfigSchema.safeParse({});
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.disabled_hooks).toBeUndefined();
+      expect(result.data.disabled_commands).toBeUndefined();
+    }
+  });
+
+  it('exports the valid value lists as the enum source of truth', () => {
+    expect(DISABLED_HOOKS_VALUES).toEqual([
+      'phase-reminder',
+      'foreground-fallback',
+    ]);
+    expect(DISABLED_COMMANDS_VALUES).toEqual([
+      'interview',
+      'deepwork',
+      'reflect',
+      'loop',
+    ]);
+  });
+
+  it('keeps the strict enum for direct schema consumers (loader strips first)', () => {
+    // Config loading strips unknown entries before validation and warns
+    // (see loader.test.ts). The enum remains as defense in depth and for
+    // editor completion.
+    expect(
+      PluginConfigSchema.safeParse({ disabled_hooks: ['auto-update-checker'] })
+        .success,
+    ).toBe(false);
+    expect(
+      PluginConfigSchema.safeParse({ disabled_commands: ['council'] }).success,
+    ).toBe(false);
+    expect(
+      PluginConfigSchema.safeParse({
+        disabled_commands: ['deepwork', 'review'],
+      }).success,
+    ).toBe(false);
   });
 });
 
