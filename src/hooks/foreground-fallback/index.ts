@@ -1782,9 +1782,9 @@ export class ForegroundFallbackManager {
       // whole history. Long-lived sessions serve the full listing in the
       // hundreds of megabytes (measured 463 MB / 11.7 s on a live
       // months-old orchestrator session), which delayed every failover by
-      // ~20 s. The `limit` query keeps the hot path O(tail); the full read
-      // remains as a fallback for hosts that ignore it or transcripts whose
-      // tail carries no replayable user message.
+      // ~20 s. The `limit` query keeps the hot path O(tail). A tail without a
+      // user message is one long turn: read only the user message its last
+      // entry answers (v1 `parentID`); shapes without that id read it all.
       const tailResult = await session.messages({
         path: { id: sessionID },
         query: { limit: FALLBACK_REPLAY_TAIL_MESSAGES },
@@ -1798,24 +1798,28 @@ export class ForegroundFallbackManager {
       // undefined at runtime (OpenCode violates its own declared type), and
       // v2 messages carry `type`/`text` instead of `info`/`parts`, so guard
       // each entry instead of dereferencing a fixed shape.
-      let messages = (tailResult.data ?? []) as unknown[];
+      const messages = (tailResult.data ?? []) as unknown[];
       let requestError: unknown = tailResult.error ?? undefined;
-      if (!messages.some((message) => isReplayableUserMessage(message))) {
-        const fullResult = await session.messages({
-          path: { id: sessionID },
-        });
+      let lastUser = messages.findLast(isReplayableUserMessage);
+      if (!lastUser) {
+        const parentID = (messages.at(-1) as { info?: { parentID?: unknown } })
+          ?.info?.parentID;
+        const deepResult = await (typeof parentID === 'string'
+          ? session.message({ path: { id: sessionID, messageID: parentID } })
+          : session.messages({ path: { id: sessionID } }));
         if (!this.isCurrentTurn(sessionID, expectedEpoch)) return;
-        messages = (fullResult.data ?? []) as unknown[];
-        // Preserve BOTH failures: when the tail and the full read fail
+        lastUser = [deepResult.data ?? []]
+          .flat()
+          .findLast(isReplayableUserMessage);
+        // Preserve BOTH failures: when the tail and the deeper read fail
         // differently, the diagnostic log must surface the first error
-        // too instead of letting the full-read error overwrite it.
-        const fullError = fullResult.error ?? undefined;
-        if (fullError !== undefined) {
+        // too instead of letting the deeper-read error overwrite it.
+        const deepError = deepResult.error ?? undefined;
+        if (deepError !== undefined) {
           requestError =
-            requestError === undefined ? fullError : [requestError, fullError];
+            requestError === undefined ? deepError : [requestError, deepError];
         }
       }
-      const lastUser = [...messages].reverse().find(isReplayableUserMessage);
       if (!lastUser) {
         log('[foreground-fallback] no user message found', {
           sessionID,
