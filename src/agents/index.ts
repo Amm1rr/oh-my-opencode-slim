@@ -44,12 +44,14 @@ type AgentFactory = (
   customAppendPrompt?: string,
 ) => AgentDefinition;
 
-const TASK_CONTROL_TOOL_NAMES = [
+const ORCHESTRATOR_DEFAULT_TOOL_NAMES = [
   'task_cancel',
   'task_message',
+  'task_reply',
   'task_revive',
   'task_status',
   'task_result',
+  'acp_run',
 ] as const;
 const MARKETPLACE_TOOL_NAMES = [
   'marketplace_inspect',
@@ -672,8 +674,8 @@ function applyDefaultPermissions(
 
   // Respect explicit deny on question (councillor)
   const questionPerm = existing.question === 'deny' ? 'deny' : 'allow';
-  const taskControlPermissions = Object.fromEntries(
-    TASK_CONTROL_TOOL_NAMES.map((toolName) => [
+  const orchestratorDefaultPermissions = Object.fromEntries(
+    ORCHESTRATOR_DEFAULT_TOOL_NAMES.map((toolName) => [
       toolName,
       existing[toolName] ?? (agent.name === 'orchestrator' ? 'allow' : 'deny'),
     ]),
@@ -699,7 +701,7 @@ function applyDefaultPermissions(
   agent.config.permission = {
     ...existing,
     question: questionPerm,
-    ...taskControlPermissions,
+    ...orchestratorDefaultPermissions,
     wait_for_user: waitForUserPerm,
     ...marketplacePermissions,
     // Apply skill permissions as nested object under 'skill' key

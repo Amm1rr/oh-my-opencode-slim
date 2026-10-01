@@ -36,6 +36,7 @@ function createTool(overrides?: {
   waitIdle?: () => Promise<void>;
   promptAsync?: () => Promise<unknown>;
   messages?: () => Promise<unknown>;
+  get?: () => Promise<unknown>;
   baselineTimeoutMs?: number;
   admissionTimeoutMs?: number;
   onLaunch?: () => void;
@@ -59,6 +60,7 @@ function createTool(overrides?: {
         status: overrides?.omitStatus ? undefined : status,
         promptAsync,
         messages: overrides?.messages,
+        get: overrides?.get,
       },
     },
   } as never;
@@ -865,6 +867,41 @@ describe('task_revive tool', () => {
       });
     },
   );
+
+  test('untracked-revive guidance distinguishes alias, existing, gone, and unknown states', async () => {
+    const alias = createTool();
+    await expect(
+      alias.taskRevive.execute({ task_id: 'fix-1', prompt: 'x' }, context),
+    ).rejects.toThrow('Aliases do not survive a host restart');
+
+    const existing = createTool({
+      get: async () => ({ data: { id: 'ses_1' } }),
+    });
+    await expect(
+      existing.taskRevive.execute({ task_id: 'ses_1', prompt: 'x' }, context),
+    ).rejects.toThrow('session exists at the host');
+
+    const gone = createTool({ get: async () => ({}) });
+    await expect(
+      gone.taskRevive.execute({ task_id: 'ses_1', prompt: 'x' }, context),
+    ).rejects.toThrow('No such session exists at the host');
+
+    const errored = createTool({
+      get: async () => ({ error: { message: 'boom' } }),
+    });
+    await expect(
+      errored.taskRevive.execute({ task_id: 'ses_1', prompt: 'x' }, context),
+    ).rejects.toThrow('verify whether the host restored it');
+
+    const throwing = createTool({
+      get: async () => {
+        throw new Error('transport down');
+      },
+    });
+    await expect(
+      throwing.taskRevive.execute({ task_id: 'ses_1', prompt: 'x' }, context),
+    ).rejects.toThrow('verify whether the host restored it');
+  });
 
   test.each(['deadline first', 'acceptance first'])(
     'keeps the local deadline outcome when admission settles in the same tick: %s',

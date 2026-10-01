@@ -4,7 +4,11 @@ import type { BackgroundJobLease } from '../utils/background-job-board';
 import type { BackgroundJobSupervisor } from '../utils/background-job-supervisor';
 import { log } from '../utils/logger';
 import { getClient } from '../utils/opencode-client';
-import { OperationTimeoutError, withTimeout } from '../utils/session';
+import {
+  OperationTimeoutError,
+  SESSION_ID_PATTERN,
+  withTimeout,
+} from '../utils/session';
 import { getRuntimeSessionStatusSnapshot } from '../utils/session-runtime-status';
 import type { ExperimentalV2 } from '../v2/client-shim';
 import {
@@ -36,7 +40,7 @@ export function createTaskReviveTool(
   const idParam = idParamFor(options.input);
   const task_revive = tool({
     description:
-      'Revive a retained background task in its existing session with a new prompt.',
+      'Revive a retained background task in its existing session with a new prompt. Tracking does not survive a host restart; an untracked ID fails with guidance instead of retrying blindly.',
     args: {
       ...taskRefArgs(idParam),
       prompt: z.string().min(1).describe('Prompt for the revived task'),
@@ -57,7 +61,7 @@ export function createTaskReviveTool(
         requested,
       );
       if (!resolved) {
-        throw new Error(`Unknown or unowned background task: ${requested}`);
+        throw new Error(await untrackedReviveGuidance(options, requested));
       }
 
       let current = getCurrentReviveJob(
@@ -500,6 +504,47 @@ function getApiError(response: unknown): unknown {
   return record.error === undefined || record.error === null
     ? undefined
     : record.error;
+}
+
+/**
+ * Untracked-revive guidance, distinguished by what the host still knows.
+ *
+ * - Alias input: aliases are deliberately not restored after a restart
+ *   (persistence header); the session may still exist under its ID.
+ * - Session-ID input: one read-only `session.get` probe tells the caller
+ *   whether the host still has it — possibly auto-resumed by the host's
+ *   own recovery, in which case re-dispatching would duplicate the work.
+ * - Probe failure: stay neutral instead of advising a write.
+ */
+async function untrackedReviveGuidance(
+  options: TaskReviveToolOptions,
+  requested: string,
+): Promise<string> {
+  const prefix = `Unknown or unowned background task: ${requested}`;
+  if (!SESSION_ID_PATTERN.test(requested)) {
+    return `${prefix}. Aliases do not survive a host restart; retry with the task's session ID from history or notifications, or re-dispatch the work.`;
+  }
+  try {
+    const session = getClient(options.input).session;
+    const response = await (
+      session.get as unknown as (
+        args: Record<string, unknown>,
+      ) => Promise<unknown>
+    )({
+      path: { id: requested },
+      query: { directory: options.input.directory },
+    });
+    if (getApiError(response) !== undefined) {
+      return `${prefix}. Tracking does not survive a host restart; verify whether the host restored it before re-dispatching.`;
+    }
+    const data = (response as Record<string, unknown> | undefined)?.data;
+    if (data !== undefined && data !== null) {
+      return `${prefix}. The session exists at the host but is not tracked by this board — tracking does not survive a host restart. If the host restored it, its result is still delivered on completion; do not re-dispatch blindly.`;
+    }
+  } catch {
+    return `${prefix}. Tracking does not survive a host restart; verify whether the host restored it before re-dispatching.`;
+  }
+  return `${prefix}. No such session exists at the host (tracking does not survive a restart). Re-dispatch the work.`;
 }
 
 function errorText(error: unknown): string {

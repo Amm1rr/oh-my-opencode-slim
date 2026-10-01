@@ -77,7 +77,7 @@ export function createTaskReplyTool(options: {
   const idParam = idParamFor(options.input);
   const task_reply = tool({
     description:
-      'Answer a tracked background child task waiting on a supported question or permission request. Permissions are supported on OpenCode v2 hosts that expose permission.reply; v2 form-created questions are observable but not answerable through the pinned plugin context. Accepts the task ID or parent-scoped alias plus the request ID from the wake or task_status.',
+      'Answer a tracked background child task waiting on a question or permission request. Accepts the task ID or parent-scoped alias plus the request ID from the wake or task_status.',
     args: {
       ...taskRefArgs(idParam),
       request_id: z
