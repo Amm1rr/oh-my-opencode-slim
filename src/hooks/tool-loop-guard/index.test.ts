@@ -3,6 +3,7 @@ import type { ToolLoopGuardHook } from './hook';
 import {
   createToolLoopGuardHook,
   LOOP_GUARD_WARNING,
+  MAX_TRACKED_SESSIONS,
   WAIT_GUARD_MARKER,
   WAIT_GUARD_WARNING,
 } from './hook';
@@ -447,6 +448,23 @@ describe('tool-loop-guard', () => {
     const count =
       String(out.output).split(LOOP_GUARD_WARNING.trim()).length - 1;
     expect(count).toBe(1);
+  });
+
+  test('bounds pending calls whose after hook never runs', async () => {
+    const args = { filePath: 'a.ts' };
+    await runIdenticalCall('c1', args);
+    const output = await runIdenticalCall('c2', args);
+    await hook['tool.execute.before'](beforeInput({ callID: 'c3' }), { args });
+    for (let i = 0; i <= MAX_TRACKED_SESSIONS; i++) {
+      await hook['tool.execute.before'](
+        beforeInput({ callID: `failed-${i}` }),
+        {
+          args: { filePath: `failed-${i}.ts` },
+        },
+      );
+    }
+    await hook['tool.execute.after'](afterInput({ callID: 'c3' }), output);
+    expect(output.output).not.toContain(LOOP_GUARD_WARNING);
   });
 
   test('resetSession clears loop guard state for a specific session', async () => {

@@ -54,6 +54,7 @@ function createMockClient(overrides?: {
   includePromptAsync?: boolean;
   messagesData?: unknown[];
   messagesImpl?: (args: unknown) => Promise<unknown>;
+  messageData?: unknown;
   postImpl?: (args: unknown) => Promise<unknown>;
   includePostClient?: boolean;
 }) {
@@ -73,6 +74,9 @@ function createMockClient(overrides?: {
       ],
     };
   });
+  const message = mock(async (_args: unknown) => ({
+    data: overrides?.messageData,
+  }));
   const post = mock(async (args: unknown) => {
     if (overrides?.postImpl) return overrides.postImpl(args);
     return true;
@@ -80,6 +84,7 @@ function createMockClient(overrides?: {
   const session: Record<string, unknown> = {
     abort,
     messages,
+    message,
   };
   if (overrides?.includePromptAsync !== false) {
     session.promptAsync = promptAsync;
@@ -97,7 +102,7 @@ function createMockClient(overrides?: {
       session,
       _client: { post },
     } as never,
-    mocks: { promptAsync, abort, messages, post },
+    mocks: { promptAsync, abort, messages, message, post },
   };
 }
 
@@ -348,6 +353,35 @@ describe('foreground fallback redo harness', () => {
     expect(mocks.promptAsync.mock.calls[1]?.[0]).toMatchObject({
       body: { model: { providerID: 'test', modelID: 'c' } },
     });
+  });
+
+  test('a re-emitted user-message update is inert while a newer turn classifies', async () => {
+    // v1 republishes a turn's user message (info only) on every step finish.
+    const { manager, mocks } = makeManager();
+    const newerTurnRead = deferred<unknown>();
+    mocks.messages
+      .mockImplementationOnce(async () => ({ data: [] }))
+      .mockImplementationOnce(() => newerTurnRead.promise);
+    const update = (id: string, modelID: string) => ({
+      type: 'message.updated',
+      properties: {
+        info: {
+          id,
+          sessionID: 'reemitted',
+          role: 'user',
+          model: { providerID: 'test', modelID },
+        },
+      },
+    });
+
+    await manager.handleEvent(update('turn-1', 'a'));
+    const newerTurn = manager.handleEvent(update('turn-2', 'b'));
+    await manager.handleEvent(update('turn-1', 'a'));
+    newerTurnRead.resolve({ data: [] });
+    await newerTurn;
+
+    expect(mocks.messages).toHaveBeenCalledTimes(2);
+    expect((manager as any).sessionModel.get('reemitted')).toBe('test/b');
   });
 
   test('v1 info-only replay notification is claimed by its reserved message ID', async () => {
@@ -1935,6 +1969,10 @@ describe('ForegroundFallbackManager session.error', () => {
     // Should have picked the next model after anthropic/claude-opus-4-5
     expect(call[0].body.model.providerID).toBe('openai');
     expect(call[0].body.model.modelID).toBe('gpt-4o');
+    expect(mgr.getActiveFallbackModel('sess-1')).toBe('openai/gpt-4o');
+
+    mgr.observeExternalTurn('sess-1');
+    expect(mgr.getActiveFallbackModel('sess-1')).toBeUndefined();
   });
 
   test('triggers fallback on content-policy moderation session.error', async () => {
@@ -2373,6 +2411,7 @@ describe('ForegroundFallbackManager session.error', () => {
     promptAsyncImpl?: () => Promise<unknown>;
     abortImpl?: () => Promise<unknown>;
     messagesData?: unknown[];
+    messageData?: unknown;
     handoff?: ReturnType<typeof handoffMock>['handoff'];
     readBackgroundGeneration?: (sessionID: string) => number | undefined;
     modelChanged?: () => void;
@@ -2381,6 +2420,7 @@ describe('ForegroundFallbackManager session.error', () => {
       promptAsyncImpl: options?.promptAsyncImpl,
       abortImpl: options?.abortImpl,
       messagesData: options?.messagesData,
+      messageData: options?.messageData,
     }));
     mgr = new ForegroundFallbackManager(
       makeChains(),
@@ -2441,6 +2481,27 @@ describe('ForegroundFallbackManager session.error', () => {
     expect(calls.prepare).toEqual([['sess-1', undefined, 'm2']]);
     expect(calls.admit).toEqual([['sess-1', undefined]]);
     expect(calls.reject).toEqual([]);
+  });
+
+  test('a turn longer than the tail replays its parent user message without a full read', async () => {
+    const { calls, handoff } = handoffMock();
+    const mocks = await runFallbackScenario({
+      handoff,
+      messagesData: [
+        { info: { id: 'm2', role: 'assistant', parentID: 'm1' }, parts: [] },
+      ],
+      messageData: taskPrompt[0],
+    });
+
+    expect(mocks.messages).toHaveBeenCalledTimes(1);
+    expect(mocks.message.mock.calls[0]?.[0]).toMatchObject({
+      path: { id: 'sess-1', messageID: 'm1' },
+    });
+    const call = mocks.promptAsync.mock.calls[0] as [
+      { body: { parts: Array<{ text?: string }> } },
+    ];
+    expect(call[0].body.parts[0]?.text).toBe('task prompt');
+    expect(calls.prepare).toEqual([['sess-1', undefined, 'm2']]);
   });
 
   test('rejects the handoff when promptAsync resolves with an error envelope', async () => {

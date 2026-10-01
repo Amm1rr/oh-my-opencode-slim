@@ -20,14 +20,18 @@
  *   trip its bust warning, which is written to the plugin log
  *   (`OPENCODE_LOG_DIR` fixture + `flushLoggerForTesting`).
  */
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { readdirSync as readDirSync, readFileSync } from 'node:fs';
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
+import * as fs from 'node:fs';
+import { existsSync, readdirSync as readDirSync, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import * as path from 'node:path';
+import type { BundledSkillInfo } from '../cli/custom-skills';
 import { MarketplaceStore } from '../marketplace/store';
 import { flushLoggerForTesting } from '../utils/logger';
+import { compilePermissionPolicy } from './permissions';
 import { createV2Setup } from './setup';
-import type { V2Context } from './types';
+import type { V2Context, V2PermissionRule } from './types';
 
 type CapturedTool = {
   name: string;
@@ -41,6 +45,7 @@ interface MockCalls {
   agentTransformCount: number;
   toolAdds: CapturedTool[];
   commandAdds: Array<{ name: string; definition: Record<string, unknown> }>;
+  skillAdds: BundledSkillInfo[];
   mcpSets: Array<{ name: string; config: Record<string, unknown> }>;
   hooks: string[];
   toolBeforeCb:
@@ -60,6 +65,8 @@ interface MockCalls {
       }) => Promise<void>)
     | undefined;
   disposed: string[];
+  /** Replay registered skill transforms for one simulated state rebuild. */
+  rebuildSkills: () => void;
 }
 
 /** Test-controlled event stream: manual push, pull/return observability. */
@@ -117,17 +124,22 @@ function createEventQueue() {
   };
 }
 
-function makeMockV2Context(projectDir: string): {
+function makeMockV2Context(
+  projectDir: string,
+  skillDraftHasAdd = true,
+): {
   ctx: V2Context;
   calls: MockCalls;
   events: ReturnType<typeof createEventQueue>;
 } {
+  const skillCallbacks = new Set<(draft: unknown) => void>();
   const calls: MockCalls = {
     agentUpdates: [],
     agentDefault: undefined,
     agentTransformCount: 0,
     toolAdds: [],
     commandAdds: [],
+    skillAdds: [],
     mcpSets: [],
     hooks: [],
     toolBeforeCb: undefined,
@@ -135,6 +147,23 @@ function makeMockV2Context(projectDir: string): {
     contextHookCb: undefined,
     promptHookCb: undefined,
     disposed: [],
+    rebuildSkills: () => {
+      for (const cb of skillCallbacks) {
+        cb({
+          ...(skillDraftHasAdd
+            ? {
+                add: (skill: BundledSkillInfo) => {
+                  calls.skillAdds.push(skill);
+                },
+              }
+            : {}),
+          get: () => undefined,
+          list: () => [],
+          remove: () => {},
+          update: () => {},
+        });
+      }
+    },
   };
   const events = createEventQueue();
   const reg = (label: string) => ({
@@ -142,7 +171,8 @@ function makeMockV2Context(projectDir: string): {
       calls.disposed.push(label);
     },
   });
-
+  // The skill domain replays registered transforms on simulated dirty-state
+  // rebuilds. The registration handle removes its callback on disposal.
   const ctx = {
     app: { name: 'opencode', version: 'v2-e2e' },
     options: {},
@@ -209,6 +239,19 @@ function makeMockV2Context(projectDir: string): {
         return reg(`command:${calls.commandAdds.length}`);
       },
       list: async () => [],
+    },
+    skill: {
+      transform: async (cb: (draft: unknown) => void) => {
+        skillCallbacks.add(cb);
+        return {
+          dispose: () => {
+            calls.disposed.push('skill.transform');
+            skillCallbacks.delete(cb);
+          },
+        };
+      },
+      list: async () => [],
+      reload: async () => {},
     },
     // Runtime session methods deliberately ABSENT: the shim must degrade
     // honestly without them (no fake success shapes).
@@ -296,7 +339,7 @@ describe('createV2Setup e2e', () => {
 
   beforeEach(async () => {
     originalEnv = { ...process.env };
-    fixtureRoot = await mkdtemp('/tmp/omo-v2-setup-e2e-');
+    fixtureRoot = await mkdtemp(path.join(tmpdir(), 'omo-v2-setup-e2e-'));
     projectDir = path.join(fixtureRoot, 'project');
     configDir = path.join(fixtureRoot, 'config');
     logDir = path.join(fixtureRoot, 'logs');
@@ -344,6 +387,7 @@ describe('createV2Setup e2e', () => {
       expect(tool.options).toEqual({ codemode: false });
     }
     expect(calls.commandAdds.map((c) => c.name)).toContain('deepwork');
+    expect(calls.commandAdds.map((c) => c.name)).toContain('interview');
     expect(calls.mcpSets.map((m) => m.name)).toEqual(['context7', 'gh_grep']);
     expect(calls.mcpSets.map((m) => m.config)).toEqual([
       expect.objectContaining({ type: 'remote' }),
@@ -358,7 +402,156 @@ describe('createV2Setup e2e', () => {
     await calls.promptHookCb?.({
       sessionID: 'ses_baseline_unknown',
       messageID: 'msg_baseline',
+      prompt: { text: 'baseline' },
     });
+
+    await cleanup();
+    expect(calls.disposed.length).toBeGreaterThan(0);
+  }, 20_000);
+
+  test('bundled skills register through a lazily replayed draft', async () => {
+    // Deferred execution previously prevented setup from retaining the
+    // registration's explicit cleanup handle.
+    const legacyDir = path.join(configDir, '.oh-my-opencode-slim');
+    await mkdir(legacyDir, { recursive: true });
+    await Bun.write(path.join(legacyDir, 'skills-manifest.json'), '{ invalid');
+    const { ctx, calls } = makeMockV2Context(projectDir);
+    const cleanup = await createV2Setup()(ctx);
+
+    // Nothing has reached the draft yet — the await has already settled.
+    expect(calls.skillAdds).toEqual([]);
+
+    calls.rebuildSkills();
+    const firstRebuildCount = calls.skillAdds.length;
+    expect(firstRebuildCount).toBeGreaterThan(0);
+    calls.rebuildSkills();
+    expect(calls.skillAdds).toHaveLength(firstRebuildCount * 2);
+    await flushLoggerForTesting();
+    expect(
+      readPluginLog().match(/legacy skills manifest unreadable/g),
+    ).toHaveLength(1);
+    expect(calls.skillAdds.map((skill) => skill.id)).toContain('deepwork');
+    for (const skill of calls.skillAdds) {
+      expect(skill.path.endsWith('SKILL.md')).toBe(true);
+      expect(skill.content).toBeString();
+    }
+
+    await cleanup();
+    expect(calls.disposed).toContain('skill.transform');
+  }, 20_000);
+
+  test('retries a throwing legacy skill cleanup on a later rebuild', async () => {
+    const legacyDir = path.join(configDir, '.oh-my-opencode-slim');
+    await mkdir(legacyDir, { recursive: true });
+    await Bun.write(
+      path.join(legacyDir, 'skills-manifest.json'),
+      JSON.stringify({ skills: {} }),
+    );
+    const { ctx, calls } = makeMockV2Context(projectDir);
+    const cleanup = await createV2Setup()(ctx);
+
+    try {
+      // A path-filtered spy, as the marketplace cleanup tests use, so the
+      // failure is induced the same way for every uid. chmod would not
+      // constrain root, and replacing the module breaks this file's imports.
+      const realRmSync = fs.rmSync;
+      const removeSpy = spyOn(fs, 'rmSync').mockImplementation(((
+        target: fs.PathLike,
+        options: fs.RmOptions,
+      ) => {
+        if (target === legacyDir) {
+          throw new Error('injected legacy cleanup failure');
+        }
+        return realRmSync(target, options);
+      }) as typeof fs.rmSync);
+      try {
+        calls.rebuildSkills();
+      } finally {
+        removeSpy.mockRestore();
+      }
+
+      await flushLoggerForTesting();
+      expect(
+        readPluginLog().match(/legacy skill cleanup failed/g),
+      ).toHaveLength(1);
+      expect(existsSync(legacyDir)).toBe(true);
+
+      // The guard must not latch on failure: a later rebuild retries.
+      calls.rebuildSkills();
+      expect(existsSync(legacyDir)).toBe(false);
+    } finally {
+      await cleanup();
+    }
+  }, 20_000);
+
+  test('does not migrate legacy skills when the deferred draft lacks add()', async () => {
+    const legacyDir = path.join(configDir, '.oh-my-opencode-slim');
+    await mkdir(legacyDir, { recursive: true });
+    await Bun.write(
+      path.join(legacyDir, 'skills-manifest.json'),
+      JSON.stringify({ skills: { deepwork: { status: 'managed' } } }),
+    );
+    const { ctx, calls } = makeMockV2Context(projectDir, false);
+    const cleanup = await createV2Setup()(ctx);
+    calls.rebuildSkills();
+    await flushLoggerForTesting();
+
+    expect(readPluginLog()).toContain('ctx.skill draft lacks add()');
+    expect(
+      await Bun.file(path.join(legacyDir, 'skills-manifest.json')).exists(),
+    ).toBe(true);
+    await cleanup();
+  }, 20_000);
+
+  test('disabled_commands interview gates both registration and execution', async () => {
+    // Override the beforeEach fixture: the all-setup wiring test must load
+    // its own disabled_commands through the real loadPluginConfig path.
+    await Bun.write(
+      path.join(projectDir, '.opencode', 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        companion: { enabled: false },
+        disabled_commands: ['interview'],
+      }),
+    );
+    const { ctx, calls } = makeMockV2Context(projectDir);
+    const cleanup = await createV2Setup()(ctx);
+
+    // Registration gate: /interview absent, non-disabled commands intact
+    expect(calls.commandAdds.map((c) => c.name)).not.toContain('interview');
+    expect(calls.commandAdds.map((c) => c.name)).toContain('deepwork');
+
+    // Execution gate: a trailing interview marker passes through untouched
+    const trailing = {
+      id: 'tail-iv-gate',
+      role: 'user',
+      content: [
+        {
+          type: 'text',
+          text: '<omos-interview-command>build an app</omos-interview-command>',
+        },
+      ],
+    };
+    expect(calls.contextHookCb).toBeFunction();
+    await calls.contextHookCb?.({
+      sessionID: 'ses_iv_gate',
+      agent: 'oracle',
+      model: {},
+      system: [],
+      tools: {},
+      messages: [trailing],
+    });
+    expect(trailing.content).toEqual([
+      {
+        type: 'text',
+        text: '<omos-interview-command>build an app</omos-interview-command>',
+      },
+    ]);
+    // The gate short-circuits before the service; the merged handler swallows
+    // bridge errors, so assert the bridge did not fail its way into a no-op.
+    // flushLoggerForTesting: log() lands via an async writeChain, and the
+    // error-path line is asserted right after the awaited handler.
+    await flushLoggerForTesting();
+    expect(readPluginLog()).not.toContain('interview context bridge failed');
 
     await cleanup();
     expect(calls.disposed.length).toBeGreaterThan(0);
@@ -537,6 +730,218 @@ describe('createV2Setup e2e', () => {
       await cleanup();
     }
     expect(calls.disposed).toContain('malformed-agent-transform');
+  }, 20_000);
+
+  test.each([
+    ['agent registration', '/approved/scratch/report.txt', 'allow'],
+    ['agent registration', '/forbidden/key', 'deny'],
+    ['agent registration', '/approved/scratch/private/key', 'deny'],
+    ['child projection', '/approved/scratch/report.txt', 'allow'],
+    ['child projection', '/forbidden/key', 'deny'],
+    ['child projection', '/approved/scratch/private/key', 'deny'],
+  ] as const)(
+    '#1374 post-transform policy survives child replacement: %s %s %s',
+    async (surface, resource, expected) => {
+      await Bun.write(
+        path.join(projectDir, '.opencode', 'oh-my-opencode-slim.json'),
+        JSON.stringify({
+          companion: { enabled: false },
+          agents: {
+            fixer: {
+              permission: {
+                external_directory: { '/approved/scratch/private/*': 'deny' },
+              },
+            },
+          },
+        }),
+      );
+      const globalRules: V2PermissionRule[] = [
+        { action: 'external_directory', resource: '*', effect: 'ask' },
+        {
+          action: 'external_directory',
+          resource: '/approved/scratch/*',
+          effect: 'allow',
+        },
+        {
+          action: 'external_directory',
+          resource: '/forbidden/*',
+          effect: 'deny',
+        },
+      ];
+      const { ctx, calls, events } = makeMockV2Context(projectDir);
+      const registered = new Map<string, Record<string, unknown>>();
+      const childUpdates: V2PermissionRule[][] = [];
+      ctx.agent.transform = async (callback) => {
+        callback({
+          // Only the host's build agent exists; fixer is created by the plugin.
+          list: () => [{ id: 'build' }],
+          get: (id: string) =>
+            id === 'build' ? { id, mode: 'primary' } : undefined,
+          update: (
+            id: string,
+            mutate: (draft: Record<string, unknown>) => void,
+          ) => {
+            const draft: Record<string, unknown> = {};
+            mutate(draft);
+            registered.set(id, draft);
+          },
+          default: () => {},
+          remove: () => {},
+        });
+        return { dispose: () => {} };
+      };
+      ctx.session.update = async (input) => {
+        if (input.sessionID === 'child-1374' && input.permissions) {
+          childUpdates.push(input.permissions);
+        }
+        return {};
+      };
+
+      const cleanup = await createV2Setup()(ctx);
+      try {
+        const finalizedAgent = registered.get('fixer');
+        expect(finalizedAgent).toBeDefined();
+        const pluginRules = finalizedAgent?.permissions as V2PermissionRule[];
+        expect(pluginRules).toBeDefined();
+        // v2.0.20 ConfigAgentPlugin runs AFTER external plugin transforms.
+        // Global policy is absent from the initial snapshot by design; the
+        // host appends expanded global rules, then explicit per-agent rules.
+        const finalizedRules: V2PermissionRule[] = [
+          ...pluginRules,
+          ...globalRules,
+          {
+            action: 'external_directory',
+            resource: '/approved/scratch/private/*',
+            effect: 'deny',
+          },
+        ];
+        if (finalizedAgent) finalizedAgent.permissions = finalizedRules;
+        ctx.agent.list = async () => [...registered.values()] as never;
+        // Prove the host finalized policy is correct before any child update.
+        expect(
+          compilePermissionPolicy({
+            baselineRules: finalizedRules,
+            hostRules: [],
+          }).decide('external_directory', resource),
+        ).toBe(expected);
+        if (surface === 'child projection') {
+          events.push({
+            type: 'session.created',
+            data: {
+              sessionID: 'child-1374',
+              parentID: 'parent-1374',
+              agent: 'fixer',
+            },
+          });
+          await settlePump();
+          await calls.promptHookCb?.({
+            sessionID: 'child-1374',
+            messageID: 'message-1374',
+            prompt: { text: 'read the approved scratch path' },
+          });
+          // The child must actually be projected, not merely left alone.
+          expect(childUpdates.length).toBeGreaterThan(0);
+        }
+        const policy = compilePermissionPolicy({
+          baselineRules: finalizedRules,
+          // session.update replaces the session-scoped list; its last payload
+          // is evaluated after the correctly finalized agent rules.
+          hostRules: childUpdates.at(-1) ?? [],
+        });
+        expect(policy.decide('external_directory', resource)).toBe(expected);
+      } finally {
+        await cleanup();
+      }
+    },
+    20_000,
+  );
+
+  test('#1374 an agent pass that ran before the MCP snapshot is rebuilt so host config rules reach plugin agents', async () => {
+    const { ctx } = makeMockV2Context(projectDir);
+    const globalRules: V2PermissionRule[] = [
+      {
+        action: 'external_directory',
+        resource: '/approved/*',
+        effect: 'allow',
+      },
+    ];
+    let pluginAgentTransform: ((draft: unknown) => void) | undefined;
+    let pluginMcpTransform: ((draft: unknown) => void) | undefined;
+    let agents = new Map<string, Record<string, unknown>>();
+    let reloads = 0;
+    // Host State semantics: every read rebuilds a fresh candidate by running
+    // transforms in order; the host config transform (internal post plugin)
+    // appends global rules to every agent present at that point.
+    const rebuild = () => {
+      const next = new Map<string, Record<string, unknown>>([
+        ['build', { id: 'build', permissions: [] }],
+      ]);
+      const editor = {
+        list: () => [...next.values()],
+        get: (id: string) => next.get(id),
+        update: (
+          id: string,
+          mutate: (agent: Record<string, unknown>) => void,
+        ) => {
+          const agent = next.get(id) ?? { id, permissions: [] };
+          mutate(agent);
+          next.set(id, agent);
+        },
+        default: () => {},
+        remove: (id: string) => next.delete(id),
+      };
+      pluginAgentTransform?.(editor);
+      for (const agent of editor.list()) {
+        (agent.permissions as V2PermissionRule[]).push(...globalRules);
+      }
+      agents = next;
+    };
+    ctx.agent.transform = async (callback) => {
+      pluginAgentTransform = callback as (draft: unknown) => void;
+      return { dispose: () => {} };
+    };
+    ctx.agent.reload = async () => {
+      reloads += 1;
+      rebuild();
+    };
+    ctx.agent.list = async () => [...agents.values()] as never;
+    (
+      ctx.mcp as unknown as {
+        transform: (callback: (draft: unknown) => void) => Promise<{
+          dispose: () => void;
+        }>;
+      }
+    ).transform = async (callback) => {
+      pluginMcpTransform = callback;
+      return { dispose: () => {} };
+    };
+
+    const cleanup = await createV2Setup()(ctx);
+    try {
+      // The agent pass runs before the MCP inventory is known.
+      rebuild();
+      expect(agents.has('explorer')).toBe(false);
+      pluginMcpTransform?.({
+        list: () => [],
+        get: () => undefined,
+        set: () => {},
+        update: () => {},
+        remove: () => {},
+      });
+      await settlePump();
+
+      expect(reloads).toBe(1);
+      const explorer = agents.get('explorer');
+      expect(explorer).toBeDefined();
+      expect(
+        compilePermissionPolicy({
+          baselineRules: explorer?.permissions as V2PermissionRule[],
+          hostRules: [],
+        }).decide('external_directory', '/approved/report.txt'),
+      ).toBe('allow');
+    } finally {
+      await cleanup();
+    }
   }, 20_000);
 
   test('native agents without a permissions field register normally', async () => {
@@ -1036,6 +1441,7 @@ describe('createV2Setup e2e', () => {
         calls.promptHookCb?.({
           sessionID: 'ses_marketplace_unknown',
           messageID: 'msg_unknown',
+          prompt: { text: 'unknown marketplace session' },
         }),
       ).rejects.toThrow(/identity is unknown; prompt blocked/i);
 
@@ -1057,8 +1463,43 @@ describe('createV2Setup e2e', () => {
         calls.promptHookCb?.({
           sessionID: 'ses_marketplace_unclassified_child',
           messageID: 'msg_unclassified_child',
+          prompt: { text: 'unclassified child' },
         }),
       ).rejects.toThrow(/identity is unknown; prompt blocked/i);
+
+      // #1374: the child projects the host-finalized agent, whose global
+      // rules follow plugin registration. Ceilings still cap those globals.
+      ctx.agent.list = async () =>
+        [
+          {
+            id: 'v2-marketplace-agent',
+            permissions: [
+              ...packageRules,
+              { action: 'bash', resource: '*', effect: 'allow' },
+              { action: 'read', resource: '/global/*', effect: 'deny' },
+            ],
+          },
+        ] as never;
+      events.push({
+        type: 'session.created',
+        data: {
+          sessionID: 'ses_marketplace_global_child',
+          parentID: 'ses_marketplace_parent',
+          agent: 'v2-marketplace-agent',
+        },
+      });
+      const globalDeadline = Date.now() + 2_000;
+      while (childUpdates.length < 2 && Date.now() < globalDeadline) {
+        await Bun.sleep(10);
+      }
+      expect(childUpdates[1]?.sessionID).toBe('ses_marketplace_global_child');
+      const childPolicy = compilePermissionPolicy({
+        baselineRules: packageRules as V2PermissionRule[],
+        hostRules: childUpdates[1]?.permissions as V2PermissionRule[],
+      });
+      expect(childPolicy.decide('bash', 'ls')).toBe('deny');
+      expect(childPolicy.decide('read', '/global/secret')).toBe('deny');
+      expect(childPolicy.decide('read', 'src/index.ts')).toBe('allow');
     } finally {
       await cleanup();
     }
@@ -1240,6 +1681,8 @@ describe('createV2Setup e2e', () => {
       ).toContainEqual(
         expect.objectContaining({ action: 'host-only_*', effect: 'deny' }),
       );
+      await flushLoggerForTesting();
+      expect(readPluginLog()).toContain('[v2] agents registered {"count":6}');
       await expect(earlyPrompt).resolves.toBeUndefined();
       await calls.promptHookCb?.({
         sessionID: 'ses_deferred_mcp_child',
@@ -1259,6 +1702,89 @@ describe('createV2Setup e2e', () => {
       expect(childUpdates[0]?.permissions).toContainEqual(
         expect.objectContaining({ action: 'host-only_*', effect: 'deny' }),
       );
+    } finally {
+      await cleanup();
+    }
+  }, 20_000);
+
+  test('MCP rebuild does not re-finalize a previously consumed agent draft', async () => {
+    const { ctx, calls } = makeMockV2Context(projectDir);
+    const setupCtx = ctx as unknown as {
+      agent: {
+        transform: (callback: (draft: unknown) => void) => Promise<{
+          dispose: () => void;
+        }>;
+      };
+      mcp: {
+        transform: (callback: (draft: unknown) => void) => Promise<{
+          dispose: () => void;
+        }>;
+      };
+    };
+    const agentState = new Map<string, Record<string, unknown>>();
+    const agentUpdates: string[] = [];
+    let defaultAgent: string | undefined;
+    const agentDraft = {
+      list: () => [],
+      get: (name: string) => agentState.get(name),
+      default: (name: string | undefined) => {
+        defaultAgent = name;
+      },
+      update: (
+        name: string,
+        project: (draft: Record<string, unknown>) => void,
+      ) => {
+        const current = agentState.get(name) ?? {};
+        project(current);
+        agentState.set(name, current);
+        agentUpdates.push(name);
+      },
+      remove: () => {},
+    };
+    let mcpTransform: ((draft: unknown) => void) | undefined;
+    const makeMcpDraft = () => ({
+      list: () => [],
+      get: () => undefined,
+      set: (name: string, config: Record<string, unknown>) => {
+        calls.mcpSets.push({ name, config });
+      },
+      update: () => {},
+      remove: () => {},
+    });
+    setupCtx.agent.transform = async (callback) => {
+      callback(agentDraft);
+      return { dispose: () => calls.disposed.push('persistent-agent') };
+    };
+    setupCtx.mcp.transform = async (callback) => {
+      mcpTransform = callback;
+      callback(makeMcpDraft());
+      return { dispose: () => calls.disposed.push('replayable-mcp') };
+    };
+
+    const cleanup = await createV2Setup()(ctx);
+    try {
+      const explorer = agentState.get('explorer');
+      if (!explorer) throw new Error('Explorer agent was not finalized');
+      const updatesAfterFinalize = agentUpdates.length;
+      const downstreamPermissions = [
+        { action: 'read', resource: 'downstream-only', effect: 'allow' },
+      ];
+      Object.assign(explorer, {
+        model: { providerID: 'downstream', id: 'kept-model' },
+        permissions: downstreamPermissions,
+      });
+      defaultAgent = 'downstream-default';
+
+      if (!mcpTransform) throw new Error('MCP transform was not captured');
+      for (let replay = 0; replay < 2; replay += 1) {
+        mcpTransform(makeMcpDraft());
+        expect(explorer).toMatchObject({
+          model: { providerID: 'downstream', id: 'kept-model' },
+          permissions: downstreamPermissions,
+        });
+        expect(defaultAgent).toBe('downstream-default');
+        expect(agentUpdates).toHaveLength(updatesAfterFinalize);
+      }
     } finally {
       await cleanup();
     }

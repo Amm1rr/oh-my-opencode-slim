@@ -72,10 +72,6 @@ const ALLOWLIST = new Map<string, string>([
     'Date.now() establishes in-memory request/observation ordering for generation-safe status reconciliation; board timestamps are never formatted into prompt content.',
   ],
   [
-    'hooks/image-hook.ts',
-    'Date.now() throttles temp-image cleanup; extracted image paths are deterministic per part id.',
-  ],
-  [
     'hooks/orchestrator-wake/index.ts',
     'Date.now() timestamps event-tracked child/status bookkeeping for wake decisions (staleness bound, busy-set); the wake prompt text is a static constant and never derives from them.',
   ],

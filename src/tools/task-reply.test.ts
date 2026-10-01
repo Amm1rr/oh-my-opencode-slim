@@ -89,6 +89,84 @@ async function routeMappedV2Event(
 }
 
 describe('task_status with a waiting child', () => {
+  test('#1356 native data-keyed permission reply clears only its matching child wait', async () => {
+    resetChildInputWaitForTests();
+    const board = new BackgroundJobBoard();
+    registerBackgroundChild(board);
+    const hook = createInputWaitHook(board);
+    try {
+      for (const requestID of ['per_1356', 'per_other']) {
+        await routeMappedV2Event(hook, {
+          type: 'permission.asked',
+          data: {
+            id: requestID,
+            sessionID: 'ses_child1',
+            action: 'external_directory',
+            resources: ['/approved/scratch/report.txt'],
+          },
+        });
+      }
+      expect(getChildInputWait('ses_child1', 'per_1356')).toBeDefined();
+      expect(getChildInputWait('ses_child1', 'per_other')).toBeDefined();
+
+      // Exact native V2 wire shape; the event pump dispatches raw plus every
+      // synthesized event, just as routeMappedV2Event does here.
+      await routeMappedV2Event(hook, {
+        type: 'permission.replied',
+        data: {
+          sessionID: 'ses_child1',
+          requestID: 'per_1356',
+          reply: 'once',
+        },
+      });
+
+      expect(getChildInputWait('ses_child1', 'per_other')).toBeDefined();
+      expect(getChildInputWait('ses_child1', 'per_1356')).toBeUndefined();
+    } finally {
+      resetChildInputWaitForTests();
+    }
+  });
+
+  test('#1375 permission reply with a properties envelope still clears its child wait', async () => {
+    resetChildInputWaitForTests();
+    const board = new BackgroundJobBoard();
+    registerBackgroundChild(board);
+    const hook = createInputWaitHook(board);
+    try {
+      for (const requestID of ['per_1375', 'per_other']) {
+        await routeMappedV2Event(hook, {
+          type: 'permission.asked',
+          data: {
+            id: requestID,
+            sessionID: 'ses_child1',
+            action: 'external_directory',
+            resources: ['/approved/scratch/report.txt'],
+          },
+        });
+      }
+      expect(getChildInputWait('ses_child1', 'per_1375')).toBeDefined();
+      expect(getChildInputWait('ses_child1', 'per_other')).toBeDefined();
+
+      // Same resolution payload as #1356 but with a bare `properties`
+      // envelope alongside `data` — previously suppressed synthesis, so
+      // the wait stuck and the parent kept seeing `waiting_input`.
+      await routeMappedV2Event(hook, {
+        type: 'permission.replied',
+        data: {
+          sessionID: 'ses_child1',
+          requestID: 'per_1375',
+          reply: 'once',
+        },
+        properties: {},
+      });
+
+      expect(getChildInputWait('ses_child1', 'per_other')).toBeDefined();
+      expect(getChildInputWait('ses_child1', 'per_1375')).toBeUndefined();
+    } finally {
+      resetChildInputWaitForTests();
+    }
+  });
+
   test('surfaces waiting_input with the question and answer guidance', async () => {
     resetChildInputWaitForTests();
     const board = new BackgroundJobBoard();
@@ -479,6 +557,43 @@ describe('task_reply', () => {
     ).rejects.toThrow('timed out');
 
     expect(getChildInputWait('ses_child1', 'per_1')).not.toBeUndefined();
+  });
+
+  test('#1356 a host not-found permission reply clears only that stale wait', async () => {
+    resetChildInputWaitForTests();
+    const board = new BackgroundJobBoard();
+    registerBackgroundChild(board);
+    for (const requestID of ['per_gone', 'per_open']) {
+      noteChildInputWait({
+        taskID: 'ses_child1',
+        parentSessionID: 'parent-1',
+        kind: 'permission',
+        requestID,
+        permission: 'external_directory',
+        patterns: ['/approved/*'],
+      });
+    }
+    const client = {
+      permission: {
+        reply: mock(async () => {
+          throw new Error('Permission request not found: per_gone');
+        }),
+      },
+    };
+    const { task_reply } = createTaskReplyTool({
+      input: { directory: '/test', client } as never,
+      backgroundJobBoard: board,
+    });
+
+    const output = await task_reply.execute(
+      { task_id: 'ses_child1', request_id: 'per_gone', reply: 'once' },
+      { sessionID: 'parent-1' } as never,
+    );
+
+    expect(output).toContain('no longer pending');
+    expect(output).toContain('Nothing was replied');
+    expect(getChildInputWait('ses_child1', 'per_gone')).toBeUndefined();
+    expect(getChildInputWait('ses_child1', 'per_open')).toBeDefined();
   });
 
   test('a timed-out question reject keeps the wait for retry', async () => {

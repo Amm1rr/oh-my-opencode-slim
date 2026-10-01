@@ -111,6 +111,32 @@ describe('child input-wait wake', () => {
     expect(text).toContain('task_reply');
   });
 
+  test('child-input wake text carries the v2-form caveat (negative invariant pin)', async () => {
+    resetOrchestratorWakeGateForTests();
+    const promptAsync = mock(async () => ({}));
+    const session = v1Session(promptAsync);
+    const scheduler = makeScheduler(session);
+
+    scheduler.triggerChildInputWaitWake(
+      'parent-1',
+      delta(),
+      'ses_child1:que_1',
+    );
+    await flush();
+
+    expect(promptAsync).toHaveBeenCalledTimes(1);
+    const call = promptAsync.mock.calls[0]?.[0] as {
+      body: { parts: Array<{ text: string }> };
+    };
+    const text = call.body.parts[0]?.text ?? '';
+    // Negative invariant: a wake delivering a child-input ask always uses
+    // ORCHESTRATOR_CHILD_INPUT_WAKE_TEXT, which carries the v2-form caveat.
+    // If a new delta-send branch ever bypasses it, this pin goes red.
+    expect(text).toContain(
+      'form-created question requests are observable but not answerable',
+    );
+  });
+
   test('duplicate asks do not double-wake', async () => {
     resetOrchestratorWakeGateForTests();
     const promptAsync = mock(async () => ({}));

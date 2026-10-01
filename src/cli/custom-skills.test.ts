@@ -130,6 +130,34 @@ describe('removeLegacySkillSyncState', () => {
     );
   });
 
+  test('rejects empty and directory-alias manifest names without deleting parents', () => {
+    const configDir = tmpDir();
+    const legacyDir = path.join(configDir, '.oh-my-opencode-slim');
+    const skillsDir = path.join(configDir, 'skills');
+    fs.mkdirSync(legacyDir, { recursive: true });
+    fs.mkdirSync(path.join(skillsDir, 'normal'), { recursive: true });
+    fs.writeFileSync(path.join(skillsDir, 'keep.txt'), 'keep');
+    fs.writeFileSync(path.join(configDir, 'keep.txt'), 'keep');
+    fs.writeFileSync(
+      path.join(legacyDir, 'skills-manifest.json'),
+      JSON.stringify({
+        skills: {
+          '': { status: 'managed' },
+          '.': { status: 'managed' },
+          '..': { status: 'managed' },
+          normal: { status: 'managed' },
+        },
+      }),
+    );
+
+    removeLegacySkillSyncState(configDir);
+
+    expect(fs.existsSync(skillsDir)).toBe(true);
+    expect(fs.existsSync(path.join(skillsDir, 'keep.txt'))).toBe(true);
+    expect(fs.existsSync(path.join(configDir, 'keep.txt'))).toBe(true);
+    expect(fs.existsSync(path.join(skillsDir, 'normal'))).toBe(false);
+  });
+
   test('keeps customized copies (user edits) and still clears sync state', () => {
     const configDir = tmpDir();
     fs.mkdirSync(path.join(configDir, '.oh-my-opencode-slim'), {

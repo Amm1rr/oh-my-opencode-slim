@@ -25,6 +25,7 @@ import { ensureCompanionVersion } from './companion/updater';
 import { deepMerge, loadPluginConfig, type Preset } from './config';
 import {
   DEFAULT_MAX_SESSION_METADATA_ENTRIES,
+  SMARTFETCH_SECONDARY_SESSION_TITLE,
   TOAST_DURATION_MS,
 } from './config/constants';
 import type { ConfigLoadWarningKind } from './config/loader';
@@ -127,12 +128,16 @@ import {
   createBackgroundJobTerminalGate,
 } from './utils/background-job-terminal-gate';
 import { isPluginDisabledByEnv } from './utils/env';
-import { isInternalInitiatorPart } from './utils/internal-initiator';
+import {
+  isInternalInitiatorPart,
+  isNativeBackgroundTaskNotification,
+} from './utils/internal-initiator';
 import { probeJSDOM } from './utils/jsdom';
 import { initLogger, log } from './utils/logger';
 import { SessionMetadataStore } from './utils/session-metadata';
 import {
   createSessionSelectionReader,
+  modelFromMetadataString,
   resolveCurrentSelection,
 } from './utils/session-selection';
 import {
@@ -170,9 +175,95 @@ async function appLog(
   }
 }
 
-// Debounce: only show image-skipped toast once per 60 seconds per project
-const lastImageSkippedToastByDir = new Map<string, number>();
-const IMAGE_SKIPPED_DEBOUNCE_MS = 60_000;
+// Debounce: only show the retained-inline image warning once per project
+// every 60 seconds.
+const lastImageRetainedToastByDir = new Map<string, number>();
+const IMAGE_RETAINED_TOAST_DEBOUNCE_MS = 60_000;
+
+type ModelChainEntry = { id: string; variant?: string };
+
+type DelegatedModelSelection = {
+  agentName: string;
+  entry: ModelChainEntry;
+  index: number;
+};
+
+function modelProvider(model: string): string | undefined {
+  const separator = model.indexOf('/');
+  return separator > 0 ? model.slice(0, separator) : undefined;
+}
+
+/**
+ * Pick the child-chain entry that best matches a parent's live fallback.
+ * Exact model matches win. Once the parent has moved past its primary,
+ * specialists prefer the parent's working provider, then the first child
+ * entry outside the providers already exhausted by the parent.
+ */
+function selectDelegatedModel(input: {
+  agentName: string;
+  childChain: ModelChainEntry[] | undefined;
+  followsParent: boolean;
+  parentModel: string | undefined;
+  parentChain: ModelChainEntry[] | undefined;
+}): DelegatedModelSelection | undefined {
+  const { agentName, childChain, parentModel } = input;
+  if (!parentModel) return undefined;
+
+  if (input.followsParent) {
+    const index = childChain?.findIndex((entry) => entry.id === parentModel);
+    return {
+      agentName,
+      entry:
+        index !== undefined && index >= 0
+          ? (childChain?.[index] as ModelChainEntry)
+          : { id: parentModel },
+      index: index ?? -1,
+    };
+  }
+
+  if (!childChain?.length) return undefined;
+
+  const exact = childChain.findIndex((entry) => entry.id === parentModel);
+  if (exact >= 0) {
+    return { agentName, entry: childChain[exact], index: exact };
+  }
+
+  const parentChain = input.parentChain;
+  if (!parentChain) return undefined;
+  const parentIndex = parentChain.findIndex(
+    (entry) => entry.id === parentModel,
+  );
+  if (parentIndex <= 0) return undefined;
+
+  const activeProvider = modelProvider(parentModel);
+  if (activeProvider) {
+    const sameProvider = childChain.findIndex(
+      (entry) => modelProvider(entry.id) === activeProvider,
+    );
+    if (sameProvider >= 0) {
+      return {
+        agentName,
+        entry: childChain[sameProvider],
+        index: sameProvider,
+      };
+    }
+  }
+
+  const exhaustedProviders = new Set(
+    parentChain
+      .slice(0, parentIndex)
+      .map((entry) => modelProvider(entry.id))
+      .filter((provider): provider is string => provider !== undefined),
+  );
+  if (activeProvider) exhaustedProviders.delete(activeProvider);
+  const viable = childChain.findIndex((entry) => {
+    const provider = modelProvider(entry.id);
+    return provider === undefined || !exhaustedProviders.has(provider);
+  });
+  return viable >= 0
+    ? { agentName, entry: childChain[viable], index: viable }
+    : undefined;
+}
 
 // Module-level runtime preset tracking. Survives plugin re-inits triggered
 // by client.config.update() → Instance.dispose(). When the plugin function
@@ -238,10 +329,77 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   // Host flavor ('v2' on OpenCode v2 hosts via the client shim, undefined on
   // v1). Survives the try block so prompt-assembly hooks can use it.
   let hostFlavor: string | undefined;
+  // v1 task() cannot select a model per call. The task before-hook records
+  // the fallback chosen for a delegation; the child's first chat.message
+  // rewrites its model before the host persists it (the host loop reads the
+  // persisted user model). Keyed by parent session for new children and by
+  // child session for task_id resumes. Child links come from session.created,
+  // which v1 publishes synchronously inside session.create.
+  type PendingV1ChildModel = {
+    callID?: string;
+    /** Background tasks return before their child prompts. */
+    background: boolean;
+    agentName: string;
+    entry: ModelChainEntry;
+  };
+  const MAX_PENDING_V1_CHILD_MODELS = 32;
+  const v1ChildParents = new Map<string, string>();
+  const pendingV1ChildModels = new Map<string, PendingV1ChildModel[]>();
+  const pendingV1ResumeModels = new Map<string, PendingV1ChildModel>();
+  const forgetV1ChildRouting = (sessionID: string) => {
+    v1ChildParents.delete(sessionID);
+    pendingV1ChildModels.delete(sessionID);
+    pendingV1ResumeModels.delete(sessionID);
+  };
+  const dropPendingV1ChildModelsForCall = (callID: string) => {
+    const isDropped = (pending: PendingV1ChildModel) =>
+      pending.callID === callID && !pending.background;
+    for (const [parentID, queue] of pendingV1ChildModels) {
+      const kept = queue.filter((pending) => !isDropped(pending));
+      if (kept.length === 0) pendingV1ChildModels.delete(parentID);
+      else if (kept.length !== queue.length)
+        pendingV1ChildModels.set(parentID, kept);
+    }
+    for (const [childID, pending] of pendingV1ResumeModels) {
+      if (isDropped(pending)) pendingV1ResumeModels.delete(childID);
+    }
+  };
+  const takePendingV1ChildModel = (
+    sessionID: string,
+    agentName: string,
+  ): PendingV1ChildModel | undefined => {
+    const resumed = pendingV1ResumeModels.get(sessionID);
+    if (resumed?.agentName === agentName) {
+      pendingV1ResumeModels.delete(sessionID);
+      return resumed;
+    }
+    const parentID = v1ChildParents.get(sessionID);
+    // Only the child's first prompt follows its creation; later prompts
+    // (task_id resumes) are keyed by the child itself.
+    v1ChildParents.delete(sessionID);
+    const queue = parentID ? pendingV1ChildModels.get(parentID) : undefined;
+    const index =
+      queue?.findIndex((pending) => pending.agentName === agentName) ?? -1;
+    if (!parentID || !queue || index < 0) return undefined;
+    const [pending] = queue.splice(index, 1);
+    if (queue.length === 0) pendingV1ChildModels.delete(parentID);
+    return pending;
+  };
   let autoUpdateChecker: ReturnType<typeof createAutoUpdateCheckerHook>;
+  const v1InternalSelectionOverrides = new Map<
+    string,
+    {
+      agent?: string;
+      model?: { providerID: string; modelID: string };
+      modelText?: string;
+      variant?: string;
+    }
+  >();
   const sessionMetadata = new SessionMetadataStore({
     maxEntries: DEFAULT_MAX_SESSION_METADATA_ENTRIES,
     onEvict: (sessionID) => {
+      v1InternalSelectionOverrides.delete(sessionID);
+      forgetV1ChildRouting(sessionID);
       log('[session] evicted oldest session metadata', {
         threshold: DEFAULT_MAX_SESSION_METADATA_ENTRIES,
         droppedSessionId: sessionID,
@@ -249,22 +407,50 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     },
   });
   const compactingSessionIds = new Set<string>();
+  // smartfetch's temporary secondary-model sessions run under the default
+  // agent; they must never reach the sidebar, metadata or session hooks.
+  const internalSessionIds = new Set<string>();
   const ownedTuiActivitySessions = new Map<string, string>();
   // #1079: lifecycle continuations (orchestrator wake, terminal
   // notifications) resolve the session's CURRENT agent/model at send
   // time instead of hardcoding `orchestrator`. Host-persisted selection
-  // wins; slim metadata (fed only by external admissions — see the
-  // chat.message filter) is the fallback.
+  // normally wins; when a v1 unpinned internal continuation has temporarily
+  // overwritten it, preserve the exact policy-selected continuation until
+  // the next real operator admission.
   const lifecycleSelectionReader = createSessionSelectionReader(
     ctx.client,
     ctx.directory,
   );
-  const lifecycleSelectionResolver = (sessionID: string) =>
-    resolveCurrentSelection(
+  const lifecycleSelectionResolver = async (sessionID: string) => {
+    const resolved = await resolveCurrentSelection(
       sessionID,
       lifecycleSelectionReader,
       sessionMetadata,
     );
+    const internalOverride = v1InternalSelectionOverrides.get(sessionID);
+    if (!internalOverride) return resolved;
+
+    // v1 computes an unpinned synthetic continuation from the static agent
+    // primary and persists that choice before chat.message runs. While that
+    // host selection is known to be internal, preserve the exact selection
+    // chosen for that continuation. A later external admission clears the
+    // override and makes the host authoritative again.
+    const agent = internalOverride.agent ?? resolved.agent;
+    const modelText = internalOverride.modelText;
+    const model = internalOverride.model ?? resolved.model;
+    return {
+      ...(agent ? { agent } : {}),
+      ...(model ? { model } : {}),
+      ...(internalOverride.variant
+        ? { variant: internalOverride.variant }
+        : modelText && agent
+          ? { variant: resolveTuiVariantForModel(agent, modelText) }
+          : resolved.variant
+            ? { variant: resolved.variant }
+            : {}),
+      provenance: 'observed-external' as const,
+    };
+  };
   // Busy/retry arrived before the session's agent was known. chat.message
   // latches the agent and flushes these so the spinner still starts. The
   // observed status is kept so the flushed activation records the right
@@ -305,10 +491,10 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     ownedTuiActivitySessions.set(sessionID, directory);
     void hydrateTuiSessionParent(sessionID, directory);
   };
-  // Sessions that predate this fix or whose session.created event was
-  // missed have no link in the persistent index. Ask the host once per
-  // session and walk up to a confirmed root; absence of parentID on a
-  // valid response is a final answer (top-level chat).
+  // Sessions whose child→parent link is missing ask the host and walk up
+  // to a confirmed root. Only confirmed roots and in-flight lookups stay
+  // in this set; a valid response without parentID is a final answer
+  // (top-level chat).
   const hydratedTuiParents = new Set<string>();
   const hydrateTuiSessionParent = async (
     startSessionID: string,
@@ -361,6 +547,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       }
       if (typeof parentID === 'string' && parentID !== current) {
         recordTuiSessionParent(current, parentID, directory);
+        hydratedTuiParents.delete(current);
         current = parentID;
         continue;
       }
@@ -517,6 +704,34 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
 
     const resolvedName = resolveRuntimeAgentName(runtime, agentType);
     return readModel(finalAgentConfig?.[resolvedName]);
+  };
+
+  const resolveDelegatedModelForParent = (
+    agentType: string,
+    parentSessionID?: string,
+  ): DelegatedModelSelection | undefined => {
+    if (!parentSessionID) return undefined;
+    const agentName = resolveRuntimeAgentName(runtime, agentType);
+    const parentAgentRaw = sessionMetadata.getAgent(parentSessionID);
+    const parentAgent = parentAgentRaw
+      ? resolveRuntimeAgentName(runtime, parentAgentRaw)
+      : undefined;
+    const followsParent =
+      runtime.agent(agentName)?.inheritModelFrom === 'orchestrator' ||
+      runtime.agent(agentName)?.inheritModelFrom === 'session';
+    return selectDelegatedModel({
+      agentName,
+      childChain: runtime.modelArrays[agentName],
+      followsParent,
+      // External-selection metadata deliberately ignores internal fallback
+      // replays (#1079). Delegation needs the opposite view: the model
+      // actually executing this parent turn, or children will be launched
+      // back onto the provider the parent just escaped.
+      parentModel:
+        foregroundFallback?.getActiveFallbackModel(parentSessionID) ??
+        sessionMetadata.getModel(parentSessionID),
+      parentChain: parentAgent ? runtime.modelArrays[parentAgent] : undefined,
+    });
   };
 
   try {
@@ -771,15 +986,11 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // taken over. Disable the manager's automatic intervention entirely on v2
     // (unregistering only the retry hook is not enough: session.error,
     // message.updated and session.status retry all reach the replay path).
-    const fallbackEnabled =
+    const fallbackUserEnabled =
       runtime.fallback.enabled !== false &&
-      !runtime.disabledHooks.has('foreground-fallback') &&
-      hostFlavor !== 'v2';
-    if (
-      runtime.fallback.enabled !== false &&
-      !runtime.disabledHooks.has('foreground-fallback') &&
-      hostFlavor === 'v2'
-    ) {
+      !runtime.disabledHooks.has('foreground-fallback');
+    const fallbackEnabled = fallbackUserEnabled && hostFlavor !== 'v2';
+    if (fallbackUserEnabled && hostFlavor === 'v2') {
       // Deterministic notice: no timestamps or per-call ids. Do not log when
       // the user explicitly disabled fallback, including via disabled_hooks.
       log(
@@ -831,18 +1042,27 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       backgroundJobSupervisor,
       backgroundTaskConcurrency,
       pendingCallTracker: admissionRuntimeLease.pendingCallTracker,
-      getModelForAgent: (agentType: string, parentSessionID?: string) =>
+      getModelForAgent: (agentType: string, parentSessionID?: string) => {
+        const delegated = resolveDelegatedModelForParent(
+          agentType,
+          parentSessionID,
+        );
+        if (delegated) return delegated.entry.id;
+
         // Admission must use the config after the host has merged all of its
         // agent layers. The direct lookup preserves display-name keys; the
-        // resolved lookup handles canonical names and legacy aliases. A
-        // parent model is only an inheritance fallback when neither final
-        // agent entry carries one.
-        resolvePrimaryModelFromFinalHostConfig(agentType) ??
-        (parentSessionID
-          ? sessionMetadata.getModel(parentSessionID)
-          : undefined),
+        // resolved lookup handles canonical names and legacy aliases.
+        return (
+          resolvePrimaryModelFromFinalHostConfig(agentType) ??
+          (parentSessionID
+            ? sessionMetadata.getModel(parentSessionID)
+            : undefined)
+        );
+      },
       sameProviderPolicy: runtime.backgroundJobs.sameProviderPolicy,
-      getSessionModel: (sessionID) => sessionMetadata.getModel(sessionID),
+      getSessionModel: (sessionID) =>
+        foregroundFallback.getActiveFallbackModel(sessionID) ??
+        sessionMetadata.getModel(sessionID),
       hostFlavor,
       shouldManageSession: (sessionID) =>
         sessionMetadata.getAgent(sessionID) === 'orchestrator' ||
@@ -1564,6 +1784,17 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // inference/runtime profiles for new child sessions + the sidebar.
     // Unknown to v1 hosts, consumed by src/v2/setup.ts.
     'v2.refreshProfiles': refreshProfilesFromDisk,
+    // v2's native subagent tool accepts a per-call model override. Keep a
+    // delegated child on the parent's active fallback model when that model
+    // belongs to the child's own ordered chain. v1 task() has no model field,
+    // so this capability is consumed only by the v2 bridge.
+    'v2.resolveDelegatedModel': ({
+      agentType,
+      parentSessionID,
+    }: {
+      agentType: string;
+      parentSessionID: string;
+    }) => resolveDelegatedModelForParent(agentType, parentSessionID)?.entry.id,
     'v2.session.retry':
       foregroundFallback.handleV2Retry.bind(foregroundFallback),
 
@@ -1635,7 +1866,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         ...currentAgentConfig,
         ...structuredClone(registry.managedAgentConfig),
       };
-      finalHostAgentConfig = opencodeConfig.agent as Record<string, unknown>;
       const currentMcpConfig =
         opencodeConfig.mcp && typeof opencodeConfig.mcp === 'object'
           ? (opencodeConfig.mcp as Record<string, unknown>)
@@ -1651,6 +1881,11 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         },
         ctx.directory,
       );
+
+      // This is the source of truth for admission. It is intentionally
+      // captured only after every host/plugin merge, model pass and
+      // permission pass.
+      finalHostAgentConfig = opencodeConfig.agent as Record<string, unknown>;
 
       registryBridge.prepareCommands(opencodeConfig);
     },
@@ -1670,8 +1905,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       ) {
         return;
       }
-
-      await cacheMonitor.event(input);
 
       const event = input.event as {
         type: string;
@@ -1702,6 +1935,18 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       // message id in info.id and the session id in info.sessionID. Resolve
       // by session so child activity refreshes the correct stuck timer.
       const eventSessionID = resolveEventSessionID(event);
+      if (
+        eventSessionID &&
+        event.type === 'session.created' &&
+        event.properties?.info?.title === SMARTFETCH_SECONDARY_SESSION_TITLE
+      ) {
+        internalSessionIds.add(eventSessionID);
+      }
+      if (eventSessionID && internalSessionIds.has(eventSessionID)) {
+        if (event.type !== 'session.deleted') return;
+        internalSessionIds.delete(eventSessionID);
+      }
+      await cacheMonitor.event(input);
       const rawStatus = event.properties?.status;
       const statusType =
         typeof rawStatus === 'string'
@@ -1813,6 +2058,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           event.properties as { info?: { parentID?: unknown } } | undefined
         )?.info?.parentID;
         if (createdSessionId && typeof createdSessionParent === 'string') {
+          if (hostFlavor !== 'v2') {
+            v1ChildParents.set(createdSessionId, createdSessionParent);
+          }
           // Persist the child→parent link so any process can resolve the
           // conversation root, surviving restarts and revives (#1147).
           recordTuiSessionParent(
@@ -1915,6 +2163,8 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         }
         companionManager.onSessionDeleted(sessionID);
         if (sessionID) {
+          v1InternalSelectionOverrides.delete(sessionID);
+          forgetV1ChildRouting(sessionID);
           sessionMetadata.delete(sessionID);
         }
       }
@@ -1938,6 +2188,10 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       // so generation two would otherwise inherit generation one's
       // two-wake no-progress caps and never wake those sessions again.
       clearAllWakeSessions();
+      v1InternalSelectionOverrides.clear();
+      v1ChildParents.clear();
+      pendingV1ChildModels.clear();
+      pendingV1ResumeModels.clear();
       await interviewManager.dispose();
       clearTuiActivities();
       tuiReusableProjection?.dispose();
@@ -1974,6 +2228,44 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         input as never,
         output as never,
       );
+      if (
+        hostFlavor !== 'v2' &&
+        input.tool.toLowerCase() === 'task' &&
+        output.args !== null &&
+        typeof output.args === 'object' &&
+        !Array.isArray(output.args)
+      ) {
+        const args = output.args as Record<string, unknown>;
+        if (typeof args.subagent_type === 'string') {
+          const selected = resolveDelegatedModelForParent(
+            args.subagent_type,
+            input.sessionID,
+          );
+          // subagent_type stays canonical: the host's task permission and
+          // agent lookup see the real specialist name.
+          if (selected && selected.index > 0) {
+            const pending: PendingV1ChildModel = {
+              ...(input.callID ? { callID: input.callID } : {}),
+              background: args.background === true,
+              agentName: selected.agentName,
+              entry: selected.entry,
+            };
+            if (typeof args.task_id === 'string' && args.task_id) {
+              pendingV1ResumeModels.set(args.task_id, pending);
+            } else {
+              const queue = pendingV1ChildModels.get(input.sessionID) ?? [];
+              queue.push(pending);
+              if (queue.length > MAX_PENDING_V1_CHILD_MODELS) queue.shift();
+              pendingV1ChildModels.set(input.sessionID, queue);
+            }
+            log('[delegation] routing v1 child to active fallback model', {
+              parentSessionID: input.sessionID,
+              agent: selected.agentName,
+              model: selected.entry.id,
+            });
+          }
+        }
+      }
       // Record a call only after all rejecting before-hooks have accepted it.
       // In particular, search-path-guard can reject grep/glob before the host
       // emits tool.execute.after; running the loop guard first would leave a
@@ -2077,24 +2369,13 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         parts?: unknown[];
       },
     ) => {
+      if (internalSessionIds.has(input.sessionID)) return;
       // A fresh user message proves no compaction transform is coming for a
       // pending mark (the host runs compacting → transform back to back):
       // drop it so a stale mark can never strip reminders from an ordinary
       // turn. Fails safe — worst case the summary keeps the boilerplate,
       // which is the pre-change behavior.
       compactingSessionIds.delete(input.sessionID);
-      const rawAgent = input.agent ?? output?.message?.agent;
-      const agent = rawAgent
-        ? resolveRuntimeAgentName(runtime, rawAgent)
-        : undefined;
-
-      if (
-        agent &&
-        output?.message &&
-        typeof output.message.agent === 'string'
-      ) {
-        output.message.agent = agent;
-      }
 
       // #1079: internal admissions (lifecycle wakes, terminal
       // notifications) must not overwrite the user's tracked selection.
@@ -2108,8 +2389,10 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       const messageID = input.messageID ?? output?.message?.id;
       const inputParts = Array.isArray(input.parts) ? input.parts : [];
       const outputParts = Array.isArray(output?.parts) ? output.parts : [];
-      const partsInternal = [...inputParts, ...outputParts].some((part) =>
-        isInternalInitiatorPart(part),
+      const partsInternal = [...inputParts, ...outputParts].some(
+        (part) =>
+          isInternalInitiatorPart(part) ||
+          isNativeBackgroundTaskNotification(part),
       );
       // v1 chat.message sees the internal parts but historically never
       // recorded the message id, so the later message.updated could not
@@ -2123,6 +2406,134 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         partsInternal ||
         (typeof messageID === 'string' &&
           isInternalAdmission(input.sessionID, messageID));
+      if (!internalAdmission) {
+        foregroundFallback.observeExternalTurn(input.sessionID);
+      }
+
+      // v1 delegated child on a parent's active fallback (recorded by the
+      // task before-hook): rewrite the prompt's model before the host
+      // persists the message. The host loop runs on the persisted model.
+      const childAgentRaw = input.agent ?? output?.message?.agent;
+      const routedChild =
+        hostFlavor !== 'v2' && !internalAdmission && childAgentRaw
+          ? takePendingV1ChildModel(
+              input.sessionID,
+              resolveRuntimeAgentName(runtime, childAgentRaw),
+            )
+          : undefined;
+      const routedChildModel = modelFromMetadataString(routedChild?.entry.id);
+      // A child already on the routed model (inherited from the parent)
+      // keeps its message untouched, including the inherited variant.
+      if (
+        routedChild &&
+        routedChildModel &&
+        output?.message &&
+        (output.message.model?.providerID !== routedChildModel.providerID ||
+          output.message.model?.modelID !== routedChildModel.modelID)
+      ) {
+        output.message.model = {
+          ...routedChildModel,
+          ...(routedChild.entry.variant
+            ? { variant: routedChild.entry.variant }
+            : {}),
+        };
+        log('[delegation] routed v1 child to active fallback model', {
+          sessionID: input.sessionID,
+          agent: routedChild.agentName,
+          model: routedChild.entry.id,
+        });
+      }
+
+      // OpenCode v1's native background notifier does not pin a model. The
+      // host therefore constructs (and persists) this synthetic message on
+      // the agent's static primary before exposing chat.message, even when
+      // the parent is already running on a fallback. Rewrite the message to
+      // the policy-selected model: either retry the last external selection
+      // or retain the confirmed fallback. Remember the exact selection so
+      // later Slim lifecycle continuations use the same policy decision.
+      const unpinnedV1InternalContinuation =
+        hostFlavor !== 'v2' && internalAdmission && input.model === undefined;
+      const trackedAgent = unpinnedV1InternalContinuation
+        ? sessionMetadata.getAgent(input.sessionID)
+        : undefined;
+      const trackedModelText = unpinnedV1InternalContinuation
+        ? runtime.fallback.continuationPolicy === 'stick-to-fallback'
+          ? (foregroundFallback.getActiveFallbackModel(input.sessionID) ??
+            sessionMetadata.getModel(input.sessionID))
+          : sessionMetadata.getModel(input.sessionID)
+        : undefined;
+      const trackedModel = modelFromMetadataString(trackedModelText);
+      let rewroteInternalSelection = false;
+      if (output?.message && unpinnedV1InternalContinuation) {
+        if (trackedAgent && output.message.agent !== trackedAgent) {
+          output.message.agent = trackedAgent;
+          rewroteInternalSelection = true;
+        }
+        if (
+          trackedModel &&
+          (output.message.model?.providerID !== trackedModel.providerID ||
+            output.message.model?.modelID !== trackedModel.modelID)
+        ) {
+          const variant = trackedAgent
+            ? resolveTuiVariantForModel(trackedAgent, trackedModelText ?? '')
+            : undefined;
+          output.message.model = {
+            ...trackedModel,
+            ...(variant ? { variant } : {}),
+          };
+          rewroteInternalSelection = true;
+        }
+      }
+      if (
+        output?.message &&
+        trackedModel &&
+        trackedModelText &&
+        output.message.model?.providerID === trackedModel.providerID &&
+        output.message.model?.modelID === trackedModel.modelID
+      ) {
+        // The continuation policy changed (or confirmed) the model actually
+        // serving this turn. Keep fallback state in sync so a task delegated
+        // before the next external admission follows that model rather than
+        // a stale fallback from the preceding turn.
+        foregroundFallback.observeContinuationModel(
+          input.sessionID,
+          trackedModelText,
+        );
+      }
+      if (rewroteInternalSelection) {
+        v1InternalSelectionOverrides.set(input.sessionID, {
+          ...(trackedAgent ? { agent: trackedAgent } : {}),
+          ...(trackedModel ? { model: trackedModel } : {}),
+          ...(trackedModelText ? { modelText: trackedModelText } : {}),
+          ...(output?.message?.model?.variant
+            ? { variant: output.message.model.variant }
+            : {}),
+        });
+        log('[fallback] applied v1 internal continuation model policy', {
+          sessionID: input.sessionID,
+          agent: trackedAgent,
+          model: trackedModelText,
+          policy: runtime.fallback.continuationPolicy,
+        });
+      } else if (!internalAdmission) {
+        v1InternalSelectionOverrides.delete(input.sessionID);
+      }
+
+      const rawAgent =
+        (unpinnedV1InternalContinuation ? trackedAgent : undefined) ??
+        input.agent ??
+        output?.message?.agent;
+      const agent = rawAgent
+        ? resolveRuntimeAgentName(runtime, rawAgent)
+        : undefined;
+
+      if (
+        agent &&
+        output?.message &&
+        typeof output.message.agent === 'string'
+      ) {
+        output.message.agent = agent;
+      }
 
       if (agent) {
         foregroundFallback.registerSessionAgent(input.sessionID, agent);
@@ -2155,7 +2566,10 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       // inheriting background task could be admitted before its parent's
       // model is known — admission then resolves the correct provider/model
       // cap immediately.
-      const messageModel = input.model ?? output?.message?.model;
+      const messageModel =
+        (routedChild ? routedChildModel : undefined) ??
+        input.model ??
+        output?.message?.model;
       if (
         messageModel &&
         typeof messageModel.providerID === 'string' &&
@@ -2299,14 +2713,14 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       });
       if (imageResult) {
         const now = Date.now();
-        const last = lastImageSkippedToastByDir.get(ctx.directory) ?? 0;
-        if (now - last > IMAGE_SKIPPED_DEBOUNCE_MS) {
+        const last = lastImageRetainedToastByDir.get(ctx.directory) ?? 0;
+        if (now - last > IMAGE_RETAINED_TOAST_DEBOUNCE_MS) {
           ctx.client.tui
             .showToast({
               body: {
-                title: 'Images skipped',
+                title: 'Images retained inline',
                 message:
-                  'Observer agent is disabled, so images can\'t be analyzed. Set image_routing to "direct" to send images to your model, or enable observer.',
+                  'Observer is disabled, so image attachments remain inline and may require a vision-capable orchestrator. Enable observer or set image_routing to "direct".',
                 variant: 'warning',
                 duration: TOAST_DURATION_MS,
               },
@@ -2315,7 +2729,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
               // Only advance the debounce window on a successful toast
               // so a failed attempt doesn't suppress the next warning.
               // Greptile: "Failed Toast Starts Debounce Window".
-              lastImageSkippedToastByDir.set(ctx.directory, now);
+              lastImageRetainedToastByDir.set(ctx.directory, now);
             })
             .catch(() => {});
         }
@@ -2340,6 +2754,12 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
 
     'tool.execute.after': async (input, output) => {
       await deepworkGuardAfter(input, output);
+      // A foreground task that never reached its child prompt must not leave
+      // a routed model for a later delegation. Background entries (flagged
+      // by the before-hook) stay until their child consumes them.
+      if (input.tool.toLowerCase() === 'task' && input.callID) {
+        dropPendingV1ChildModelsForCall(input.callID);
+      }
       await jsonErrorRecoveryAfter(input, output);
       await toolLoopGuard['tool.execute.after'](
         input as never,
@@ -2349,6 +2769,10 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     },
   } as Hooks & {
     'v2.refreshProfiles': typeof refreshProfilesFromDisk;
+    'v2.resolveDelegatedModel': (input: {
+      agentType: string;
+      parentSessionID: string;
+    }) => string | undefined;
   };
 
   return hooks;

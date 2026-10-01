@@ -70,6 +70,11 @@ export interface PersistedTombstoneEntry {
   taskID: string;
   epoch: number;
   recordedAt: number;
+  /** Terminal state recorded when an evicted task had already ended with a
+   * result, so a post-restart task_revive can surface the recorded result
+   * instead of re-prompting the child. */
+  terminalState?: 'completed' | 'error' | 'cancelled';
+  resultSummary?: string;
 }
 
 export interface PersistedBackgroundJobState {
@@ -196,7 +201,12 @@ export async function loadInitialBackgroundJobPersistence(): Promise<PersistedBa
           typeof value?.epoch === 'number' &&
           Number.isFinite(value.epoch)
         ) {
+          // Passthrough + validation: the load must mirror the write shape,
+          // so new persisted fields survive by construction; validation
+          // only rejects bad values — it never selects fields (a whitelist
+          // silently drops fields added to the write path).
           const record: PersistedTombstoneEntry = {
+            ...value,
             taskID: value.taskID,
             epoch: value.epoch,
             recordedAt:
@@ -205,6 +215,18 @@ export async function loadInitialBackgroundJobPersistence(): Promise<PersistedBa
                 ? value.recordedAt
                 : 0,
           };
+          if (
+            !(
+              (record.terminalState === 'completed' ||
+                record.terminalState === 'error' ||
+                record.terminalState === 'cancelled') &&
+              typeof record.resultSummary === 'string' &&
+              record.resultSummary
+            )
+          ) {
+            delete record.terminalState;
+            delete record.resultSummary;
+          }
           state.tombstones.set(record.taskID, record);
           state.deletionEpochs.set(record.taskID, record.epoch);
         }
@@ -243,12 +265,22 @@ export function persistedBackgroundJobState(): PersistedBackgroundJobState {
  * `recordBackgroundJobSuppression`). The epoch comes from the ledger so
  * in-memory and persisted epochs stay identical.
  */
-export function recordSuppression(taskID: string, epoch?: number): void {
+export function recordSuppression(
+  taskID: string,
+  epoch?: number,
+  terminal?: {
+    state: 'completed' | 'error' | 'cancelled';
+    resultSummary: string;
+  },
+): void {
   const effectiveEpoch = epoch ?? nextFreeEpoch();
   const record: PersistedTombstoneEntry = {
     taskID,
     epoch: effectiveEpoch,
     recordedAt: Date.now(),
+    ...(terminal
+      ? { terminalState: terminal.state, resultSummary: terminal.resultSummary }
+      : {}),
   };
   liveTombstones.set(taskID, record);
   enforceTombstoneCap();
@@ -283,6 +315,15 @@ export function clearSuppression(taskID: string): void {
   enqueueWrite(tombstoneKey(taskID), async () => {
     await backend?.remove(tombstoneKey(taskID));
   });
+}
+
+/** Read a persisted suppression tombstone (hydrated at load, maintained by
+ * record/clear). Terminal-result entries let a post-restart task_revive
+ * surface the recorded result instead of re-prompting the child. */
+export function getSuppressionTombstone(
+  taskID: string,
+): PersistedTombstoneEntry | undefined {
+  return liveTombstones.get(taskID);
 }
 
 function enforceTombstoneCap(): void {

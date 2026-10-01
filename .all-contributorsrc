@@ -1136,6 +1136,33 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "EmojiPati",
+      "name": "pati",
+      "avatar_url": "https://avatars.githubusercontent.com/u/49492351?v=4",
+      "profile": "https://github.com/EmojiPati",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "unsnow-iac",
+      "name": "unsnow-iac",
+      "avatar_url": "https://avatars.githubusercontent.com/u/256081678?v=4",
+      "profile": "https://github.com/unsnow-iac",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "guidan-nick",
+      "name": "guidan-nick",
+      "avatar_url": "https://avatars.githubusercontent.com/u/224735395?v=4",
+      "profile": "https://github.com/guidan-nick",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "commitConvention": "angular"

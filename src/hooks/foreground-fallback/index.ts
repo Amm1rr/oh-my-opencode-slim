@@ -415,6 +415,11 @@ export class ForegroundFallbackManager {
   > = {};
   /** sessionID → last observed model string ("providerID/modelID") */
   private readonly sessionModel = new Map<string, string>();
+  /** sessionID → model selected by a confirmed fallback replay.
+   *  Kept separate from sessionModel because synthetic admissions may emit
+   *  message.updated events for another model without changing the model
+   *  serving the user's active turn. */
+  private readonly activeFallbackModel = new Map<string, string>();
   /** sessionID → agent name (populated from message.updated info.agent field) */
   private readonly sessionAgent = new Map<string, string>();
   /** child sessionID → parent sessionID (from session.created info).
@@ -615,8 +620,7 @@ export class ForegroundFallbackManager {
     return true;
   }
 
-  private noteExternalTurn(sessionID: string, messageID: string): boolean {
-    if (this.lastUserMessageID.get(sessionID) === messageID) return false;
+  private noteExternalTurn(sessionID: string, messageID: string): void {
     this.lastUserMessageID.set(sessionID, messageID);
     this.turnEpoch.set(sessionID, (this.turnEpoch.get(sessionID) ?? 0) + 1);
     this.lastTrigger.delete(sessionID);
@@ -629,7 +633,6 @@ export class ForegroundFallbackManager {
     this.sessionRetries.delete(sessionID);
     this.retryAttempt.delete(sessionID);
     this.cancelInitialDelay(sessionID);
-    return true;
   }
 
   private nextUserEventSequence(sessionID: string): number {
@@ -756,22 +759,9 @@ export class ForegroundFallbackManager {
     eventParts: unknown[],
     partsAvailable: boolean,
   ): Promise<boolean> {
-    if (this.replayMessageIds.get(sessionID)?.has(messageID)) return true;
-    if (
-      eventParts.some(
-        (part) =>
-          isInternalInitiatorPart(part) ||
-          (isRecord(part) &&
-            typeof part.text === 'string' &&
-            part.text.includes(SLIM_INTERNAL_INITIATOR_MARKER)),
-      )
-    ) {
-      this.rememberReplayMessage(sessionID, messageID);
-      return true;
-    }
     // In v1, message.updated can carry only info while message parts are
     // emitted separately. When parts are present on this event and contain
-    // no internal marker, the message is an external turn.
+    // no internal marker (the caller checked them), it is an external turn.
     if (partsAvailable && eventParts.length > 0) return false;
 
     try {
@@ -883,6 +873,7 @@ export class ForegroundFallbackManager {
     if (coordinator) {
       coordinator.onSessionDeleted((id) => {
         this.sessionModel.delete(id);
+        this.activeFallbackModel.delete(id);
         this.sessionAgent.delete(id);
         this.sessionTried.delete(id);
         // NOTE: inProgress is intentionally NOT cleared here —
@@ -909,6 +900,31 @@ export class ForegroundFallbackManager {
         this.cancelInitialDelay(id);
       });
     }
+  }
+
+  /** Confirmed fallback model serving this session's active user turn. */
+  getActiveFallbackModel(sessionID: string): string | undefined {
+    return this.activeFallbackModel.get(sessionID);
+  }
+
+  /** Reconcile an internal continuation that explicitly selected a model.
+   *  Returning to the configured primary ends the previous fallback episode,
+   *  while retaining the confirmed fallback keeps its delegation hint live. */
+  observeContinuationModel(sessionID: string, model: string): void {
+    const previousModel = this.sessionModel.get(sessionID);
+    this.sessionModel.set(sessionID, model);
+    if (this.activeFallbackModel.get(sessionID) !== model) {
+      this.activeFallbackModel.delete(sessionID);
+    }
+    if (previousModel !== model) {
+      this.onSessionModelChanged?.(sessionID, model);
+    }
+  }
+
+  /** A genuine external turn starts from the host-selected model again;
+   *  promptAsync model overrides are per-message and do not persist. */
+  observeExternalTurn(sessionID: string): void {
+    this.activeFallbackModel.delete(sessionID);
   }
 
   /**
@@ -939,6 +955,10 @@ export class ForegroundFallbackManager {
             typeof info.id === 'string' &&
             !this.isKnownInternalReplayUserMessage(sessionID, info.id, parts)
           ) {
+            // A re-emitted update of the observed turn (v1: one per step
+            // finish) is inert: no transcript probe, no model re-seed (fallback
+            // may have advanced it), no sequence bump superseding a newer turn.
+            if (this.lastUserMessageID.get(sessionID) === info.id) break;
             const eventSequence = this.nextUserEventSequence(sessionID);
             const isInternal = await this.isInternalReplayUserMessage(
               sessionID,
@@ -949,9 +969,8 @@ export class ForegroundFallbackManager {
             if (this.userEventSequence.get(sessionID) !== eventSequence) {
               break;
             }
-            const isNewExternalTurn =
-              !isInternal && this.noteExternalTurn(sessionID, info.id);
-            if (isNewExternalTurn && isRecord(info.model)) {
+            if (!isInternal) this.noteExternalTurn(sessionID, info.id);
+            if (!isInternal && isRecord(info.model)) {
               const providerID = info.model.providerID;
               const modelID = info.model.modelID ?? info.model.id;
               if (
@@ -961,10 +980,6 @@ export class ForegroundFallbackManager {
                 this.sessionModel.set(sessionID, `${providerID}/${modelID}`);
               }
             }
-            // User-message update events can be re-emitted for an already
-            // observed message after fallback has advanced the session model.
-            // Only a newly confirmed external turn may seed its model.
-            if (!isInternal && !isNewExternalTurn) break;
           }
         }
         // Capture agent name when available (OpenCode includes it on subagent messages)
@@ -1292,6 +1307,7 @@ export class ForegroundFallbackManager {
       if (this.disposed) return;
       event.decision = { retry: true, delay: this.retryDelayMs };
       this.sessionModel.set(sessionID, nextModel);
+      this.activeFallbackModel.set(sessionID, nextModel);
       this.onSessionModelChanged?.(sessionID, nextModel);
       this.showFallbackToast(agentName, nextModel, event.error);
       log('[foreground-fallback] retry hook switched model in place', {
@@ -1320,6 +1336,7 @@ export class ForegroundFallbackManager {
             )
               return;
             this.sessionModel.set(event.sessionID, target);
+            this.activeFallbackModel.set(event.sessionID, target);
             this.onSessionModelChanged?.(event.sessionID, target);
             log('[foreground-fallback] retry hook reconciled a late switch', {
               sessionID: event.sessionID,
@@ -1798,9 +1815,9 @@ export class ForegroundFallbackManager {
       // whole history. Long-lived sessions serve the full listing in the
       // hundreds of megabytes (measured 463 MB / 11.7 s on a live
       // months-old orchestrator session), which delayed every failover by
-      // ~20 s. The `limit` query keeps the hot path O(tail); the full read
-      // remains as a fallback for hosts that ignore it or transcripts whose
-      // tail carries no replayable user message.
+      // ~20 s. The `limit` query keeps the hot path O(tail). A tail without a
+      // user message is one long turn: read only the user message its last
+      // entry answers (v1 `parentID`); shapes without that id read it all.
       const tailResult = await session.messages({
         path: { id: sessionID },
         query: { limit: FALLBACK_REPLAY_TAIL_MESSAGES },
@@ -1814,24 +1831,28 @@ export class ForegroundFallbackManager {
       // undefined at runtime (OpenCode violates its own declared type), and
       // v2 messages carry `type`/`text` instead of `info`/`parts`, so guard
       // each entry instead of dereferencing a fixed shape.
-      let messages = (tailResult.data ?? []) as unknown[];
+      const messages = (tailResult.data ?? []) as unknown[];
       let requestError: unknown = tailResult.error ?? undefined;
-      if (!messages.some((message) => isReplayableUserMessage(message))) {
-        const fullResult = await session.messages({
-          path: { id: sessionID },
-        });
+      let lastUser = messages.findLast(isReplayableUserMessage);
+      if (!lastUser) {
+        const parentID = (messages.at(-1) as { info?: { parentID?: unknown } })
+          ?.info?.parentID;
+        const deepResult = await (typeof parentID === 'string'
+          ? session.message({ path: { id: sessionID, messageID: parentID } })
+          : session.messages({ path: { id: sessionID } }));
         if (!this.isCurrentTurn(sessionID, expectedEpoch)) return;
-        messages = (fullResult.data ?? []) as unknown[];
-        // Preserve BOTH failures: when the tail and the full read fail
+        lastUser = [deepResult.data ?? []]
+          .flat()
+          .findLast(isReplayableUserMessage);
+        // Preserve BOTH failures: when the tail and the deeper read fail
         // differently, the diagnostic log must surface the first error
-        // too instead of letting the full-read error overwrite it.
-        const fullError = fullResult.error ?? undefined;
-        if (fullError !== undefined) {
+        // too instead of letting the deeper-read error overwrite it.
+        const deepError = deepResult.error ?? undefined;
+        if (deepError !== undefined) {
           requestError =
-            requestError === undefined ? fullError : [requestError, fullError];
+            requestError === undefined ? deepError : [requestError, deepError];
         }
       }
-      const lastUser = [...messages].reverse().find(isReplayableUserMessage);
       if (!lastUser) {
         log('[foreground-fallback] no user message found', {
           sessionID,
@@ -2056,6 +2077,7 @@ export class ForegroundFallbackManager {
         );
       } else {
         this.sessionModel.set(sessionID, nextModel);
+        this.activeFallbackModel.set(sessionID, nextModel);
         this.onSessionModelChanged?.(sessionID, nextModel);
       }
       // Admission accepted (with or without the switch): convert the

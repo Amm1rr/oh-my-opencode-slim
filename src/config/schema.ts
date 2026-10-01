@@ -787,6 +787,16 @@ export const FailoverConfigSchema = z.preprocess(
           'Delay in milliseconds between consecutive fallback attempts ' +
             'after the initial trigger. 0 disables.',
         ),
+      continuationPolicy: z
+        .enum(['retry-primary', 'stick-to-fallback'])
+        .default('retry-primary')
+        .describe(
+          'Model policy for unpinned OpenCode v1 internal continuations ' +
+            '(for example, background completion and lifecycle wakes) after ' +
+            'a confirmed fallback. "retry-primary" lets the host try the ' +
+            'configured primary again; "stick-to-fallback" keeps the ' +
+            'confirmed fallback until a new external user turn.',
+        ),
     })
     .strict(),
 );
@@ -987,13 +997,17 @@ export const RawPluginConfigSchema = z
       .array(z.enum(DISABLED_HOOKS_VALUES))
       .optional()
       .describe(
-        'Hook names to disable completely. Valid values: "phase-reminder" (not registered, so orchestrator phase reminders are never injected) and "foreground-fallback" (marks the fallback manager inert: it is still constructed but never triggers automatic intervention, same effect as fallback.enabled = false). Unknown values are stripped with a warning when the config loads.',
+        'Hook names to disable completely. Valid values: ' +
+          DISABLED_HOOKS_VALUES.join(', ') +
+          '. "phase-reminder" is not registered, so orchestrator phase reminders are never injected; "foreground-fallback" marks the fallback manager inert: it is still constructed but never triggers automatic intervention, same effect as fallback.enabled = false. Unknown values are stripped with a warning when the config loads. A value consisting only of unknown names is treated as unset, so a lower config layer\'s list still applies.',
       ),
     disabled_commands: z
       .array(z.enum(DISABLED_COMMANDS_VALUES))
       .optional()
       .describe(
-        'Slash-command names to disable completely. Valid values: "interview", "deepwork", "reflect", "loop". Disabled commands are neither registered nor intercepted at execution time, so a user-defined command with the same name is left untouched. The /reflect command is also disabled when "reflect" is listed in disabled_skills. Unknown values are stripped with a warning when the config loads.',
+        'Slash-command names to disable completely. Valid values: ' +
+          DISABLED_COMMANDS_VALUES.join(', ') +
+          '. Disabled commands are neither registered nor intercepted at execution time, so a user-defined command with the same name is left untouched. The /reflect command is also disabled when "reflect" is listed in disabled_skills. Unknown values are stripped with a warning when the config loads. A value consisting only of unknown names is treated as unset, so a lower config layer\'s list still applies.',
       ),
     // Multiplexer config
     multiplexer: MultiplexerConfigSchema.optional(),

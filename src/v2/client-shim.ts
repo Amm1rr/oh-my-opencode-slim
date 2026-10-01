@@ -626,12 +626,10 @@ export function buildPluginInput(
           },
       // v2 removed the delete endpoint in name only: `session.remove` is
       // the same DELETE /api/session/:id. Capability-probed like `get`
-      // above — smartfetch's secondary-model cleanup (the real caller)
-      // relies on this to not leak temp sessions on v2. Hosts without
-      // `remove` (the stock v2 plugin session domain — see the one-time
-      // notice block near the top of this file) degrade to a no-op with
-      // a single per-generation warning (no fake success, no per-call
-      // noise).
+      // above. Hosts without `remove` (the stock v2 plugin session domain
+      // — see the one-time notice block near the top of this file) degrade
+      // to a no-op with a single per-generation warning (no fake success,
+      // no per-call noise).
       delete: s.remove
         ? async (args: Record<string, unknown>) => {
             await s.remove?.({ sessionID: sessionIDOf(args) });

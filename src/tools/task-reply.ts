@@ -77,7 +77,7 @@ export function createTaskReplyTool(options: {
   const idParam = idParamFor(options.input);
   const task_reply = tool({
     description:
-      'Answer a tracked background child task waiting on a supported question or permission request. Permissions are supported on OpenCode v2 hosts that expose permission.reply; v2 form-created questions are observable but not answerable through the pinned plugin context. Accepts the task ID or parent-scoped alias plus the request ID from the wake or task_status.',
+      'Answer a tracked background child task waiting on a question or permission request. Accepts the task ID or parent-scoped alias plus the request ID from the wake or task_status.',
     args: {
       ...taskRefArgs(idParam),
       request_id: z
@@ -268,11 +268,25 @@ export function createTaskReplyTool(options: {
         clearChildInputWait(targetJob.taskID, openWait.requestID);
         return `Replied ${reply} to pending permission ${openWait.requestID} for ${targetJob.alias} (${targetJob.taskID}).`;
       } catch (error) {
-        // Keep the wait on error/timeout so task_status still shows the
+        if (error instanceof OperationTimeoutError) throw error;
+        const message = errorText(error);
+        // The reply targets the owning child session, so the host's typed
+        // not-found means the request is no longer pending there: it was
+        // answered elsewhere (e.g. the UI) or dropped with its step (#1356).
+        // Clear the stale wait so it cannot keep waking the parent; this
+        // call approved nothing.
+        if (
+          openWait.kind === 'permission' &&
+          message.includes('Permission request not found') &&
+          message.includes(openWait.requestID)
+        ) {
+          clearChildInputWait(targetJob.taskID, openWait.requestID);
+          return `Permission ${openWait.requestID} for ${targetJob.alias} (${targetJob.taskID}) is no longer pending on the host; cleared the stale wait. Nothing was replied.`;
+        }
+        // Keep the wait on other errors so task_status still shows the
         // open ask and task_reply can retry; a failed transport leaves the
         // ask open on the host.
-        if (error instanceof OperationTimeoutError) throw error;
-        throw new Error(`Task reply transport failed: ${errorText(error)}`);
+        throw new Error(`Task reply transport failed: ${message}`);
       }
     },
   });

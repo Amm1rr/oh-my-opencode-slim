@@ -1196,7 +1196,7 @@ describe('createV2Setup permission rules wiring', () => {
       const calls: RulesCall[] = [];
       const projectDir = path.join(fixtureRoot, 'project');
       let transformAgents!: (draft: unknown) => void;
-      const nativeAgents = [
+      const nativeAgents: Array<Record<string, unknown>> = [
         {
           id: 'explorer',
           permissions: [
@@ -1380,7 +1380,18 @@ describe('createV2Setup permission rules wiring', () => {
           list: () => nativeAgents,
           get: () => undefined,
           default: () => {},
-          update: () => {},
+          // Like the host, finalized agent reads reflect plugin registration.
+          update: (
+            id: string,
+            mutate: (agent: Record<string, unknown>) => void,
+          ) => {
+            let agent = nativeAgents.find((entry) => entry.id === id);
+            if (!agent) {
+              agent = { id };
+              nativeAgents.push(agent);
+            }
+            mutate(agent);
+          },
           remove: () => {},
         });
         expect(transformsApplied).toBe(true);

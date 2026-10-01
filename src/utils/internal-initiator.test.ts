@@ -4,6 +4,7 @@ import {
   createInternalAgentTextPart,
   INTERNAL_INITIATOR_METADATA_KEY,
   isInternalInitiatorPart,
+  isNativeBackgroundTaskNotification,
   SLIM_INTERNAL_INITIATOR_MARKER,
 } from './internal-initiator';
 
@@ -56,6 +57,52 @@ describe('internal initiator markers', () => {
       metadata: { compaction_continue: true },
     };
     expect(isInternalInitiatorPart(compactionContinuation)).toBe(true);
+  });
+
+  test.each([
+    [
+      'completed',
+      [
+        '<task id="ses_child" state="completed">',
+        '<summary>Background task completed: check availability</summary>',
+        '<task_result>',
+        'OK',
+        '</task_result>',
+        '</task>',
+      ].join('\n'),
+    ],
+    [
+      'failed',
+      [
+        '<task id="ses_child" state="error">',
+        '<summary>Background task failed: check availability</summary>',
+        '<task_error>',
+        'boom',
+        '</task_error>',
+        '</task>',
+      ].join('\n'),
+    ],
+  ])('recognizes a native background-task %s notification', (_state, text) => {
+    const part = { type: 'text', synthetic: true, text };
+    expect(isNativeBackgroundTaskNotification(part)).toBe(true);
+    // Native terminal payloads remain visible to the task-board
+    // reconciliation path; callers that only need lifecycle selection
+    // protection opt into the narrower helper above.
+    expect(isInternalInitiatorPart(part)).toBe(false);
+  });
+
+  test('does not classify arbitrary synthetic task-shaped text as a native notification', () => {
+    expect(
+      isNativeBackgroundTaskNotification({
+        type: 'text',
+        synthetic: true,
+        text: [
+          '<task id="ses_child" state="completed">',
+          '<task_result>OK</task_result>',
+          '</task>',
+        ].join('\n'),
+      }),
+    ).toBe(false);
   });
 
   test('compaction_continue without synthetic is not internal', () => {

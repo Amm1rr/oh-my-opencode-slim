@@ -142,8 +142,7 @@ not an optional-degradation path.
    `noReply: true` maps to `delivery: "queue", resume: false`),
    `session.update`→
    `session.update` (`{sessionID, title}`), `session.delete`→`remove` (same
-   `DELETE /api/session/:id`; stops the smartfetch secondary-model temp
-   sessions leaking), and `session.list` (v2 `Session.Info` page → the v1
+   `DELETE /api/session/:id`), and `session.list` (v2 `Session.Info` page → the v1
    `{data}` envelope with `directory` derived from `location` and `outcome`
    mapped, used by the interview dashboard's session scan and the
    orchestrator-wake children enumeration). Note that `remove` and `list`
@@ -270,9 +269,11 @@ not an optional-degradation path.
       `question.asked`/`question.replied`/`question.rejected`
       (`form.id` → the question request id; forms owned by the `"global"`
       sentinel are skipped), and `permission.asked` field mapping to the v1
-      names (`permission` ← `action`, `patterns` ← `resources`;
-      `permission.replied` passes through raw — v2's shape already matches
-      the v1 event). V2 hosts publish durable `session.execution.started/
+       names (`permission` ← `action`, `patterns` ← `resources`;
+       `permission.replied` keeps raw-first delivery and additionally
+       normalizes the native `data` payload into `properties`
+       `{sessionID, requestID, reply}` so the v1 consumers can clear the
+       wait). V2 hosts publish durable `session.execution.started/
       succeeded/failed/interrupted` and emit no busy/idle `session.status`
       and no `session.idle` on the event stream — the observed payloads
       always ride under `data` (verified live, 80-event capture). The
@@ -891,10 +892,9 @@ v2.0.x stable hosts both probes fail and the shims degrade:
   because it probes the *shim's* `list` function, which always exists.
   The interview dashboard's session scan likewise sees no sessions from
   `list` on v2.
-- **Session delete.** `client.session.delete` is a **no-op**: the
-  smartfetch secondary-model temp-session cleanup cannot remove sessions
-  through the shim on v2 (the temp sessions simply persist; nothing
-  fails loudly).
+- **Session delete.** `client.session.delete` is a **no-op**. No caller is
+  affected: smartfetch summarizes through `generate.text` and never creates
+  temp sessions on v2.
 
 Both degradations announce themselves in the plugin log with a single
 deterministic, **one-time-per-process** warning instead of degrading

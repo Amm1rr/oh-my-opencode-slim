@@ -186,7 +186,7 @@ an MCP tool remains authoritative.
 | `acpAgents.<name>.permissionMode` | string | `ask` | How ACP permission requests are handled: `ask`, `allow`, or `reject` See [ACP-connected agents](#acp-connected-agents). |
 | `acpAgents.<name>.timeoutMs` | integer | `0` | Timeout for a single ACP run in milliseconds. `0` disables the timeout so external agents can run indefinitely. Finite values can be up to `2147483647`ms (~24.8 days) See [ACP-connected agents](#acp-connected-agents). |
 | `disabled_agents` | string[] | `["observer"]` | Agent names to disable globally. Set to `[]` to enable Observer; this is global, not per-preset See [Custom Agents](#custom-agents). |
-| `image_routing` | `"auto"` \| `"direct"` | omitted (legacy conditional) | Optional. When omitted, resolves to `"auto"` if Observer is enabled, otherwise `"direct"`. Explicit `"auto"` requires Observer enabled and saves image attachments to disk before nudging delegation to @observer. `"direct"`: always pass images to the orchestrator. |
+| `image_routing` | `"auto"` \| `"direct"` | omitted (legacy conditional) | Optional. When omitted, resolves to `"auto"` if Observer is enabled, otherwise `"direct"`. Explicit `"auto"` saves image attachments under `.opencode/images/<session>/` and nudges delegation to @observer; saved images remain until you remove them. `"direct"` always passes image parts to the orchestrator. Remove saved images with `rm -rf .opencode/images/` (or a single session subdirectory) when they are no longer needed; session-less messages save images at the top level. |
 | `autoUpdate` | boolean | `true` | Automatically install plugin updates in the background; set to `false` for notification-only mode |
 | `multiplexer.type` | string | `"none"` | Multiplexer mode: `auto`, `tmux`, `zellij`, `herdr`, `cmux-tui`, `kitty`, or `none` See [Multiplexer Integration](multiplexer-integration.md). On OpenCode v2 hosts, panes work with the shared background service or an explicit `--server`; `--standalone` hosts ignore the setting (one diagnostic per process). |
 | `multiplexer.layout` | string | `"main-vertical"` | Layout preset: `main-vertical`, `main-horizontal`, `tiled`, `even-horizontal`, `even-vertical`. Each adapter maps it to its nearest native expression (tmux full layouts; split directions for Zellij/Herdr; built-in layouts for kitty); cmux-tui has no layout expression and ignores it. See [Multiplexer Integration](multiplexer-integration.md#layouts). |
@@ -217,12 +217,15 @@ an MCP tool remains authoritative.
 | `backgroundJobs.waitForUserGuard` | boolean | `true` | When true, intercepts `wait_for_user` calls while background tasks are still running and the orchestrator wake scheduler is enabled, returning guidance to end the turn instead of blocking on manual input. See [Background Job Management](#background-job-management). |
 | `backgroundJobs.boardInjection` | boolean | `true` | When false, the Background Job Board reminder is never injected into prompts. Background task tracking, wake, and task_status all keep working; the orchestrator simply no longer passively sees the board. See [Background Job Management](#background-job-management). |
 | `disabled_mcps` | string[] | `[]` | MCP server IDs to disable globally |
+| `disabled_tools` | string[] | `[]` | Slim tool names to disable globally. Disabled Slim tools are not registered with OpenCode and cannot be used by agents; OpenCode built-in tools are not affected |
+| `disabled_skills` | string[] | `[]` | Skill names to disable globally. Disabled skills are not granted to agents, and disabled bundled skills are not registered; listing `reflect` here also disables the `/reflect` command |
 | `disabled_hooks` | string[] | `[]` | Hook names to disable globally: `"phase-reminder"` stops orchestrator phase-reminder injection; `"foreground-fallback"` disables automatic foreground model fallback, same effect as `fallback.enabled = false`. Unknown values are stripped with a warning when the config loads; a value consisting only of unknown names is treated as unset, so a lower config layer's list still applies |
 | `disabled_commands` | string[] | `[]` | Slash commands to disable globally: `"interview"`, `"deepwork"`, `"reflect"`, or `"loop"`. Disabled commands are neither registered nor intercepted at execution time, so a user-defined command with the same name is left untouched. Listing `reflect` in `disabled_skills` also disables the `/reflect` command. Unknown values are stripped with a warning when the config loads; a value consisting only of unknown names is treated as unset, so a lower config layer's list still applies |
 | `fallback.enabled` | boolean | `true` | Enable Slim's foreground model-chain failover. It does not configure OpenCode provider/AI-SDK retries. On **v2 hosts** Slim's automatic foreground fallback is disabled regardless (temporary compatibility limitation: the v2 `switchModel` has no per-turn/atomic conditional form, so an in-flight switch could commit after a newer user turn has taken over). Host-native retries still run, but the configured chain is not executed automatically. Re-enable only once a host atomic conditional-switch capability is confirmed — not merely because a `switchModel` method exists. |
 | `fallback.maxRetries` | number | `3` | Number of host retry events Slim absorbs before advancing the foreground model chain. The budget stays spent across model switches; a completed successful assistant response, an observed return to the configured primary for a fresh descent, or session deletion re-arms it. Terminal `session.error` and `message.updated` failures advance immediately without charging it. `0` advances on the first retry event. This does not configure OpenCode provider or background subagent retries. |
 | `fallback.initialRetryDelayMs` | number | `0` | Delay in milliseconds before triggering the first fallback on a failover-worthy error. Gives intercepting plugins time to recover the current model before the fallback chain advances. 0 disables. |
 | `fallback.retryDelayMs` | number | `500` | Delay in milliseconds between consecutive fallback attempts after the initial trigger. 0 disables. |
+| `fallback.continuationPolicy` | `"retry-primary"` \| `"stick-to-fallback"` | `"retry-primary"` | OpenCode v1 policy for unpinned internal continuations after a confirmed fallback. `"retry-primary"` lets background-completion and lifecycle turns try the configured primary again; `"stick-to-fallback"` keeps them on the confirmed fallback until the next external user turn. |
 | `council.presets` | object | - | **Required if using council.** Named councillor presets See [Council configuration note](#council-configuration-note). |
 | `council.presets.<name>.<councillor>.model` | string | - | Councillor model See [Council configuration note](#council-configuration-note). |
 | `council.presets.<name>.<councillor>.variant` | string | - | Councillor variant See [Council configuration note](#council-configuration-note). |
@@ -583,14 +586,30 @@ that should follow the current session or the configured orchestrator model:
 Supported values are:
 
 - `session`: omit the agent model so OpenCode uses the current session model
-- `orchestrator`: use the orchestrator model resolved during configuration; if
-  none is configured, fall back to the current session model
+- `orchestrator`: follow the live orchestrator/session model, including later
+  fallback switches
 
-`orchestrator` means the model resolved during plugin configuration. It does
-not dynamically follow a later foreground fallback to another model.
-Runtime fallback behavior is independent of `inheritModelFrom` — unless the
-same override also configures an array `model` chain, which combines with it
-(see the rules below).
+`orchestrator` inheritance remains live when the orchestrator changes models.
+Delegated agents therefore follow the active fallback model rather than
+starting on a stale primary and waiting for an avoidable provider failure.
+Their own configured model array remains the ordered fallback chain after the
+inherited active model.
+
+Array-configured specialists also avoid a provider the orchestrator has
+already fallen past. When the parent's active fallback is present in the
+child's chain, that exact entry is used. Otherwise Slim prefers the child's
+first entry on the working parent provider, then the first entry outside the
+providers exhausted by the parent. OpenCode v2 uses the native per-call
+subagent model override. OpenCode v1's `task` tool has no model argument, so
+Slim sets the selected model on the child's first prompt before the host saves
+it. In both cases the delegation keeps the canonical specialist name, so
+`task` permission rules and the task tool's agent list are unchanged. On v1,
+`fallback.continuationPolicy` controls what happens when an unpinned native
+background-completion or lifecycle turn follows a confirmed fallback. The
+default, `"retry-primary"`, lets the host try the configured primary again,
+which is useful after a quota or provider outage is repaired. Set it to
+`"stick-to-fallback"` to keep those internal continuations on the confirmed
+fallback until the next external user turn.
 
 Model selection follows these rules:
 

@@ -44,6 +44,12 @@ export interface ResolvedAgentRegistry {
   readonly nativePolicies: Readonly<
     Record<string, ReturnType<typeof compilePermissionPolicy>>
   >;
+  /** Reapply owned ceilings to authoritative host-expanded rules, without
+   * replaying the pre-host-finalization permission baseline. */
+  compileChildPermissions(
+    agent: string,
+    rules: readonly V2PermissionRule[],
+  ): readonly V2PermissionRule[];
   readonly mcpConfig: Readonly<Record<string, unknown>>;
   readonly managedMcpConfig: Readonly<Record<string, unknown>>;
   readonly finalAgentConfig: Readonly<Record<string, unknown>>;
@@ -512,6 +518,10 @@ export function buildResolvedAgentRegistry(
     string,
     ReturnType<typeof compilePermissionPolicy>
   > = {};
+  const childPolicyConstraints: Record<
+    string,
+    { ceilings?: PermissionCeilings }
+  > = {};
 
   const mcpConfig = { ...(host.mcp ?? {}), ...pluginMcps };
   const availableMcpNames = Object.keys(mcpConfig);
@@ -534,13 +544,12 @@ export function buildResolvedAgentRegistry(
     const displayName = definition.displayName
       ? normalizeAgentName(definition.displayName)
       : name;
-    const legacyAlias = Object.keys(AGENT_ALIASES).find(
-      (key) => AGENT_ALIASES[key] === name,
-    );
-    const hostEntry =
-      hostEntries[name] ??
-      hostEntries[displayName] ??
-      (legacyAlias ? hostEntries[legacyAlias] : undefined);
+    // Host-config boundary: resolve host overrides by canonical name and
+    // explicit displayName only. Legacy aliases (e.g. host `explore`) belong
+    // to the host's native agent namespace and must never map onto the
+    // plugin agent (e.g. `explorer`). Plugin-own alias support (runtime
+    // overrides, presets, identity mirroring) is handled separately.
+    const hostEntry = hostEntries[name] ?? hostEntries[displayName];
     const entry = sdk[name] as
       | (SDKAgentConfig & Record<string, unknown>)
       | undefined;
@@ -694,30 +703,7 @@ export function buildResolvedAgentRegistry(
 
   appendMarketplaceRouting(finalAgentConfig, definitions, marketplaceMetadata);
 
-  const orchestratorEntry = finalAgentConfig.orchestrator as
-    | Record<string, unknown>
-    | undefined;
-  const orchestratorDefinition = definitions.find(
-    (definition) => definition.name === 'orchestrator',
-  );
-  const visibleOrchestratorName = orchestratorDefinition?.displayName
-    ? normalizeAgentName(orchestratorDefinition.displayName)
-    : 'orchestrator';
-  const visibleOrchestratorHost =
-    visibleOrchestratorName === 'orchestrator'
-      ? undefined
-      : hostEntries[visibleOrchestratorName];
-  const visibleOrchestratorModel =
-    typeof visibleOrchestratorHost?.model === 'string'
-      ? visibleOrchestratorHost.model
-      : typeof orchestratorEntry?.model === 'string'
-        ? orchestratorEntry.model
-        : null;
-  applyModelInheritanceToConfig(
-    finalAgentConfig,
-    runtime,
-    visibleOrchestratorModel,
-  );
+  applyModelInheritanceToConfig(finalAgentConfig, runtime);
 
   for (const definition of definitions) {
     const name = definition.name;
@@ -842,9 +828,6 @@ export function buildResolvedAgentRegistry(
     }
     finalEntry.permission = permission;
     (sdk[name] as Record<string, unknown>).permission = clone(permission);
-    const legacyAlias = Object.keys(AGENT_ALIASES).find(
-      (key) => AGENT_ALIASES[key] === name,
-    );
     const visibleNativeRules = definition.displayName
       ? Object.entries(nativeRules).find(
           ([agentName]) =>
@@ -852,11 +835,9 @@ export function buildResolvedAgentRegistry(
             normalizeAgentName(definition.displayName as string).toLowerCase(),
         )?.[1]
       : undefined;
-    const hostRuleSet =
-      nativeRules[name] ??
-      visibleNativeRules ??
-      (legacyAlias ? nativeRules[legacyAlias] : undefined) ??
-      [];
+    // Same host-config boundary as above: host native rules keyed by a
+    // legacy alias (e.g. `explore`) must not apply to the plugin agent.
+    const hostRuleSet = nativeRules[name] ?? visibleNativeRules ?? [];
     const baselineRules = adaptPermissions(permission).filter(
       (rule): rule is V2PermissionRule =>
         rule.effect === 'allow' ||
@@ -884,6 +865,15 @@ export function buildResolvedAgentRegistry(
     const baselineBeforeReadSafeguards = ownerReadRule.length
       ? baselineRules.filter((rule) => rule.action !== 'read')
       : baselineRules;
+    childPolicyConstraints[name] = finalizedPackageMetadata
+      ? {
+          ceilings: marketplacePermissionCeilings(
+            finalizedPackageMetadata.capabilities.tools,
+            finalizedPackageMetadata.capabilities.skills,
+            finalizedPackageMetadata.capabilities.mcps,
+          ),
+        }
+      : {};
     policyMap[name] = compilePermissionPolicy({
       baselineRules: [
         ...baselineBeforeReadSafeguards,
@@ -893,15 +883,7 @@ export function buildResolvedAgentRegistry(
       hostRules: finalizedPackageMetadata
         ? marketplaceHostRules(hostRuleSet)
         : hostRuleSet,
-      ...(finalizedPackageMetadata
-        ? {
-            ceilings: marketplacePermissionCeilings(
-              finalizedPackageMetadata.capabilities.tools,
-              finalizedPackageMetadata.capabilities.skills,
-              finalizedPackageMetadata.capabilities.mcps,
-            ),
-          }
-        : {}),
+      ...childPolicyConstraints[name],
     });
     finalAgentConfig[name] = clone(finalEntry);
     sdk[name] = clone(finalEntry) as SDKAgentConfig & Record<string, unknown>;
@@ -913,13 +895,12 @@ export function buildResolvedAgentRegistry(
     candidateMap[alias] = clone(candidateMap[canonical] ?? []);
     effective[alias] = clone(effective[canonical] ?? {});
     if (policyMap[canonical]) policyMap[alias] = policyMap[canonical];
+    if (childPolicyConstraints[canonical])
+      childPolicyConstraints[alias] = childPolicyConstraints[canonical];
   }
   for (const definition of definitions) {
     const display = identities[definition.name];
     if (display && display !== definition.name) {
-      const legacyAlias = Object.keys(AGENT_ALIASES).find(
-        (key) => AGENT_ALIASES[key] === definition.name,
-      );
       const canonicalConfig = finalAgentConfig[definition.name] as Record<
         string,
         unknown
@@ -1041,10 +1022,7 @@ export function buildResolvedAgentRegistry(
         ...(visibleVariant ? { variant: visibleVariant } : {}),
       };
       const visibleRules =
-        nativeRules[display] ??
-        nativeRules[definition.name] ??
-        (legacyAlias ? nativeRules[legacyAlias] : undefined) ??
-        [];
+        nativeRules[display] ?? nativeRules[definition.name] ?? [];
       const visibleOwnerReadRule: V2PermissionRule[] =
         packageMetadata &&
         Object.hasOwn(sourceVisiblePermission, 'read') &&
@@ -1066,6 +1044,15 @@ export function buildResolvedAgentRegistry(
       const visibleBaselineBeforeReadSafeguards = visibleOwnerReadRule.length
         ? visibleBaselineRules.filter((rule) => rule.action !== 'read')
         : visibleBaselineRules;
+      childPolicyConstraints[display] = packageMetadata
+        ? {
+            ceilings: marketplacePermissionCeilings(
+              visibleTools,
+              visibleSkills,
+              cappedMcps,
+            ),
+          }
+        : {};
       policyMap[display] = compilePermissionPolicy({
         baselineRules: [
           ...visibleBaselineBeforeReadSafeguards,
@@ -1075,15 +1062,7 @@ export function buildResolvedAgentRegistry(
         hostRules: packageMetadata
           ? marketplaceHostRules(visibleRules)
           : visibleRules,
-        ...(packageMetadata
-          ? {
-              ceilings: marketplacePermissionCeilings(
-                visibleTools,
-                visibleSkills,
-                cappedMcps,
-              ),
-            }
-          : {}),
+        ...childPolicyConstraints[display],
       });
       if (definition.name === 'orchestrator') {
         appendMarketplaceRouting(
@@ -1109,6 +1088,7 @@ export function buildResolvedAgentRegistry(
   const frozenTuiVariants = freeze(clone(tuiVariants));
   const frozenIdentities = freeze(clone(identities));
   const frozenPolicies = Object.freeze({ ...policyMap });
+  const frozenChildConstraints = freeze(clone(childPolicyConstraints));
   const frozenMcps = freeze(clone(mcpConfig));
   const frozenPluginMcps = freeze(clone(pluginMcps));
   const managedAgentConfig: Record<string, unknown> = {};
@@ -1158,6 +1138,22 @@ export function buildResolvedAgentRegistry(
     tuiAgentModels: frozenTuiModels,
     tuiAgentVariants: frozenTuiVariants,
     nativePolicies: frozenPolicies,
+    compileChildPermissions: (
+      agent: string,
+      rules: readonly V2PermissionRule[],
+    ) => {
+      const constraints = frozenChildConstraints[agent];
+      if (!constraints) {
+        throw new Error(
+          `child permission constraints unavailable for '${agent}'`,
+        );
+      }
+      return compilePermissionPolicy({
+        baselineRules: [],
+        hostRules: rules,
+        ...constraints,
+      }).rules;
+    },
     mcpConfig: frozenMcps,
     managedMcpConfig: frozenPluginMcps,
     finalAgentConfig: frozenFinal,

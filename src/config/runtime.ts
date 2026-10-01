@@ -112,6 +112,7 @@ const DEFAULT_FALLBACK: FailoverConfig = {
   maxRetries: 3,
   initialRetryDelayMs: 0,
   retryDelayMs: 500,
+  continuationPolicy: 'retry-primary',
 };
 
 /** First model from an override's model field (string or array). */

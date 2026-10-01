@@ -58,7 +58,7 @@ export const POLL_INTERVAL_BACKGROUND_MS = 2000;
 export const MAX_POLL_TIME_MS = 5 * 60 * 1000; // 5 minutes
 
 // Workflow reminders
-export const PHASE_REMINDER_TEXT = `!IMPORTANT! Scheduler workflow: First choose the lightest workflow that fits the work. If direct execution is justified, complete it and verify proportionately. Otherwise: plan lanes/dependencies → dispatch background specialists → track task IDs → wait for hook-driven completion → reconcile terminal results → verify. !END!`;
+export const PHASE_REMINDER_TEXT = `!IMPORTANT! Scheduler workflow: pick the lightest workflow that fits. Direct work: execute and verify proportionately. Otherwise: plan lanes → dispatch background specialists → track task IDs → await hook-driven completion → reconcile terminal results → verify. !END!`;
 
 export function formatSystemReminder(text: string): string {
   return `<system-reminder>\n${text}\n</system-reminder>`;
@@ -107,6 +107,9 @@ export const DEFAULT_MAX_RETAINED_SNAPSHOTS = 20;
  * Oldest entries are evicted first when this threshold is reached.
  */
 export const DEFAULT_MAX_SESSION_METADATA_ENTRIES = 1000;
+
+/** Title of smartfetch's temporary secondary-model sessions (v1 hosts). */
+export const SMARTFETCH_SECONDARY_SESSION_TITLE = 'smartfetch-secondary';
 
 export type ImageRouting = 'auto' | 'direct';
 

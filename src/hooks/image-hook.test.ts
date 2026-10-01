@@ -1,17 +1,13 @@
 import { afterAll, describe, expect, it, spyOn } from 'bun:test';
-import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
-  chmodSync,
   existsSync,
-  linkSync,
   lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
-  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import * as os from 'node:os';
@@ -25,11 +21,8 @@ const IMG = { type: 'image', url: 'data:image/png;base64,AAAA' };
 const IMG_BYTES = Buffer.from('AAAA', 'base64');
 const IMG_HASH = createHash('sha1').update(IMG_BYTES).digest('hex').slice(0, 8);
 const IMG_CONTENT_NAME = `image-${IMG_HASH}.png`;
-const LEGACY_GITIGNORE = '*\n';
-const LEGACY_GITIGNORE_BYTES = Buffer.from(LEGACY_GITIGNORE);
-const LEGACY_GITIGNORE_BACKUP = '.gitignore.oh-my-opencode-slim-legacy';
 const IMAGES_GITIGNORE = 'images/\n';
-const IMAGES_GITIGNORE_BYTES = Buffer.from(IMAGES_GITIGNORE);
+const MAX_MEDIA_INGEST_BYTES = 20 * 1024 * 1024;
 
 function makeTestDir(name: string): { workDir: string; saveDir: string } {
   const workDir = path.join(TEST_DIR, name);
@@ -42,35 +35,31 @@ function gitignorePath(workDir: string): string {
   return path.join(workDir, '.opencode', '.gitignore');
 }
 
-function legacyGitignoreBackupPath(workDir: string): string {
-  return path.join(workDir, '.opencode', LEGACY_GITIGNORE_BACKUP);
-}
-
-function writeOpencodeGitignore(
-  workDir: string,
-  content: string | Buffer,
-): string {
-  const opencodeDir = path.join(workDir, '.opencode');
-  mkdirSync(opencodeDir, { recursive: true });
-  const gi = gitignorePath(workDir);
-  writeFileSync(gi, content);
-  return gi;
-}
-
-function makeOldFile(dir: string, name: string): string {
-  const filePath = path.join(dir, name);
-  writeFileSync(filePath, 'data');
-  const past = new Date(Date.now() - 2 * 60 * 60 * 1000);
-  utimesSync(filePath, past, past);
-  return filePath;
-}
-
 function makeUserMsg(parts: MessageWithParts['parts']): MessageWithParts {
   return { info: { role: 'user', sessionID: 's1' }, parts };
 }
 
 function imagePartCount(message: MessageWithParts): number {
   return message.parts.filter((part) => part.type === 'image').length;
+}
+
+function nudgeText(message: MessageWithParts): string {
+  return message.parts.find((part) => part.type === 'text')?.text ?? '';
+}
+
+function savedFiles(saveDir: string): string[] {
+  const files: string[] = [];
+  for (const entry of readdirSync(saveDir, { withFileTypes: true })) {
+    const fullPath = path.join(saveDir, entry.name);
+    if (entry.isDirectory()) {
+      for (const child of readdirSync(fullPath)) {
+        files.push(path.join(fullPath, child));
+      }
+    } else {
+      files.push(fullPath);
+    }
+  }
+  return files;
 }
 
 const AUTO = {
@@ -83,798 +72,401 @@ function processAuto(messages: MessageWithParts[], workDir: string): boolean {
   return processImageAttachments({ messages, workDir, ...AUTO });
 }
 
-function nudgeText(message: MessageWithParts): string {
-  return message.parts.find((part) => part.type === 'text')?.text ?? '';
-}
-
 afterAll(() => {
   rmSync(TEST_DIR, { recursive: true, force: true });
 });
 
-describe('image-hook catch logging', () => {
-  it('survives file cleanup failure without throwing', () => {
-    const { workDir, saveDir } = makeTestDir('cleanup-fail-1');
-    makeOldFile(saveDir, 'old-image.png');
-    chmodSync(saveDir, 0o555);
-
-    try {
-      expect(() => {
-        processImageAttachments({
-          messages: [],
-          workDir,
-          imageRouting: 'auto',
-          disabledAgents: new Set<string>(),
-          log: () => {},
-        });
-      }).not.toThrow();
-    } finally {
-      chmodSync(saveDir, 0o755);
-    }
-  });
-
-  it('survives subdirectory file cleanup failure without throwing', () => {
-    const { workDir, saveDir } = makeTestDir('cleanup-fail-2');
-    const sessionDir = path.join(saveDir, 'ses-abc');
-    mkdirSync(sessionDir, { recursive: true });
-    makeOldFile(sessionDir, 'img.png');
-    chmodSync(sessionDir, 0o555);
-
-    try {
-      expect(() => {
-        processImageAttachments({
-          messages: [],
-          workDir,
-          imageRouting: 'auto',
-          disabledAgents: new Set<string>(),
-          log: () => {},
-        });
-      }).not.toThrow();
-    } finally {
-      chmodSync(sessionDir, 0o755);
-    }
-  });
-});
-
-describe('processImageAttachments image routing', () => {
-  it('direct mode leaves image parts untouched', () => {
+describe('processImageAttachments routing', () => {
+  it('leaves image parts untouched in direct mode without filesystem work', () => {
+    const workDir = path.join(TEST_DIR, 'direct');
     const message = makeUserMsg([IMG]);
+
     const result = processImageAttachments({
       messages: [message],
-      workDir: path.join(TEST_DIR, 'direct'),
+      workDir,
       imageRouting: 'direct',
-      disabledAgents: new Set<string>(),
+      disabledAgents: new Set(),
       log: () => {},
     });
+
     expect(result).toBe(false);
     expect(imagePartCount(message)).toBe(1);
+    expect(existsSync(path.join(workDir, '.opencode'))).toBe(false);
   });
 
-  it('auto mode saves image parts and adds an @observer nudge', () => {
+  it('does no filesystem work on text-only auto transforms', () => {
+    const workDir = path.join(TEST_DIR, 'text-only');
+    const message = makeUserMsg([{ type: 'text', text: 'hello' }]);
+
+    expect(processAuto([message], workDir)).toBe(false);
+    expect(existsSync(path.join(workDir, '.opencode'))).toBe(false);
+  });
+
+  it('saves an attachment, protects the workspace, and nudges observer', () => {
+    const workDir = path.join(TEST_DIR, 'auto');
     const message = makeUserMsg([IMG]);
-    const result = processImageAttachments({
-      messages: [message],
-      workDir: path.join(TEST_DIR, 'auto'),
-      imageRouting: 'auto',
-      disabledAgents: new Set<string>(),
-      log: () => {},
-    });
-    expect(result).toBe(false);
+
+    expect(processAuto([message], workDir)).toBe(false);
     expect(imagePartCount(message)).toBe(0);
-    const textParts = message.parts.filter((part) => part.type === 'text');
-    expect(textParts).toHaveLength(1);
-    expect(textParts[0]?.text).toContain('@observer');
-  });
-
-  it('writes a .gitignore covering only the images directory in a fresh workspace', () => {
-    const workDir = path.join(TEST_DIR, 'gitignore-fresh');
-    mkdirSync(workDir, { recursive: true });
-    expect(existsSync(gitignorePath(workDir))).toBe(false);
-    processImageAttachments({
-      messages: [makeUserMsg([IMG])],
-      workDir,
-      imageRouting: 'auto',
-      disabledAgents: new Set<string>(),
-      log: () => {},
-    });
-    expect(readFileSync(gitignorePath(workDir))).toEqual(
-      IMAGES_GITIGNORE_BYTES,
+    expect(nudgeText(message)).toContain('@observer');
+    expect(nudgeText(message)).toContain(path.join('.opencode', 'images'));
+    expect(readFileSync(gitignorePath(workDir), 'utf8')).toBe(IMAGES_GITIGNORE);
+    expect(savedFiles(path.join(workDir, '.opencode', 'images'))).toHaveLength(
+      1,
     );
   });
 
-  it('migrates exact legacy * gitignore before early returns (direct/text-only)', () => {
-    const workDir = path.join(TEST_DIR, 'gitignore-legacy-direct');
-    writeOpencodeGitignore(workDir, LEGACY_GITIGNORE_BYTES);
-    const logs: string[] = [];
-
-    processImageAttachments({
-      messages: [makeUserMsg([{ type: 'text', text: 'no images' }])],
-      workDir,
-      imageRouting: 'direct',
-      disabledAgents: new Set<string>(),
-      log: (message) => logs.push(message),
-    });
-
-    expect(readFileSync(gitignorePath(workDir))).toEqual(
-      IMAGES_GITIGNORE_BYTES,
-    );
-    expect(readFileSync(legacyGitignoreBackupPath(workDir))).toEqual(
-      LEGACY_GITIGNORE_BYTES,
-    );
-    expect(logs.some((message) => message.includes('backup created at'))).toBe(
-      true,
-    );
-  });
-
-  it('legacy gitignore migration is idempotent', () => {
-    const workDir = path.join(TEST_DIR, 'gitignore-legacy-idempotent');
-    writeOpencodeGitignore(workDir, LEGACY_GITIGNORE_BYTES);
-
-    const run = () =>
-      processImageAttachments({
-        messages: [makeUserMsg([{ type: 'text', text: 'hello' }])],
-        workDir,
-        imageRouting: 'direct',
-        disabledAgents: new Set<string>(),
-        log: () => {},
-      });
-
-    run();
-    expect(readFileSync(gitignorePath(workDir))).toEqual(
-      IMAGES_GITIGNORE_BYTES,
-    );
-    const backupAfterFirst = readFileSync(legacyGitignoreBackupPath(workDir));
-    run();
-    expect(readFileSync(gitignorePath(workDir))).toEqual(
-      IMAGES_GITIGNORE_BYTES,
-    );
-    expect(readFileSync(legacyGitignoreBackupPath(workDir))).toEqual(
-      backupAfterFirst,
-    );
-  });
-
-  it('uses an exact existing legacy gitignore backup unchanged', () => {
-    const workDir = path.join(TEST_DIR, 'gitignore-existing-backup');
-    const existingBackup = LEGACY_GITIGNORE_BYTES;
-    writeOpencodeGitignore(workDir, LEGACY_GITIGNORE_BYTES);
-    writeFileSync(legacyGitignoreBackupPath(workDir), existingBackup);
-
-    processImageAttachments({
-      messages: [makeUserMsg([{ type: 'text', text: 'hello' }])],
-      workDir,
-      imageRouting: 'direct',
-      disabledAgents: new Set<string>(),
-      log: () => {},
-    });
-
-    expect(readFileSync(gitignorePath(workDir))).toEqual(
-      IMAGES_GITIGNORE_BYTES,
-    );
-    expect(readFileSync(legacyGitignoreBackupPath(workDir))).toEqual(
-      existingBackup,
-    );
-  });
-
-  it('keeps an invalid existing backup and legacy gitignore unchanged', () => {
-    const workDir = path.join(TEST_DIR, 'gitignore-invalid-backup');
-    const invalidBackup = Buffer.from('# unrelated backup\n');
-    writeOpencodeGitignore(workDir, LEGACY_GITIGNORE_BYTES);
-    writeFileSync(legacyGitignoreBackupPath(workDir), invalidBackup);
-    const logs: string[] = [];
-
-    processImageAttachments({
-      messages: [makeUserMsg([{ type: 'text', text: 'hello' }])],
-      workDir,
-      imageRouting: 'direct',
-      disabledAgents: new Set<string>(),
-      log: (message) => logs.push(message),
-    });
-
-    expect(readFileSync(gitignorePath(workDir))).toEqual(
-      LEGACY_GITIGNORE_BYTES,
-    );
-    expect(readFileSync(legacyGitignoreBackupPath(workDir))).toEqual(
-      invalidBackup,
-    );
-    expect(
-      logs.some((message) => message.includes('backup is not an exact')),
-    ).toBe(true);
-  });
-
-  it('keeps a hard-linked backup and legacy gitignore unchanged', () => {
-    const workDir = path.join(TEST_DIR, 'gitignore-hardlink-backup');
-    const gitignore = writeOpencodeGitignore(workDir, LEGACY_GITIGNORE_BYTES);
-    const backup = legacyGitignoreBackupPath(workDir);
-    linkSync(gitignore, backup);
-
-    processImageAttachments({
-      messages: [makeUserMsg([{ type: 'text', text: 'hello' }])],
-      workDir,
-      imageRouting: 'direct',
-      disabledAgents: new Set<string>(),
-      log: () => {},
-    });
-
-    expect(readFileSync(gitignore)).toEqual(LEGACY_GITIGNORE_BYTES);
-    expect(readFileSync(backup)).toEqual(LEGACY_GITIGNORE_BYTES);
-  });
-
-  it('preserves custom gitignore with wildcard/comment byte-for-byte on migration', () => {
-    const workDir = path.join(TEST_DIR, 'gitignore-custom-preserve');
-    // Contains `*` but is not the exact legacy plugin content.
-    const custom = Buffer.from(
-      '# keep local secrets\n*.local\n!important.local\n',
-    );
-    writeOpencodeGitignore(workDir, custom);
-
-    processImageAttachments({
-      messages: [makeUserMsg([{ type: 'text', text: 'no images' }])],
-      workDir,
-      imageRouting: 'direct',
-      disabledAgents: new Set<string>(),
-      log: () => {},
-    });
-
-    expect(readFileSync(gitignorePath(workDir))).toEqual(custom);
-    expect(existsSync(legacyGitignoreBackupPath(workDir))).toBe(false);
-  });
-
-  it('appends images/ exactly once to custom gitignore when saving images', () => {
-    const workDir = path.join(TEST_DIR, 'gitignore-custom-append');
-    const custom = Buffer.from('# project rules\n*.tmp');
-    writeOpencodeGitignore(workDir, custom);
-
-    const run = () =>
-      processImageAttachments({
-        messages: [makeUserMsg([IMG])],
-        workDir,
-        imageRouting: 'auto',
-        disabledAgents: new Set<string>(),
-        log: () => {},
-      });
-
-    run();
-    const afterFirst = readFileSync(gitignorePath(workDir));
-    expect(afterFirst).toEqual(
-      Buffer.concat([custom, Buffer.from('\n'), IMAGES_GITIGNORE_BYTES]),
-    );
-
-    run();
-    const afterSecond = readFileSync(gitignorePath(workDir));
-    expect(afterSecond).toEqual(afterFirst);
-    expect(
-      afterSecond
-        .toString('utf8')
-        .split(/\r?\n/)
-        .filter((l) => l === 'images/'),
-    ).toEqual(['images/']);
-  });
-
-  it('preserves non-UTF-8 prefix bytes when appending images/', () => {
-    const workDir = path.join(TEST_DIR, 'gitignore-binary-prefix');
-    // Invalid UTF-8 lead bytes + a comment line; must survive append intact.
-    const prefix = Buffer.from([
-      0xff, 0xfe, 0x00, 0x23, 0x20, 0x62, 0x69, 0x6e, 0x0a,
-    ]);
-    writeOpencodeGitignore(workDir, prefix);
-
-    processImageAttachments({
-      messages: [makeUserMsg([IMG])],
-      workDir,
-      imageRouting: 'auto',
-      disabledAgents: new Set<string>(),
-      log: () => {},
-    });
-
-    const after = readFileSync(gitignorePath(workDir));
-    expect(after.subarray(0, prefix.length)).toEqual(prefix);
-    expect(after.subarray(prefix.length)).toEqual(IMAGES_GITIGNORE_BYTES);
-  });
-
-  it('does not mutate external target through symlinked .gitignore', () => {
-    const workDir = path.join(TEST_DIR, 'gitignore-symlink-file');
-    const external = path.join(TEST_DIR, 'gitignore-symlink-file-external');
-    writeFileSync(external, LEGACY_GITIGNORE_BYTES);
+  it('does not migrate the retired legacy wildcard gitignore', () => {
+    const workDir = path.join(TEST_DIR, 'legacy-no-migration');
     mkdirSync(path.join(workDir, '.opencode'), { recursive: true });
+    writeFileSync(gitignorePath(workDir), '*\n');
+    const message = makeUserMsg([{ type: 'text', text: 'hello' }]);
+
+    processImageAttachments({
+      messages: [message],
+      workDir,
+      imageRouting: 'direct',
+      disabledAgents: new Set(),
+      log: () => {},
+    });
+
+    expect(readFileSync(gitignorePath(workDir), 'utf8')).toBe('*\n');
+    expect(
+      existsSync(
+        path.join(
+          workDir,
+          '.opencode',
+          '.gitignore.oh-my-opencode-slim-legacy',
+        ),
+      ),
+    ).toBe(false);
+  });
+
+  it('appends images/ once when a new image is written', () => {
+    const workDir = path.join(TEST_DIR, 'gitignore-custom');
+    mkdirSync(path.join(workDir, '.opencode'), { recursive: true });
+    writeFileSync(gitignorePath(workDir), '# local rules\n*.tmp');
+
+    processAuto([makeUserMsg([IMG])], workDir);
+    const first = readFileSync(gitignorePath(workDir), 'utf8');
+    processAuto([makeUserMsg([IMG])], workDir);
+    const second = readFileSync(gitignorePath(workDir), 'utf8');
+
+    expect(first).toBe('# local rules\n*.tmp\nimages/\n');
+    expect(second).toBe(first);
+  });
+
+  it('preserves a binary gitignore prefix while appending images/', () => {
+    const workDir = path.join(TEST_DIR, 'gitignore-binary');
+    mkdirSync(path.join(workDir, '.opencode'), { recursive: true });
+    const prefix = Buffer.from([0xff, 0xfe, 0x00, 0x23, 0x0a]);
+    writeFileSync(gitignorePath(workDir), prefix);
+
+    processAuto([makeUserMsg([IMG])], workDir);
+
+    const result = readFileSync(gitignorePath(workDir));
+    expect(result.subarray(0, prefix.length)).toEqual(prefix);
+    expect(result.subarray(prefix.length).toString()).toBe(IMAGES_GITIGNORE);
+  });
+
+  it('does not mutate an external gitignore symlink', () => {
+    const workDir = path.join(TEST_DIR, 'gitignore-symlink');
+    const external = path.join(TEST_DIR, 'gitignore-symlink-external');
+    mkdirSync(path.join(workDir, '.opencode'), { recursive: true });
+    writeFileSync(external, '# external\n');
     symlinkSync(external, gitignorePath(workDir));
 
-    const logs: string[] = [];
-    processImageAttachments({
-      messages: [makeUserMsg([IMG])],
-      workDir,
-      imageRouting: 'auto',
-      disabledAgents: new Set<string>(),
-      log: (msg) => logs.push(msg),
-    });
+    const message = makeUserMsg([IMG]);
+    processAuto([message], workDir);
 
-    expect(readFileSync(external)).toEqual(LEGACY_GITIGNORE_BYTES);
-    expect(logs.some((m) => m.includes('symlinked'))).toBe(true);
+    expect(readFileSync(external, 'utf8')).toBe('# external\n');
+    expect(imagePartCount(message)).toBe(1);
+    expect(nudgeText(message)).toBe('');
   });
 
-  it('symlinked .opencode refuses gitignore mutation, external images dir, and keeps attachments', () => {
-    const workDir = path.join(TEST_DIR, 'symlink-opencode-dir');
-    const externalDir = path.join(TEST_DIR, 'symlink-opencode-dir-external');
+  it('refuses a symlinked .opencode directory without touching its target', () => {
+    const workDir = path.join(TEST_DIR, 'opencode-symlink');
+    const external = path.join(TEST_DIR, 'opencode-symlink-external');
     mkdirSync(workDir, { recursive: true });
-    mkdirSync(externalDir, { recursive: true });
-    const externalGi = path.join(externalDir, '.gitignore');
-    const externalContent = Buffer.from('# external custom\n*.bak\n');
-    writeFileSync(externalGi, externalContent);
-    symlinkSync(externalDir, path.join(workDir, '.opencode'));
+    mkdirSync(external, { recursive: true });
+    symlinkSync(external, path.join(workDir, '.opencode'));
 
     const message = makeUserMsg([IMG]);
-    const logs: string[] = [];
-    const result = processImageAttachments({
-      messages: [message],
-      workDir,
-      imageRouting: 'auto',
-      disabledAgents: new Set<string>(),
-      log: (msg) => logs.push(msg),
-    });
+    processAuto([message], workDir);
 
-    expect(result).toBe(false);
     expect(imagePartCount(message)).toBe(1);
-    expect(readFileSync(externalGi)).toEqual(externalContent);
-    expect(existsSync(path.join(externalDir, 'images'))).toBe(false);
-    expect(logs.some((m) => m.includes('symlinked'))).toBe(true);
+    expect(readdirSync(external)).toEqual([]);
   });
 
-  it('symlinked images dir does not delete external expired files or write images', () => {
-    const workDir = path.join(TEST_DIR, 'symlink-images-dir');
-    const externalImages = path.join(
-      TEST_DIR,
-      'symlink-images-dir-external-images',
-    );
-    mkdirSync(path.join(workDir, '.opencode'), { recursive: true });
-    mkdirSync(externalImages, { recursive: true });
-
-    const expired = path.join(externalImages, 'old-external.png');
-    writeFileSync(expired, 'external-old');
-    const past = new Date(Date.now() - 2 * 60 * 60 * 1000);
-    utimesSync(expired, past, past);
-
-    symlinkSync(externalImages, path.join(workDir, '.opencode', 'images'));
+  it('refuses a symlinked session directory without touching its target', () => {
+    const { workDir, saveDir } = makeTestDir('session-symlink');
+    const external = path.join(TEST_DIR, 'session-symlink-external');
+    mkdirSync(external, { recursive: true });
+    writeFileSync(path.join(external, 'marker.txt'), 'external');
+    symlinkSync(external, path.join(saveDir, 's1'));
 
     const message = makeUserMsg([IMG]);
-    const logs: string[] = [];
-    const result = processImageAttachments({
-      messages: [message],
-      workDir,
-      imageRouting: 'auto',
-      disabledAgents: new Set<string>(),
-      log: (msg) => logs.push(msg),
-    });
+    processAuto([message], workDir);
 
-    expect(result).toBe(false);
     expect(imagePartCount(message)).toBe(1);
-    expect(existsSync(expired)).toBe(true);
-    expect(readFileSync(expired, 'utf8')).toBe('external-old');
-    // No session subdirectory or new image written into the external target.
-    expect(readdirSync(externalImages)).toEqual(['old-external.png']);
-    expect(logs.some((m) => m.includes('symlinked'))).toBe(true);
-
-    // Text-only path must also skip cleanup through the symlink.
-    processImageAttachments({
-      messages: [makeUserMsg([{ type: 'text', text: 'later' }])],
-      workDir,
-      imageRouting: 'auto',
-      disabledAgents: new Set<string>(),
-      log: () => {},
-    });
-    expect(existsSync(expired)).toBe(true);
-    expect(readdirSync(externalImages)).toEqual(['old-external.png']);
+    expect(readFileSync(path.join(external, 'marker.txt'), 'utf8')).toBe(
+      'external',
+    );
   });
 
-  it('symlinked session directory keeps attachments and does not touch external target', () => {
-    const workDir = path.join(TEST_DIR, 'symlink-session-dir');
-    const imagesDir = path.join(workDir, '.opencode', 'images');
-    const externalSession = path.join(
-      TEST_DIR,
-      'symlink-session-dir-external-session',
-    );
-    mkdirSync(imagesDir, { recursive: true });
-    mkdirSync(externalSession, { recursive: true });
-
-    const externalMarker = path.join(externalSession, 'marker.txt');
-    writeFileSync(externalMarker, 'session-external');
-    // Session id from makeUserMsg is 's1'
-    symlinkSync(externalSession, path.join(imagesDir, 's1'));
-
-    const message = makeUserMsg([IMG]);
-    const logs: string[] = [];
-    const result = processImageAttachments({
-      messages: [message],
-      workDir,
-      imageRouting: 'auto',
-      disabledAgents: new Set<string>(),
-      log: (msg) => logs.push(msg),
-    });
-
-    expect(result).toBe(false);
-    expect(imagePartCount(message)).toBe(1);
-    expect(readFileSync(externalMarker, 'utf8')).toBe('session-external');
-    expect(readdirSync(externalSession)).toEqual(['marker.txt']);
-    expect(lstatSync(path.join(imagesDir, 's1')).isSymbolicLink()).toBe(true);
-    expect(logs.some((m) => m.includes('symlinked session'))).toBe(true);
-
-    // Cleanup must not traverse the session symlink either.
-    processImageAttachments({
-      messages: [makeUserMsg([{ type: 'text', text: 'later' }])],
-      workDir,
-      imageRouting: 'auto',
-      disabledAgents: new Set<string>(),
-      log: () => {},
-    });
-    expect(readdirSync(externalSession)).toEqual(['marker.txt']);
-  });
-
-  it('symlinked candidate filename advances to local suffix without writing through', () => {
-    const workDir = path.join(TEST_DIR, 'symlink-candidate-file');
-    const sessionDir = path.join(workDir, '.opencode', 'images', 's1');
-    const externalFile = path.join(
-      TEST_DIR,
-      'symlink-candidate-file-external.bin',
-    );
+  it('advances around a symlinked content-addressed candidate', () => {
+    const { workDir, saveDir } = makeTestDir('candidate-symlink');
+    const sessionDir = path.join(saveDir, 's1');
     mkdirSync(sessionDir, { recursive: true });
-    writeFileSync(externalFile, 'do-not-overwrite');
-    const candidateLink = path.join(sessionDir, IMG_CONTENT_NAME);
-    symlinkSync(externalFile, candidateLink);
+    const external = path.join(TEST_DIR, 'candidate-external');
+    writeFileSync(external, 'do not overwrite');
+    symlinkSync(external, path.join(sessionDir, IMG_CONTENT_NAME));
 
     const message = makeUserMsg([IMG]);
-    processImageAttachments({
-      messages: [message],
-      workDir,
-      imageRouting: 'auto',
-      disabledAgents: new Set<string>(),
-      log: () => {},
-    });
+    processAuto([message], workDir);
 
-    // External target bytes must remain unchanged.
-    expect(readFileSync(externalFile, 'utf8')).toBe('do-not-overwrite');
-    expect(lstatSync(candidateLink).isSymbolicLink()).toBe(true);
+    expect(readFileSync(external, 'utf8')).toBe('do not overwrite');
+    expect(
+      lstatSync(path.join(sessionDir, IMG_CONTENT_NAME)).isSymbolicLink(),
+    ).toBe(true);
+    expect(existsSync(path.join(sessionDir, `image-${IMG_HASH}-1.png`))).toBe(
+      true,
+    );
+    expect(imagePartCount(message)).toBe(0);
+  });
 
-    // Saved to a non-symlink collision name under the real session dir.
+  it('advances around a non-file entry occupying the content-addressed name', () => {
+    const { workDir, saveDir } = makeTestDir('non-file-collision');
+    const sessionDir = path.join(saveDir, 's1');
+    mkdirSync(sessionDir, { recursive: true });
+    // A directory squatting on the content-addressed name must not be reused.
+    mkdirSync(path.join(sessionDir, IMG_CONTENT_NAME), { recursive: true });
+
+    const message = makeUserMsg([IMG]);
+    processAuto([message], workDir);
+
+    expect(imagePartCount(message)).toBe(0);
     const suffixed = path.join(sessionDir, `image-${IMG_HASH}-1.png`);
     expect(existsSync(suffixed)).toBe(true);
-    expect(lstatSync(suffixed).isSymbolicLink()).toBe(false);
-    expect(readFileSync(suffixed)).toEqual(IMG_BYTES);
-    // Attachment replaced with observer nudge pointing at the local path.
-    expect(imagePartCount(message)).toBe(0);
-    const text = message.parts.find((p) => p.type === 'text')?.text ?? '';
-    expect(text).toContain(suffixed);
+    expect(
+      lstatSync(path.join(sessionDir, IMG_CONTENT_NAME)).isDirectory(),
+    ).toBe(true);
+    expect(nudgeText(message)).toContain(suffixed);
   });
 
-  it('git check-ignore treats images/ as ignored under .opencode', () => {
-    const workDir = path.join(TEST_DIR, 'gitignore-check-ignore');
-    mkdirSync(workDir, { recursive: true });
-    const gitEnv = {
-      ...process.env,
-      GIT_CONFIG_GLOBAL: os.devNull,
-      GIT_CONFIG_NOSYSTEM: '1',
-      XDG_CONFIG_HOME: path.join(workDir, 'empty-git-config'),
-    };
-
-    const init = spawnSync('git', ['init'], {
-      cwd: workDir,
-      encoding: 'utf8',
-      env: gitEnv,
-    });
-    if (init.status !== 0) {
-      throw new Error(
-        `git init failed (status=${init.status}): ${init.stderr}`,
-      );
-    }
-
-    processImageAttachments({
-      messages: [makeUserMsg([IMG])],
-      workDir,
-      imageRouting: 'auto',
-      disabledAgents: new Set<string>(),
-      log: () => {},
-    });
-
-    const nestedImage = path.join(
-      workDir,
-      '.opencode',
-      'images',
-      's1',
-      'probe.png',
-    );
-    mkdirSync(path.dirname(nestedImage), { recursive: true });
-    writeFileSync(nestedImage, 'x');
-
-    const configPath = path.join(
-      workDir,
-      '.opencode',
-      'oh-my-opencode-slim.json',
-    );
-    writeFileSync(configPath, '{}');
-
-    const ignored = spawnSync(
-      'git',
-      ['check-ignore', '-q', path.relative(workDir, nestedImage)],
-      { cwd: workDir, encoding: 'utf8', env: gitEnv },
-    );
-    expect(ignored.status).toBe(0);
-
-    const configIgnored = spawnSync(
-      'git',
-      ['check-ignore', '-q', path.relative(workDir, configPath)],
-      { cwd: workDir, encoding: 'utf8', env: gitEnv },
-    );
-    // config must NOT be ignored (exit 1 = not ignored)
-    expect(configIgnored.status).toBe(1);
-  });
-
-  it('resolves omitted image routing to auto and intercepts for Observer', () => {
-    const message = makeUserMsg([IMG]);
-    processImageAttachments({
-      messages: [message],
-      workDir: path.join(TEST_DIR, 'omitted-routing'),
-      imageRouting: resolveImageRouting(undefined, true),
-      disabledAgents: new Set<string>(),
-      log: () => {},
-    });
-    expect(imagePartCount(message)).toBe(0);
-    expect(message.parts.some((part) => part.type === 'text')).toBe(true);
-  });
-
-  it('returns true when observer disabled and message has images', () => {
-    const message = makeUserMsg([IMG]);
-    const result = processImageAttachments({
-      messages: [message],
-      workDir: path.join(TEST_DIR, 'disabled'),
-      imageRouting: 'auto',
-      disabledAgents: new Set(['observer']),
-      log: () => {},
-    });
-    expect(result).toBe(true);
-    expect(imagePartCount(message)).toBe(1);
-  });
-
-  it('returns false when observer disabled but no images present', () => {
-    const message = makeUserMsg([{ type: 'text', text: 'hello' }]);
-    const result = processImageAttachments({
-      messages: [message],
-      workDir: path.join(TEST_DIR, 'disabled-noimg'),
-      imageRouting: 'auto',
-      disabledAgents: new Set(['observer']),
-      log: () => {},
-    });
-    expect(result).toBe(false);
-  });
-
-  it('returns true when observer disabled and an earlier (non-last) user message has images', () => {
-    const earlierMsg = makeUserMsg([IMG]);
-    const lastMsg = makeUserMsg([{ type: 'text', text: 'follow-up question' }]);
-    const result = processImageAttachments({
-      messages: [earlierMsg, lastMsg],
-      workDir: path.join(TEST_DIR, 'earlier-image'),
-      imageRouting: 'auto',
-      disabledAgents: new Set(['observer']),
-      log: () => {},
-    });
-    expect(result).toBe(true);
-  });
-
-  it('does not re-trigger on text-only messages after image was processed', () => {
-    // Regression test: Greptile #1 fix checked ALL messages, causing the hook
-    // to fire on every transform once an image was in the conversation history.
-    const workDir = path.join(TEST_DIR, 'no-rere-trigger');
-    const imageMsg = makeUserMsg([IMG]);
-    const textMsg = makeUserMsg([{ type: 'text', text: 'follow-up' }]);
-
-    // First call: image present → should return true
-    const result1 = processImageAttachments({
-      messages: [imageMsg, textMsg],
-      workDir,
-      imageRouting: 'auto',
-      disabledAgents: new Set(['observer']),
-      log: () => {},
-    });
-    expect(result1).toBe(true);
-
-    // Second call: same messages, no new image → should return false
-    const result2 = processImageAttachments({
-      messages: [imageMsg, textMsg],
-      workDir,
-      imageRouting: 'auto',
-      disabledAgents: new Set(['observer']),
-      log: () => {},
-    });
-    expect(result2).toBe(false);
-  });
-
-  it('keeps images when auto mode cannot save them', () => {
+  it('fails open when an image cannot be materialized', () => {
+    const workDir = path.join(TEST_DIR, 'unsaved');
     const message = makeUserMsg([
       { type: 'image', url: 'https://example.com/image.png' },
     ]);
-    const logs: string[] = [];
-    processImageAttachments({
-      messages: [message],
-      workDir: path.join(TEST_DIR, 'unsaved'),
-      imageRouting: 'auto',
-      disabledAgents: new Set<string>(),
-      log: (message) => logs.push(message),
-    });
+
+    processAuto([message], workDir);
+
     expect(imagePartCount(message)).toBe(1);
     expect(message.parts).toHaveLength(1);
-    expect(logs.some((message) => message.includes('[image-routing]'))).toBe(
-      false,
-    );
   });
 
-  it('strips only attachments saved successfully', () => {
+  it('removes a truncated file when the image write fails mid-way', async () => {
+    const { workDir, saveDir } = makeTestDir('partial-write');
+    const fs = await import('node:fs');
+    const originalWrite = fs.writeFileSync;
+    const spy = spyOn(fs, 'writeFileSync').mockImplementation(((
+      p: unknown,
+      d: unknown,
+      o: unknown,
+    ) => {
+      const opts = o as { flag?: string } | undefined;
+      if (String(p).includes('image-') && opts?.flag === 'wx') {
+        // Simulate a partial write that lands on disk, then a hard failure.
+        (originalWrite as typeof fs.writeFileSync)(
+          p as string,
+          Buffer.from('truncated'),
+          { flag: 'wx' },
+        );
+        const err = new Error('no space left on device') as Error & {
+          code: string;
+        };
+        err.code = 'ENOSPC';
+        throw err;
+      }
+      return (originalWrite as typeof fs.writeFileSync)(
+        p as never,
+        d as never,
+        o as never,
+      );
+    }) as never);
+
+    try {
+      const message = makeUserMsg([IMG]);
+      processAuto([message], workDir);
+
+      // Fail-open: the original part is retained, nothing is stripped.
+      expect(imagePartCount(message)).toBe(1);
+      // The truncated file must be gone: no corrupt bytes left for reuse.
+      const sessionDir = path.join(saveDir, 's1');
+      const leftovers = existsSync(sessionDir) ? readdirSync(sessionDir) : [];
+      expect(leftovers).toEqual([]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('strips only image parts that were saved successfully', () => {
     const message = makeUserMsg([
       IMG,
       { type: 'image', url: 'https://example.com/image.png' },
     ]);
-    processImageAttachments({
-      messages: [message],
-      workDir: path.join(TEST_DIR, 'mixed'),
-      imageRouting: 'auto',
-      disabledAgents: new Set<string>(),
-      log: () => {},
-    });
+
+    processAuto([message], path.join(TEST_DIR, 'mixed-save'));
+
     expect(imagePartCount(message)).toBe(1);
-    expect(message.parts.some((part) => part.type === 'text')).toBe(true);
+    expect(nudgeText(message)).toContain('@observer');
   });
 
-  it('continues after an earlier message cannot save its images', () => {
-    const failed = makeUserMsg([
-      { type: 'image', url: 'https://example.com/image.png' },
-    ]);
-    const saved = makeUserMsg([IMG]);
-    processImageAttachments({
-      messages: [failed, saved],
-      workDir: path.join(TEST_DIR, 'multiple'),
+  it('checks only the newest user message when observer is disabled', () => {
+    const earlier = makeUserMsg([IMG]);
+    const latest = makeUserMsg([{ type: 'text', text: 'follow-up' }]);
+    const logMessages: string[] = [];
+
+    const result = processImageAttachments({
+      messages: [earlier, latest],
+      workDir: path.join(TEST_DIR, 'disabled-earlier'),
       imageRouting: 'auto',
-      disabledAgents: new Set<string>(),
-      log: () => {},
+      disabledAgents: new Set(['observer']),
+      log: (message) => logMessages.push(message),
     });
-    expect(imagePartCount(failed)).toBe(1);
-    expect(imagePartCount(saved)).toBe(0);
+
+    expect(result).toBe(false);
+    expect(imagePartCount(earlier)).toBe(1);
+    expect(logMessages).toEqual([]);
+
+    const newestImage = makeUserMsg([IMG]);
+    const secondResult = processImageAttachments({
+      messages: [earlier, newestImage],
+      workDir: path.join(TEST_DIR, 'disabled-newest'),
+      imageRouting: 'auto',
+      disabledAgents: new Set(['observer']),
+      log: (message) => logMessages.push(message),
+    });
+
+    expect(secondResult).toBe(true);
+    expect(imagePartCount(newestImage)).toBe(1);
+    expect(logMessages.at(-1)).toContain('retained inline');
   });
 
-  it('historical attachments reuse the memoized path without re-decoding', async () => {
-    const { workDir } = makeTestDir('memo-reuse');
+  it('reuses the content-addressed file without creating a duplicate', () => {
+    const { workDir, saveDir } = makeTestDir('dedup');
     const first = makeUserMsg([IMG]);
+    const second = makeUserMsg([IMG]);
+
     processAuto([first], workDir);
-    const marker = nudgeText(first).match(
-      /(\/[^\s,]+image-[0-9a-f]{8}\.png)/,
-    )?.[1];
-    expect(marker).toBeDefined();
-    const fromSpy = spyOn((await import('node:buffer')).Buffer, 'from');
-    try {
-      const second = makeUserMsg([IMG]);
-      processAuto([second], workDir);
-      expect(nudgeText(second)).toContain(marker as string);
-      expect(fromSpy).not.toHaveBeenCalled();
-    } finally {
-      fromSpy.mockRestore();
-    }
+    processAuto([second], workDir);
+
+    const files = savedFiles(saveDir);
+    expect(files).toHaveLength(1);
+    expect(nudgeText(second)).toContain(path.basename(files[0] as string));
   });
 
-  it('memoized attachment falls back to re-saving after deletion', () => {
-    const { workDir, saveDir } = makeTestDir('memo-evict');
+  it('restores the images gitignore rule when only reused images are saved', () => {
+    const { workDir } = makeTestDir('gitignore-restore');
     processAuto([makeUserMsg([IMG])], workDir);
-    for (const entry of readdirSync(saveDir, { withFileTypes: true })) {
-      if (entry.isDirectory()) {
-        rmSync(path.join(saveDir, entry.name), {
-          recursive: true,
-          force: true,
-        });
-      }
-    }
-    const second = makeUserMsg([IMG]);
-    processAuto([second], workDir);
-    expect(imagePartCount(second)).toBe(0);
-    expect(nudgeText(second)).toContain('image-');
-  });
+    expect(readFileSync(gitignorePath(workDir), 'utf8')).toBe(IMAGES_GITIGNORE);
 
-  it('same payload with different filenames resolves to different memo entries', () => {
-    const { workDir } = makeTestDir('memo-filename');
-    const before = makeUserMsg([{ type: 'image', url: IMG.url }]);
-    const after = makeUserMsg([
-      { type: 'image', url: IMG.url, filename: 'after.png' },
-    ]);
-    processAuto([before], workDir);
-    processAuto([after], workDir);
-    expect(nudgeText(before)).toContain('image-');
-    expect(nudgeText(after)).toContain('after-');
-  });
+    // Externally deleted rules must be restored even when the next transform
+    // only reuses the existing content-addressed file (Greptile P1).
+    rmSync(gitignorePath(workDir));
+    const message = makeUserMsg([IMG]);
+    processAuto([message], workDir);
 
-  it('suffixed resolution is not memoized: canonical path returns when obstacle is gone', () => {
-    const { workDir } = makeTestDir('memo-suffix');
-    const sessionDir = path.join(workDir, '.opencode', 'images', 's1');
-    mkdirSync(sessionDir, { recursive: true });
-    const canonical = path.join(sessionDir, IMG_CONTENT_NAME);
-    const external = path.join(TEST_DIR, 'memo-suffix-external.bin');
-    writeFileSync(external, 'external');
-    symlinkSync(external, canonical);
-    const first = makeUserMsg([IMG]);
-    processAuto([first], workDir);
-    expect(nudgeText(first)).toContain(`image-${IMG_HASH}-1.png`);
-    rmSync(canonical);
-    const second = makeUserMsg([IMG]);
-    processAuto([second], workDir);
-    expect(nudgeText(second)).toContain(IMG_CONTENT_NAME);
-    expect(nudgeText(second)).not.toContain(`image-${IMG_HASH}-1.png`);
-  });
-
-  it('memo hit does not reuse a path replaced by a symlink', () => {
-    const { workDir } = makeTestDir('memo-symlink');
-    const first = makeUserMsg([IMG]);
-    processAuto([first], workDir);
-    const savedPath = nudgeText(first).match(
-      /(\/[^\s,]+image-[0-9a-f]{8}\.png)/,
-    )?.[1];
-    expect(savedPath).toBeDefined();
-    const external = path.join(TEST_DIR, 'memo-symlink-external.bin');
-    writeFileSync(external, 'external');
-    rmSync(savedPath as string);
-    symlinkSync(external, savedPath as string);
-    const second = makeUserMsg([IMG]);
-    processAuto([second], workDir);
-    const text = nudgeText(second);
-    expect(text).not.toContain(savedPath as string);
-    expect(text).toContain('image-');
-    expect(lstatSync(savedPath as string).isSymbolicLink()).toBe(true);
-    expect(readFileSync(external, 'utf8')).toBe('external');
-  });
-
-  it('ignores non-user messages and non-image parts', () => {
-    const userText = makeUserMsg([{ type: 'text', text: 'hello' }]);
-    const assistant = {
-      info: { role: 'assistant', sessionID: 's1' },
-      parts: [{ type: 'text', text: 'hi' }],
-    } as unknown as MessageWithParts;
-    processImageAttachments({
-      messages: [userText, assistant],
-      workDir: path.join(TEST_DIR, 'non-image'),
-      imageRouting: 'auto',
-      disabledAgents: new Set<string>(),
-      log: () => {},
-    });
-    expect(userText.parts).toHaveLength(1);
-    expect(assistant.parts).toHaveLength(1);
-  });
-});
-
-describe('processImageAttachments v2 media parts', () => {
-  function mediaPart(base64: string, extra: Record<string, unknown> = {}) {
-    return {
-      type: 'media',
-      mediaType: 'image/png',
-      data: base64,
-      filename: 'img-test.png',
-      ...extra,
-    };
-  }
-
-  it('saves v2 media parts under .opencode/images and replaces with a nudge', () => {
-    const bytes = Buffer.from('v2-media-bytes', 'utf8');
-    const message = makeUserMsg([mediaPart(bytes.toString('base64'))]);
-    processImageAttachments({
-      messages: [message],
-      workDir: path.join(TEST_DIR, 'v2-media'),
-      imageRouting: 'auto',
-      disabledAgents: new Set<string>(),
-      log: () => {},
-    });
+    expect(readFileSync(gitignorePath(workDir), 'utf8')).toBe(IMAGES_GITIGNORE);
     expect(imagePartCount(message)).toBe(0);
-    const textParts = message.parts.filter((part) => part.type === 'text');
-    expect(textParts).toHaveLength(1);
-    const text = textParts[0]?.text ?? '';
-    const savedPath = text.match(/(\/[^\s,]+\.png)/)?.[1];
-    expect(savedPath).toBeDefined();
-    expect(savedPath).toContain(path.join('.opencode', 'images'));
-    const hash = createHash('sha1').update(bytes).digest('hex').slice(0, 8);
-    expect(path.basename(savedPath as string)).toBe(`img-test-${hash}.png`);
-    expect(readFileSync(savedPath as string)).toEqual(bytes);
   });
 
-  it('still saves v1 file parts with image mime (regression guard)', () => {
-    const bytes = Buffer.from('AAAA', 'base64');
+  it('archives oversized images and excludes them from the delegation nudge', () => {
+    const bytes = Buffer.alloc(MAX_MEDIA_INGEST_BYTES + 1, 7);
     const message = makeUserMsg([
+      {
+        type: 'media',
+        mediaType: 'image/png',
+        data: bytes.toString('base64'),
+        filename: 'large.png',
+      },
+    ]);
+
+    processAuto([message], path.join(TEST_DIR, 'oversized'));
+
+    const text = nudgeText(message);
+    expect(imagePartCount(message)).toBe(0);
+    expect(text).toContain('Too large to analyze');
+    expect(text).toContain('compress or crop');
+    expect(text).not.toContain('@observer');
+    expect(
+      savedFiles(path.join(TEST_DIR, 'oversized', '.opencode', 'images')),
+    ).toHaveLength(1);
+  }, 30_000);
+
+  it('separates readable and oversized paths in one nudge', () => {
+    const oversized = Buffer.alloc(MAX_MEDIA_INGEST_BYTES + 1, 7);
+    const message = makeUserMsg([
+      IMG,
+      {
+        type: 'media',
+        mediaType: 'image/png',
+        data: oversized.toString('base64'),
+        filename: 'huge.png',
+      },
+    ]);
+
+    processAuto([message], path.join(TEST_DIR, 'mixed-oversize'));
+
+    const text = nudgeText(message);
+    expect(imagePartCount(message)).toBe(0);
+    expect(text).toContain('Delegate to @observer');
+    expect(text).toContain('Too large to analyze');
+    expect(text).toContain('huge-');
+  }, 30_000);
+
+  it('saves session-less images at the top level of the images directory', () => {
+    const { workDir, saveDir } = makeTestDir('sessionless');
+    const message: MessageWithParts = {
+      info: { role: 'user' },
+      parts: [IMG],
+    };
+
+    processAuto([message], workDir);
+
+    const files = savedFiles(saveDir);
+    expect(files).toHaveLength(1);
+    expect(path.dirname(files[0] as string)).toBe(saveDir);
+    expect(imagePartCount(message)).toBe(0);
+  });
+
+  it('saves images from multiple messages in one transform', () => {
+    const { workDir, saveDir } = makeTestDir('multi-message');
+    const first = makeUserMsg([IMG]);
+    const second = makeUserMsg([IMG]);
+
+    processAuto([first, second], workDir);
+
+    expect(imagePartCount(first)).toBe(0);
+    expect(imagePartCount(second)).toBe(0);
+    expect(nudgeText(first)).toContain('image-');
+    expect(nudgeText(second)).toContain('image-');
+    // Same content across messages: one content-addressed file, reused.
+    expect(savedFiles(saveDir)).toHaveLength(1);
+  });
+
+  it('handles v2 media, v1 file, and non-image media parts', () => {
+    const bytes = Buffer.from('media-bytes');
+    const v2 = makeUserMsg([
+      {
+        type: 'media',
+        mediaType: 'image/png',
+        data: bytes.toString('base64'),
+        filename: 'shot.png',
+      },
+    ]);
+    const v1 = makeUserMsg([
       {
         type: 'file',
         mime: 'image/png',
@@ -882,126 +474,52 @@ describe('processImageAttachments v2 media parts', () => {
         filename: 'photo.png',
       },
     ]);
-    processImageAttachments({
-      messages: [message],
-      workDir: path.join(TEST_DIR, 'v2-v1-file-regression'),
-      imageRouting: 'auto',
-      disabledAgents: new Set<string>(),
-      log: () => {},
-    });
-    expect(message.parts.filter((part) => part.type === 'file')).toHaveLength(
-      0,
-    );
-    const text = nudgeText(message);
-    const savedPath = text.match(/(\/[^\s,]+\.png)/)?.[1];
-    expect(savedPath).toBeDefined();
-    const hash = createHash('sha1').update(bytes).digest('hex').slice(0, 8);
-    expect(path.basename(savedPath as string)).toBe(`photo-${hash}.png`);
-    expect(readFileSync(savedPath as string)).toEqual(bytes);
-  });
-
-  it('does not treat non-image media parts as images', () => {
-    const { workDir, saveDir } = makeTestDir('v2-media-audio');
-    const message = makeUserMsg([
+    const audio = makeUserMsg([
       {
         type: 'media',
         mediaType: 'audio/mpeg',
-        data: Buffer.from('clip', 'utf8').toString('base64'),
+        data: Buffer.from('clip').toString('base64'),
         filename: 'clip.mp3',
       },
     ]);
-    processAuto([message], workDir);
-    expect(message.parts).toHaveLength(1);
-    expect(message.parts.filter((part) => part.type === 'text')).toHaveLength(
-      0,
-    );
-    expect(readdirSync(saveDir)).toEqual([]);
+
+    processAuto([v2], path.join(TEST_DIR, 'v2-media'));
+    processAuto([v1], path.join(TEST_DIR, 'v1-file'));
+    processAuto([audio], path.join(TEST_DIR, 'audio'));
+
+    expect(imagePartCount(v2)).toBe(0);
+    expect(v1.parts.some((part) => part.type === 'file')).toBe(false);
+    expect(audio.parts).toHaveLength(1);
   });
 
-  it('direct mode leaves v2 media parts untouched', () => {
-    const message = makeUserMsg([mediaPart('AAAA')]);
-    const result = processImageAttachments({
-      messages: [message],
-      workDir: path.join(TEST_DIR, 'v2-media-direct'),
-      imageRouting: 'direct',
-      disabledAgents: new Set<string>(),
-      log: () => {},
-    });
-    expect(result).toBe(false);
+  it('leaves undecodable media untouched', () => {
+    const message = makeUserMsg([
+      {
+        type: 'media',
+        mediaType: 'image/png',
+        data: '',
+        filename: 'empty.png',
+      },
+    ]);
+
+    processAuto([message], path.join(TEST_DIR, 'empty-media'));
+
     expect(message.parts).toHaveLength(1);
     expect(message.parts[0]?.type).toBe('media');
-  });
-
-  it('v2 media part with undecodable/empty data is left in the message', () => {
-    const { workDir } = makeTestDir('v2-media-empty-data');
-    const message = makeUserMsg([mediaPart('')]);
-    processAuto([message], workDir);
-    expect(message.parts).toHaveLength(1);
-    expect(message.parts.filter((part) => part.type === 'text')).toHaveLength(
-      0,
-    );
-  });
-
-  it('v2 media with image filename extension is treated as an image', () => {
-    const bytes = Buffer.from('named-bytes', 'utf8');
-    const message = makeUserMsg([
-      mediaPart(bytes.toString('base64'), {
-        mediaType: 'application/octet-stream',
-        filename: 'shot.png',
-      }),
-    ]);
-    processImageAttachments({
-      messages: [message],
-      workDir: path.join(TEST_DIR, 'v2-media-by-filename'),
-      imageRouting: 'auto',
-      disabledAgents: new Set<string>(),
-      log: () => {},
-    });
-    expect(message.parts.filter((part) => part.type === 'media')).toHaveLength(
-      0,
-    );
-    const text = nudgeText(message);
-    const savedPath = text.match(/(\/[^\s,]+\.png)/)?.[1];
-    expect(savedPath).toBeDefined();
-    const hash = createHash('sha1').update(bytes).digest('hex').slice(0, 8);
-    expect(path.basename(savedPath as string)).toBe(`shot-${hash}.png`);
-    expect(readFileSync(savedPath as string)).toEqual(bytes);
-  });
-
-  it('v2 media attachments reuse the memoized path without re-writing', () => {
-    const { workDir, saveDir } = makeTestDir('v2-media-memo');
-    const base64 = Buffer.from('memo-bytes', 'utf8').toString('base64');
-    const first = makeUserMsg([mediaPart(base64)]);
-    processAuto([first], workDir);
-    const marker = nudgeText(first).match(/(\/[^\s,]+\.png)/)?.[1];
-    expect(marker).toBeDefined();
-    expect(readdirSync(saveDir)).toEqual(['s1']);
-    const sessionDir = path.join(saveDir, 's1');
-    const entriesBefore = readdirSync(sessionDir);
-    expect(entriesBefore).toHaveLength(1);
-
-    const second = makeUserMsg([mediaPart(base64)]);
-    processAuto([second], workDir);
-    expect(nudgeText(second)).toContain(marker as string);
-    // Same canonical file reused; no duplicate/collision write.
-    expect(readdirSync(sessionDir)).toEqual(entriesBefore);
   });
 });
 
 describe('resolveImageRouting', () => {
-  it('returns auto when omitted and observer enabled', () => {
+  it('uses auto when omitted and observer is enabled', () => {
     expect(resolveImageRouting(undefined, true)).toBe('auto');
   });
 
-  it('returns direct when omitted and observer disabled', () => {
+  it('uses direct when omitted and observer is disabled', () => {
     expect(resolveImageRouting(undefined, false)).toBe('direct');
   });
 
-  it('preserves explicit auto even when observer disabled', () => {
+  it('preserves explicit routing choices', () => {
     expect(resolveImageRouting('auto', false)).toBe('auto');
-  });
-
-  it('preserves explicit direct even when observer enabled', () => {
     expect(resolveImageRouting('direct', true)).toBe('direct');
   });
 });

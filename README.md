@@ -52,7 +52,8 @@ The main idea is simple: instead of forcing one model to do everything, the plug
   across 25 languages, and built-in MCPs for docs and GitHub code
   search.
 - **[Fully customizable](docs/configuration.md)** - custom agents, prompt
-  overrides, per-agent skill/MCP permissions, and
+  overrides, per-agent skill/MCP permissions, global disable switches for
+  tools, MCPs, agents, skills, hooks, and slash commands, and
   [project-local customization](docs/project-local-customization.md).
 - **[Marketplace packages](docs/marketplace.md)** - install and manage community
   agents; package changes apply only after reloading OpenCode.
@@ -529,7 +530,7 @@ If any agent fails to respond, check your provider authentication and config fil
 ### Observer: The Silent Witness
 
 > [!NOTE]
-> **Why a separate agent?** If your Orchestrator model is not multimodal, enable Observer to handle images, screenshots, and other visual files. Observer is disabled by default and gives the Orchestrator a dedicated multimodal reader without forcing you to change your main reasoning model. Set `disabled_agents: []` and an `observer` model in your configuration. The bundled `opencode-go` install preset does this automatically because its GLM Orchestrator is not multimodal. Omitting `image_routing` preserves existing conditional Observer behavior. Set `image_routing: "auto"` only when Observer is enabled, or `"direct"` to always pass image attachments to the Orchestrator.
+> **Why a separate agent?** If your Orchestrator model is not multimodal, enable Observer to handle images, screenshots, and other visual files. Observer is disabled by default and gives the Orchestrator a dedicated multimodal reader without forcing you to change your main reasoning model. Set `disabled_agents: []` and an `observer` model in your configuration. The bundled `opencode-go` install preset does this automatically because its GLM Orchestrator is not multimodal. Omitting `image_routing` preserves existing conditional Observer behavior. `"auto"` saves attachments under `.opencode/images/<session>/` and delegates by path; `"direct"` keeps image parts inline for native vision. Saved workspace images are not automatically deleted. Remove the whole `.opencode/images/` directory or a single session subdirectory manually when no longer needed (references in old conversations then stop resolving); images from session-less messages are saved at the top level.
 
 <table>
   <tr>
@@ -543,7 +544,7 @@ If any agent fails to respond, check your provider authentication and config fil
 
 - Images, screenshots, diagrams → `read` tool (native image support)
 - PDFs and binary documents → `read` tool (text + structure extraction)
-- **Disabled by default** - enable with `"disabled_agents": []` and configure a vision-capable model; installing with `--preset=opencode-go` enables it with `opencode-go/mimo-v2.5`. Image attachments route to Observer by default when it is enabled; set `"image_routing": "direct"` to keep them on the Orchestrator.
+- **Disabled by default** - enable with `"disabled_agents": []` and configure a vision-capable model; installing with `--preset=opencode-go` enables it with `opencode-go/mimo-v2.5`. In `"auto"`, attachments are saved as workspace assets and routed to Observer by path; set `"image_routing": "direct"` to keep them inline for the Orchestrator.
 
     </td>
   </tr>
@@ -675,7 +676,7 @@ Use this section as a map: start with installation, then jump to features, confi
   <p><sub>Every merged contribution leaves a mark on the realm.</sub></p>
 
   <!-- ALL-CONTRIBUTORS-BADGE:START - Do not remove or modify this section -->
-[![All Contributors](https://img.shields.io/badge/all_contributors-125-orange.svg?style=flat-square)](#contributors-)
+[![All Contributors](https://img.shields.io/badge/all_contributors-128-orange.svg?style=flat-square)](#contributors-)
 <!-- ALL-CONTRIBUTORS-BADGE:END -->
 </div>
 
@@ -852,6 +853,11 @@ Use this section as a map: start with installation, then jump to features, confi
       <td align="center" valign="top" width="16.66%"><a href="https://github.com/ananas-wonders"><img src="https://avatars.githubusercontent.com/u/7282452?v=4?s=100" width="100px;" alt="Ananas"/><br /><sub><b>Ananas</b></sub></a><br /><a href="https://github.com/alvinunreal/oh-my-opencode-slim/commits?author=ananas-wonders" title="Code">💻</a></td>
       <td align="center" valign="top" width="16.66%"><a href="https://github.com/jaynis"><img src="https://avatars.githubusercontent.com/u/1553675?v=4?s=100" width="100px;" alt="jaynis"/><br /><sub><b>jaynis</b></sub></a><br /><a href="https://github.com/alvinunreal/oh-my-opencode-slim/commits?author=jaynis" title="Code">💻</a></td>
       <td align="center" valign="top" width="16.66%"><a href="https://github.com/drakeo338"><img src="https://avatars.githubusercontent.com/u/328244157?v=4?s=100" width="100px;" alt="Y.B."/><br /><sub><b>Y.B.</b></sub></a><br /><a href="https://github.com/alvinunreal/oh-my-opencode-slim/commits?author=drakeo338" title="Code">💻</a></td>
+      <td align="center" valign="top" width="16.66%"><a href="https://github.com/EmojiPati"><img src="https://avatars.githubusercontent.com/u/49492351?v=4?s=100" width="100px;" alt="pati"/><br /><sub><b>pati</b></sub></a><br /><a href="https://github.com/alvinunreal/oh-my-opencode-slim/commits?author=EmojiPati" title="Code">💻</a></td>
+    </tr>
+    <tr>
+      <td align="center" valign="top" width="16.66%"><a href="https://github.com/unsnow-iac"><img src="https://avatars.githubusercontent.com/u/256081678?v=4?s=100" width="100px;" alt="unsnow-iac"/><br /><sub><b>unsnow-iac</b></sub></a><br /><a href="https://github.com/alvinunreal/oh-my-opencode-slim/commits?author=unsnow-iac" title="Code">💻</a></td>
+      <td align="center" valign="top" width="16.66%"><a href="https://github.com/guidan-nick"><img src="https://avatars.githubusercontent.com/u/224735395?v=4?s=100" width="100px;" alt="guidan-nick"/><br /><sub><b>guidan-nick</b></sub></a><br /><a href="https://github.com/alvinunreal/oh-my-opencode-slim/commits?author=guidan-nick" title="Code">💻</a></td>
     </tr>
   </tbody>
 </table>
