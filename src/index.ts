@@ -773,15 +773,11 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // taken over. Disable the manager's automatic intervention entirely on v2
     // (unregistering only the retry hook is not enough: session.error,
     // message.updated and session.status retry all reach the replay path).
-    const fallbackEnabled =
+    const fallbackUserEnabled =
       runtime.fallback.enabled !== false &&
-      !runtime.disabledHooks.has('foreground-fallback') &&
-      hostFlavor !== 'v2';
-    if (
-      runtime.fallback.enabled !== false &&
-      !runtime.disabledHooks.has('foreground-fallback') &&
-      hostFlavor === 'v2'
-    ) {
+      !runtime.disabledHooks.has('foreground-fallback');
+    const fallbackEnabled = fallbackUserEnabled && hostFlavor !== 'v2';
+    if (fallbackUserEnabled && hostFlavor === 'v2') {
       // Deterministic notice: no timestamps or per-call ids. Do not log when
       // the user explicitly disabled fallback, including via disabled_hooks.
       log(

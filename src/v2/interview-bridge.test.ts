@@ -115,6 +115,80 @@ describe('v2 interview bridge', () => {
     });
   });
 
+  test('does not intercept markers when the command is disabled', async () => {
+    const directory = `.tmp-v2-interview-disabled-${Date.now()}`;
+    const synthetic = mock(async () => ({}));
+    const update = mock(async () => ({}));
+    const bridge = createV2InterviewBridge(
+      createContext({ synthetic, update }),
+      { outputFolder: directory } as never,
+      { commandEnabled: false },
+    );
+    const handler = mock(async () => {});
+    bridge.service.handleCommandExecuteBefore = handler;
+    const trailing = {
+      id: 'tail-disabled',
+      role: 'user',
+      content: [{ type: 'text', text: markerText('disabled idea') }],
+    };
+    const before = structuredClone(trailing.content);
+
+    await bridge.handleContext({
+      sessionID: 'ses_v2_disabled',
+      agent: 'orchestrator',
+      model: {},
+      system: [],
+      tools: {},
+      messages: [trailing],
+    });
+
+    expect(trailing.content).toEqual(before);
+    expect(bridge.getTranscript('ses_v2_disabled')).toEqual([]);
+    expect(handler).not.toHaveBeenCalled();
+    expect(synthetic).not.toHaveBeenCalled();
+    expect(update).not.toHaveBeenCalled();
+    bridge.dispose();
+    await fs.rm(`${process.cwd()}/${directory}`, {
+      recursive: true,
+      force: true,
+    });
+  });
+
+  test('intercepts markers when the command is enabled', async () => {
+    const directory = `.tmp-v2-interview-enabled-${Date.now()}`;
+    const synthetic = mock(async () => ({}));
+    const update = mock(async () => ({}));
+    const bridge = createV2InterviewBridge(
+      createContext({ synthetic, update }),
+      { outputFolder: directory } as never,
+      { commandEnabled: true },
+    );
+    const handler = mock(async () => {});
+    bridge.service.handleCommandExecuteBefore = handler;
+    const trailing = {
+      id: 'tail-enabled',
+      role: 'user',
+      content: [{ type: 'text', text: markerText('enabled idea') }],
+    };
+
+    await bridge.handleContext({
+      sessionID: 'ses_v2_enabled',
+      agent: 'orchestrator',
+      model: {},
+      system: [],
+      tools: {},
+      messages: [trailing],
+    });
+
+    expect(handler).toHaveBeenCalled();
+    expect(trailing.content[0]?.text).not.toBe(markerText('enabled idea'));
+    bridge.dispose();
+    await fs.rm(`${process.cwd()}/${directory}`, {
+      recursive: true,
+      force: true,
+    });
+  });
+
   test('registerCommand is a no-op when the draft has no add', () => {
     const bridge = createV2InterviewBridge(createContext());
     expect(() => bridge.registerCommand({} as never)).not.toThrow();

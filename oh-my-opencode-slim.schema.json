@@ -3072,7 +3072,7 @@
       }
     },
     "disabled_hooks": {
-      "description": "Hook names to disable completely. Valid values: \"phase-reminder\" (not registered, so orchestrator phase reminders are never injected) and \"foreground-fallback\" (marks the fallback manager inert: it is still constructed but never triggers automatic intervention, same effect as fallback.enabled = false). Unknown values are stripped with a warning when the config loads.",
+      "description": "Hook names to disable completely. Valid values: phase-reminder, foreground-fallback. \"phase-reminder\" is not registered, so orchestrator phase reminders are never injected; \"foreground-fallback\" marks the fallback manager inert: it is still constructed but never triggers automatic intervention, same effect as fallback.enabled = false. Unknown values are stripped with a warning when the config loads. A value consisting only of unknown names is treated as unset, so a lower config layer's list still applies.",
       "type": "array",
       "items": {
         "type": "string",
@@ -3083,7 +3083,7 @@
       }
     },
     "disabled_commands": {
-      "description": "Slash-command names to disable completely. Valid values: \"interview\", \"deepwork\", \"reflect\", \"loop\". Disabled commands are neither registered nor intercepted at execution time, so a user-defined command with the same name is left untouched. The /reflect command is also disabled when \"reflect\" is listed in disabled_skills. Unknown values are stripped with a warning when the config loads.",
+      "description": "Slash-command names to disable completely. Valid values: interview, deepwork, reflect, loop. Disabled commands are neither registered nor intercepted at execution time, so a user-defined command with the same name is left untouched. The /reflect command is also disabled when \"reflect\" is listed in disabled_skills. Unknown values are stripped with a warning when the config loads. A value consisting only of unknown names is treated as unset, so a lower config layer's list still applies.",
       "type": "array",
       "items": {
         "type": "string",

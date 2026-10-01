@@ -387,6 +387,7 @@ describe('createV2Setup e2e', () => {
       expect(tool.options).toEqual({ codemode: false });
     }
     expect(calls.commandAdds.map((c) => c.name)).toContain('deepwork');
+    expect(calls.commandAdds.map((c) => c.name)).toContain('interview');
     expect(calls.mcpSets.map((m) => m.name)).toEqual(['context7', 'gh_grep']);
     expect(calls.mcpSets.map((m) => m.config)).toEqual([
       expect.objectContaining({ type: 'remote' }),
@@ -500,6 +501,60 @@ describe('createV2Setup e2e', () => {
       await Bun.file(path.join(legacyDir, 'skills-manifest.json')).exists(),
     ).toBe(true);
     await cleanup();
+  }, 20_000);
+
+  test('disabled_commands interview gates both registration and execution', async () => {
+    // Override the beforeEach fixture: the all-setup wiring test must load
+    // its own disabled_commands through the real loadPluginConfig path.
+    await Bun.write(
+      path.join(projectDir, '.opencode', 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        companion: { enabled: false },
+        disabled_commands: ['interview'],
+      }),
+    );
+    const { ctx, calls } = makeMockV2Context(projectDir);
+    const cleanup = await createV2Setup()(ctx);
+
+    // Registration gate: /interview absent, non-disabled commands intact
+    expect(calls.commandAdds.map((c) => c.name)).not.toContain('interview');
+    expect(calls.commandAdds.map((c) => c.name)).toContain('deepwork');
+
+    // Execution gate: a trailing interview marker passes through untouched
+    const trailing = {
+      id: 'tail-iv-gate',
+      role: 'user',
+      content: [
+        {
+          type: 'text',
+          text: '<omos-interview-command>build an app</omos-interview-command>',
+        },
+      ],
+    };
+    expect(calls.contextHookCb).toBeFunction();
+    await calls.contextHookCb?.({
+      sessionID: 'ses_iv_gate',
+      agent: 'oracle',
+      model: {},
+      system: [],
+      tools: {},
+      messages: [trailing],
+    });
+    expect(trailing.content).toEqual([
+      {
+        type: 'text',
+        text: '<omos-interview-command>build an app</omos-interview-command>',
+      },
+    ]);
+    // The gate short-circuits before the service; the merged handler swallows
+    // bridge errors, so assert the bridge did not fail its way into a no-op.
+    // flushLoggerForTesting: log() lands via an async writeChain, and the
+    // error-path line is asserted right after the awaited handler.
+    await flushLoggerForTesting();
+    expect(readPluginLog()).not.toContain('interview context bridge failed');
+
+    await cleanup();
+    expect(calls.disposed.length).toBeGreaterThan(0);
   }, 20_000);
 
   test('reduced ctx (no agent.transform) skips gracefully', async () => {
