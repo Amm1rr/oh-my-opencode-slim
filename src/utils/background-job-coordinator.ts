@@ -1,4 +1,5 @@
 import type {
+  BackgroundJobAdoptionInput,
   BackgroundJobBoard,
   BackgroundJobLaunchInput,
   BackgroundJobLease,
@@ -192,6 +193,22 @@ export class BackgroundJobCoordinator implements BackgroundJobStore {
       parentSessionID: record.parentSessionID,
       agent: record.agent,
       alias: record.alias,
+    });
+    return record;
+  }
+
+  adoptTerminal(
+    input: BackgroundJobAdoptionInput,
+  ): BackgroundJobRecord | undefined {
+    const record = this.board.adoptTerminal(input);
+    if (!record) return;
+    const { taskID, parentSessionID, agent, alias } = record;
+    this.notifyLaunchIdentity({
+      kind: 'registered',
+      taskID,
+      parentSessionID,
+      agent,
+      alias,
     });
     return record;
   }

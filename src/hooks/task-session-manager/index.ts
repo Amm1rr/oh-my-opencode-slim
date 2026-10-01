@@ -20,7 +20,10 @@ import {
   createBackgroundJobTerminalGate,
   readSessionInfoForObservation,
 } from '../../utils/background-job-terminal-gate';
-import { fetchChildTranscript } from '../../utils/child-transcript';
+import {
+  classifyTerminalEvidence,
+  fetchChildTranscript,
+} from '../../utils/child-transcript';
 import { isRecord as isObjectRecord } from '../../utils/guards';
 import { getClient } from '../../utils/opencode-client';
 import { isGenuineOperatorMessage } from '../orchestrator-wake/index';
@@ -238,6 +241,52 @@ export function createTaskSessionManagerHook(
     });
   const rehydrateState = getBackgroundJobLifecycleLedger(backgroundJobBoard);
   const rehydrateTombstones = rehydrateState.tombstones;
+  const historyBoundaries = new Map<string, number>();
+  const adoptRequested = async (
+    parent: string,
+    requested: string,
+    agent: string,
+  ): Promise<void> => {
+    const boundary = historyBoundaries.get(parent);
+    if (boundary === undefined || rehydrateTombstones.has(requested)) return;
+    try {
+      const client = getClient(_ctx);
+      const query = { directory: _ctx.directory };
+      const { data: info } = await client.session.get({
+        path: { id: requested },
+        query,
+        throwOnError: true,
+      });
+      const suffix = info.title.match(/ \(@([^()]+) subagent\)$/);
+      if (
+        info.parentID !== parent ||
+        !(info.time.created < boundary) ||
+        suffix?.[1] !== agent
+      )
+        return;
+      const evidence = classifyTerminalEvidence(
+        await client.session.messages({
+          path: { id: requested },
+          query: { ...query, limit: 1 },
+          throwOnError: true,
+        }),
+      );
+      if (evidence.verdict !== 'completed' && evidence.verdict !== 'error')
+        return;
+      backgroundJobBoard.adoptTerminal({
+        taskID: requested,
+        parentSessionID: parent,
+        agent,
+        description: info.title.slice(0, -suffix[0].length),
+        createdAt: info.time.created,
+        updatedAt: info.time.updated,
+        terminalState: evidence.verdict,
+        resultSummary: evidence.text,
+      });
+    } catch (error) {
+      log('[task-session-manager] host child adoption failed', String(error));
+    }
+  };
 
   // Transcript-backed stop gate (false-stop incident): shared by the
   // quiescent stop-confirmation timer and the periodic runtime-status
@@ -486,6 +535,7 @@ export function createTaskSessionManagerHook(
       }
       terminalJobsInjectedByParent.delete(sessionId);
       pendingInjectedTerminalJobsByParent.delete(sessionId);
+      historyBoundaries.delete(sessionId);
       injectionState.retainedBoardSnapshots.delete(sessionId);
       injectionState.retainedTailBoards.delete(sessionId);
       // Orphaned reopen corrections must never surface in a recreated
@@ -627,6 +677,8 @@ export function createTaskSessionManagerHook(
         taskContextTracker,
         getLifecycleEpoch: () => rehydrateState.nextEpoch,
         hostFlavor: options.hostFlavor,
+        adoptRequested:
+          options.hostFlavor === 'v2' ? undefined : adoptRequested,
       }),
 
     'tool.execute.after': async (
@@ -663,6 +715,17 @@ export function createTaskSessionManagerHook(
       output: { messages?: unknown },
     ): Promise<void> => {
       const messages = Array.isArray(output.messages) ? output.messages : [];
+      let viewSession: unknown;
+      let viewStart = Number.POSITIVE_INFINITY;
+      for (const message of messages) {
+        if (!isObjectRecord(message) || !isObjectRecord(message.info)) continue;
+        viewSession ??= message.info.sessionID;
+        const { time } = message.info;
+        if (isObjectRecord(time) && typeof time.created === 'number')
+          viewStart = Math.min(viewStart, time.created);
+      }
+      if (typeof viewSession === 'string' && viewStart !== Infinity)
+        historyBoundaries.set(viewSession, viewStart);
 
       // Keep still-running task tool results byte-stable so a live background
       // lane never rewrites mid-history bytes and invalidates the prompt

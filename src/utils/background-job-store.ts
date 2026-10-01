@@ -1,4 +1,5 @@
 import type {
+  BackgroundJobAdoptionInput,
   BackgroundJobLaunchInput,
   BackgroundJobLease,
   BackgroundJobPromptMetadata,
@@ -172,6 +173,9 @@ export function clearBackgroundJobSuppression(
 export interface BackgroundJobStore {
   // ── Mutation methods ──────────────────────────────────────────────
   registerLaunch(input: BackgroundJobLaunchInput): BackgroundJobRecord;
+  adoptTerminal(
+    input: BackgroundJobAdoptionInput,
+  ): BackgroundJobRecord | undefined;
   acquireCancellationLease(
     taskID: string,
     generation: number,

@@ -1,12 +1,73 @@
-import { describe, expect, mock, test } from 'bun:test';
+import { describe, expect, mock, spyOn, test } from 'bun:test';
 import {
   AGED_ENTRY_RENDER_TTL_MS,
   BackgroundJobBoard as ProductionBoard,
   STATUS_UNCERTAIN_DEMOTE_AFTER_MS,
 } from './background-job-board';
+import { BackgroundJobCoordinator } from './background-job-coordinator';
 import { BackgroundJobBoard } from './background-job-fixture';
 
 describe('BackgroundJobBoard', () => {
+  test('T-B: silent adoption does not outrank known F2 sessions', () => {
+    const clock = spyOn(Date, 'now').mockReturnValue(1000);
+    const board = new BackgroundJobBoard({ maxReusablePerAgent: 2 });
+    const coordinator = new BackgroundJobCoordinator(board);
+    const complete = (taskID: string, now: number) => {
+      board.registerLaunch({
+        taskID,
+        parentSessionID: 'parent-1',
+        agent: 'explorer',
+        now,
+      });
+      board.updateStatus({ taskID, state: 'completed', now });
+      board.markReconciled(taskID, now);
+    };
+    complete('ses_f2', 400);
+    const f2 = structuredClone(board.get('ses_f2'));
+    const terminal = mock();
+    const outcome = mock();
+    const identity = mock();
+    board.addTerminalStateListener(terminal);
+    coordinator.addTerminalStateListener(terminal);
+    coordinator.addTerminalOutcomeListener(outcome);
+    coordinator.addLaunchIdentityListener(identity);
+    const input = {
+      taskID: 'ses_adopted',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'host child',
+      terminalState: 'error' as const,
+      resultSummary: 'host error',
+      createdAt: 50,
+      updatedAt: 100,
+    };
+    try {
+      const adopted = coordinator.adoptTerminal(input);
+      expect(adopted).toMatchObject({
+        state: 'reconciled',
+        terminalState: 'error',
+        lastUsedAt: 100,
+        resultSummary: 'host error',
+      });
+      expect(
+        coordinator.adoptTerminal({ ...input, taskID: 'ses_f2' }),
+      ).toBeUndefined();
+      expect(board.get('ses_f2')).toEqual(f2);
+      expect(identity).toHaveBeenCalledTimes(1);
+      expect(terminal).not.toHaveBeenCalled();
+      expect(outcome).not.toHaveBeenCalled();
+      expect(board.formatForPrompt('parent-1')).toContain(
+        '#### Active / Unreconciled\n- none',
+      );
+      complete('ses_new', 1000);
+      expect(board.get('ses_adopted')).toBeUndefined();
+      expect(board.get('ses_f2')).toBeDefined();
+      expect(board.get('ses_new')).toBeDefined();
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   test('registers background launches as running jobs with aliases', () => {
     const board = new BackgroundJobBoard();
 

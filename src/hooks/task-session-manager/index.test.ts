@@ -15,6 +15,7 @@ import {
   type BackgroundJobTerminalGate,
   createBackgroundJobTerminalGate,
 } from '../../utils/background-job-terminal-gate';
+import * as logger from '../../utils/logger';
 import {
   createPhaseReminderHook,
   PHASE_REMINDER_METADATA_KEY,
@@ -710,6 +711,110 @@ describe('task-session-manager hook', () => {
     expect(boardText(messages)).toContain(
       'exp-1 / child-1 / explorer / running',
     );
+  });
+
+  test('T-A: F4 resumes only a cropped own terminal child', async () => {
+    const clock = spyOn(Date, 'now').mockReturnValue(1000);
+    const logs = spyOn(logger, 'log').mockImplementation(() => {});
+    const get = mock(async ({ path }: { path: { id: string } }) => {
+      if (path.id === 'ses_missing') throw new Error('host unavailable');
+      return {
+        data: {
+          parentID: path.id === 'ses_foreign' ? 'other' : 'parent-1',
+          title:
+            path.id === 'ses_other_agent'
+              ? 'work (@oracle subagent)'
+              : 'work (@explorer subagent)',
+          time: { created: 150, updated: 160 },
+        },
+      };
+    });
+    const board = new BackgroundJobBoard();
+    const { hook, complete } = createHook({
+      backgroundJobBoard: board,
+      sessionClient: { get },
+    });
+    complete('ses_own', 'done');
+    complete('ses_error', 'child failed', true);
+    complete('ses_foreign', 'done');
+    complete('ses_other_agent', 'done');
+    const visible = (created: number) => ({
+      messages: [
+        {
+          info: { role: 'assistant', sessionID: 'parent-1', time: { created } },
+          parts: [],
+        },
+        {
+          info: {
+            role: 'user',
+            agent: 'orchestrator',
+            sessionID: 'parent-1',
+            time: { created: 500 },
+          },
+          parts: [{ type: 'text', text: 'continue' }],
+        },
+      ],
+    });
+    const resume = (task_id: string) =>
+      hook['tool.execute.before'](
+        { tool: 'task', sessionID: 'parent-1', callID: task_id },
+        { args: { task_id, subagent_type: 'explorer', prompt: 'continue' } },
+      );
+    const refuse = async (id: string) => {
+      const message = await resume(id).then(
+        () => 'unexpected resume',
+        (error: Error) => error.message,
+      );
+      expect(message).toBe(
+        `Task ${id}: task() cannot resolve this task_id. It was not dropped; no new session was created. Omit task_id on a separate call to start a new session.`,
+      );
+      expect(logs.mock.calls.at(-1)).toEqual([
+        '[task-session-manager] refused explicit task_id',
+        { task_id: id, unresolved: true },
+      ]);
+      expect(board.get(id)).toBeUndefined();
+    };
+    try {
+      const full = visible(100);
+      const before = structuredClone(full);
+      await hook['experimental.chat.messages.transform']({}, full);
+      expect(full).toEqual(before);
+      expect(get).not.toHaveBeenCalled();
+      await refuse('ses_own');
+      await hook['experimental.chat.messages.transform']({}, visible(200));
+      await hook['experimental.chat.messages.transform'](
+        {},
+        {
+          messages: [
+            {
+              info: { role: 'user', sessionID: 'child', time: { created: 1 } },
+              parts: [],
+            },
+          ],
+        },
+      );
+      await refuse('ses_foreign');
+      await refuse('ses_other_agent');
+      await refuse('ses_missing');
+      await refuse('ses_nonterminal');
+      await resume('ses_own');
+      const own = board.get('ses_own');
+      if (!own) throw new Error('own child was not adopted');
+      expect(own?.state).toBe('reconciled');
+      expect(own?.terminalState).toBe('completed');
+      expect(
+        board.acquireRelaunchLease('ses_own', own.generation),
+      ).toBeUndefined();
+      await resume('ses_error');
+      expect(board.get('ses_error')).toMatchObject({
+        terminalState: 'error',
+        resultSummary: 'child failed',
+      });
+    } finally {
+      await hook.event({ event: { type: 'server.instance.disposed' } });
+      logs.mockRestore();
+      clock.mockRestore();
+    }
   });
 
   test('rehydrates historical background tasks and keeps absent children provisional', async () => {

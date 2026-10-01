@@ -132,6 +132,11 @@ export async function handleToolExecuteBefore(
      * delegation vocabulary for model-visible refusal guidance. Defaults to
      * v1 wording. */
     hostFlavor?: string;
+    adoptRequested?: (
+      parent: string,
+      requested: string,
+      agent: string,
+    ) => Promise<void>;
   },
 ): Promise<void> {
   const toolName = input.tool.toLowerCase();
@@ -224,7 +229,7 @@ export async function handleToolExecuteBefore(
   });
   if (typeof args.task_id === 'string' && args.task_id.trim() !== '') {
     const requested = args.task_id.trim();
-    const remembered =
+    let remembered =
       deps.backgroundJobBoard.resolveReusable(
         input.sessionID,
         requested,
@@ -255,12 +260,23 @@ export async function handleToolExecuteBefore(
           delegation,
         );
       }
-      refuseExplicitTaskId(
-        requested,
-        `Task ${requested}: ${delegation.tool}() cannot resolve this ${delegation.resumeParam}. It was not dropped; no new session was created. Omit ${delegation.resumeParam} on a separate call to start a new session.`,
-        { unresolved: true },
-      );
-    } else {
+      if (requested.startsWith('ses_') && deps.adoptRequested) {
+        await deps.adoptRequested(input.sessionID, requested, agentType);
+        remembered = deps.backgroundJobBoard.resolveReusable(
+          input.sessionID,
+          requested,
+          agentType,
+        );
+      }
+      if (!remembered) {
+        refuseExplicitTaskId(
+          requested,
+          `Task ${requested}: ${delegation.tool}() cannot resolve this ${delegation.resumeParam}. It was not dropped; no new session was created. Omit ${delegation.resumeParam} on a separate call to start a new session.`,
+          { unresolved: true },
+        );
+      }
+    }
+    if (remembered) {
       const relaunchLease = deps.backgroundJobBoard.acquireRelaunchLease(
         remembered.taskID,
         remembered.generation,
