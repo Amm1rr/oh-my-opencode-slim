@@ -202,6 +202,9 @@ find repeated work worth turning into reusable instructions
 suggest skills or agent config improvements from what I keep doing
 ```
 
+Listing `reflect` in `disabled_skills` also disables the `/reflect` command;
+the command is not registered when the skill is disabled.
+
 Reflect is intentionally conservative. If no repeated workflow is strong enough,
 it should recommend creating nothing instead of manufacturing new assets.
 
