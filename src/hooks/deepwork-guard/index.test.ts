@@ -246,6 +246,30 @@ describe('deepwork guard', () => {
     clean(root);
   });
 
+  test('v1 filePath writes are guarded like v2 path writes', () => {
+    const root = makeRoot();
+    mkdirSync(path.join(root, '.opencode'), { recursive: true });
+    writeFileSync(
+      path.join(root, '.opencode', 'oh-my-opencode-slim.json'),
+      JSON.stringify({ deepworkGuardMode: 'enforce' }),
+    );
+    const hook = createDeepworkGuardHook(makeCtx(root));
+    const deepworkRoot = path.join(root, '.slim', 'deepwork');
+    // OpenCode v1 write/edit name the target `filePath`; v2 core uses `path`.
+    expect(() =>
+      hook['tool.execute.before'](
+        { tool: 'write', sessionID: 'ses-a', callID: 'c1' },
+        {
+          args: {
+            filePath: path.join(deepworkRoot, 't1', 'progress.md'),
+            content: 'status: completed\n\nsee `.slim/deepwork/t1/ghost.md`\n',
+          },
+        },
+      ),
+    ).toThrow(/Completion blocked/);
+    clean(root);
+  });
+
   test('failed edits record no receipt (unchanged file)', () => {
     const root = makeRoot();
     const hook = createDeepworkGuardHook(makeCtx(root));

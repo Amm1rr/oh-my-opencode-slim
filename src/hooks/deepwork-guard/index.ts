@@ -49,7 +49,10 @@ interface BeforeInput {
 
 interface BeforeOutput {
   args?: {
+    /** v2 core write/edit parameter. */
     path?: unknown;
+    /** v1 write/edit parameter. */
+    filePath?: unknown;
     content?: unknown;
     newString?: unknown;
     [key: string]: unknown;
@@ -283,7 +286,7 @@ export function createDeepworkGuardHook(ctx: PluginInput): {
   return {
     'tool.execute.before': async (input, output) => {
       if (!WRITE_TOOLS.has(input.tool.toLowerCase())) return;
-      const raw = output.args?.path;
+      const raw = output.args?.path ?? output.args?.filePath;
       if (typeof raw !== 'string' || raw === '') return;
       const filePath = path.isAbsolute(raw)
         ? raw
