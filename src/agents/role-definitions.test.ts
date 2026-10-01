@@ -1,6 +1,5 @@
 import { describe, expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
-import { DEFAULT_AGENT_MCPS } from '../config/agent-mcps';
 import { createDesignerAgent } from './designer';
 import { createExplorerAgent } from './explorer';
 import { createFixerAgent } from './fixer';
@@ -21,57 +20,6 @@ const FACTORIES = {
 } as const;
 
 describe('specialist role definitions', () => {
-  test('enforces the read-only tool matrix on read-only roles only', () => {
-    // Invariant: a role's class map must allow its own DEFAULT_AGENT_MCPS —
-    // marketplace packages extending the builtin project their inherited
-    // MCP grants through this map's ceiling, so the two static properties
-    // must never drift apart.
-    for (const role of [
-      'explorer',
-      'librarian',
-      'oracle',
-      'observer',
-    ] as const) {
-      const agent = FACTORIES[role]('test/model');
-      const permission = agent.config.permission as Record<string, unknown>;
-      expect(permission).toBeDefined();
-      expect(permission['*']).toBe('deny');
-      expect(permission.edit).toBe('deny');
-      expect(permission.write).toBe('deny');
-      expect(permission.bash).toBe('deny');
-      expect(permission.apply_patch).toBe('deny');
-      expect(permission.ast_grep_replace).toBe('deny');
-      expect(permission.read).toBe('allow');
-      expect(permission.glob).toBe('allow');
-      expect(permission.grep).toBe('allow');
-      expect(permission.ast_grep_search).toBe('allow');
-      expect(permission.webfetch).toBe('allow');
-      expect(permission.websearch).toBe('allow');
-    }
-    for (const role of ['designer', 'fixer'] as const) {
-      const agent = FACTORIES[role]('test/model');
-      expect(agent.config.permission).toBeUndefined();
-    }
-  });
-
-  test('read-only roles may only declare read-only MCP dependencies', () => {
-    // The class map derives its MCP allows from DEFAULT_AGENT_MCPS, which
-    // makes the declaration a security-relevant edit point: a write-capable
-    // MCP declared here would be silently allowed through the read-only
-    // ceiling. Pin the known read-only set.
-    const READ_ONLY_MCP_ALLOWLIST = new Set(['context7', 'gh_grep']);
-    for (const role of [
-      'explorer',
-      'librarian',
-      'oracle',
-      'observer',
-    ] as const) {
-      for (const mcp of DEFAULT_AGENT_MCPS[role] ?? []) {
-        expect(READ_ONLY_MCP_ALLOWLIST.has(mcp)).toBe(true);
-      }
-    }
-  });
-
   test('matches golden factory prompts and descriptions', () => {
     const outputs = SPECIALIST_ROLES.map((role) => {
       const agent = FACTORIES[role]('test/model');

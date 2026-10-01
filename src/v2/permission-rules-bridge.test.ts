@@ -393,21 +393,14 @@ describe('built-in agent permission-rule derivation matrix', () => {
 
     // Before the fix this was 0 calls ("no exact-match rules derivable")
     // and the child kept the parent's inherited session-scoped rules.
-    // Explorer now carries the read-only class map, so the derived rules
-    // include its read-class allows and the enforced edit deny.
     expect(calls).toHaveLength(1);
     expect(calls[0].sessionID).toBe('ses_child_1');
     expect(calls[0].permissions.length).toBeGreaterThan(0);
     expect(rulesAreHostCanonical(calls[0].permissions)).toBe(true);
     expect(calls[0].permissions).toContainEqual({
-      action: 'read',
+      action: 'question',
       resource: '*',
       effect: 'allow',
-    });
-    expect(calls[0].permissions).toContainEqual({
-      action: 'edit',
-      resource: '*',
-      effect: 'deny',
     });
   });
 

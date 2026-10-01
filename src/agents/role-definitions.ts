@@ -1,13 +1,8 @@
-import { DEFAULT_AGENT_MCPS } from '../config/agent-mcps';
 import {
   type SpecialistRole,
   SUPPORTED_SPECIALIST_ROLES,
 } from '../config/agent-roles';
 import type { AgentDefinition } from './orchestrator';
-import {
-  type AgentPermission,
-  createReadOnlyAgentPermission,
-} from './permissions';
 import {
   DESIGNER_PROMPT,
   EXPLORER_PROMPT,
@@ -67,38 +62,6 @@ export const ROLE_DEFINITIONS: Readonly<
   }),
 });
 
-/** Enforced tool matrix for read-only roles: the same strict base the
- * councillor seats use (wildcard deny + inspection allows), plus the web
- * research tools — web reads are read-only operations, and the research
- * roles legitimately consult external docs. This enforces the read-only
- * contract with permissions, not just prompt guidance. Writers keep the
- * host default, tightened at assembly by the orchestrator-default denies. */
-const READ_ONLY_ROLE_IDS: ReadonlySet<SpecialistRole> = new Set([
-  'explorer',
-  'librarian',
-  'oracle',
-  'observer',
-]);
-
-function createRolePermission(
-  role: SpecialistRole,
-): AgentPermission | undefined {
-  if (!READ_ONLY_ROLE_IDS.has(role)) return undefined;
-  const permission: AgentPermission = {
-    ...createReadOnlyAgentPermission(),
-    webfetch: 'allow',
-    websearch: 'allow',
-  };
-  // The class map must allow the role's own declared default MCP
-  // dependencies: marketplace packages extending the builtin project their
-  // inherited MCP grants through this map's ceiling (permissionEffect), so
-  // denying them here would cut the extension's required tools.
-  for (const mcp of DEFAULT_AGENT_MCPS[role] ?? []) {
-    permission[`${mcp.replace(/[^a-zA-Z0-9_-]/g, '_')}_*`] = 'allow';
-  }
-  return permission;
-}
-
 export function createRoleAgent(
   role: SpecialistRoleDefinition,
   model: string,
@@ -110,11 +73,10 @@ export function createRoleAgent(
     : customAppendPrompt
       ? `${role.prompt}\n\n${customAppendPrompt}`
       : role.prompt;
-  const permission = createRolePermission(role.id);
 
   return {
     name: role.id,
     description: role.description,
-    config: permission ? { model, prompt, permission } : { model, prompt },
+    config: { model, prompt },
   };
 }
