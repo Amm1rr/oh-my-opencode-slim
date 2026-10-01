@@ -119,24 +119,28 @@ Start it directly with:
    `.slim/deepwork/` in `.gitignore` and `!.slim/deepwork/` plus
    `!.slim/deepwork/**` in `.ignore`. This keeps state git-local while making it
    readable to OpenCode.
-2. Orchestrator creates a session artifact at `.slim/deepwork/<session-id>.md`
+2. Orchestrator creates a router head at `.slim/deepwork/<session-id>.md` and a
+   task directory `.slim/deepwork/<task-slug>/` holding the task's progress file
+   and topic files
 3. Draft a phased implementation plan with a small number of coherent phases
    based on dependencies and natural delivery boundaries. Do not split work
    merely to make an Oracle review smaller.
 4. Before execution, show a compact overview of phase order, specialist
    ownership/scope, the Oracle review total, the review after each phase, and a
    short reason for each gate.
-5. Execute phase by phase: validate, update session state, then get an Oracle
-   review before advancing.
+5. Execute phase by phase: validate, update the task progress file, then get an
+   Oracle review before advancing.
 6. Batch material findings into one bounded remediation pass with focused
    validation. Re-review only when needed to assess a changed decision/risk or
    an otherwise unverifiable concern.
 
 **Key features:**
-- Persistent session state in markdown files
+- Bounded state: a ≤12-line router head per session, an ~80-line progress file
+  per task, one-line fold-on-close entries
 - Predictable Oracle reviews after each planned phase, declared before execution
 - V2 scheduler integration (dispatch specialists, wait for hook-driven completion, reconcile)
-- Flexible structure - orchestrator adapts format to task needs
+- Fixed head, flexible body — the orchestrator shapes everything below the
+  progress-file head
 
 **When to use:** Large-scale refactoring, multi-file architectural changes, complex feature development spanning modules.
 
