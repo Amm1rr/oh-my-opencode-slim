@@ -344,6 +344,7 @@ describe('createV2Setup e2e', () => {
       expect(tool.options).toEqual({ codemode: false });
     }
     expect(calls.commandAdds.map((c) => c.name)).toContain('deepwork');
+    expect(calls.commandAdds.map((c) => c.name)).toContain('interview');
     expect(calls.mcpSets.map((m) => m.name)).toEqual(['context7', 'gh_grep']);
     expect(calls.mcpSets.map((m) => m.config)).toEqual([
       expect.objectContaining({ type: 'remote' }),
@@ -392,6 +393,7 @@ describe('createV2Setup e2e', () => {
         },
       ],
     };
+    expect(calls.contextHookCb).toBeFunction();
     await calls.contextHookCb?.({
       sessionID: 'ses_iv_gate',
       agent: 'oracle',
@@ -406,6 +408,9 @@ describe('createV2Setup e2e', () => {
         text: '<omos-interview-command>build an app</omos-interview-command>',
       },
     ]);
+    // The gate short-circuits before the service; the merged handler swallows
+    // bridge errors, so assert the bridge did not fail its way into a no-op.
+    expect(readPluginLog()).not.toContain('interview context bridge failed');
 
     await cleanup();
     expect(calls.disposed.length).toBeGreaterThan(0);
