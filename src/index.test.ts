@@ -2466,6 +2466,61 @@ describe('background task admission model resolution', () => {
     await expectSecondTaskQueued('orchestrator-1');
   });
 
+  test('v1 retry-primary continuation restores the last external model', async () => {
+    const sessionID = 'orchestrator-fallback';
+    await hooks?.['chat.message']?.(
+      {
+        sessionID,
+        agent: 'orchestrator',
+        model: { providerID: 'openai', modelID: 'gpt-6-luna' },
+      } as never,
+      {} as never,
+    );
+
+    const output = {
+      message: {
+        id: 'msg-native-completion',
+        role: 'user',
+        sessionID,
+        agent: 'orchestrator',
+        model: {
+          providerID: 'openrouter',
+          modelID: 'openrouter/auto',
+          variant: 'low',
+        },
+      },
+      parts: [
+        {
+          type: 'text',
+          synthetic: true,
+          text: [
+            '<task id="ses_child" state="completed">',
+            '<summary>Background task completed: availability check</summary>',
+            '<task_result>',
+            'OPERATOR_OK',
+            '</task_result>',
+            '</task>',
+          ].join('\n'),
+        },
+      ],
+    };
+
+    await hooks?.['chat.message']?.(
+      {
+        sessionID,
+        agent: 'orchestrator',
+        messageID: 'msg-native-completion',
+      } as never,
+      output as never,
+    );
+
+    expect(output.message.model).toEqual({
+      providerID: 'openai',
+      modelID: 'gpt-6-luna',
+    });
+    await expectSecondTaskQueued(sessionID);
+  });
+
   test('internal initiator chat.message does not overwrite the tracked session model', async () => {
     await hooks?.['chat.message']?.(
       {
@@ -2628,8 +2683,15 @@ describe('plugin config model inheritance', () => {
 
   async function loadConfiguredPlugin(
     config: Record<string, unknown>,
-    existingDirectory?: string,
+    existingDirectoryOrFallbackMessages?: string | unknown[],
   ) {
+    const existingDirectory =
+      typeof existingDirectoryOrFallbackMessages === 'string'
+        ? existingDirectoryOrFallbackMessages
+        : undefined;
+    const fallbackMessages = Array.isArray(existingDirectoryOrFallbackMessages)
+      ? existingDirectoryOrFallbackMessages
+      : undefined;
     const configDir =
       existingDirectory ?? (await mkdtemp('/tmp/oh-my-opencode-inheritance-'));
     if (!existingDirectory) configDirs.push(configDir);
@@ -2649,7 +2711,7 @@ describe('plugin config model inheritance', () => {
     const client = createPluginClient(async () => ({}));
     client.session.status = async () => ({ data: {} });
     client.session.messages = async () => ({
-      data: [
+      data: fallbackMessages ?? [
         {
           info: {
             role: 'assistant',
@@ -2741,6 +2803,69 @@ describe('plugin config model inheritance', () => {
     }
   }
 
+  /** Run a v1 task delegation through the before-hook, the child's
+   *  session.created and its first chat.message (which the host persists
+   *  after the hook); return the routed subagent_type and child model. */
+  async function delegateV1Child(
+    hooks: Awaited<ReturnType<typeof loadConfiguredPlugin>>,
+    parentSessionID: string,
+    callID: string,
+    primary: { providerID: string; modelID: string },
+    options: { background?: boolean; completeBeforeChild?: boolean } = {},
+  ) {
+    const output = {
+      args: {
+        subagent_type: 'operator',
+        description: 'verify fallback routing',
+        prompt: 'return ok',
+        ...(options.background ? { background: true } : {}),
+      },
+    };
+    await hooks['tool.execute.before']?.(
+      { tool: 'task', sessionID: parentSessionID, callID } as never,
+      output as never,
+    );
+    if (options.completeBeforeChild) {
+      // A background task returns before its child's first prompt.
+      await hooks['tool.execute.after']?.(
+        {
+          tool: 'task',
+          sessionID: parentSessionID,
+          callID,
+          args: output.args,
+        } as never,
+        { title: '', output: 'started', metadata: {} } as never,
+      );
+    }
+    const childID = `child-${callID}`;
+    await hooks.event?.({
+      event: {
+        type: 'session.created',
+        properties: {
+          info: { id: childID, parentID: parentSessionID, agent: 'operator' },
+        },
+      },
+    } as never);
+    const childOutput = {
+      message: {
+        id: `msg-${childID}`,
+        role: 'user',
+        sessionID: childID,
+        agent: 'operator',
+        model: { ...primary },
+      },
+      parts: [{ type: 'text', text: 'return ok' }],
+    };
+    await hooks['chat.message']?.(
+      { sessionID: childID, agent: 'operator', model: primary } as never,
+      childOutput as never,
+    );
+    return {
+      subagentType: output.args.subagent_type,
+      childModel: childOutput.message.model,
+    };
+  }
+
   test('session inheritance removes a stale host model in the final config', async () => {
     const hooks = await loadConfiguredPlugin({
       agents: {
@@ -2798,7 +2923,7 @@ describe('plugin config model inheritance', () => {
     }
   });
 
-  test('orchestrator inheritance uses the host orchestrator model in the final config', async () => {
+  test('orchestrator inheritance leaves the child model-less for live parent selection', async () => {
     const hooks = await loadConfiguredPlugin({
       agents: {
         librarian: { inheritModelFrom: 'orchestrator' },
@@ -2818,11 +2943,330 @@ describe('plugin config model inheritance', () => {
         string,
         Record<string, unknown>
       >;
-      expect(agents.librarian?.model).toBe('host/orchestrator');
+      expect(agents.librarian?.model).toBeUndefined();
     } finally {
       await hooks.dispose?.();
     }
   });
+
+  test.each([
+    [
+      'exact child fallback',
+      ['openrouter/openrouter/auto', 'openai/gpt-6-luna'],
+      'openai/gpt-6-luna',
+    ],
+    [
+      'working parent provider',
+      ['openrouter/anthropic/claude-opus', 'openai/gpt-6-astra'],
+      'openai/gpt-6-astra',
+    ],
+  ])(
+    'v1 delegation starts on the %s instead of a provider the parent exhausted',
+    async (_label, childModels, expectedModel) => {
+      const hooks = await loadConfiguredPlugin({
+        agents: {
+          orchestrator: {
+            model: ['openrouter/openrouter/auto', 'openai/gpt-6-luna'],
+          },
+          operator: { model: childModels },
+        },
+      });
+      const hostConfig: Record<string, unknown> = { agent: {} };
+
+      try {
+        await hooks.config?.(hostConfig);
+        await hooks['chat.message']?.(
+          {
+            sessionID: 'orchestrator-fallback',
+            agent: 'orchestrator',
+            model: { providerID: 'openai', modelID: 'gpt-6-luna' },
+          } as never,
+          {} as never,
+        );
+        const routed = await delegateV1Child(
+          hooks,
+          'orchestrator-fallback',
+          `call-${_label}`,
+          { providerID: 'openrouter', modelID: 'openrouter/auto' },
+        );
+
+        // No hidden agent aliases: the host task permission and agent
+        // lookup keep seeing the canonical specialist.
+        expect(routed.subagentType).toBe('operator');
+        const agents = hostConfig.agent as Record<string, unknown>;
+        expect(
+          Object.keys(agents).some((name) =>
+            name.startsWith('slim-internal-fallback'),
+          ),
+        ).toBe(false);
+        const slash = expectedModel.indexOf('/');
+        expect(routed.childModel).toEqual({
+          providerID: expectedModel.slice(0, slash),
+          modelID: expectedModel.slice(slash + 1),
+        });
+      } finally {
+        await hooks.dispose?.();
+      }
+    },
+  );
+
+  test.each([
+    ['background', true, { providerID: 'openai', modelID: 'gpt-6-luna' }],
+    [
+      'foreground',
+      false,
+      { providerID: 'openrouter', modelID: 'openrouter/auto' },
+    ],
+  ] as const)(
+    'v1 %s task completion before the child prompt keeps the route only for background',
+    async (_label, background, expectedModel) => {
+      const hooks = await loadConfiguredPlugin({
+        agents: {
+          orchestrator: {
+            model: ['openrouter/openrouter/auto', 'openai/gpt-6-luna'],
+          },
+          operator: {
+            model: ['openrouter/openrouter/auto', 'openai/gpt-6-luna'],
+          },
+        },
+      });
+
+      try {
+        await hooks.config?.({ agent: {} });
+        await hooks['chat.message']?.(
+          {
+            sessionID: `orchestrator-${_label}`,
+            agent: 'orchestrator',
+            model: { providerID: 'openai', modelID: 'gpt-6-luna' },
+          } as never,
+          {} as never,
+        );
+        const routed = await delegateV1Child(
+          hooks,
+          `orchestrator-${_label}`,
+          `call-${_label}-early-after`,
+          { providerID: 'openrouter', modelID: 'openrouter/auto' },
+          { background, completeBeforeChild: true },
+        );
+        expect(routed.subagentType).toBe('operator');
+        expect(routed.childModel).toEqual(expectedModel);
+      } finally {
+        await hooks.dispose?.();
+      }
+    },
+  );
+
+  test('v1 delegation uses the fallback replay model instead of the last external selection', async () => {
+    const hooks = await loadConfiguredPlugin(
+      {
+        agents: {
+          orchestrator: {
+            model: ['openrouter/openrouter/auto', 'openai/gpt-6-luna'],
+          },
+          operator: {
+            model: ['openrouter/openrouter/auto', 'openai/gpt-6-luna'],
+          },
+        },
+      },
+      [
+        {
+          info: { id: 'msg-original', role: 'user' },
+          parts: [{ type: 'text', text: 'delegate this work' }],
+        },
+      ],
+    );
+    const hostConfig: Record<string, unknown> = { agent: {} };
+    const sessionID = 'orchestrator-live-fallback';
+    const fallbackMessageID = 'msg-fallback-replay';
+
+    try {
+      await hooks.config?.(hostConfig);
+      await hooks['chat.message']?.(
+        {
+          sessionID,
+          agent: 'orchestrator',
+          model: { providerID: 'openrouter', modelID: 'openrouter/auto' },
+        } as never,
+        {} as never,
+      );
+      await hooks.event?.({
+        event: {
+          type: 'message.updated',
+          properties: {
+            info: {
+              id: 'msg-primary-error',
+              sessionID,
+              role: 'assistant',
+              agent: 'orchestrator',
+              providerID: 'openrouter',
+              modelID: 'openrouter/auto',
+            },
+          },
+        },
+      } as never);
+      await hooks.event?.({
+        event: {
+          type: 'session.error',
+          properties: {
+            sessionID,
+            error: { statusCode: 403, message: 'Key limit exceeded' },
+          },
+        },
+      } as never);
+      // A synthetic admission may report another model in the same session;
+      // it must not displace the confirmed fallback used for delegation.
+      await hooks['chat.message']?.(
+        {
+          sessionID,
+          agent: 'orchestrator',
+          model: { providerID: 'anthropic', modelID: 'claude' },
+          messageID: fallbackMessageID,
+          parts: [createInternalAgentTextPart('background completion')],
+        } as never,
+        {} as never,
+      );
+      await hooks.event?.({
+        event: {
+          type: 'message.updated',
+          properties: {
+            info: {
+              id: fallbackMessageID,
+              sessionID,
+              role: 'user',
+              agent: 'orchestrator',
+              providerID: 'anthropic',
+              modelID: 'claude',
+            },
+          },
+        },
+      } as never);
+
+      const routed = await delegateV1Child(
+        hooks,
+        sessionID,
+        'call-live-fallback',
+        { providerID: 'openrouter', modelID: 'openrouter/auto' },
+      );
+      expect(routed.subagentType).toBe('operator');
+      expect(routed.childModel).toEqual({
+        providerID: 'openai',
+        modelID: 'gpt-6-luna',
+      });
+    } finally {
+      await hooks.dispose?.();
+    }
+  });
+
+  test.each([
+    ['retry-primary', 'openrouter', 'openrouter/auto'],
+    ['stick-to-fallback', 'openai', 'gpt-6-luna'],
+  ] as const)(
+    'v1 %s policy selects the completion model after a confirmed fallback',
+    async (continuationPolicy, expectedProvider, expectedModel) => {
+      const hooks = await loadConfiguredPlugin(
+        {
+          fallback: { maxRetries: 0, continuationPolicy },
+          agents: {
+            orchestrator: {
+              model: ['openrouter/openrouter/auto', 'openai/gpt-6-luna'],
+            },
+            operator: {
+              model: ['openrouter/openrouter/auto', 'openai/gpt-6-luna'],
+            },
+          },
+        },
+        [
+          {
+            info: { id: 'msg-original', role: 'user' },
+            parts: [{ type: 'text', text: 'continue after fallback' }],
+          },
+        ],
+      );
+      const sessionID = `continuation-${continuationPolicy}`;
+      const hostConfig: Record<string, unknown> = { agent: {} };
+
+      try {
+        await hooks.config?.(hostConfig);
+        await hooks['chat.message']?.(
+          {
+            sessionID,
+            agent: 'orchestrator',
+            model: {
+              providerID: 'openrouter',
+              modelID: 'openrouter/auto',
+            },
+          } as never,
+          {} as never,
+        );
+        await hooks.event?.({
+          event: {
+            type: 'message.updated',
+            properties: {
+              info: {
+                id: `msg-primary-error-${continuationPolicy}`,
+                sessionID,
+                role: 'assistant',
+                agent: 'orchestrator',
+                providerID: 'openrouter',
+                modelID: 'openrouter/auto',
+              },
+            },
+          },
+        } as never);
+        await hooks.event?.({
+          event: {
+            type: 'session.error',
+            properties: {
+              sessionID,
+              error: { statusCode: 403, message: 'Key limit exceeded' },
+            },
+          },
+        } as never);
+
+        const output = {
+          message: {
+            id: `msg-completion-${continuationPolicy}`,
+            role: 'user',
+            sessionID,
+            agent: 'orchestrator',
+            model: {
+              providerID: 'openrouter',
+              modelID: 'openrouter/auto',
+            },
+          },
+          parts: [createInternalAgentTextPart('background task completed')],
+        };
+        await hooks['chat.message']?.(
+          {
+            sessionID,
+            agent: 'orchestrator',
+            messageID: output.message.id,
+          } as never,
+          output as never,
+        );
+
+        expect(output.message.model).toEqual({
+          providerID: expectedProvider,
+          modelID: expectedModel,
+        });
+
+        const routed = await delegateV1Child(
+          hooks,
+          sessionID,
+          `call-continuation-${continuationPolicy}`,
+          { providerID: 'openrouter', modelID: 'openrouter/auto' },
+        );
+        expect(routed.subagentType).toBe('operator');
+        expect(routed.childModel).toEqual(
+          continuationPolicy === 'retry-primary'
+            ? { providerID: 'openrouter', modelID: 'openrouter/auto' }
+            : { providerID: 'openai', modelID: 'gpt-6-luna' },
+        );
+      } finally {
+        await hooks.dispose?.();
+      }
+    },
+  );
 
   test('preset inheritance clears a stale host model in the final config', async () => {
     const hooks = await loadConfiguredPlugin({

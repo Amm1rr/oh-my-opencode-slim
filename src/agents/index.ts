@@ -220,21 +220,22 @@ function applyOverrides(
  * when an agent config does not specify `model`.
  *
  * A combined array-chain policy (`model: [...]` + `inheritModelFrom`) keeps
- * the SDK-level inheritance: the agent follows the session/orchestrator model
- * and `_modelArray` remains the runtime fallback chain. A scalar `model`
+ * the SDK-level inheritance: the agent follows the live session/orchestrator
+ * model and `_modelArray` remains the runtime fallback chain. A scalar `model`
  * still wins outright (explicit model precedence, see getModelForAgent).
  */
 function applyModelInheritance(
   agent: AgentDefinition,
   override: AgentOverrideConfig | undefined,
-  orchestratorModel: string | undefined,
 ): void {
+  // Scalar models are explicit and always win. An array may be combined with
+  // inheritance: keep it as the fallback chain while the live parent model
+  // supplies the current primary.
   if (override?.model !== undefined && !Array.isArray(override.model)) return;
 
   if (
     override?.inheritModelFrom === 'session' ||
-    (override?.inheritModelFrom === 'orchestrator' &&
-      orchestratorModel === undefined)
+    override?.inheritModelFrom === 'orchestrator'
   ) {
     delete agent.config.model;
     // The chain head's inline variant belongs to the chain head model, not
@@ -247,28 +248,21 @@ function applyModelInheritance(
 
 /**
  * Apply model inheritance to the final host agent config after the host layer
- * has been merged. This clears stale host models for `session` inheritance,
- * which cannot be handled by the agent definition alone.
+ * has been merged. This clears stale host models for `session` and
+ * `orchestrator` inheritance so delegated agents follow the live parent model.
  *
  * Combined array-chain policies (`model: [...]` + `inheritModelFrom`) are
- * honored here too: `session` inheritance clears the host model so the SDK
- * keeps following the live session model, and `orchestrator` inheritance
- * pins the resolved orchestrator model ahead of the chain. A chain head's
- * inline variant stamped by the earlier passes is cleared alongside the
- * rewritten model. Scalar models keep explicit precedence and skip
+ * honored here too: inheritance clears the host model so the SDK keeps
+ * following the live parent model. A chain head's inline variant stamped by
+ * the earlier passes is cleared alongside the rewritten model. Scalar models
+ * keep explicit precedence and skip
  * inheritance entirely.
  */
 export function applyModelInheritanceToConfig(
   configAgent: Record<string, unknown>,
   runtime: RuntimeConfig,
-  resolvedOrchestratorModel?: string | null,
 ): void {
   const mergedAgents = runtime.agents();
-  const orchestratorModel =
-    resolvedOrchestratorModel !== undefined
-      ? (resolvedOrchestratorModel ?? undefined)
-      : getPrimaryModelFromOverride(runtime.agent('orchestrator'));
-
   for (const agentName of Object.keys(configAgent)) {
     const override = getOverrideFromAgents(mergedAgents, agentName);
     if (!override) continue;
@@ -286,13 +280,7 @@ export function applyModelInheritanceToConfig(
     }
 
     const agentConfig = entry as Record<string, unknown>;
-    if (override.inheritModelFrom === 'session') {
-      delete agentConfig.model;
-    } else if (orchestratorModel === undefined) {
-      delete agentConfig.model;
-    } else {
-      agentConfig.model = orchestratorModel;
-    }
+    delete agentConfig.model;
     // The array-primary and runtime preset passes stamp the chain head's
     // inline variant into this entry next to its model. A combined policy
     // rewrites or clears that model, so the stale variant — which belongs
@@ -912,7 +900,7 @@ export function createAgents(
     if (override) {
       applyOverrides(agent, override);
     }
-    applyModelInheritance(agent, override, configuredOrchestratorModel);
+    applyModelInheritance(agent, override);
     applyDefaultPermissions(agent, override?.skills, runtime.disabledSkills);
     return agent;
   });
@@ -922,7 +910,7 @@ export function createAgents(
     if (override) {
       applyOverrides(agent, override);
     }
-    applyModelInheritance(agent, override, configuredOrchestratorModel);
+    applyModelInheritance(agent, override);
     applyDefaultPermissions(agent, override?.skills, runtime.disabledSkills);
     return agent;
   });
@@ -997,11 +985,7 @@ export function createAgents(
   if (orchestratorOverride) {
     applyOverrides(orchestrator, orchestratorOverride);
   }
-  applyModelInheritance(
-    orchestrator,
-    orchestratorOverride,
-    configuredOrchestratorModel,
-  );
+  applyModelInheritance(orchestrator, orchestratorOverride);
   applyDefaultPermissions(
     orchestrator,
     orchestratorOverride?.skills,

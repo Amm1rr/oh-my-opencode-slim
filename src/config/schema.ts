@@ -787,6 +787,16 @@ export const FailoverConfigSchema = z.preprocess(
           'Delay in milliseconds between consecutive fallback attempts ' +
             'after the initial trigger. 0 disables.',
         ),
+      continuationPolicy: z
+        .enum(['retry-primary', 'stick-to-fallback'])
+        .default('retry-primary')
+        .describe(
+          'Model policy for unpinned OpenCode v1 internal continuations ' +
+            '(for example, background completion and lifecycle wakes) after ' +
+            'a confirmed fallback. "retry-primary" lets the host try the ' +
+            'configured primary again; "stick-to-fallback" keeps the ' +
+            'confirmed fallback until a new external user turn.',
+        ),
     })
     .strict(),
 );

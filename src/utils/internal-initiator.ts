@@ -1,10 +1,45 @@
 import { isRecord } from './guards';
+import { parseTaskStatusOutput } from './task';
 
 export const SLIM_INTERNAL_INITIATOR_MARKER =
   '<!-- SLIM_INTERNAL_INITIATOR -->';
 
 export const INTERNAL_INITIATOR_METADATA_KEY =
   'oh-my-opencode-slim.internalInitiator';
+
+/**
+ * OpenCode v1's native background-task notifier submits an untagged
+ * synthetic user message when a child finishes. It is still an internal
+ * lifecycle continuation, and treating it as external would overwrite the
+ * parent's live fallback model with the agent's configured primary.
+ */
+export function isNativeBackgroundTaskNotification(part: unknown): boolean {
+  if (
+    !isRecord(part) ||
+    part.type !== 'text' ||
+    part.synthetic !== true ||
+    typeof part.text !== 'string'
+  ) {
+    return false;
+  }
+
+  const status = parseTaskStatusOutput(part.text);
+  if (status?.state === 'completed') {
+    return (
+      part.text.includes('<summary>Background task completed: ') &&
+      part.text.includes('<task_result>') &&
+      part.text.includes('</task_result>')
+    );
+  }
+  if (status?.state === 'error') {
+    return (
+      part.text.includes('<summary>Background task failed: ') &&
+      part.text.includes('<task_error>') &&
+      part.text.includes('</task_error>')
+    );
+  }
+  return false;
+}
 
 export function createInternalAgentTextPart(text: string): {
   type: 'text';
