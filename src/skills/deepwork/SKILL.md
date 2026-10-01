@@ -53,8 +53,9 @@ gone). Below: an open-items checklist (3–8 items) and a dated log folding
 every closed phase or decision into one line — `[x] name: one-line
 conclusion (see <file>)`. Update at every phase close, decision, and
 review, folding as you go; the head and log-line format are the only fixed
-shapes. Claim a task with plain `mkdir .slim/deepwork/<task-slug>` (no
-`-p`); on success, write its `slug:` into the pinned head — flipping a
+shapes. Claim a task with `mkdir -p .slim/deepwork` then a plain
+`mkdir .slim/deepwork/<task-slug>` (no `-p` on the task directory); on
+success, write its `slug:` into the pinned head — flipping a
 reused head's `status:` back to `active` — before working. If the
 directory already exists: a `slug:` in another session's `status: active`
 head means claimed; otherwise adopt it by writing the `slug:` yourself.
@@ -64,7 +65,8 @@ transcribed by the orchestrator when it cannot; the progress file gets
 only a one-line conclusion plus the path. Never paste
 `@council`/`@oracle`/`@librarian` output into a progress file or fork
 one. Accept lane completion only after re-reading the artifact from disk
-(on miss, re-check once). Past ~400 lines,
+and confirming it carries this lane's returned conclusion (on miss,
+re-check once). Past ~400 lines,
 consolidate a topic file — one per topic, new versions overwrite old
 ones.
 
