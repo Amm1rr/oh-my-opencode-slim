@@ -52,7 +52,8 @@ The main idea is simple: instead of forcing one model to do everything, the plug
   across 25 languages, and built-in MCPs for docs and GitHub code
   search.
 - **[Fully customizable](docs/configuration.md)** - custom agents, prompt
-  overrides, per-agent skill/MCP permissions, and
+  overrides, per-agent skill/MCP permissions, global disable switches for
+  tools, MCPs, agents, skills, hooks, and slash commands, and
   [project-local customization](docs/project-local-customization.md).
 - **[Marketplace packages](docs/marketplace.md)** - install and manage community
   agents; package changes apply only after reloading OpenCode.
