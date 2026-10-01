@@ -4,26 +4,15 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
-  readdirSync,
   readFileSync,
-  rmdirSync,
-  statSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { basename, extname, join } from 'node:path';
-import { log } from '../utils/logger';
 import { isUserMessageWithParts, type MessageWithParts } from './types';
 
-// Debounce: only run cleanup every 10 minutes per directory
-const lastCleanupByDir = new Map<string, number>();
-const CLEANUP_INTERVAL = 10 * 60 * 1000; // 10 minutes
-
-/** Exact bytes previously written by this plugin for `.opencode/.gitignore`. */
-const LEGACY_OPENCODE_GITIGNORE_BYTES = Buffer.from('*\n');
-const LEGACY_OPENCODE_GITIGNORE_BACKUP =
-  '.gitignore.oh-my-opencode-slim-legacy';
-/** Correct scoped rule: ignore only the images directory under `.opencode/`. */
+/** Keep this aligned with the host read tool's MAX_MEDIA_INGEST_BYTES. */
+const MAX_MEDIA_INGEST_BYTES = 20 * 1024 * 1024;
 const IMAGES_GITIGNORE_RULE = 'images/';
 const IMAGES_GITIGNORE_BYTES = Buffer.from(`${IMAGES_GITIGNORE_RULE}\n`);
 
@@ -35,26 +24,8 @@ function opencodeGitignorePath(workDir: string): string {
   return join(opencodeDirPath(workDir), '.gitignore');
 }
 
-function legacyOpencodeGitignoreBackupPath(workDir: string): string {
-  return join(opencodeDirPath(workDir), LEGACY_OPENCODE_GITIGNORE_BACKUP);
-}
-
-function hasExactLegacyOpencodeGitignoreBackup(
-  gitignorePath: string,
-  backupPath: string,
-  raw: Buffer,
-): boolean {
-  try {
-    const source = statSync(gitignorePath);
-    const backup = lstatSync(backupPath);
-    return (
-      backup.isFile() &&
-      (backup.dev !== source.dev || backup.ino !== source.ino) &&
-      readFileSync(backupPath).equals(raw)
-    );
-  } catch {
-    return false;
-  }
+function imagesDirPath(workDir: string): string {
+  return join(opencodeDirPath(workDir), 'images');
 }
 
 function pathIsSymlink(target: string): boolean {
@@ -65,10 +36,14 @@ function pathIsSymlink(target: string): boolean {
   }
 }
 
-/**
- * Refuse to create/overwrite/append `.opencode/.gitignore` when the ignore file
- * or its `.opencode` parent is a symlink (would mutate an external target).
- */
+function isRegularFile(target: string): boolean {
+  try {
+    return lstatSync(target).isFile();
+  } catch {
+    return false;
+  }
+}
+
 function isUnsafeOpencodeGitignorePath(workDir: string): boolean {
   return (
     pathIsSymlink(opencodeDirPath(workDir)) ||
@@ -76,14 +51,6 @@ function isUnsafeOpencodeGitignorePath(workDir: string): boolean {
   );
 }
 
-function imagesDirPath(workDir: string): string {
-  return join(opencodeDirPath(workDir), 'images');
-}
-
-/**
- * Refuse mkdir/cleanup/writes when `.opencode` or `.opencode/images` is a
- * symlink (would create, delete, or write through an external target).
- */
 function isUnsafeImageSavePath(workDir: string): boolean {
   return (
     pathIsSymlink(opencodeDirPath(workDir)) ||
@@ -96,105 +63,42 @@ function gitignoreHasExactRule(content: string, rule: string): boolean {
 }
 
 /**
- * Migrate only the exact legacy plugin-generated `.opencode/.gitignore` (`*\n`)
- * to `images/\n`. Custom contents (comments, other rules, even ones containing
- * `*`) are left untouched. Symlinked targets are refused.
- */
-function migrateLegacyOpencodeGitignore(
-  workDir: string,
-  logFn: (msg: string) => void,
-): void {
-  const gitignorePath = opencodeGitignorePath(workDir);
-  const backupPath = legacyOpencodeGitignoreBackupPath(workDir);
-  try {
-    if (!existsSync(gitignorePath) && !pathIsSymlink(gitignorePath)) return;
-    if (isUnsafeOpencodeGitignorePath(workDir)) {
-      logFn('[image-hook] refusing to migrate symlinked .opencode/.gitignore');
-      return;
-    }
-    const raw = readFileSync(gitignorePath);
-    if (!raw.equals(LEGACY_OPENCODE_GITIGNORE_BYTES)) return;
-
-    let createdBackup = false;
-    if (!existsSync(backupPath)) {
-      try {
-        writeFileSync(backupPath, raw, { flag: 'wx' });
-        createdBackup = true;
-      } catch (e) {
-        if (
-          !(e instanceof Error) ||
-          (e as NodeJS.ErrnoException).code !== 'EEXIST'
-        ) {
-          logFn(`[image-hook] failed to back up legacy .gitignore: ${e}`);
-          return;
-        }
-      }
-    }
-
-    if (
-      !createdBackup &&
-      !hasExactLegacyOpencodeGitignoreBackup(gitignorePath, backupPath, raw)
-    ) {
-      logFn(
-        '[image-hook] refusing to migrate legacy .gitignore: backup is not an exact regular file',
-      );
-      return;
-    }
-
-    writeFileSync(gitignorePath, IMAGES_GITIGNORE_BYTES);
-    logFn(
-      `[image-hook] migrated legacy .gitignore; ${
-        createdBackup ? 'backup created at' : 'using existing backup at'
-      } ${backupPath}`,
-    );
-  } catch (e) {
-    logFn(`[image-hook] failed to migrate .gitignore: ${e}`);
-  }
-}
-
-/**
- * Ensure `.opencode/.gitignore` ignores the images directory when auto mode
- * actually saves images. Creates the file when absent; appends `images/` once
- * to custom contents that lack that exact rule, preserving existing bytes.
- * Symlinked targets are refused.
+ * Protect only the generated images directory. Called once per image-bearing
+ * transform before any write, so persisted images are never left un-ignored;
+ * direct routing and text-only messages never reach this.
  */
 function ensureImagesGitignore(
   workDir: string,
   logFn: (msg: string) => void,
-): void {
+): boolean {
   const gitignorePath = opencodeGitignorePath(workDir);
   try {
     if (isUnsafeOpencodeGitignorePath(workDir)) {
       logFn('[image-hook] refusing to update symlinked .opencode/.gitignore');
-      return;
+      return false;
     }
 
     if (!existsSync(gitignorePath)) {
       writeFileSync(gitignorePath, IMAGES_GITIGNORE_BYTES);
-      return;
+      return true;
     }
 
     const raw = readFileSync(gitignorePath);
-    const text = raw.toString('utf8');
-    if (gitignoreHasExactRule(text, IMAGES_GITIGNORE_RULE)) return;
+    if (gitignoreHasExactRule(raw.toString('utf8'), IMAGES_GITIGNORE_RULE)) {
+      return true;
+    }
 
     const needsNewline = raw.length > 0 && raw[raw.length - 1] !== 0x0a;
     const suffix = needsNewline
       ? Buffer.from(`\n${IMAGES_GITIGNORE_RULE}\n`)
       : IMAGES_GITIGNORE_BYTES;
     appendFileSync(gitignorePath, suffix);
-  } catch (e) {
-    logFn(`[image-hook] failed to update .gitignore: ${e}`);
+    return true;
+  } catch (error) {
+    logFn(`[image-hook] failed to update .gitignore: ${error}`);
+    return false;
   }
 }
-
-// Track how many user messages we've already checked for images per directory.
-// Without this, the observer-disabled guard re-checks ALL messages on every
-// transform. Once an image is sent, it stays in the messages array forever,
-// causing the hook to fire on every subsequent text-only message. This
-// suppresses duplicate toasts while still catching images in non-last messages
-// (Greptile #1 fix).
-const lastProcessedUserMsgCountByDir = new Map<string, number>();
 
 interface ImagePart {
   type: string;
@@ -225,66 +129,11 @@ function isImagePart(p: ImagePart): boolean {
     if (hasImageFileExtension(p)) return true;
   }
   if (p.type === 'media') {
-    // OpenCode v2 media parts: `{ type: 'media', mediaType, data, filename }`.
     const mediaType = p.mediaType as string | undefined;
     if (mediaType?.startsWith('image/')) return true;
     if (hasImageFileExtension(p)) return true;
   }
   return false;
-}
-
-// Memo of already-materialized attachments. Keys are small derived strings
-// (targetDir + effective filename + content digest) — never the raw base64.
-// Suffixed collision names (`-N`) are not stored: the obstacle may be
-// gone next transform. Hits revalidate with lstat (regular file only).
-const resolvedAttachmentByKey = new Map<string, string>();
-const RESOLVED_ATTACHMENT_MAX = 256;
-
-function urlAttachmentMemoKey(
-  targetDir: string,
-  dataUrl: string,
-  effectiveName: string,
-): string {
-  return `${targetDir}\n${effectiveName}\n${createHash('sha256').update(dataUrl).digest('hex')}`;
-}
-
-// v2 media parts have no url; key on mediaType + sha1 of the decoded bytes
-// (cheap: the bytes are hashed for the filename anyway).
-function mediaAttachmentMemoKey(
-  targetDir: string,
-  effectiveName: string,
-  mediaType: string,
-  data: Buffer,
-): string {
-  return `${targetDir}\n${effectiveName}\n${mediaType}\n${createHash('sha1').update(data).digest('hex')}`;
-}
-
-function isSuffixedResolution(filePath: string): boolean {
-  return /-[0-9a-f]{8}-\d+\.[^.]+$/.test(basename(filePath));
-}
-
-function rememberResolvedAttachment(key: string, filePath: string): void {
-  if (isSuffixedResolution(filePath)) return;
-  if (
-    !resolvedAttachmentByKey.has(key) &&
-    resolvedAttachmentByKey.size >= RESOLVED_ATTACHMENT_MAX
-  ) {
-    const oldest = resolvedAttachmentByKey.keys().next().value;
-    if (oldest !== undefined) resolvedAttachmentByKey.delete(oldest);
-  }
-  resolvedAttachmentByKey.set(key, filePath);
-}
-
-function recalledResolvedAttachment(key: string): string | null {
-  const saved = resolvedAttachmentByKey.get(key);
-  if (!saved) return null;
-  try {
-    if (lstatSync(saved).isFile()) return saved;
-  } catch {
-    // gone
-  }
-  resolvedAttachmentByKey.delete(key);
-  return null;
 }
 
 function decodeDataUrl(url: string): { mime: string; data: Buffer } | null {
@@ -311,8 +160,6 @@ function extFromMimeFromUrl(url: string): string {
   return match ? extFromMime(match[1]) : '.png';
 }
 
-// v2 media parts: extension from mediaType first, then the filename, then a
-// sane default. Uses the same mime table as the data-url path.
 function extFromMediaPart(p: {
   mediaType?: string;
   filename?: string;
@@ -332,72 +179,11 @@ function sanitizeFilename(name: string): string {
   return name.replace(/[^a-zA-Z0-9._-]/g, '_');
 }
 
-function cleanupAllSessions(saveDir: string): void {
-  const now = Date.now();
-  const lastCleanup = lastCleanupByDir.get(saveDir) ?? 0;
-  if (now - lastCleanup < CLEANUP_INTERVAL) return;
-  lastCleanupByDir.set(saveDir, now);
-
-  const maxAge = 60 * 60 * 1000;
-  const dirsToScan: string[] = [];
-
-  // Collect saveDir itself (for non-session images) + all session subdirs
-  try {
-    for (const entry of readdirSync(saveDir, { withFileTypes: true })) {
-      const fp = join(saveDir, entry.name);
-      // Never traverse or delete through symlinks (session dirs or files).
-      if (entry.isSymbolicLink() || pathIsSymlink(fp)) continue;
-      if (entry.isDirectory()) {
-        dirsToScan.push(fp);
-      } else {
-        try {
-          if (now - statSync(fp).mtimeMs > maxAge) unlinkSync(fp);
-        } catch (err) {
-          log('[image-hook] file cleanup failed', String(err));
-        }
-      }
-    }
-  } catch (err) {
-    log('[image-hook] directory scan failed', String(err));
-  }
-
-  for (const dir of dirsToScan) {
-    if (pathIsSymlink(dir)) continue;
-    try {
-      let isEmpty = true;
-      let allRemoved = true;
-      for (const f of readdirSync(dir)) {
-        isEmpty = false;
-        const fp = join(dir, f);
-        if (pathIsSymlink(fp)) {
-          allRemoved = false;
-          continue;
-        }
-        try {
-          if (now - statSync(fp).mtimeMs > maxAge) {
-            unlinkSync(fp);
-          } else {
-            allRemoved = false;
-          }
-        } catch (err) {
-          log('[image-hook] file cleanup failed', String(err));
-          allRemoved = false;
-        }
-      }
-      // Remove session subdirectory only if it had files and all were expired
-      if (!isEmpty && allRemoved) {
-        try {
-          rmdirSync(dir);
-        } catch (err) {
-          log('[image-hook] directory removal failed', String(err));
-        }
-      }
-    } catch (err) {
-      log('[image-hook] session cleanup failed', String(err));
-    }
-  }
-}
-
+/**
+ * Save a content-addressed image with an exclusive create. The filename is
+ * the content digest, so an existing path is the durable dedup memo: reuse it
+ * without rewriting.
+ */
 function writeUniqueFile(
   dir: string,
   name: string,
@@ -411,17 +197,24 @@ function writeUniqueFile(
 
   const MAX_ATTEMPTS = 1000;
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-    // Never treat a symlink as an already-saved image and never write through it.
-    // Advance to the next collision name instead.
+    // Never treat a symlink as an already-saved image and never write through
+    // it. Advance to the next collision name instead.
     if (pathIsSymlink(candidate)) {
       counter += 1;
       candidate = join(dir, `${base}-${counter}${ext}`);
       continue;
     }
 
-    // Existing regular file at this content-addressed name: reuse path.
+    // Existing regular file at this content-addressed name: reuse the path.
+    // A non-file entry (directory, fifo, ...) squatting on the name is not a
+    // saved image; advance to the next collision name instead of reusing it.
     if (existsSync(candidate)) {
-      return candidate;
+      if (isRegularFile(candidate)) {
+        return candidate;
+      }
+      counter += 1;
+      candidate = join(dir, `${base}-${counter}${ext}`);
+      continue;
     }
 
     try {
@@ -437,6 +230,13 @@ function writeUniqueFile(
         continue;
       }
 
+      // A failed write can leave a truncated file at the content-addressed
+      // path; remove it so a later transform never reuses corrupt bytes.
+      try {
+        unlinkSync(candidate);
+      } catch {
+        // Best effort: nothing was created, or it is already gone.
+      }
       log(`[image-hook] failed to save image: ${e}`);
       return null;
     }
@@ -448,6 +248,10 @@ function writeUniqueFile(
   return null;
 }
 
+function formatMiB(bytes: number): string {
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
 export function processImageAttachments(args: {
   messages: MessageWithParts[];
   workDir: string;
@@ -457,55 +261,20 @@ export function processImageAttachments(args: {
 }): boolean {
   const { messages, workDir, imageRouting, disabledAgents, log } = args;
 
-  // Repair legacy plugin-generated ignore rules before any early return so
-  // direct/disabled/text-only paths still upgrade existing workspaces.
-  migrateLegacyOpencodeGitignore(workDir, log);
-
   // direct mode: never intercept attachments; the orchestrator handles them
   // inline. @observer remains available for manual delegation.
-  if (imageRouting === 'direct') {
-    return false;
-  }
+  if (imageRouting === 'direct') return false;
 
-  // auto mode: observer must be enabled (enforced at config load). Retain
-  // this guard as defense-in-depth in case validation is bypassed.
-  const observerEnabled = !disabledAgents.has('observer');
-  if (!observerEnabled) {
-    // Check only NEW user messages for images. We track how many user messages
-    // we've already processed per session. Without this, the guard re-checks
-    // ALL messages on every transform — once an image is sent, it stays in the
-    // messages array forever, causing the hook to fire on every subsequent
-    // text-only message (regression from Greptile #1 fix).
-    //
-    // Keyed by workDir:sessionID so multiple sessions in the same project
-    // don't collide (Greptile P1: "Scope tracking by conversation").
-    const firstUserMsg = messages.find(isUserMessageWithParts);
-    const sessionId = firstUserMsg?.info.sessionID ?? 'default';
-    const counterKey = `${workDir}:${sessionId}`;
-    const userMsgCount = messages.filter(isUserMessageWithParts).length;
-    let lastProcessed = lastProcessedUserMsgCountByDir.get(counterKey) ?? 0;
-    // ponytail: reset after history compaction; re-checking old messages is harmless
-    if (userMsgCount < lastProcessed) {
-      lastProcessed = 0;
-      lastProcessedUserMsgCountByDir.set(counterKey, 0);
-    }
-    if (userMsgCount > lastProcessed) {
-      // Check only the new user messages (those we haven't seen yet)
-      let userIndex = 0;
-      for (const msg of messages) {
-        if (!isUserMessageWithParts(msg)) continue;
-        if (userIndex >= lastProcessed) {
-          // This is a new user message — check for images
-          if (msg.parts.some(isImagePart)) {
-            log('[image-hook] dropped images: observer disabled');
-            lastProcessedUserMsgCountByDir.set(counterKey, userMsgCount);
-            return true;
-          }
-        }
-        userIndex++;
-      }
-      // No images in new messages — update counter so we don't re-check them
-      lastProcessedUserMsgCountByDir.set(counterKey, userMsgCount);
+  // Keep original parts when observer is unavailable. The caller displays a
+  // debounced warning toast; this hook must never destroy user data.
+  if (disabledAgents.has('observer')) {
+    const userMessages = messages.filter(isUserMessageWithParts);
+    const latestUserMessage = userMessages[userMessages.length - 1];
+    if (latestUserMessage?.parts.some(isImagePart)) {
+      log(
+        '[image-hook] images retained inline; observer disabled — enable observer or set image_routing "direct"',
+      );
+      return true;
     }
     return false;
   }
@@ -523,37 +292,27 @@ export function processImageAttachments(args: {
     }
   }
 
-  // Save images inside the project's .opencode/images/ directory.
-  // This is within the workspace so the read tool won't require extra permissions.
+  if (messagesWithImages.length === 0) return false;
+
   const saveDir = imagesDirPath(workDir);
-
-  if (messagesWithImages.length === 0) {
-    // Never walk/delete through a symlinked .opencode or images path.
-    if (!isUnsafeImageSavePath(workDir) && existsSync(saveDir)) {
-      cleanupAllSessions(saveDir);
-    }
-    return false;
-  }
-
   if (isUnsafeImageSavePath(workDir)) {
-    log(
-      '[image-hook] refusing to create/cleanup/write via symlinked .opencode/images path',
-    );
+    log('[image-hook] refusing to write via symlinked .opencode/images path');
     return false;
   }
 
   try {
     mkdirSync(saveDir, { recursive: true });
-  } catch (e) {
-    log(`[image-hook] failed to create image directory: ${e}`);
+  } catch (error) {
+    log(`[image-hook] failed to create image directory: ${error}`);
   }
 
-  // Only the images directory is ignored. A bare '*' (legacy plugin output)
-  // ignores all of `.opencode/` — including project config
-  // (.opencode/oh-my-opencode-slim.json) and prompt overrides.
-  ensureImagesGitignore(workDir, log);
-
-  cleanupAllSessions(saveDir);
+  // Persist images only when the images directory is git-ignored. Ensuring
+  // once per image-bearing transform (before any write) keeps reused images
+  // protected and guarantees a failed ensure leaves zero files behind.
+  if (!ensureImagesGitignore(workDir, log)) {
+    log('[image-hook] images kept inline: .gitignore protection failed');
+    return false;
+  }
 
   for (const { msg, imageParts } of messagesWithImages) {
     const sessionSubdir = msg.info.sessionID
@@ -561,7 +320,6 @@ export function processImageAttachments(args: {
       : undefined;
     const targetDir = sessionSubdir ? join(saveDir, sessionSubdir) : saveDir;
 
-    // Refuse per-session target when it is already a symlink (external write).
     if (pathIsSymlink(targetDir)) {
       log(
         `[image-hook] refusing to write via symlinked session image directory: ${targetDir}`,
@@ -571,13 +329,34 @@ export function processImageAttachments(args: {
 
     try {
       mkdirSync(targetDir, { recursive: true });
-    } catch (e) {
-      log(`[image-hook] failed to create target image directory: ${e}`);
+    } catch (error) {
+      log(`[image-hook] failed to create target image directory: ${error}`);
     }
 
-    // Save each image to .opencode/images/ and collect paths
     const savedPaths: string[] = [];
+    const oversizedPaths = new Map<string, number>();
     const savedImageParts = new Set<ImagePart>();
+
+    const saveDecoded = (
+      part: ImagePart,
+      data: Buffer,
+      ext: string,
+      baseName: string,
+    ): void => {
+      if (data.length === 0) return;
+
+      const hash = createHash('sha1').update(data).digest('hex').slice(0, 8);
+      const name = `${baseName}-${hash}${ext}`;
+      const filePath = writeUniqueFile(targetDir, name, data, log);
+      if (!filePath) return;
+
+      savedPaths.push(filePath);
+      savedImageParts.add(part);
+      if (data.length > MAX_MEDIA_INGEST_BYTES) {
+        oversizedPaths.set(filePath, data.length);
+      }
+    };
+
     for (const p of imageParts) {
       const url = p.url as string | undefined;
       const mediaType = p.mediaType as string | undefined;
@@ -591,39 +370,20 @@ export function processImageAttachments(args: {
         ? sanitizedFilename.replace(/\.[^.]+$/, '') || 'image'
         : 'image';
 
-      // OpenCode v2 media parts carry raw base64 in `data` and their mime in
-      // `mediaType`; there is no data url to decode.
       if (!url && data !== undefined) {
+        // Buffer.from leniently decodes invalid base64 instead of throwing;
+        // host-produced media parts are well-formed, and the fail-open
+        // contract (never throw, never block) takes precedence here.
         const decoded = Buffer.from(data, 'base64');
-        if (decoded.length === 0) continue;
-        const ext = extFromMediaPart({
-          mediaType,
-          filename: sanitizedFilename,
-        });
-        const effectiveName = `${baseName}-${ext}`;
-        const memoKey = mediaAttachmentMemoKey(
-          targetDir,
-          effectiveName,
-          mediaType ?? '',
+        saveDecoded(
+          p,
           decoded,
+          extFromMediaPart({
+            mediaType,
+            filename: sanitizedFilename,
+          }),
+          baseName,
         );
-        const recalled = recalledResolvedAttachment(memoKey);
-        if (recalled) {
-          savedPaths.push(recalled);
-          savedImageParts.add(p);
-          continue;
-        }
-        const hash = createHash('sha1')
-          .update(decoded)
-          .digest('hex')
-          .slice(0, 8);
-        const name = `${baseName}-${hash}${ext}`;
-        const filePath = writeUniqueFile(targetDir, name, decoded, log);
-        if (filePath) {
-          savedPaths.push(filePath);
-          savedImageParts.add(p);
-          rememberResolvedAttachment(memoKey, filePath);
-        }
         continue;
       }
 
@@ -631,42 +391,39 @@ export function processImageAttachments(args: {
         const ext = sanitizedFilename
           ? extname(sanitizedFilename) || extFromMimeFromUrl(url)
           : extFromMimeFromUrl(url);
-        const effectiveName = `${baseName}-${ext}`;
-        const memoKey = urlAttachmentMemoKey(targetDir, url, effectiveName);
-        const recalled = recalledResolvedAttachment(memoKey);
-        if (recalled) {
-          savedPaths.push(recalled);
-          savedImageParts.add(p);
-          continue;
-        }
         const decoded = decodeDataUrl(url);
-        if (decoded) {
-          const hash = createHash('sha1')
-            .update(decoded.data)
-            .digest('hex')
-            .slice(0, 8);
-          const name = `${baseName}-${hash}${ext}`;
-          const filePath = writeUniqueFile(targetDir, name, decoded.data, log);
-          if (filePath) {
-            savedPaths.push(filePath);
-            savedImageParts.add(p);
-            rememberResolvedAttachment(memoKey, filePath);
-          }
-        }
+        if (decoded) saveDecoded(p, decoded.data, ext, baseName);
       }
     }
 
-    // If no image could be saved, do not strip the parts: the orchestrator
-    // would receive a nudge with no usable path and the bytes would be lost.
+    // If no image could be saved, leave every original part in place. This is
+    // the fail-open contract for malformed data, permissions, and NFS errors.
     if (savedPaths.length === 0) {
       log('[image-hook] no images saved; leaving original parts in message');
       continue;
     }
 
-    const pathsText = ` Saved to: ${savedPaths.join(', ')}`;
-    log(`[image-hook] saved image/file parts to disk${pathsText}`);
+    const readablePaths = savedPaths.filter(
+      (filePath) => !oversizedPaths.has(filePath),
+    );
+    const nudgeSections: string[] = [];
+    if (readablePaths.length > 0) {
+      nudgeSections.push(
+        `Saved to:\n${readablePaths.map((p) => `- ${p}`).join('\n')}\nYour model may not support image input. Delegate to @observer with these file path(s) and your goal so it can read the files with its read tool.`,
+      );
+    }
+    if (oversizedPaths.size > 0) {
+      nudgeSections.push(
+        `Too large to analyze (host read limit 20 MiB) — do not delegate these; ask the user to compress or crop them first:\n${[
+          ...oversizedPaths.entries(),
+        ]
+          .map(([p, size]) => `- ${p} (${formatMiB(size)})`)
+          .join('\n')}`,
+      );
+    }
+
     log(
-      `[image-routing] auto mode: intercepted ${savedImageParts.size} image(s), delegating to @observer`,
+      `[image-routing] auto mode: intercepted ${savedImageParts.size} image(s), delegating ${readablePaths.length}`,
     );
 
     msg.parts = msg.parts
@@ -674,7 +431,7 @@ export function processImageAttachments(args: {
       .concat([
         {
           type: 'text',
-          text: `[Image attachment detected.${pathsText} Your model may not support image input. Delegate to @observer with the file path(s) above so it can read the file with its read tool.]`,
+          text: `[Image attachment detected. ${nudgeSections.join('\n')}]`,
         },
       ]);
   }
