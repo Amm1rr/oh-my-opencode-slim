@@ -4,6 +4,7 @@ export { createAutoUpdateCheckerHook } from './auto-update-checker';
 export { createCacheMonitorHook } from './cache-monitor';
 export { createChatHeadersHook } from './chat-headers';
 export { createDeepworkCommandHook } from './deepwork';
+export { createDeepworkGuardHook } from './deepwork-guard';
 export {
   ForegroundFallbackManager,
   type ForegroundFallbackModel,

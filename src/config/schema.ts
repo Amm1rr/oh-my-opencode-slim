@@ -909,6 +909,7 @@ function rejectOrchestratorPromptOnOrchestrator(
 export const DISABLED_HOOKS_VALUES = [
   'phase-reminder',
   'foreground-fallback',
+  'deepwork-guard',
 ] as const;
 
 /** Valid `disabled_commands` entries; single source for the enum and the loader. */
@@ -962,6 +963,16 @@ export const RawPluginConfigSchema = z
           'observer to be enabled and saves attachments to disk before ' +
           'nudging delegation to @observer. "direct": always passes ' +
           'attachments to the orchestrator untouched.',
+      ),
+    deepworkGuardMode: z
+      .enum(['shadow', 'enforce'])
+      .optional()
+      .describe(
+        'Deepwork guard mode. "shadow" (default) records receipts and claim ' +
+          'markers under .slim/deepwork/.runtime/ but never blocks; ' +
+          '"enforce" additionally blocks completion writes whose tombstone ' +
+          'references artifacts with no recorded receipt. The guard itself ' +
+          'is disabled by listing "deepwork-guard" in disabled_hooks.',
       ),
     disabled_mcps: z
       .array(z.string())
