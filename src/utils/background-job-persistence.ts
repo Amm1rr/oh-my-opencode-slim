@@ -201,7 +201,12 @@ export async function loadInitialBackgroundJobPersistence(): Promise<PersistedBa
           typeof value?.epoch === 'number' &&
           Number.isFinite(value.epoch)
         ) {
+          // Passthrough + validation: the load must mirror the write shape,
+          // so new persisted fields survive by construction; validation
+          // only rejects bad values — it never selects fields (a whitelist
+          // silently drops fields added to the write path).
           const record: PersistedTombstoneEntry = {
+            ...value,
             taskID: value.taskID,
             epoch: value.epoch,
             recordedAt:
@@ -210,6 +215,18 @@ export async function loadInitialBackgroundJobPersistence(): Promise<PersistedBa
                 ? value.recordedAt
                 : 0,
           };
+          if (
+            !(
+              (record.terminalState === 'completed' ||
+                record.terminalState === 'error' ||
+                record.terminalState === 'cancelled') &&
+              typeof record.resultSummary === 'string' &&
+              record.resultSummary
+            )
+          ) {
+            delete record.terminalState;
+            delete record.resultSummary;
+          }
           state.tombstones.set(record.taskID, record);
           state.deletionEpochs.set(record.taskID, record.epoch);
         }

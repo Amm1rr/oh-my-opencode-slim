@@ -62,6 +62,7 @@ export function createTaskReviveTool(
         parentSessionID,
         requested,
       );
+      let adopted = false;
       if (!resolved) {
         const guidance = await resolveOrAdoptUntrackedTask(
           options,
@@ -75,6 +76,7 @@ export function createTaskReviveTool(
           parentSessionID,
           requested,
         );
+        adopted = true;
       }
       if (!resolved) {
         throw new Error(
@@ -109,7 +111,12 @@ export function createTaskReviveTool(
       }
 
       let cancelledForRevive = false;
-      if (current.state === 'running') {
+      // An adopted record is never aborted: its 'running' state is the
+      // registration shape, not evidence of a live run this caller owns. If
+      // the host resumed the session between the adoption gate and the
+      // send, the pre-send live re-verification below refuses with the
+      // record accurately 'running' — recovered work is never cancelled.
+      if (current.state === 'running' && !adopted) {
         await cancelTrackedExecution(options, captured, 'revived');
         cancelledForRevive = true;
         current = getCurrentReviveJob(
@@ -121,7 +128,11 @@ export function createTaskReviveTool(
         );
       }
 
-      if (!cancelledForRevive && !isReviveableRetainedJob(current)) {
+      if (
+        !cancelledForRevive &&
+        !adopted &&
+        !isReviveableRetainedJob(current)
+      ) {
         throw new Error(
           `Task ${requested} cannot be revived: state ${current.state} is not a verified retained terminal session`,
         );
@@ -213,7 +224,12 @@ export function createTaskReviveTool(
         );
         if (
           !options.backgroundJobBoard.validateLease(relaunchLease) ||
-          !isReviveableRetainedJob(current) ||
+          // The retained-state leg is blind to an adopted record's
+          // registration-shape 'running'; for adopted records the race is
+          // fenced by the busy-timestamp leg below plus the queue delivery
+          // semantics, and the status-snapshot check above already refused
+          // a genuinely busy session.
+          (!adopted && !isReviveableRetainedJob(current)) ||
           (current.lastLiveBusyAt !== undefined &&
             current.lastLiveBusyAt !== observedLiveBusyAt)
         ) {
@@ -559,8 +575,10 @@ function getApiError(response: unknown): unknown {
  *    generation from the process sequence; the persisted deletion epoch
  *    survives and keeps fencing late pre-restart artifacts, while the
  *    tombstone itself is cleared by registerLaunch for this proven
- *    explicit relaunch). The unchanged revive pipeline below then
- *    revalidates live state before writing the prompt.
+ *    explicit relaunch). The revive pipeline never aborts an adopted
+ *    record: if the host resumed the session between the gate and the
+ *    send, the pre-send live re-verification refuses (the record stays
+ *    accurately `running`) — recovered work is never cancelled.
  *
  * Returns undefined when the session was adopted (the caller continues
  * into the normal revive flow); otherwise returns the guidance message.

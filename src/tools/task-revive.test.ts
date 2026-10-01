@@ -970,6 +970,80 @@ describe('task_revive tool', () => {
     expect(getSuppressionTombstone('ses_1')).toBeUndefined();
   });
 
+  test('adoption never aborts: a host-resumed session is refused, not cancelled', async () => {
+    let statusCalls = 0;
+    const tool = createTool({
+      get: async () => ({
+        data: {
+          id: 'ses_1',
+          parentID: 'parent-1',
+          agent: 'explorer',
+          title: 'council work',
+        },
+      }),
+      status: async () => {
+        statusCalls += 1;
+        return {
+          data: { ses_1: { type: statusCalls === 1 ? 'idle' : 'busy' } },
+        };
+      },
+      revivedRunTracker: {
+        captureBaseline: async () => 'baseline',
+        register: () => {},
+        probe: async () => {},
+      },
+    });
+    // The adoption gate sees idle; the host resumes the child before the
+    // pre-send verification sees busy. The revive must refuse delivery —
+    // never abort the recovered work — and the record stays accurately
+    // 'running' for the now-busy session.
+    await expect(
+      tool.taskRevive.execute({ task_id: 'ses_1', prompt: 'x' }, context),
+    ).rejects.toThrow('executing at the host');
+    expect(tool.abort).not.toHaveBeenCalled();
+    expect(tool.board.get('ses_1')).toMatchObject({ state: 'running' });
+  });
+
+  test('a refused adoption does not wedge: a second revive after the host goes idle again succeeds', async () => {
+    let statusCalls = 0;
+    const tool = createTool({
+      get: async () => ({
+        data: {
+          id: 'ses_1',
+          parentID: 'parent-1',
+          agent: 'explorer',
+          title: 'council work',
+        },
+      }),
+      status: async () => {
+        statusCalls += 1;
+        return {
+          data: { ses_1: { type: statusCalls === 2 ? 'busy' : 'idle' } },
+        };
+      },
+      revivedRunTracker: {
+        captureBaseline: async () => 'baseline',
+        register: () => {},
+        probe: async () => {},
+      },
+    });
+    // First revive: the adoption gate sees idle, the pre-send check sees
+    // the host-resumed busy state, and delivery is refused — the record
+    // persists as 'running' (accurately, for a busy session).
+    await expect(
+      tool.taskRevive.execute({ task_id: 'ses_1', prompt: 'x' }, context),
+    ).rejects.toThrow('executing at the host');
+
+    // Second revive once the host is idle again: the now-tracked record
+    // goes through the normal cancel-and-resume path and the prompt is
+    // sent. This pins that a refused adoption never wedges the session.
+    const result = await tool.taskRevive.execute(
+      { task_id: 'ses_1', prompt: 'continue' },
+      context,
+    );
+    expect(result).toContain('started');
+  });
+
   test.each(['deadline first', 'acceptance first'])(
     'keeps the local deadline outcome when admission settles in the same tick: %s',
     async (order) => {
