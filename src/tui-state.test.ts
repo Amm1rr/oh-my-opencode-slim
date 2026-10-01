@@ -14,6 +14,7 @@ import {
   recordTuiSessionParent,
   resolveTuiSessionRoot,
   snapshotSectionsEqual,
+  TUI_SESSION_PARENTS_MAX,
   updateTuiSessionDetails,
 } from './tui-state';
 
@@ -311,6 +312,19 @@ describe('tui-state persistence', () => {
     expect(fs.existsSync(lockPath)).toBe(false);
   });
 
+  test('recovers an aged state lock whose recorded PID is alive', () => {
+    const lockPath = `${getTuiStatePath(tempDir)}.lock`;
+    fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+    fs.writeFileSync(lockPath, JSON.stringify({ pid: process.pid }));
+    const staleTime = new Date('2000-01-01T00:00:00Z');
+    fs.utimesSync(lockPath, staleTime, staleTime);
+
+    recordLuna();
+
+    expect(readTuiSnapshot(tempDir).agentModels.explorer).toBe(LUNA.model);
+    expect(fs.existsSync(lockPath)).toBe(false);
+  });
+
   test('scopes recorded activity to the owning conversation tree', () => {
     recordTuiSessionParent('child-a', 'conv-1', tempDir);
     recordTuiSessionParent('child-b', 'conv-2', tempDir);
@@ -331,6 +345,50 @@ describe('tui-state persistence', () => {
       'child-a': 'oracle',
       'child-b': 'fixer',
     });
+  });
+
+  function seedSessionParents(count: number): void {
+    const statePath = getTuiStatePath(tempDir);
+    fs.mkdirSync(path.dirname(statePath), { recursive: true });
+    fs.writeFileSync(
+      statePath,
+      JSON.stringify({
+        ...readTuiSnapshot(tempDir),
+        sessionParents: Object.fromEntries(
+          Array.from({ length: count }, (_, i) => [
+            `ses_${i}`,
+            i ? `ses_${i - 1}` : 'root',
+          ]),
+        ),
+      }),
+    );
+  }
+
+  test('caps session parents on any write, refreshing re-registered links', () => {
+    seedSessionParents(TUI_SESSION_PARENTS_MAX + 2);
+
+    recordLuna();
+    expect(readTuiSnapshot(tempDir).sessionParents.ses_1).toBeUndefined();
+    recordTuiSessionParent('ses_2', 'root', tempDir);
+    recordTuiSessionParent('ses_new', 'root', tempDir);
+
+    const { sessionParents } = readTuiSnapshot(tempDir);
+    expect(Object.keys(sessionParents)).toHaveLength(TUI_SESSION_PARENTS_MAX);
+    expect(sessionParents.ses_2).toBe('root');
+    expect(sessionParents.ses_3).toBeUndefined();
+    expect(sessionParents.ses_new).toBe('root');
+  });
+
+  test('keeps the ancestry of an active session past the cap', () => {
+    seedSessionParents(TUI_SESSION_PARENTS_MAX + 1);
+    recordTuiAgentActivity(
+      { sessionID: 'ses_1', agentName: 'explorer', active: true },
+      tempDir,
+    );
+
+    recordTuiSessionParent('ses_new', 'root', tempDir);
+
+    expect(resolveTuiSessionRoot('ses_1', tempDir)).toBe('root');
   });
 
   test('resolves multi-level ancestry through the index', () => {

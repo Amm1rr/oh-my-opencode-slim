@@ -28,6 +28,7 @@ import {
   getTuiStatePath,
   readTuiSnapshot,
   snapshotSectionsEqual,
+  updateSnapshot,
 } from './tui-state';
 import { BackgroundJobCoordinator } from './utils/background-job-coordinator';
 import { BackgroundJobBoard } from './utils/background-job-fixture';
@@ -1725,6 +1726,56 @@ describe('plugin TUI agent activity', () => {
     } finally {
       await chainHooks?.dispose?.();
     }
+  });
+
+  test('rehydrates a lost child-parent link without requerying the confirmed root', async () => {
+    const childResponse = Promise.withResolvers<{
+      data: { parentID: string };
+    }>();
+    const rootResponse = Promise.withResolvers<{
+      data: { parentID?: string };
+    }>();
+    const get = mock((input: { path: { id: string } }) =>
+      input.path.id === 'child' ? childResponse.promise : rootResponse.promise,
+    );
+    await hooks?.dispose?.();
+    hooks = await plugin({
+      client: { session: { get } },
+      directory: projectDir,
+      worktree: projectDir,
+      serverUrl: new URL('http://127.0.0.1:4096'),
+    } as never);
+
+    await hooks?.['chat.message']?.(
+      { sessionID: 'child', agent: 'fixer' } as never,
+      {} as never,
+    );
+    await busy('child');
+    // Hydration awaits these same promises before the test, so its
+    // continuations finish before each corresponding test continuation.
+    childResponse.resolve({ data: { parentID: 'root' } });
+    await childResponse.promise;
+    rootResponse.resolve({ data: {} });
+    await rootResponse.promise;
+    expect(readTuiSnapshot(projectDir).sessionParents.child).toBe('root');
+
+    expect(
+      updateSnapshot(projectDir, (snapshot) => {
+        delete snapshot.sessionParents.child;
+      }),
+    ).toBe(true);
+    expect(readTuiSnapshot(projectDir).sessionParents.child).toBeUndefined();
+
+    await busy('child');
+    await childResponse.promise;
+
+    expect(
+      get.mock.calls.filter(([input]) => input.path.id === 'child'),
+    ).toHaveLength(2);
+    expect(readTuiSnapshot(projectDir).sessionParents.child).toBe('root');
+    expect(
+      get.mock.calls.filter(([input]) => input.path.id === 'root'),
+    ).toHaveLength(1);
   });
 
   test('does not cache an errored host lookup as a confirmed root', async () => {

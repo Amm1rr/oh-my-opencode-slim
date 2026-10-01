@@ -59,6 +59,7 @@ export interface TuiSnapshot {
   reusableOwners: Record<string, number>;
 }
 
+export const TUI_SESSION_PARENTS_MAX = 256;
 const STATE_DIR = 'oh-my-opencode-slim';
 const STATE_FILE = 'tui-state.json';
 const STATE_LOCK_RETRY_MS = 5;
@@ -343,20 +344,14 @@ export function isProcessRunning(pid: number): boolean {
 
 function isStateLockStale(lockPath: string): boolean {
   try {
-    const metadata = JSON.parse(fs.readFileSync(lockPath, 'utf8')) as {
+    if (Date.now() - fs.statSync(lockPath).mtimeMs > STATE_LOCK_STALE_MS)
+      return true;
+    const { pid } = JSON.parse(fs.readFileSync(lockPath, 'utf8')) as {
       pid?: unknown;
     };
-    if (typeof metadata.pid === 'number' && metadata.pid > 0) {
-      return !isProcessRunning(metadata.pid);
-    }
+    return typeof pid === 'number' && pid > 0 && !isProcessRunning(pid);
   } catch {
-    // A creator may still be writing metadata; use age as fallback.
-  }
-
-  try {
-    return Date.now() - fs.statSync(lockPath).mtimeMs > STATE_LOCK_STALE_MS;
-  } catch {
-    return false;
+    return false; // Lock released, or metadata still being written.
   }
 }
 
@@ -548,6 +543,13 @@ export function updateSnapshot(
       return true;
     }
     snapshot.updatedAt = Date.now();
+    // Any write drops the oldest links past the cap but keeps active chains.
+    const { sessionParents: parents, activeSessions } = snapshot;
+    const keep = new Set<string>();
+    for (let id of Object.keys(activeSessions))
+      for (; parents[id] && !keep.has(id); id = parents[id]) keep.add(id);
+    for (const key of Object.keys(parents).slice(0, -TUI_SESSION_PARENTS_MAX))
+      if (!keep.has(key)) delete parents[key];
     if (writeTuiSnapshot(snapshot, projectDir)) {
       rememberSnapshot(statePath, snapshot);
       return true;
@@ -701,6 +703,7 @@ export function recordTuiSessionParent(
   projectDir: string,
 ): void {
   updateSnapshot(projectDir, (snapshot) => {
+    delete snapshot.sessionParents[sessionID]; // Re-registered link is newest.
     snapshot.sessionParents[sessionID] = parentID;
   });
 }
