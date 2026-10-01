@@ -378,11 +378,10 @@ export function createSessionContextHandler(
     // injection does), so rebuild event.messages from the transformed
     // v1messages rather than index-based content copy-back.
     if (deps.messagesTransform && Array.isArray(event.messages)) {
-      // Transcript identity enrichment (v2-only): live v2 hosts carry
-      // only {id, time, text, type} on transcript user messages, but the
-      // bridged v1 injection gates (phase-reminder, background-job-board)
-      // key on user-message info.sessionID /
-      // info.agent — without this stamp every injection skips on v2.
+      // Transcript identity enrichment (v2-only): checkpoint board replay
+      // reads info.sessionID from the real-message tail, which may be an
+      // assistant or tool result. Stamp missing session IDs on every role;
+      // agent identity and internal-wake handling remain user-only.
       // Identity is envelope-only and strictly absence-gated: host-provided
       // values win. Synthetic wakes additionally need their first text part
       // re-flagged because the host discards its internal part metadata.
@@ -392,10 +391,10 @@ export function createSessionContextHandler(
           ? event.agent
           : deps.knownAgentForSession?.(event.sessionID);
       for (const message of event.messages) {
-        if (message.role !== 'user') continue;
         if (message.sessionID === undefined) {
           message.sessionID = event.sessionID;
         }
+        if (message.role !== 'user') continue;
         if (message.agent === undefined && knownAgent) {
           message.agent = knownAgent;
         }
