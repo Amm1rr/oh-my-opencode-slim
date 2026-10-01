@@ -2,7 +2,7 @@
 
 `/interview` opens a local browser UI for refining a feature idea inside the same OpenCode session.
 
-The command can be disabled globally with `disabled_commands: ["interview"]` in
+The command can be disabled globally with `"disabled_commands": ["interview"]` in
 the Slim configuration; a disabled `/interview` is not registered.
 
 Use it when chat feels too loose and you want a cleaner question/answer flow plus a markdown spec saved in your repo.
