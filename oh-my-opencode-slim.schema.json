@@ -3050,6 +3050,14 @@
         "direct"
       ]
     },
+    "deepworkGuardMode": {
+      "description": "Deepwork guard mode. \"shadow\" (default) records receipts and claim markers under .slim/deepwork/.runtime/ but never blocks; \"enforce\" additionally blocks completion writes whose tombstone references artifacts with no recorded receipt. The guard itself is disabled by listing \"deepwork-guard\" in disabled_hooks.",
+      "type": "string",
+      "enum": [
+        "shadow",
+        "enforce"
+      ]
+    },
     "disabled_mcps": {
       "description": "MCP server names to disable completely. Disabled servers are not started and cannot be used by agents.",
       "type": "array",
@@ -3078,7 +3086,8 @@
         "type": "string",
         "enum": [
           "phase-reminder",
-          "foreground-fallback"
+          "foreground-fallback",
+          "deepwork-guard"
         ]
       }
     },

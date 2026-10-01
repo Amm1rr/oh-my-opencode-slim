@@ -91,6 +91,10 @@ const ALLOWLIST = new Map<string, string>([
     'hooks/auto-update-checker/checker.ts',
     'Date.now()/Math.random() compose a per-run temp token for install bookkeeping; it names local directories and never reaches the prompt prefix.',
   ],
+  [
+    'hooks/deepwork-guard/index.ts',
+    'Date.now() timestamps claim markers and receipts under .slim/deepwork/.runtime/ (machine-owned bookkeeping the workflow never reads); the completion gate deny message carries only slugs and paths, never timestamps.',
+  ],
 ]);
 
 async function scanForViolations(): Promise<string[]> {

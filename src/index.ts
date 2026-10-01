@@ -38,6 +38,7 @@ import {
   createCacheMonitorHook,
   createChatHeadersHook,
   createDeepworkCommandHook,
+  createDeepworkGuardHook,
   createJsonErrorRecoveryHook,
   createLoopCommandHook,
   createOrchestratorWakeScheduler,
@@ -394,6 +395,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   let foregroundFallbackChains: Record<string, ForegroundFallbackModel[]> = {};
   let selectedMarketplacePackageIds: readonly string[] = [];
   let deepworkCommandHook: ReturnType<typeof createDeepworkCommandHook>;
+  let deepworkGuardHook: ReturnType<typeof createDeepworkGuardHook>;
   let reflectCommandHook: ReturnType<typeof createReflectCommandHook>;
   let loopCommandHook: ReturnType<typeof createLoopCommandHook>;
   let taskSessionManagerHook: ReturnType<typeof createTaskSessionManagerHook>;
@@ -403,6 +405,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   let absolutePathRescue: ReturnType<typeof createAbsolutePathRescueHook>;
   let jsonErrorRecovery: ReturnType<typeof createJsonErrorRecoveryHook>;
   let toolLoopGuard: ToolLoopGuardHook;
+  let deepworkGuardAfter: (i: unknown, o: unknown) => Promise<void>;
   let jsonErrorRecoveryAfter: (i: unknown, o: unknown) => Promise<void>;
   let taskSessionManagerAfter: (i: unknown, o: unknown) => Promise<void>;
   let backgroundJobBoard: BackgroundJobBoard;
@@ -1056,10 +1059,14 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
 
     absolutePathRescue = createAbsolutePathRescueHook(ctx);
 
+    deepworkGuardHook = createDeepworkGuardHook(ctx);
     jsonErrorRecovery = createJsonErrorRecoveryHook(ctx);
     toolLoopGuard = createToolLoopGuardHook();
 
     // Pre-created wrapped handlers for tool.execute.after (error-isolated)
+    deepworkGuardAfter = wrapPostToolHook('deepwork-guard', (i, o) =>
+      deepworkGuardHook['tool.execute.after'](i as never, o as never),
+    );
     jsonErrorRecoveryAfter = wrapPostToolHook('json-error-recovery', (i, o) =>
       jsonErrorRecovery['tool.execute.after'](i as never, o as never),
     );
@@ -1959,6 +1966,10 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         input as never,
         output as never,
       );
+      await deepworkGuardHook['tool.execute.before'](
+        input as never,
+        output as never,
+      );
       await taskSessionManagerHook['tool.execute.before'](
         input as never,
         output as never,
@@ -2328,6 +2339,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     },
 
     'tool.execute.after': async (input, output) => {
+      await deepworkGuardAfter(input, output);
       await jsonErrorRecoveryAfter(input, output);
       await toolLoopGuard['tool.execute.after'](
         input as never,
