@@ -85,7 +85,11 @@ This distinction uses explicit provenance, not agent names or description text.
 
 Aliases and reusable-session history are process-local and do not survive process
 restarts as a reusable board. Post-restart recovery is partial and best-effort;
-it does not guarantee restoration of those aliases or the complete history.
+it does not guarantee restoration of those aliases or the complete history. One
+recovery channel is explicit: `task_revive` on a raw session ID verifies the
+session against the host (existence and parent ownership, plus a live-state
+gate) and re-adopts an untracked child owned by the calling parent, then
+continues it with the new prompt.
 
 ---
 

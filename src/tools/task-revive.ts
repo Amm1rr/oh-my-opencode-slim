@@ -40,7 +40,7 @@ export function createTaskReviveTool(
   const idParam = idParamFor(options.input);
   const task_revive = tool({
     description:
-      'Revive a retained background task in its existing session with a new prompt. Tracking does not survive a host restart; an untracked ID fails with guidance instead of retrying blindly.',
+      'Revive a retained background task in its existing session with a new prompt. Tracking does not survive a host restart; an untracked session owned by this parent is verified against the host and re-adopted on demand.',
     args: {
       ...taskRefArgs(idParam),
       prompt: z.string().min(1).describe('Prompt for the revived task'),
@@ -56,12 +56,28 @@ export function createTaskReviveTool(
       if (!requested) throw new Error(`task_revive requires ${idParam}`);
       if (!prompt) throw new Error('task_revive requires prompt');
 
-      const resolved = options.backgroundJobBoard.resolve(
+      let resolved = options.backgroundJobBoard.resolve(
         parentSessionID,
         requested,
       );
       if (!resolved) {
-        throw new Error(await untrackedReviveGuidance(options, requested));
+        const guidance = await resolveOrAdoptUntrackedTask(
+          options,
+          parentSessionID,
+          requested,
+        );
+        if (guidance !== undefined) throw new Error(guidance);
+        // undefined ⇒ adopted: the board now owns a fresh record for this
+        // session, so the resolution below must be repeated.
+        resolved = options.backgroundJobBoard.resolve(
+          parentSessionID,
+          requested,
+        );
+      }
+      if (!resolved) {
+        throw new Error(
+          `task_revive adoption did not produce a tracked record for ${requested}`,
+        );
       }
 
       let current = getCurrentReviveJob(
@@ -516,14 +532,47 @@ function getApiError(response: unknown): unknown {
  *   own recovery, in which case re-dispatching would duplicate the work.
  * - Probe failure: stay neutral instead of advising a write.
  */
-async function untrackedReviveGuidance(
+/**
+ * Untracked-revive handling (the #1387 P0 adopt-on-miss design).
+ *
+ * The board record is process-local and deliberately not restored after a
+ * restart, while the child session itself is durable at the host. On a
+ * resolve miss this function turns guidance into adoption when the host
+ * proves the session belongs to this caller:
+ *
+ * 1. Alias input: aliases are deliberately not restored; guide instead.
+ * 2. `session.get` probe (read-only): gone → re-dispatch advice; transport
+ *    or API error → neutral verify advice.
+ * 3. Ownership: `data.parentID` must equal the caller — the host-endorsed
+ *    ledger. Every non-adoptable probe outcome (gone, API error, transport
+ *    failure, foreign parent) returns one byte-identical generic response:
+ *    the probe must not become an existence oracle for foreign sessions.
+ * 4. Live-state gate (`getRuntimeSessionStatusSnapshot`): busy/retry → the
+ *    host may have restored the task; its result is still delivered, so
+ *    refuse adoption and forbid re-dispatch. Malformed snapshot → retry.
+ * 5. Adopt: `registerLaunch` rebuilds the record (state `running`,
+ *    generation from the process sequence; the persisted deletion epoch
+ *    survives and keeps fencing late pre-restart artifacts, while the
+ *    tombstone itself is cleared by registerLaunch for this proven
+ *    explicit relaunch). The unchanged revive pipeline below then
+ *    revalidates live state before writing the prompt.
+ *
+ * Returns undefined when the session was adopted (the caller continues
+ * into the normal revive flow); otherwise returns the guidance message.
+ */
+async function resolveOrAdoptUntrackedTask(
   options: TaskReviveToolOptions,
+  parentSessionID: string,
   requested: string,
-): Promise<string> {
+): Promise<string | undefined> {
   const prefix = `Unknown or unowned background task: ${requested}`;
+  // One byte-identical response for every non-adoptable probe outcome: the
+  // probe must not become an existence oracle for foreign sessions.
+  const generic = `${prefix}. Tracking does not survive a host restart; verify whether the host restored it before re-dispatching.`;
   if (!SESSION_ID_PATTERN.test(requested)) {
     return `${prefix}. Aliases do not survive a host restart; retry with the task's session ID from history or notifications, or re-dispatch the work.`;
   }
+  let data: Record<string, unknown>;
   try {
     const session = getClient(options.input).session;
     const response = await (
@@ -534,17 +583,50 @@ async function untrackedReviveGuidance(
       path: { id: requested },
       query: { directory: options.input.directory },
     });
-    if (getApiError(response) !== undefined) {
-      return `${prefix}. Tracking does not survive a host restart; verify whether the host restored it before re-dispatching.`;
-    }
-    const data = (response as Record<string, unknown> | undefined)?.data;
-    if (data !== undefined && data !== null) {
-      return `${prefix}. The session exists at the host but is not tracked by this board — tracking does not survive a host restart. If the host restored it, its result is still delivered on completion; do not re-dispatch blindly.`;
-    }
+    if (getApiError(response) !== undefined) return generic;
+    const probed = (response as Record<string, unknown> | undefined)?.data;
+    if (probed === undefined || probed === null) return generic;
+    data = probed as Record<string, unknown>;
   } catch {
-    return `${prefix}. Tracking does not survive a host restart; verify whether the host restored it before re-dispatching.`;
+    return generic;
   }
-  return `${prefix}. No such session exists at the host (tracking does not survive a restart). Re-dispatch the work.`;
+  if (data.parentID !== parentSessionID) return generic;
+  const snapshot = await getRuntimeSessionStatusSnapshot(options.input, {
+    timeoutMs: options.verifyAbortMs ?? 1_500,
+  });
+  const liveStatus = snapshot.statuses.get(requested);
+  if (liveStatus === 'busy' || liveStatus === 'retry') {
+    return `${prefix}. The host is executing that session (it may have been restored after a restart); its result is still delivered on completion — do not re-dispatch.`;
+  }
+  if (
+    snapshot.error !== undefined ||
+    snapshot.malformedSessionIDs.has(requested)
+  ) {
+    return `${prefix}. The host could not confirm the session state (${
+      snapshot.error ?? 'malformed entry'
+    }); retry task_revive.`;
+  }
+  const agent =
+    typeof data.agent === 'string' && data.agent ? data.agent : 'unknown';
+  const title =
+    typeof data.title === 'string' && data.title ? data.title : undefined;
+  // No reconciler call here: the revive pipeline's own cancel step plus the
+  // pre-send live re-verification cover the adoption race window, and wiring
+  // the reconciler would add options plumbing for one call.
+  options.backgroundJobBoard.registerLaunch({
+    taskID: requested,
+    parentSessionID,
+    agent,
+    description: title ? `recovered: ${title}` : 'recovered background task',
+    background: true,
+    now: Date.now(),
+  });
+  log('[task-revive] adopted untracked session', {
+    taskID: requested,
+    parentSessionID,
+    agent,
+  });
+  return undefined;
 }
 
 function errorText(error: unknown): string {

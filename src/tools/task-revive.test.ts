@@ -14,7 +14,10 @@ import {
 } from '../hooks/task-session-manager/revived-run-tracker';
 import { BackgroundJobBoard as ProductionBoard } from '../utils/background-job-board';
 import { BackgroundJobBoard } from '../utils/background-job-fixture';
-import { getBackgroundJobLifecycleLedger } from '../utils/background-job-store';
+import {
+  getBackgroundJobLifecycleLedger,
+  recordBackgroundJobSuppression,
+} from '../utils/background-job-store';
 import {
   type BackgroundJobTerminalGate,
   createBackgroundJobTerminalGate,
@@ -868,39 +871,77 @@ describe('task_revive tool', () => {
     },
   );
 
-  test('untracked-revive guidance distinguishes alias, existing, gone, and unknown states', async () => {
-    const alias = createTool();
-    await expect(
-      alias.taskRevive.execute({ task_id: 'fix-1', prompt: 'x' }, context),
-    ).rejects.toThrow('Aliases do not survive a host restart');
+  test('untracked-revive guidance: one identical generic response for every non-adoptable probe outcome', async () => {
+    const capture = async (
+      get?: () => Promise<unknown>,
+      taskID = 'ses_1',
+    ): Promise<string> => {
+      const tool = createTool({ ...(get ? { get } : {}) });
+      try {
+        await tool.taskRevive.execute(
+          { task_id: taskID, prompt: 'x' },
+          context,
+        );
+        return 'no-throw';
+      } catch (error) {
+        return (error as Error).message;
+      }
+    };
 
-    const existing = createTool({
-      get: async () => ({ data: { id: 'ses_1' } }),
+    // The probe must not become an existence oracle for foreign sessions:
+    // gone, foreign-parent, API-error, and transport-failure outcomes all
+    // return one byte-identical generic response.
+    const foreign = await capture(async () => ({
+      data: { id: 'ses_1', parentID: 'other' },
+    }));
+    const gone = await capture(async () => ({}));
+    const errored = await capture(async () => ({ error: { message: 'boom' } }));
+    const throwing = await capture(async () => {
+      throw new Error('transport down');
     });
-    await expect(
-      existing.taskRevive.execute({ task_id: 'ses_1', prompt: 'x' }, context),
-    ).rejects.toThrow('session exists at the host');
+    expect(foreign).toBe(gone);
+    expect(gone).toBe(errored);
+    expect(errored).toBe(throwing);
+    expect(foreign).toContain('Unknown or unowned background task: ses_1');
+    expect(foreign).not.toContain('different parent');
+    expect(foreign).not.toContain('exists at the host');
 
-    const gone = createTool({ get: async () => ({}) });
-    await expect(
-      gone.taskRevive.execute({ task_id: 'ses_1', prompt: 'x' }, context),
-    ).rejects.toThrow('No such session exists at the host');
+    const alias = await capture(undefined, 'fix-1');
+    expect(alias).toContain('Aliases do not survive a host restart');
 
-    const errored = createTool({
-      get: async () => ({ error: { message: 'boom' } }),
-    });
-    await expect(
-      errored.taskRevive.execute({ task_id: 'ses_1', prompt: 'x' }, context),
-    ).rejects.toThrow('verify whether the host restored it');
-
-    const throwing = createTool({
-      get: async () => {
-        throw new Error('transport down');
+    const adopted = createTool({
+      get: async () => ({
+        data: {
+          id: 'ses_1',
+          parentID: 'parent-1',
+          agent: 'explorer',
+          title: 'council work',
+        },
+      }),
+      revivedRunTracker: {
+        captureBaseline: async () => 'baseline',
+        register: () => {},
+        probe: async () => {},
       },
     });
-    await expect(
-      throwing.taskRevive.execute({ task_id: 'ses_1', prompt: 'x' }, context),
-    ).rejects.toThrow('verify whether the host restored it');
+    // Simulate the pre-restart eviction tombstone: adoption's registerLaunch
+    // must clear it while the persisted deletion epoch survives for fencing.
+    recordBackgroundJobSuppression(adopted.board, 'ses_1');
+    const result = await adopted.taskRevive.execute(
+      { task_id: 'ses_1', prompt: 'continue the recovered work' },
+      context,
+    );
+    expect(result).toContain('state: running');
+    expect(result).toContain('started');
+    const ledger = getBackgroundJobLifecycleLedger(adopted.board);
+    expect(ledger.tombstones.has('ses_1')).toBe(false);
+    expect(ledger.deletionEpochs.has('ses_1')).toBe(true);
+    expect(adopted.board.get('ses_1')).toMatchObject({
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'recovered: council work',
+      background: true,
+    });
   });
 
   test.each(['deadline first', 'acceptance first'])(
