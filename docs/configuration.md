@@ -596,9 +596,10 @@ already fallen past. When the parent's active fallback is present in the
 child's chain, that exact entry is used. Otherwise Slim prefers the child's
 first entry on the working parent provider, then the first entry outside the
 providers exhausted by the parent. OpenCode v2 uses the native per-call
-subagent model override; OpenCode v1 uses hidden internal agent routes because
-its `task` tool has no model argument. The child session still records the
-canonical specialist name in both cases. On v1,
+subagent model override. OpenCode v1's `task` tool has no model argument, so
+Slim sets the selected model on the child's first prompt before the host saves
+it. In both cases the delegation keeps the canonical specialist name, so
+`task` permission rules and the task tool's agent list are unchanged. On v1,
 `fallback.continuationPolicy` controls what happens when an unpinned native
 background-completion or lifecycle turn follows a confirmed fallback. The
 default, `"retry-primary"`, lets the host try the configured primary again,

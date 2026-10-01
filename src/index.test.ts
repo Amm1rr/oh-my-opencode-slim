@@ -2667,6 +2667,55 @@ describe('plugin config model inheritance', () => {
     }
   }
 
+  /** Run a v1 task delegation through the before-hook, the child's
+   *  session.created and its first chat.message (which the host persists
+   *  after the hook); return the routed subagent_type and child model. */
+  async function delegateV1Child(
+    hooks: Awaited<ReturnType<typeof loadConfiguredPlugin>>,
+    parentSessionID: string,
+    callID: string,
+    primary: { providerID: string; modelID: string },
+  ) {
+    const output = {
+      args: {
+        subagent_type: 'operator',
+        description: 'verify fallback routing',
+        prompt: 'return ok',
+      },
+    };
+    await hooks['tool.execute.before']?.(
+      { tool: 'task', sessionID: parentSessionID, callID } as never,
+      output as never,
+    );
+    const childID = `child-${callID}`;
+    await hooks.event?.({
+      event: {
+        type: 'session.created',
+        properties: {
+          info: { id: childID, parentID: parentSessionID, agent: 'operator' },
+        },
+      },
+    } as never);
+    const childOutput = {
+      message: {
+        id: `msg-${childID}`,
+        role: 'user',
+        sessionID: childID,
+        agent: 'operator',
+        model: { ...primary },
+      },
+      parts: [{ type: 'text', text: 'return ok' }],
+    };
+    await hooks['chat.message']?.(
+      { sessionID: childID, agent: 'operator', model: primary } as never,
+      childOutput as never,
+    );
+    return {
+      subagentType: output.args.subagent_type,
+      childModel: childOutput.message.model,
+    };
+  }
+
   test('session inheritance removes a stale host model in the final config', async () => {
     const hooks = await loadConfiguredPlugin({
       agents: {
@@ -2784,34 +2833,26 @@ describe('plugin config model inheritance', () => {
           } as never,
           {} as never,
         );
-        const output = {
-          args: {
-            subagent_type: 'operator',
-            description: 'verify fallback routing',
-            prompt: 'return ok',
-          },
-        };
-
-        await hooks['tool.execute.before']?.(
-          {
-            tool: 'task',
-            sessionID: 'orchestrator-fallback',
-            callID: `call-${_label}`,
-          } as never,
-          output as never,
+        const routed = await delegateV1Child(
+          hooks,
+          'orchestrator-fallback',
+          `call-${_label}`,
+          { providerID: 'openrouter', modelID: 'openrouter/auto' },
         );
 
-        const routedAgent = output.args.subagent_type;
-        expect(routedAgent).toStartWith('slim-internal-fallback-operator-');
-        const agents = hostConfig.agent as Record<
-          string,
-          Record<string, unknown>
-        >;
-        expect(agents[routedAgent]).toMatchObject({
-          name: 'operator',
-          mode: 'subagent',
-          hidden: true,
-          model: expectedModel,
+        // No hidden agent aliases: the host task permission and agent
+        // lookup keep seeing the canonical specialist.
+        expect(routed.subagentType).toBe('operator');
+        const agents = hostConfig.agent as Record<string, unknown>;
+        expect(
+          Object.keys(agents).some((name) =>
+            name.startsWith('slim-internal-fallback'),
+          ),
+        ).toBe(false);
+        const slash = expectedModel.indexOf('/');
+        expect(routed.childModel).toEqual({
+          providerID: expectedModel.slice(0, slash),
+          modelID: expectedModel.slice(slash + 1),
         });
       } finally {
         await hooks.dispose?.();
@@ -2904,29 +2945,17 @@ describe('plugin config model inheritance', () => {
         },
       } as never);
 
-      const output = {
-        args: {
-          subagent_type: 'operator',
-          description: 'verify live fallback routing',
-          prompt: 'return ok',
-        },
-      };
-      await hooks['tool.execute.before']?.(
-        {
-          tool: 'task',
-          sessionID,
-          callID: 'call-live-fallback',
-        } as never,
-        output as never,
+      const routed = await delegateV1Child(
+        hooks,
+        sessionID,
+        'call-live-fallback',
+        { providerID: 'openrouter', modelID: 'openrouter/auto' },
       );
-
-      const routedAgent = output.args.subagent_type;
-      expect(routedAgent).toStartWith('slim-internal-fallback-operator-');
-      const agents = hostConfig.agent as Record<
-        string,
-        Record<string, unknown>
-      >;
-      expect(agents[routedAgent]?.model).toBe('openai/gpt-6-luna');
+      expect(routed.subagentType).toBe('operator');
+      expect(routed.childModel).toEqual({
+        providerID: 'openai',
+        modelID: 'gpt-6-luna',
+      });
     } finally {
       await hooks.dispose?.();
     }
@@ -3025,36 +3054,18 @@ describe('plugin config model inheritance', () => {
           modelID: expectedModel,
         });
 
-        const taskOutput = {
-          args: {
-            subagent_type: 'operator',
-            description: 'verify continuation delegation routing',
-            prompt: 'return ok',
-          },
-        };
-        await hooks['tool.execute.before']?.(
-          {
-            tool: 'task',
-            sessionID,
-            callID: `call-continuation-${continuationPolicy}`,
-          } as never,
-          taskOutput as never,
+        const routed = await delegateV1Child(
+          hooks,
+          sessionID,
+          `call-continuation-${continuationPolicy}`,
+          { providerID: 'openrouter', modelID: 'openrouter/auto' },
         );
-
-        if (continuationPolicy === 'retry-primary') {
-          expect(taskOutput.args.subagent_type).toBe('operator');
-        } else {
-          expect(taskOutput.args.subagent_type).toStartWith(
-            'slim-internal-fallback-operator-',
-          );
-          const agents = hostConfig.agent as Record<
-            string,
-            Record<string, unknown>
-          >;
-          expect(agents[taskOutput.args.subagent_type]?.model).toBe(
-            'openai/gpt-6-luna',
-          );
-        }
+        expect(routed.subagentType).toBe('operator');
+        expect(routed.childModel).toEqual(
+          continuationPolicy === 'retry-primary'
+            ? { providerID: 'openrouter', modelID: 'openrouter/auto' }
+            : { providerID: 'openai', modelID: 'gpt-6-luna' },
+        );
       } finally {
         await hooks.dispose?.();
       }

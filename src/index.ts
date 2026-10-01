@@ -142,7 +142,6 @@ import {
   looksLikeMainChatRequest,
 } from './utils/system-collapse';
 import { createTuiReusableProjection } from './utils/tui-reusable-projection';
-import { installV1FallbackAgentAliases } from './utils/v1-fallback-agent-aliases';
 import { createV2Setup } from './v2';
 import { delegationWording } from './v2/delegation';
 import {
@@ -326,7 +325,55 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   // Host flavor ('v2' on OpenCode v2 hosts via the client shim, undefined on
   // v1). Survives the try block so prompt-assembly hooks can use it.
   let hostFlavor: string | undefined;
-  let v1FallbackAgentAliases = new Map<string, string>();
+  // v1 task() cannot select a model per call. The task before-hook records
+  // the fallback chosen for a delegation; the child's first chat.message
+  // rewrites its model before the host persists it (the host loop reads the
+  // persisted user model). Keyed by parent session for new children and by
+  // child session for task_id resumes. Child links come from session.created,
+  // which v1 publishes synchronously inside session.create.
+  type PendingV1ChildModel = {
+    callID?: string;
+    agentName: string;
+    entry: ModelChainEntry;
+  };
+  const MAX_PENDING_V1_CHILD_MODELS = 32;
+  const v1ChildParents = new Map<string, string>();
+  const pendingV1ChildModels = new Map<string, PendingV1ChildModel[]>();
+  const pendingV1ResumeModels = new Map<string, PendingV1ChildModel>();
+  const forgetV1ChildRouting = (sessionID: string) => {
+    v1ChildParents.delete(sessionID);
+    pendingV1ChildModels.delete(sessionID);
+    pendingV1ResumeModels.delete(sessionID);
+  };
+  const dropPendingV1ChildModelsForCall = (callID: string) => {
+    for (const [parentID, queue] of pendingV1ChildModels) {
+      const kept = queue.filter((pending) => pending.callID !== callID);
+      if (kept.length === 0) pendingV1ChildModels.delete(parentID);
+      else if (kept.length !== queue.length)
+        pendingV1ChildModels.set(parentID, kept);
+    }
+    for (const [childID, pending] of pendingV1ResumeModels) {
+      if (pending.callID === callID) pendingV1ResumeModels.delete(childID);
+    }
+  };
+  const takePendingV1ChildModel = (
+    sessionID: string,
+    agentName: string,
+  ): PendingV1ChildModel | undefined => {
+    const resumed = pendingV1ResumeModels.get(sessionID);
+    if (resumed?.agentName === agentName) {
+      pendingV1ResumeModels.delete(sessionID);
+      return resumed;
+    }
+    const parentID = v1ChildParents.get(sessionID);
+    const queue = parentID ? pendingV1ChildModels.get(parentID) : undefined;
+    const index =
+      queue?.findIndex((pending) => pending.agentName === agentName) ?? -1;
+    if (!parentID || !queue || index < 0) return undefined;
+    const [pending] = queue.splice(index, 1);
+    if (queue.length === 0) pendingV1ChildModels.delete(parentID);
+    return pending;
+  };
   let autoUpdateChecker: ReturnType<typeof createAutoUpdateCheckerHook>;
   const v1InternalSelectionOverrides = new Map<
     string,
@@ -341,6 +388,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     maxEntries: DEFAULT_MAX_SESSION_METADATA_ENTRIES,
     onEvict: (sessionID) => {
       v1InternalSelectionOverrides.delete(sessionID);
+      forgetV1ChildRouting(sessionID);
       log('[session] evicted oldest session metadata', {
         threshold: DEFAULT_MAX_SESSION_METADATA_ENTRIES,
         droppedSessionId: sessionID,
@@ -1797,22 +1845,10 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         ctx.directory,
       );
 
-      // v1 task() cannot select a model per call. Hidden aliases preserve
-      // each specialist's prompt/permissions while exposing its secondary
-      // chain entries to the task before-hook. The alias advertises the
-      // canonical name, so child sessions, job-board records, and fallback
-      // state never leak the implementation detail. v2 has a native model
-      // argument and does not need aliases.
-      const configAgent = opencodeConfig.agent as Record<string, unknown>;
-      v1FallbackAgentAliases =
-        hostFlavor === 'v2'
-          ? new Map()
-          : installV1FallbackAgentAliases(configAgent, runtime.modelArrays);
-
       // This is the source of truth for admission. It is intentionally
-      // captured only after every host/plugin merge, model pass, permission
-      // pass, and v1 fallback-alias expansion.
-      finalHostAgentConfig = configAgent;
+      // captured only after every host/plugin merge, model pass and
+      // permission pass.
+      finalHostAgentConfig = opencodeConfig.agent as Record<string, unknown>;
 
       registryBridge.prepareCommands(opencodeConfig);
     },
@@ -1975,6 +2011,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           event.properties as { info?: { parentID?: unknown } } | undefined
         )?.info?.parentID;
         if (createdSessionId && typeof createdSessionParent === 'string') {
+          if (hostFlavor !== 'v2') {
+            v1ChildParents.set(createdSessionId, createdSessionParent);
+          }
           // Persist the child→parent link so any process can resolve the
           // conversation root, surviving restarts and revives (#1147).
           recordTuiSessionParent(
@@ -2078,6 +2117,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         companionManager.onSessionDeleted(sessionID);
         if (sessionID) {
           v1InternalSelectionOverrides.delete(sessionID);
+          forgetV1ChildRouting(sessionID);
           sessionMetadata.delete(sessionID);
         }
       }
@@ -2102,6 +2142,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       // two-wake no-progress caps and never wake those sessions again.
       clearAllWakeSessions();
       v1InternalSelectionOverrides.clear();
+      v1ChildParents.clear();
+      pendingV1ChildModels.clear();
+      pendingV1ResumeModels.clear();
       await interviewManager.dispose();
       clearTuiActivities();
       tuiReusableProjection?.dispose();
@@ -2147,18 +2190,27 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
             args.subagent_type,
             input.sessionID,
           );
+          // subagent_type stays canonical: the host's task permission and
+          // agent lookup see the real specialist name.
           if (selected && selected.index > 0) {
-            const alias = v1FallbackAgentAliases.get(
-              `${selected.agentName}\0${selected.entry.id}`,
-            );
-            if (alias) {
-              args.subagent_type = alias;
-              log('[delegation] routed v1 child to active fallback model', {
-                parentSessionID: input.sessionID,
-                agent: selected.agentName,
-                model: selected.entry.id,
-              });
+            const pending: PendingV1ChildModel = {
+              ...(input.callID ? { callID: input.callID } : {}),
+              agentName: selected.agentName,
+              entry: selected.entry,
+            };
+            if (typeof args.task_id === 'string' && args.task_id) {
+              pendingV1ResumeModels.set(args.task_id, pending);
+            } else {
+              const queue = pendingV1ChildModels.get(input.sessionID) ?? [];
+              queue.push(pending);
+              if (queue.length > MAX_PENDING_V1_CHILD_MODELS) queue.shift();
+              pendingV1ChildModels.set(input.sessionID, queue);
             }
+            log('[delegation] routing v1 child to active fallback model', {
+              parentSessionID: input.sessionID,
+              agent: selected.agentName,
+              model: selected.entry.id,
+            });
           }
         }
       }
@@ -2288,6 +2340,32 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         foregroundFallback.observeExternalTurn(input.sessionID);
       }
 
+      // v1 delegated child on a parent's active fallback (recorded by the
+      // task before-hook): rewrite the prompt's model before the host
+      // persists the message. The host loop runs on the persisted model.
+      const childAgentRaw = input.agent ?? output?.message?.agent;
+      const routedChild =
+        hostFlavor !== 'v2' && !internalAdmission && childAgentRaw
+          ? takePendingV1ChildModel(
+              input.sessionID,
+              resolveRuntimeAgentName(runtime, childAgentRaw),
+            )
+          : undefined;
+      const routedChildModel = modelFromMetadataString(routedChild?.entry.id);
+      if (routedChild && routedChildModel && output?.message) {
+        output.message.model = {
+          ...routedChildModel,
+          ...(routedChild.entry.variant
+            ? { variant: routedChild.entry.variant }
+            : {}),
+        };
+        log('[delegation] routed v1 child to active fallback model', {
+          sessionID: input.sessionID,
+          agent: routedChild.agentName,
+          model: routedChild.entry.id,
+        });
+      }
+
       // OpenCode v1's native background notifier does not pin a model. The
       // host therefore constructs (and persists) this synthetic message on
       // the agent's static primary before exposing chat.message, even when
@@ -2410,7 +2488,10 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       // inheriting background task could be admitted before its parent's
       // model is known — admission then resolves the correct provider/model
       // cap immediately.
-      const messageModel = input.model ?? output?.message?.model;
+      const messageModel =
+        (routedChild ? routedChildModel : undefined) ??
+        input.model ??
+        output?.message?.model;
       if (
         messageModel &&
         typeof messageModel.providerID === 'string' &&
@@ -2592,6 +2673,17 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     },
 
     'tool.execute.after': async (input, output) => {
+      // A foreground task that never reached its child prompt must not leave
+      // a routed model for a later delegation. Background tasks return before
+      // their child prompts, so their entry stays until the child consumes it.
+      const afterArgs = (input as { args?: { background?: unknown } }).args;
+      if (
+        input.tool.toLowerCase() === 'task' &&
+        input.callID &&
+        afterArgs?.background !== true
+      ) {
+        dropPendingV1ChildModelsForCall(input.callID);
+      }
       await jsonErrorRecoveryAfter(input, output);
       await toolLoopGuard['tool.execute.after'](
         input as never,
