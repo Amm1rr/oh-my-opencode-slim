@@ -305,6 +305,73 @@ describe('finalized existing-agent registry', () => {
     );
   });
 
+  test('host native explore entry does not leak into plugin explorer (#1383)', () => {
+    const runtime = runtimeFor({});
+    const registry = build(runtime, {
+      agent: {
+        explore: {
+          disable: true,
+          model: 'host/native-model',
+          prompt: 'host native prompt',
+        },
+        general: { disable: true },
+      },
+    });
+    const explorer = registry.finalAgentConfig.explorer as Record<
+      string,
+      unknown
+    >;
+    expect(explorer.disable).toBeUndefined();
+    expect(explorer.model).toBeUndefined();
+    expect(explorer.prompt).not.toBe('host native prompt');
+    const managed = registry.managedAgentConfig.explorer as Record<
+      string,
+      unknown
+    >;
+    expect(managed.disable).toBeUndefined();
+  });
+
+  test('host explorer disable still disables plugin explorer (#1383)', () => {
+    const runtime = runtimeFor({});
+    const registry = build(runtime, {
+      agent: { explorer: { disable: true } },
+    });
+    expect(
+      (registry.finalAgentConfig.explorer as Record<string, unknown>).disable,
+    ).toBe(true);
+    expect(
+      (registry.managedAgentConfig.explorer as Record<string, unknown>).disable,
+    ).toBe(true);
+  });
+
+  test('host native explore permission rules do not leak into explorer (#1383)', () => {
+    const runtime = runtimeFor({});
+    const withAliasRules = build(
+      runtime,
+      { agent: { explore: { disable: true } } },
+      {
+        nativePermissionsByAgent: {
+          explore: [{ action: 'x', effect: 'deny' }],
+        },
+      },
+    );
+    const cleanRuntime = runtimeFor({});
+    const withoutAliasRules = build(cleanRuntime, { agent: {} }, {});
+    expect(withAliasRules.nativePolicies.explorer.rules).toEqual(
+      withoutAliasRules.nativePolicies.explorer.rules,
+    );
+  });
+
+  test('plugin legacy alias override still applies to explorer (#1383)', () => {
+    const runtime = runtimeFor({
+      agents: { explore: { model: 'plugin/alias-model' } },
+    });
+    const registry = build(runtime, { agent: {} });
+    expect(
+      (registry.finalAgentConfig.explorer as Record<string, unknown>).model,
+    ).toBe('plugin/alias-model');
+  });
+
   test('merges host and plugin MCPs before permissions are compiled', () => {
     const runtime = runtimeFor({
       agents: { explorer: { mcps: ['plugin-mcp'] } },
