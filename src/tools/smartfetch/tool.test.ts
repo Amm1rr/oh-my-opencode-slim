@@ -207,7 +207,7 @@ describe('smartfetch/tool', () => {
     expect(pageAccepts[1]).toStartWith('text/html;q=1.0');
   });
 
-  test('a persistent Cloudflare challenge reports 403 and mentions the retry', async () => {
+  test('a Cloudflare challenge reports 403 and points to another source', async () => {
     const fetchMock = mock(
       async () =>
         new Response('challenge', {
@@ -222,9 +222,9 @@ describe('smartfetch/tool', () => {
         createExecutionContext(),
       ),
     ).rejects.toThrow(
-      'Request failed with status code: 403 (Cloudflare challenge',
+      'Request failed with status code: 403 (Cloudflare browser challenge; retrying will not help, try another source)',
     );
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   test('rejects a pre-aborted request after permission without network I/O', async () => {

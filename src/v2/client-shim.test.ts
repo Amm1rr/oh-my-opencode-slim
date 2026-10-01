@@ -649,8 +649,7 @@ describe('v2 client shim delegation', () => {
         session: { delete: (a: unknown) => Promise<unknown> };
       }
     ).session.delete({ path: { id: 'ses_tmp' }, query: { directory: '/d' } });
-    // The smartfetch secondary-model cleanup shape (path.id) must resolve
-    // to the flat v2 {sessionID} — no temp-session leak.
+    // The v1 call shape (path.id) must resolve to the flat v2 {sessionID}.
     expect(calls).toEqual([{ sessionID: 'ses_tmp' }]);
   });
 

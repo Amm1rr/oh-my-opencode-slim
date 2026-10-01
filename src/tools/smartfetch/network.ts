@@ -2,7 +2,6 @@ import path from 'node:path';
 import { fitUtf8 } from './binary';
 import {
   BINARY_PREFIXES,
-  CHALLENGE_RETRY_USER_AGENT,
   DEFAULT_ACCEPT_LANGUAGE,
   DOCS_HOST_PREFIXES,
   DOCS_HOST_SUFFIXES,
@@ -258,11 +257,13 @@ async function fetchWithChallengeRetry(
   if ('blockedRedirect' in first || !isCloudflareChallenge(first.response)) {
     return first;
   }
+  const cookie = first.response.headers
+    .getSetCookie()
+    .map((setCookie) => setCookie.split(';', 1)[0])
+    .join('; ');
+  if (!cookie || !url.startsWith('https:')) return first;
   await discard(first.response);
-  return fetchWithRedirects(url, signal, {
-    ...requestHeaders,
-    'User-Agent': CHALLENGE_RETRY_USER_AGENT,
-  });
+  return fetchWithRedirects(url, signal, { ...requestHeaders, Cookie: cookie });
 }
 
 export async function fetchWithUpgradeFallback(
