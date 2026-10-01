@@ -64,11 +64,11 @@ Full delegated output lands verbatim in
 transcribed by the orchestrator when it cannot; the progress file gets
 only a one-line conclusion plus the path. Never paste
 `@council`/`@oracle`/`@librarian` output into a progress file or fork
-one. Accept lane completion only after re-reading the artifact from disk
-and confirming it carries this lane's returned conclusion (on miss,
-re-check once). Past ~400 lines,
-consolidate a topic file — one per topic, new versions overwrite old
-ones.
+one. The artifact's first line is the lane's one-line conclusion, the
+same line it returns; accept lane completion only after re-reading the
+artifact from disk and finding that first line (on miss, re-check once).
+Past ~400 lines, consolidate a topic file — one per topic, new versions
+overwrite old ones.
 
 ### Resuming
 
