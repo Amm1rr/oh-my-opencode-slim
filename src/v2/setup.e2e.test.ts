@@ -364,6 +364,53 @@ describe('createV2Setup e2e', () => {
     expect(calls.disposed.length).toBeGreaterThan(0);
   }, 20_000);
 
+  test('disabled_commands interview gates both registration and execution', async () => {
+    // Override the beforeEach fixture: the all-setup wiring test must load
+    // its own disabled_commands through the real loadPluginConfig path.
+    await Bun.write(
+      path.join(projectDir, '.opencode', 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        companion: { enabled: false },
+        disabled_commands: ['interview'],
+      }),
+    );
+    const { ctx, calls } = makeMockV2Context(projectDir);
+    const cleanup = await createV2Setup()(ctx);
+
+    // Registration gate: /interview absent, non-disabled commands intact
+    expect(calls.commandAdds.map((c) => c.name)).not.toContain('interview');
+    expect(calls.commandAdds.map((c) => c.name)).toContain('deepwork');
+
+    // Execution gate: a trailing interview marker passes through untouched
+    const trailing = {
+      id: 'tail-iv-gate',
+      role: 'user',
+      content: [
+        {
+          type: 'text',
+          text: '<omos-interview-command>build an app</omos-interview-command>',
+        },
+      ],
+    };
+    await calls.contextHookCb?.({
+      sessionID: 'ses_iv_gate',
+      agent: 'oracle',
+      model: {},
+      system: [],
+      tools: {},
+      messages: [trailing],
+    });
+    expect(trailing.content).toEqual([
+      {
+        type: 'text',
+        text: '<omos-interview-command>build an app</omos-interview-command>',
+      },
+    ]);
+
+    await cleanup();
+    expect(calls.disposed.length).toBeGreaterThan(0);
+  }, 20_000);
+
   test('reduced ctx (no agent.transform) skips gracefully', async () => {
     const cleanup = await createV2Setup()({} as never);
     await cleanup(); // passes when neither call throws
