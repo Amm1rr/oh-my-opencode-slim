@@ -174,9 +174,10 @@ async function appLog(
   }
 }
 
-// Debounce: only show image-skipped toast once per 60 seconds per project
-const lastImageSkippedToastByDir = new Map<string, number>();
-const IMAGE_SKIPPED_DEBOUNCE_MS = 60_000;
+// Debounce: only show the retained-inline image warning once per project
+// every 60 seconds.
+const lastImageRetainedToastByDir = new Map<string, number>();
+const IMAGE_RETAINED_TOAST_DEBOUNCE_MS = 60_000;
 
 type ModelChainEntry = { id: string; variant?: string };
 
@@ -2701,14 +2702,14 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       });
       if (imageResult) {
         const now = Date.now();
-        const last = lastImageSkippedToastByDir.get(ctx.directory) ?? 0;
-        if (now - last > IMAGE_SKIPPED_DEBOUNCE_MS) {
+        const last = lastImageRetainedToastByDir.get(ctx.directory) ?? 0;
+        if (now - last > IMAGE_RETAINED_TOAST_DEBOUNCE_MS) {
           ctx.client.tui
             .showToast({
               body: {
-                title: 'Images skipped',
+                title: 'Images retained inline',
                 message:
-                  'Observer agent is disabled, so images can\'t be analyzed. Set image_routing to "direct" to send images to your model, or enable observer.',
+                  'Observer is disabled, so image attachments remain inline and may require a vision-capable orchestrator. Enable observer or set image_routing to "direct".',
                 variant: 'warning',
                 duration: TOAST_DURATION_MS,
               },
@@ -2717,7 +2718,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
               // Only advance the debounce window on a successful toast
               // so a failed attempt doesn't suppress the next warning.
               // Greptile: "Failed Toast Starts Debounce Window".
-              lastImageSkippedToastByDir.set(ctx.directory, now);
+              lastImageRetainedToastByDir.set(ctx.directory, now);
             })
             .catch(() => {});
         }
