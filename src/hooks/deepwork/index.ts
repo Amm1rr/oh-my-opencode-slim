@@ -18,7 +18,7 @@ function activationPrompt(task: string, sessionID: string): string {
   return [
     instructions,
     '',
-    `Your deepwork state file is \`.slim/deepwork/${sessionID}.md\` — create/update only this file.`,
+    `Your deepwork router head is \`.slim/deepwork/${sessionID}.md\`; the skill covers setup, planning, gates, and state rules.`,
     '',
     'Task:',
     task,
