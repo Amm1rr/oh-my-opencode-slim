@@ -1154,6 +1154,15 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "guidan-nick",
+      "name": "guidan-nick",
+      "avatar_url": "https://avatars.githubusercontent.com/u/224735395?v=4",
+      "profile": "https://github.com/guidan-nick",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "commitConvention": "angular"
