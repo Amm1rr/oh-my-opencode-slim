@@ -1,4 +1,4 @@
-type AgentPermission = Record<
+export type AgentPermission = Record<
   string,
   'allow' | 'ask' | 'deny' | Record<string, 'allow' | 'ask' | 'deny'>
 >;

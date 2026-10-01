@@ -1,6 +1,8 @@
 import { type ToolDefinition, tool } from '@opencode-ai/plugin';
 import type { RevivedRunTracker } from '../hooks/task-session-manager/revived-run-tracker';
 import type { BackgroundJobLease } from '../utils/background-job-board';
+import { getSuppressionTombstone } from '../utils/background-job-persistence';
+import { clearBackgroundJobSuppression } from '../utils/background-job-store';
 import type { BackgroundJobSupervisor } from '../utils/background-job-supervisor';
 import { log } from '../utils/logger';
 import { getClient } from '../utils/opencode-client';
@@ -550,6 +552,9 @@ function getApiError(response: unknown): unknown {
  * 4. Live-state gate (`getRuntimeSessionStatusSnapshot`): busy/retry → the
  *    host may have restored the task; its result is still delivered, so
  *    refuse adoption and forbid re-dispatch. Malformed snapshot → retry.
+ * 4b. Persisted terminal result: an evicted task that already completed
+ *     with a result returns it instead of re-prompting (tombstone cleared;
+ *     the deletion epoch survives, so a later revive adopts normally).
  * 5. Adopt: `registerLaunch` rebuilds the record (state `running`,
  *    generation from the process sequence; the persisted deletion epoch
  *    survives and keeps fencing late pre-restart artifacts, while the
@@ -605,6 +610,19 @@ async function resolveOrAdoptUntrackedTask(
     return `${prefix}. The host could not confirm the session state (${
       snapshot.error ?? 'malformed entry'
     }); retry task_revive.`;
+  }
+  const tombstone = getSuppressionTombstone(requested);
+  if (tombstone?.terminalState !== undefined && tombstone.resultSummary) {
+    // The task completed and was evicted before the tracking loss. Surface
+    // the recorded result instead of re-prompting the child, and clear the
+    // tombstone (the deletion epoch survives, so fencing stays intact) so a
+    // later task_revive adopts and continues the session normally.
+    clearBackgroundJobSuppression(options.backgroundJobBoard, requested);
+    const ending =
+      tombstone.terminalState === 'completed'
+        ? 'completed'
+        : `ended in state ${tombstone.terminalState}`;
+    return `${prefix}. The session ${ending} before the tracking loss; its recorded result: ${tombstone.resultSummary}. Re-dispatch only if this result does not satisfy the objective.`;
   }
   const agent =
     typeof data.agent === 'string' && data.agent ? data.agent : 'unknown';

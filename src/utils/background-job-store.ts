@@ -137,13 +137,17 @@ export function getBackgroundJobLifecycleLedger(
 export function recordBackgroundJobSuppression(
   store: BackgroundJobStore,
   taskID: string,
+  terminal?: {
+    state: 'completed' | 'error' | 'cancelled';
+    resultSummary: string;
+  },
 ): void {
   const ledger = getBackgroundJobLifecycleLedger(store);
   if (ledger.tombstones.has(taskID)) return;
   ledger.tombstones.add(taskID);
   const epoch = ++ledger.nextEpoch;
   ledger.deletionEpochs.set(taskID, epoch);
-  recordSuppressionPersisted(taskID, epoch);
+  recordSuppressionPersisted(taskID, epoch, terminal);
 }
 
 /** Clear only the active rehydrate tombstone for a proven new launch.

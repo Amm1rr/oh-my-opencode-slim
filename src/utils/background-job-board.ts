@@ -1429,13 +1429,22 @@ export class BackgroundJobBoard implements BackgroundJobStore {
 
   clearParent(parentSessionID: string): void {
     for (const job of this.list(parentSessionID)) {
-      recordBackgroundJobSuppression(this, job.taskID);
+      recordBackgroundJobSuppression(
+        this,
+        job.taskID,
+        terminalResultPayloadOf(job),
+      );
       this.deleteJob(job.taskID);
     }
   }
 
   drop(taskID: string): void {
-    recordBackgroundJobSuppression(this, taskID);
+    const record = this.get(taskID);
+    recordBackgroundJobSuppression(
+      this,
+      taskID,
+      record ? terminalResultPayloadOf(record) : undefined,
+    );
     this.deleteJob(taskID);
   }
 
@@ -1468,7 +1477,11 @@ export class BackgroundJobBoard implements BackgroundJobStore {
         (entry.terminalState ?? terminalStateOf(entry.state)) !== undefined &&
         sumContextLines(entry) > this.maxContextLines
       ) {
-        recordBackgroundJobSuppression(this, entry.taskID);
+        recordBackgroundJobSuppression(
+          this,
+          entry.taskID,
+          terminalResultPayloadOf(entry),
+        );
         this.deleteJob(entry.taskID);
       }
     }
@@ -1484,7 +1497,11 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       )
       .sort((a, b) => b.lastUsedAt - a.lastUsedAt);
     for (const stale of reusable.slice(this.maxReusablePerAgent)) {
-      recordBackgroundJobSuppression(this, stale.taskID);
+      recordBackgroundJobSuppression(
+        this,
+        stale.taskID,
+        terminalResultPayloadOf(stale),
+      );
       this.deleteJob(stale.taskID);
     }
   }
@@ -1500,7 +1517,11 @@ export class BackgroundJobBoard implements BackgroundJobStore {
         !this.liveLeases.has(entry.taskID) &&
         sumContextLines(entry) > this.maxContextLines
       ) {
-        recordBackgroundJobSuppression(this, entry.taskID);
+        recordBackgroundJobSuppression(
+          this,
+          entry.taskID,
+          terminalResultPayloadOf(entry),
+        );
         this.deleteJob(entry.taskID);
       }
     }
@@ -1514,7 +1535,11 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       )
       .sort((a, b) => b.lastUsedAt - a.lastUsedAt);
     for (const stale of retained.slice(this.maxReusablePerAgent)) {
-      recordBackgroundJobSuppression(this, stale.taskID);
+      recordBackgroundJobSuppression(
+        this,
+        stale.taskID,
+        terminalResultPayloadOf(stale),
+      );
       this.deleteJob(stale.taskID);
     }
   }
@@ -1664,6 +1689,24 @@ function terminalStateOf(
 ): TaskOutputState | undefined {
   return state === 'completed' || state === 'error' || state === 'cancelled'
     ? state
+    : undefined;
+}
+
+/** Terminal result payload persisted alongside an eviction tombstone: only
+ * when the record had already ended with a result, so a post-restart
+ * task_revive can surface it instead of re-prompting the child. */
+function terminalResultPayloadOf(record: BackgroundJobRecord):
+  | {
+      state: 'completed' | 'error' | 'cancelled';
+      resultSummary: string;
+    }
+  | undefined {
+  const state = record.terminalState ?? terminalStateOf(record.state);
+  if (state !== 'completed' && state !== 'error' && state !== 'cancelled') {
+    return undefined;
+  }
+  return record.resultSummary
+    ? { state, resultSummary: record.resultSummary }
     : undefined;
 }
 

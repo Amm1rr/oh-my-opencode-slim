@@ -14,6 +14,7 @@ import {
 } from '../hooks/task-session-manager/revived-run-tracker';
 import { BackgroundJobBoard as ProductionBoard } from '../utils/background-job-board';
 import { BackgroundJobBoard } from '../utils/background-job-fixture';
+import { getSuppressionTombstone } from '../utils/background-job-persistence';
 import {
   getBackgroundJobLifecycleLedger,
   recordBackgroundJobSuppression,
@@ -942,6 +943,31 @@ describe('task_revive tool', () => {
       description: 'recovered: council work',
       background: true,
     });
+  });
+
+  test('untracked-revive surfaces a persisted terminal result instead of re-prompting', async () => {
+    const tool = createTool({
+      get: async () => ({
+        data: {
+          id: 'ses_1',
+          parentID: 'parent-1',
+          agent: 'explorer',
+          title: 'council work',
+        },
+      }),
+    });
+    recordBackgroundJobSuppression(tool.board, 'ses_1', {
+      state: 'completed',
+      resultSummary: 'the answer is 42',
+    });
+    expect(getSuppressionTombstone('ses_1')?.resultSummary).toBe(
+      'the answer is 42',
+    );
+    await expect(
+      tool.taskRevive.execute({ task_id: 'ses_1', prompt: 'x' }, context),
+    ).rejects.toThrow('recorded result: the answer is 42');
+    expect(tool.board.get('ses_1')).toBeUndefined();
+    expect(getSuppressionTombstone('ses_1')).toBeUndefined();
   });
 
   test.each(['deadline first', 'acceptance first'])(
