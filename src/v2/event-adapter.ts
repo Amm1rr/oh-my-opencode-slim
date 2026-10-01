@@ -54,8 +54,10 @@
  * - `permission.asked` field mapping (same consumers): v1 names
  *   `{id, sessionID, permission, patterns, metadata, always}` ← v2
  *   `{id, sessionID, action, resources, metadata?, save?}`.
- *   `permission.replied` passes through raw — v2's shape already matches
- *   the v1 event.
+ *   `permission.replied` keeps its raw-first delivery and additionally
+ *   normalizes the native `data` payload into `properties`
+ *   `{sessionID, requestID, reply}` so the v1 consumers (which read
+ *   `properties` only) can clear the wait.
  */
 
 import { isRecord } from '../utils/guards';
@@ -439,14 +441,44 @@ export function mapV2EventToV1(
     const mapped = permissionAskedToV1(props);
     if (mapped) out.push(mapped);
   } else if (type === 'permission.replied') {
-    // Native v2 carries the v1-compatible payload in `data`, while legacy
-    // consumers read `properties`. Keep raw-first delivery and normalize it.
-    if (
-      !isRecord(event.properties) &&
-      typeof props.sessionID === 'string' &&
+    // Native v2 carries the resolution payload in `data`, while the v1
+    // consumers (input-wait tracker, child-input-wait router) read
+    // `properties.sessionID` / `properties.requestID`. Keep raw-first
+    // delivery and synthesize the v1 shape alongside it.
+    //
+    // Synthesis fires whenever the payload carries a usable identity and
+    // the event's own `properties` does not already carry that same
+    // resolution — a bare or foreign `properties` envelope (e.g. `{}`)
+    // must not suppress the clear, or the child wait sticks forever.
+    // `id` is accepted as a requestID fallback (mirrors the ask side,
+    // which keys on `id`, and the form.replied `id` → `requestID` map).
+    const requestID =
       typeof props.requestID === 'string'
-    ) {
-      out.push({ type, properties: { ...props } });
+        ? props.requestID
+        : typeof props.id === 'string'
+          ? props.id
+          : undefined;
+    if (typeof props.sessionID === 'string' && typeof requestID === 'string') {
+      const existing = isRecord(event.properties)
+        ? event.properties
+        : undefined;
+      // Only `requestID` counts: the reply consumers read
+      // `properties.requestID` (never `properties.id`), so a properties
+      // envelope carrying the id under another spelling still needs the
+      // synthesized shape to clear the wait.
+      const alreadyCarries =
+        existing?.sessionID === props.sessionID &&
+        existing?.requestID === requestID;
+      if (!alreadyCarries) {
+        out.push({
+          type,
+          properties: {
+            sessionID: props.sessionID,
+            requestID,
+            reply: props.reply,
+          },
+        });
+      }
     }
   }
 

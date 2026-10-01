@@ -269,9 +269,11 @@ not an optional-degradation path.
       `question.asked`/`question.replied`/`question.rejected`
       (`form.id` → the question request id; forms owned by the `"global"`
       sentinel are skipped), and `permission.asked` field mapping to the v1
-      names (`permission` ← `action`, `patterns` ← `resources`;
-      `permission.replied` passes through raw — v2's shape already matches
-      the v1 event). V2 hosts publish durable `session.execution.started/
+       names (`permission` ← `action`, `patterns` ← `resources`;
+       `permission.replied` keeps raw-first delivery and additionally
+       normalizes the native `data` payload into `properties`
+       `{sessionID, requestID, reply}` so the v1 consumers can clear the
+       wait). V2 hosts publish durable `session.execution.started/
       succeeded/failed/interrupted` and emit no busy/idle `session.status`
       and no `session.idle` on the event stream — the observed payloads
       always ride under `data` (verified live, 80-event capture). The
