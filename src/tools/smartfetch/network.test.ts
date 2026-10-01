@@ -232,7 +232,7 @@ describe('smartfetch/network', () => {
     ]);
   });
 
-  test('retries a Cloudflare challenge once per scheme with the cookies it set and closes its body', async () => {
+  test('retries a Cloudflare challenge once over HTTPS with the cookies it set and closes its body', async () => {
     const responses: Response[] = [];
     const calls: Array<{ url: string; headers: Headers }> = [];
     globalThis.fetch = mock(
@@ -256,19 +256,17 @@ describe('smartfetch/network', () => {
       { Accept: 'text/markdown', 'If-None-Match': '"old"' },
     );
     if ('blockedRedirect' in result) throw new Error('unexpected redirect');
-    expect(result.response).toBe(responses[3]);
-    expect(responses[0]?.bodyUsed).toBe(true);
+    expect(responses.indexOf(result.response)).toBe(2);
+    expect(responses.map((r) => r.bodyUsed)).toEqual([true, true, false]);
     expect(calls.map(({ url }) => url)).toEqual([
       'https://example.com/page',
       'https://example.com/page',
-      'http://example.com/page',
       'http://example.com/page',
     ]);
     expect(calls.map(({ headers }) => headers.get('Cookie'))).toEqual([
       null,
       '__cf_bm=abc; _cfuvid=def',
       null,
-      '__cf_bm=abc; _cfuvid=def',
     ]);
     for (const { headers } of calls) {
       expect(headers.get('User-Agent')).toBe('opencode-smartfetch/1.0');

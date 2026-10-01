@@ -162,12 +162,12 @@ For URLs entered as `http://`, `webfetch` first tries `https://` and falls
 back to `http://` if the HTTPS attempt fails (connection error, blocked
 redirect, or non-2xx status).
 
-If a page request returns HTTP 403 with `cf-mitigated: challenge` and sets
+If an HTTPS page returns HTTP 403 with `cf-mitigated: challenge` and sets
 cookies, `webfetch` closes the response and retries once from the original URL
 sending those cookies back, as any cookie-keeping client would (same user
 agent and headers; redirects stay same-origin; nothing is stored). A challenge
-that sets no cookie is not retried. A persistent challenge still reports HTTP
-403 and suggests another source; the llms.txt probe does not use this retry.
+without cookies or over plain HTTP is not retried, nor is the llms.txt probe.
+A persistent challenge still reports HTTP 403 and suggests another source.
 
 ## Binary Detection
 

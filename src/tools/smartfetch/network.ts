@@ -261,7 +261,7 @@ async function fetchWithChallengeRetry(
     .getSetCookie()
     .map((setCookie) => setCookie.split(';', 1)[0])
     .join('; ');
-  if (!cookie) return first;
+  if (!cookie || !url.startsWith('https:')) return first;
   await discard(first.response);
   return fetchWithRedirects(url, signal, { ...requestHeaders, Cookie: cookie });
 }
