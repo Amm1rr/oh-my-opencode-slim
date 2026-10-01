@@ -131,17 +131,23 @@ export function getBackgroundJobLifecycleLedger(
 /** Record a task drop/eviction as a rehydrate and late-output tombstone.
  * Write-through: the persisted tombstone (and its deletion epoch) is
  * updated together with the in-memory ledger so the two can never
- * diverge across a restart. */
+ * diverge across a restart. Cleared only by clearBackgroundJobSuppression
+ * via registerLaunch — an explicit (re)launch/adoption is proof of life;
+ * the deletion epoch intentionally survives for generation fencing. */
 export function recordBackgroundJobSuppression(
   store: BackgroundJobStore,
   taskID: string,
+  terminal?: {
+    state: 'completed' | 'error' | 'cancelled';
+    resultSummary: string;
+  },
 ): void {
   const ledger = getBackgroundJobLifecycleLedger(store);
   if (ledger.tombstones.has(taskID)) return;
   ledger.tombstones.add(taskID);
   const epoch = ++ledger.nextEpoch;
   ledger.deletionEpochs.set(taskID, epoch);
-  recordSuppressionPersisted(taskID, epoch);
+  recordSuppressionPersisted(taskID, epoch, terminal);
 }
 
 /** Clear only the active rehydrate tombstone for a proven new launch.

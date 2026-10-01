@@ -114,9 +114,7 @@ describe('buildOrchestratorPrompt delegation vocabulary', () => {
     expect(prompt).toContain(
       'Never use `task(..., task_id: ...)` to fetch output',
     );
-    expect(prompt).toContain(
-      'never use `task(..., task_id: ...)` as a progress check',
-    );
+    expect(prompt).toContain('any resume starts new model work');
     expect(prompt).toContain('Prefer `task(..., background: true)`');
     expect(prompt).toContain('cannot receive another `task` call');
     expect(prompt).toContain("in the task tool's `task_id` argument");

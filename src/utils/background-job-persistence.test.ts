@@ -5,6 +5,7 @@ import {
   bumpAliasHighWaterMark,
   clearSuppression,
   configureBackgroundJobPersistence,
+  getSuppressionTombstone,
   loadInitialBackgroundJobPersistence,
   MAX_PERSISTED_TOMBSTONES,
   recordSuppression,
@@ -92,6 +93,65 @@ describe('background-job persistence', () => {
     // Next recorded epoch stays monotonic past the restored one.
     recordBackgroundJobSuppression(freshBoard, 'ses_next');
     expect(ledger.deletionEpochs.get('ses_next')).toBe(2);
+  });
+
+  test('tombstone terminal result survives a simulated restart', async () => {
+    const { backend } = createMemoryBackend();
+    configureBackgroundJobPersistence(backend);
+    await loadInitialBackgroundJobPersistence();
+
+    recordSuppression('ses_terminal', 1, {
+      state: 'completed',
+      resultSummary: 'the answer is 42',
+    });
+    await flushWrites();
+    expect(getSuppressionTombstone('ses_terminal')?.terminalState).toBe(
+      'completed',
+    );
+    // Full-field fixture: any field the load path drops breaks the
+    // equality below, regardless of which fields the assertions name.
+    const before = getSuppressionTombstone('ses_terminal');
+
+    // Simulated restart: same backend, fresh module state. The load path
+    // must carry the persisted terminal result through, or a post-restart
+    // task_revive cannot recognize the completed work.
+    configureBackgroundJobPersistence(backend);
+    await loadInitialBackgroundJobPersistence();
+
+    expect(getSuppressionTombstone('ses_terminal')).toEqual(before);
+  });
+
+  test('a malformed persisted terminal payload is dropped wholesale on load', async () => {
+    const { backend, map } = createMemoryBackend();
+    configureBackgroundJobPersistence(backend);
+    await loadInitialBackgroundJobPersistence();
+
+    recordSuppression('ses_half', 3, {
+      state: 'completed',
+      resultSummary: 'will be corrupted',
+    });
+    await flushWrites();
+    // Corrupt the persisted tombstone entry: a terminal state without a
+    // result summary. The load sanitizer must drop the pair wholesale —
+    // the consumer contract is all-or-nothing.
+    for (const [entryKey, entryValue] of map) {
+      if (entryKey.includes('ses_half') && typeof entryValue === 'object') {
+        map.set(entryKey, {
+          taskID: 'ses_half',
+          epoch: 3,
+          recordedAt: 1,
+          terminalState: 'completed',
+        });
+      }
+    }
+
+    configureBackgroundJobPersistence(backend);
+    await loadInitialBackgroundJobPersistence();
+
+    const tombstone = getSuppressionTombstone('ses_half');
+    expect(tombstone?.epoch).toBe(3);
+    expect(tombstone?.terminalState).toBeUndefined();
+    expect(tombstone?.resultSummary).toBeUndefined();
   });
 
   test('clear-on-relaunch write-through removes the persisted tombstone but keeps the epoch', async () => {

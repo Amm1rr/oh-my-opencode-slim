@@ -1814,6 +1814,12 @@ export function createOrchestratorWakeScheduler(
         .filter((text): text is string => typeof text === 'string')
         .join('\n');
       const wakeText =
+        // Negative invariant: child-input ask deltas are ONLY sent in this
+        // branch, and this branch always uses ORCHESTRATOR_CHILD_INPUT_WAKE_TEXT,
+        // which carries the v2-form caveat (pinned in child-input-wake.test).
+        // The recoveryBatch branch never contains child-input asks
+        // (stopped-job recovery only). Any new delta-send branch must
+        // preserve this or carry the caveat inline.
         sendInputKeys.length > 0 && !recoveryBatch
           ? ORCHESTRATOR_CHILD_INPUT_WAKE_TEXT
           : recoveryWake
