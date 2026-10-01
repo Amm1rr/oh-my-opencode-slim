@@ -20,10 +20,12 @@
  *   trip its bust warning, which is written to the plugin log
  *   (`OPENCODE_LOG_DIR` fixture + `flushLoggerForTesting`).
  */
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { readdirSync as readDirSync, readFileSync } from 'node:fs';
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
+import * as fs from 'node:fs';
+import { existsSync, readdirSync as readDirSync, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import * as path from 'node:path';
+import type { BundledSkillInfo } from '../cli/custom-skills';
 import { MarketplaceStore } from '../marketplace/store';
 import { flushLoggerForTesting } from '../utils/logger';
 import { createV2Setup } from './setup';
@@ -41,6 +43,7 @@ interface MockCalls {
   agentTransformCount: number;
   toolAdds: CapturedTool[];
   commandAdds: Array<{ name: string; definition: Record<string, unknown> }>;
+  skillAdds: BundledSkillInfo[];
   mcpSets: Array<{ name: string; config: Record<string, unknown> }>;
   hooks: string[];
   toolBeforeCb:
@@ -60,6 +63,8 @@ interface MockCalls {
       }) => Promise<void>)
     | undefined;
   disposed: string[];
+  /** Replay registered skill transforms for one simulated state rebuild. */
+  rebuildSkills: () => void;
 }
 
 /** Test-controlled event stream: manual push, pull/return observability. */
@@ -117,17 +122,22 @@ function createEventQueue() {
   };
 }
 
-function makeMockV2Context(projectDir: string): {
+function makeMockV2Context(
+  projectDir: string,
+  skillDraftHasAdd = true,
+): {
   ctx: V2Context;
   calls: MockCalls;
   events: ReturnType<typeof createEventQueue>;
 } {
+  const skillCallbacks = new Set<(draft: unknown) => void>();
   const calls: MockCalls = {
     agentUpdates: [],
     agentDefault: undefined,
     agentTransformCount: 0,
     toolAdds: [],
     commandAdds: [],
+    skillAdds: [],
     mcpSets: [],
     hooks: [],
     toolBeforeCb: undefined,
@@ -135,6 +145,23 @@ function makeMockV2Context(projectDir: string): {
     contextHookCb: undefined,
     promptHookCb: undefined,
     disposed: [],
+    rebuildSkills: () => {
+      for (const cb of skillCallbacks) {
+        cb({
+          ...(skillDraftHasAdd
+            ? {
+                add: (skill: BundledSkillInfo) => {
+                  calls.skillAdds.push(skill);
+                },
+              }
+            : {}),
+          get: () => undefined,
+          list: () => [],
+          remove: () => {},
+          update: () => {},
+        });
+      }
+    },
   };
   const events = createEventQueue();
   const reg = (label: string) => ({
@@ -142,7 +169,8 @@ function makeMockV2Context(projectDir: string): {
       calls.disposed.push(label);
     },
   });
-
+  // The skill domain replays registered transforms on simulated dirty-state
+  // rebuilds. The registration handle removes its callback on disposal.
   const ctx = {
     app: { name: 'opencode', version: 'v2-e2e' },
     options: {},
@@ -209,6 +237,19 @@ function makeMockV2Context(projectDir: string): {
         return reg(`command:${calls.commandAdds.length}`);
       },
       list: async () => [],
+    },
+    skill: {
+      transform: async (cb: (draft: unknown) => void) => {
+        skillCallbacks.add(cb);
+        return {
+          dispose: () => {
+            calls.disposed.push('skill.transform');
+            skillCallbacks.delete(cb);
+          },
+        };
+      },
+      list: async () => [],
+      reload: async () => {},
     },
     // Runtime session methods deliberately ABSENT: the shim must degrade
     // honestly without them (no fake success shapes).
@@ -358,10 +399,105 @@ describe('createV2Setup e2e', () => {
     await calls.promptHookCb?.({
       sessionID: 'ses_baseline_unknown',
       messageID: 'msg_baseline',
+      prompt: { text: 'baseline' },
     });
 
     await cleanup();
     expect(calls.disposed.length).toBeGreaterThan(0);
+  }, 20_000);
+
+  test('bundled skills register through a lazily replayed draft', async () => {
+    // Deferred execution previously prevented setup from retaining the
+    // registration's explicit cleanup handle.
+    const legacyDir = path.join(configDir, '.oh-my-opencode-slim');
+    await mkdir(legacyDir, { recursive: true });
+    await Bun.write(path.join(legacyDir, 'skills-manifest.json'), '{ invalid');
+    const { ctx, calls } = makeMockV2Context(projectDir);
+    const cleanup = await createV2Setup()(ctx);
+
+    // Nothing has reached the draft yet — the await has already settled.
+    expect(calls.skillAdds).toEqual([]);
+
+    calls.rebuildSkills();
+    const firstRebuildCount = calls.skillAdds.length;
+    expect(firstRebuildCount).toBeGreaterThan(0);
+    calls.rebuildSkills();
+    expect(calls.skillAdds).toHaveLength(firstRebuildCount * 2);
+    await flushLoggerForTesting();
+    expect(
+      readPluginLog().match(/legacy skills manifest unreadable/g),
+    ).toHaveLength(1);
+    expect(calls.skillAdds.map((skill) => skill.id)).toContain('deepwork');
+    for (const skill of calls.skillAdds) {
+      expect(skill.path.endsWith('SKILL.md')).toBe(true);
+      expect(skill.content).toBeString();
+    }
+
+    await cleanup();
+    expect(calls.disposed).toContain('skill.transform');
+  }, 20_000);
+
+  test('retries a throwing legacy skill cleanup on a later rebuild', async () => {
+    const legacyDir = path.join(configDir, '.oh-my-opencode-slim');
+    await mkdir(legacyDir, { recursive: true });
+    await Bun.write(
+      path.join(legacyDir, 'skills-manifest.json'),
+      JSON.stringify({ skills: {} }),
+    );
+    const { ctx, calls } = makeMockV2Context(projectDir);
+    const cleanup = await createV2Setup()(ctx);
+
+    try {
+      // A path-filtered spy, as the marketplace cleanup tests use, so the
+      // failure is induced the same way for every uid. chmod would not
+      // constrain root, and replacing the module breaks this file's imports.
+      const realRmSync = fs.rmSync;
+      const removeSpy = spyOn(fs, 'rmSync').mockImplementation(((
+        target: fs.PathLike,
+        options: fs.RmOptions,
+      ) => {
+        if (target === legacyDir) {
+          throw new Error('injected legacy cleanup failure');
+        }
+        return realRmSync(target, options);
+      }) as typeof fs.rmSync);
+      try {
+        calls.rebuildSkills();
+      } finally {
+        removeSpy.mockRestore();
+      }
+
+      await flushLoggerForTesting();
+      expect(
+        readPluginLog().match(/legacy skill cleanup failed/g),
+      ).toHaveLength(1);
+      expect(existsSync(legacyDir)).toBe(true);
+
+      // The guard must not latch on failure: a later rebuild retries.
+      calls.rebuildSkills();
+      expect(existsSync(legacyDir)).toBe(false);
+    } finally {
+      await cleanup();
+    }
+  }, 20_000);
+
+  test('does not migrate legacy skills when the deferred draft lacks add()', async () => {
+    const legacyDir = path.join(configDir, '.oh-my-opencode-slim');
+    await mkdir(legacyDir, { recursive: true });
+    await Bun.write(
+      path.join(legacyDir, 'skills-manifest.json'),
+      JSON.stringify({ skills: { deepwork: { status: 'managed' } } }),
+    );
+    const { ctx, calls } = makeMockV2Context(projectDir, false);
+    const cleanup = await createV2Setup()(ctx);
+    calls.rebuildSkills();
+    await flushLoggerForTesting();
+
+    expect(readPluginLog()).toContain('ctx.skill draft lacks add()');
+    expect(
+      await Bun.file(path.join(legacyDir, 'skills-manifest.json')).exists(),
+    ).toBe(true);
+    await cleanup();
   }, 20_000);
 
   test('reduced ctx (no agent.transform) skips gracefully', async () => {
@@ -1036,6 +1172,7 @@ describe('createV2Setup e2e', () => {
         calls.promptHookCb?.({
           sessionID: 'ses_marketplace_unknown',
           messageID: 'msg_unknown',
+          prompt: { text: 'unknown marketplace session' },
         }),
       ).rejects.toThrow(/identity is unknown; prompt blocked/i);
 
@@ -1057,6 +1194,7 @@ describe('createV2Setup e2e', () => {
         calls.promptHookCb?.({
           sessionID: 'ses_marketplace_unclassified_child',
           messageID: 'msg_unclassified_child',
+          prompt: { text: 'unclassified child' },
         }),
       ).rejects.toThrow(/identity is unknown; prompt blocked/i);
     } finally {
@@ -1240,6 +1378,8 @@ describe('createV2Setup e2e', () => {
       ).toContainEqual(
         expect.objectContaining({ action: 'host-only_*', effect: 'deny' }),
       );
+      await flushLoggerForTesting();
+      expect(readPluginLog()).toContain('[v2] agents registered {"count":6}');
       await expect(earlyPrompt).resolves.toBeUndefined();
       await calls.promptHookCb?.({
         sessionID: 'ses_deferred_mcp_child',

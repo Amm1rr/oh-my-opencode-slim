@@ -111,7 +111,10 @@ export function removeLegacySkillSyncState(
   const skillsDir = join(configDir, 'skills');
   const disabledSet = new Set(disabled);
   for (const [name, entry] of Object.entries(entries)) {
-    if (basename(name) !== name) continue; // path-safety guard on JSON-sourced names
+    // Reject directory aliases as well as path traversal from JSON names.
+    if (!name || name === '.' || name === '..' || basename(name) !== name) {
+      continue;
+    }
     const dir = join(skillsDir, name);
     const customized =
       entry?.status === 'customized' || entry?.status === 'conflict';

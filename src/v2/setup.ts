@@ -2005,7 +2005,6 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       disposers.push(() => interviewBridge.dispose());
 
       // Commands do not depend on agent finalization or host state.
-      let resolvedAgents: Record<string, Record<string, unknown>> | undefined;
       let finalizedRegistry:
         | ReturnType<RegistryFactoryBridge['requireRegistry']>
         | undefined;
@@ -2076,7 +2075,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
           resolvePermissionSnapshotReady();
           return;
         }
-        resolvedAgents = registry.getSdkAgentProjection() as Record<
+        const resolvedAgents = registry.getSdkAgentProjection() as Record<
           string,
           Record<string, unknown>
         >;
@@ -2105,6 +2104,11 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
             /* default() optional */
           }
         }
+        // Log inside finalization because the transform await only confirms
+        // registration; the callback may not have run yet.
+        log('[v2] agents registered', {
+          count: Object.keys(resolvedAgents).length,
+        });
         permissionSnapshotReady = true;
         resolvePermissionSnapshotReady();
       };
@@ -2119,7 +2123,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
         }
         pendingAgentDraft = draft;
         try {
-          if (!nativeSnapshotCaptured) {
+          if (nativeAgentSnapshot === undefined) {
             const nativeByAgent: Record<string, V2PermissionRule[]> = {};
             const hostAgents: Record<string, Record<string, unknown>> = {};
             const listedAgents = draft.list();
@@ -2150,7 +2154,6 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
               agents: hostAgents,
               permissions: nativeByAgent,
             };
-            nativeSnapshotCaptured = true;
           }
           finalizeAgentDraft(draft);
         } catch (error) {
@@ -2191,7 +2194,6 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       }
 
       // ── Agents ──
-      let nativeSnapshotCaptured = false;
       try {
         const reg = await ctx.agent.transform(captureAgentDraft);
         disposers.push(() => reg.dispose());
@@ -2207,15 +2209,10 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
             cause: permissionSnapshotFailure,
           });
         }
-        log('[v2] agents registered', {
-          count: Object.keys(resolvedAgents ?? {}).length,
-        });
       } catch (err) {
         registryBridge.retire();
         throw err;
       }
-      const agentConfigs = resolvedAgents ?? {};
-
       permissionRulesBridgeEnabled = typeof ctx.session?.update === 'function';
       if (!permissionRulesBridgeEnabled && !permissionRulesUnavailableWarned) {
         permissionRulesUnavailableWarned = true;
@@ -2380,39 +2377,52 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
                 { packageRoot },
               );
             }
-            let registered = false;
+            // A host resolves `transform` on callback *registration*; the
+            // callback body may not have run when the await returns. The
+            // handle is therefore disposed unconditionally — the one step
+            // that must not depend on the callback having run.
+            let legacyMigrated = false;
             const reg = await ctx.skill.transform((draft) => {
               // v1-era drafts expose {source,list}, not add — probe before use.
-              if (typeof draft.add !== 'function') return;
+              if (typeof draft.add !== 'function') {
+                log(
+                  '[v2] ctx.skill draft lacks add(); bundled skills not registered',
+                );
+                return;
+              }
               for (const info of infos) draft.add(info);
-              registered = true;
-            });
-            if (registered) {
-              if (typeof reg?.dispose === 'function') {
-                disposers.push(() => reg.dispose());
-              }
-              // Retire the legacy disk-copy state only after registration
-              // succeeded, so hosts without a working add() keep their copies.
-              const legacy = removeLegacySkillSyncState(undefined, disabled);
-              if (legacy.kept.length > 0 || legacy.backedUp.length > 0) {
-                log(
-                  '[v2] legacy skill copies: kept customized (shadow the in-process registration), backed up disabled',
-                  { kept: legacy.kept, backedUp: legacy.backedUp },
-                );
-              }
-              if (legacy.manifestUnreadable) {
-                log(
-                  '[v2] legacy skills manifest unreadable — stale copies may shadow registrations; remove ~/.config/opencode/.oh-my-opencode-slim manually',
-                );
-              }
               log('[v2] bundled skills registered in-process', {
                 count: infos.length,
                 disabled: disabled.length,
               });
-            } else {
-              log(
-                '[v2] ctx.skill draft lacks add(); bundled skills not registered',
-              );
+              if (!legacyMigrated) {
+                try {
+                  const legacy = removeLegacySkillSyncState(
+                    undefined,
+                    disabled,
+                  );
+                  // Latch only on success: a throwing cleanup is transient and
+                  // must be retried by a later rebuild. An unreadable manifest
+                  // returns normally, so it still latches and is not retried.
+                  legacyMigrated = true;
+                  if (legacy.kept.length > 0 || legacy.backedUp.length > 0) {
+                    log(
+                      '[v2] legacy skill copies: kept customized (shadow the in-process registration), backed up disabled',
+                      { kept: legacy.kept, backedUp: legacy.backedUp },
+                    );
+                  }
+                  if (legacy.manifestUnreadable) {
+                    log(
+                      '[v2] legacy skills manifest unreadable — stale copies may shadow registrations; remove ~/.config/opencode/.oh-my-opencode-slim manually',
+                    );
+                  }
+                } catch (err) {
+                  log('[v2] legacy skill cleanup failed', String(err));
+                }
+              }
+            });
+            if (typeof reg?.dispose === 'function') {
+              disposers.push(() => reg.dispose());
             }
           }
         } else {
@@ -2474,7 +2484,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       let promptBridge: V2SessionPromptBridge | undefined;
       const sessionProfileBridge = createSessionProfileBridge({
         profiles: () => currentProfiles,
-        pluginAgents: new Set(Object.keys(agentConfigs)),
+        pluginAgents,
         session: ctx.session,
         knownAgent: (sessionID) => promptBridge?.agentForSession(sessionID),
       });
@@ -2743,13 +2753,17 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
                       if (eventHook) await eventHook({ event: next.value });
                       continue;
                     }
-                    // Child-session permission projection sees the same RAW
-                    // event (before v1-shape synthesis) so it is independent
-                    // of v1 event-hook presence. Profile prewarm runs first so
-                    // a held permission update cannot delay identity capture
-                    // and force the awaited prompt path into another session
-                    // lookup for the same child.
-                    await sessionProfileBridge.observeEvent(next.value);
+                    // Prewarm waits for the deferred agent roster so a child is
+                    // not classified against an empty plugin-agent set; deletions
+                    // still clear captured state immediately. Prewarm stays
+                    // ahead of the permission rules so a held update cannot
+                    // delay identity capture.
+                    if (
+                      rawType !== 'session.created' ||
+                      permissionSnapshotReady
+                    ) {
+                      await sessionProfileBridge.observeEvent(next.value);
+                    }
                     await permissionRulesBridge?.observeEvent(next.value);
                     if (eventHook) {
                       for (const ev of mapV2EventToV1(next.value)) {
