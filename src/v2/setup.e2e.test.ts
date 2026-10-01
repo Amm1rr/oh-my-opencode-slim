@@ -24,12 +24,14 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import * as fs from 'node:fs';
 import { existsSync, readdirSync as readDirSync, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import type { BundledSkillInfo } from '../cli/custom-skills';
 import { MarketplaceStore } from '../marketplace/store';
 import { flushLoggerForTesting } from '../utils/logger';
+import { compilePermissionPolicy } from './permissions';
 import { createV2Setup } from './setup';
-import type { V2Context } from './types';
+import type { V2Context, V2PermissionRule } from './types';
 
 type CapturedTool = {
   name: string;
@@ -337,7 +339,7 @@ describe('createV2Setup e2e', () => {
 
   beforeEach(async () => {
     originalEnv = { ...process.env };
-    fixtureRoot = await mkdtemp('/tmp/omo-v2-setup-e2e-');
+    fixtureRoot = await mkdtemp(path.join(tmpdir(), 'omo-v2-setup-e2e-'));
     projectDir = path.join(fixtureRoot, 'project');
     configDir = path.join(fixtureRoot, 'config');
     logDir = path.join(fixtureRoot, 'logs');
@@ -673,6 +675,218 @@ describe('createV2Setup e2e', () => {
       await cleanup();
     }
     expect(calls.disposed).toContain('malformed-agent-transform');
+  }, 20_000);
+
+  test.each([
+    ['agent registration', '/approved/scratch/report.txt', 'allow'],
+    ['agent registration', '/forbidden/key', 'deny'],
+    ['agent registration', '/approved/scratch/private/key', 'deny'],
+    ['child projection', '/approved/scratch/report.txt', 'allow'],
+    ['child projection', '/forbidden/key', 'deny'],
+    ['child projection', '/approved/scratch/private/key', 'deny'],
+  ] as const)(
+    '#1374 post-transform policy survives child replacement: %s %s %s',
+    async (surface, resource, expected) => {
+      await Bun.write(
+        path.join(projectDir, '.opencode', 'oh-my-opencode-slim.json'),
+        JSON.stringify({
+          companion: { enabled: false },
+          agents: {
+            fixer: {
+              permission: {
+                external_directory: { '/approved/scratch/private/*': 'deny' },
+              },
+            },
+          },
+        }),
+      );
+      const globalRules: V2PermissionRule[] = [
+        { action: 'external_directory', resource: '*', effect: 'ask' },
+        {
+          action: 'external_directory',
+          resource: '/approved/scratch/*',
+          effect: 'allow',
+        },
+        {
+          action: 'external_directory',
+          resource: '/forbidden/*',
+          effect: 'deny',
+        },
+      ];
+      const { ctx, calls, events } = makeMockV2Context(projectDir);
+      const registered = new Map<string, Record<string, unknown>>();
+      const childUpdates: V2PermissionRule[][] = [];
+      ctx.agent.transform = async (callback) => {
+        callback({
+          // Only the host's build agent exists; fixer is created by the plugin.
+          list: () => [{ id: 'build' }],
+          get: (id: string) =>
+            id === 'build' ? { id, mode: 'primary' } : undefined,
+          update: (
+            id: string,
+            mutate: (draft: Record<string, unknown>) => void,
+          ) => {
+            const draft: Record<string, unknown> = {};
+            mutate(draft);
+            registered.set(id, draft);
+          },
+          default: () => {},
+          remove: () => {},
+        });
+        return { dispose: () => {} };
+      };
+      ctx.session.update = async (input) => {
+        if (input.sessionID === 'child-1374' && input.permissions) {
+          childUpdates.push(input.permissions);
+        }
+        return {};
+      };
+
+      const cleanup = await createV2Setup()(ctx);
+      try {
+        const finalizedAgent = registered.get('fixer');
+        expect(finalizedAgent).toBeDefined();
+        const pluginRules = finalizedAgent?.permissions as V2PermissionRule[];
+        expect(pluginRules).toBeDefined();
+        // v2.0.20 ConfigAgentPlugin runs AFTER external plugin transforms.
+        // Global policy is absent from the initial snapshot by design; the
+        // host appends expanded global rules, then explicit per-agent rules.
+        const finalizedRules: V2PermissionRule[] = [
+          ...pluginRules,
+          ...globalRules,
+          {
+            action: 'external_directory',
+            resource: '/approved/scratch/private/*',
+            effect: 'deny',
+          },
+        ];
+        if (finalizedAgent) finalizedAgent.permissions = finalizedRules;
+        ctx.agent.list = async () => [...registered.values()] as never;
+        // Prove the host finalized policy is correct before any child update.
+        expect(
+          compilePermissionPolicy({
+            baselineRules: finalizedRules,
+            hostRules: [],
+          }).decide('external_directory', resource),
+        ).toBe(expected);
+        if (surface === 'child projection') {
+          events.push({
+            type: 'session.created',
+            data: {
+              sessionID: 'child-1374',
+              parentID: 'parent-1374',
+              agent: 'fixer',
+            },
+          });
+          await settlePump();
+          await calls.promptHookCb?.({
+            sessionID: 'child-1374',
+            messageID: 'message-1374',
+            prompt: { text: 'read the approved scratch path' },
+          });
+          // The child must actually be projected, not merely left alone.
+          expect(childUpdates.length).toBeGreaterThan(0);
+        }
+        const policy = compilePermissionPolicy({
+          baselineRules: finalizedRules,
+          // session.update replaces the session-scoped list; its last payload
+          // is evaluated after the correctly finalized agent rules.
+          hostRules: childUpdates.at(-1) ?? [],
+        });
+        expect(policy.decide('external_directory', resource)).toBe(expected);
+      } finally {
+        await cleanup();
+      }
+    },
+    20_000,
+  );
+
+  test('#1374 an agent pass that ran before the MCP snapshot is rebuilt so host config rules reach plugin agents', async () => {
+    const { ctx } = makeMockV2Context(projectDir);
+    const globalRules: V2PermissionRule[] = [
+      {
+        action: 'external_directory',
+        resource: '/approved/*',
+        effect: 'allow',
+      },
+    ];
+    let pluginAgentTransform: ((draft: unknown) => void) | undefined;
+    let pluginMcpTransform: ((draft: unknown) => void) | undefined;
+    let agents = new Map<string, Record<string, unknown>>();
+    let reloads = 0;
+    // Host State semantics: every read rebuilds a fresh candidate by running
+    // transforms in order; the host config transform (internal post plugin)
+    // appends global rules to every agent present at that point.
+    const rebuild = () => {
+      const next = new Map<string, Record<string, unknown>>([
+        ['build', { id: 'build', permissions: [] }],
+      ]);
+      const editor = {
+        list: () => [...next.values()],
+        get: (id: string) => next.get(id),
+        update: (
+          id: string,
+          mutate: (agent: Record<string, unknown>) => void,
+        ) => {
+          const agent = next.get(id) ?? { id, permissions: [] };
+          mutate(agent);
+          next.set(id, agent);
+        },
+        default: () => {},
+        remove: (id: string) => next.delete(id),
+      };
+      pluginAgentTransform?.(editor);
+      for (const agent of editor.list()) {
+        (agent.permissions as V2PermissionRule[]).push(...globalRules);
+      }
+      agents = next;
+    };
+    ctx.agent.transform = async (callback) => {
+      pluginAgentTransform = callback as (draft: unknown) => void;
+      return { dispose: () => {} };
+    };
+    ctx.agent.reload = async () => {
+      reloads += 1;
+      rebuild();
+    };
+    ctx.agent.list = async () => [...agents.values()] as never;
+    (
+      ctx.mcp as unknown as {
+        transform: (callback: (draft: unknown) => void) => Promise<{
+          dispose: () => void;
+        }>;
+      }
+    ).transform = async (callback) => {
+      pluginMcpTransform = callback;
+      return { dispose: () => {} };
+    };
+
+    const cleanup = await createV2Setup()(ctx);
+    try {
+      // The agent pass runs before the MCP inventory is known.
+      rebuild();
+      expect(agents.has('explorer')).toBe(false);
+      pluginMcpTransform?.({
+        list: () => [],
+        get: () => undefined,
+        set: () => {},
+        update: () => {},
+        remove: () => {},
+      });
+      await settlePump();
+
+      expect(reloads).toBe(1);
+      const explorer = agents.get('explorer');
+      expect(explorer).toBeDefined();
+      expect(
+        compilePermissionPolicy({
+          baselineRules: explorer?.permissions as V2PermissionRule[],
+          hostRules: [],
+        }).decide('external_directory', '/approved/report.txt'),
+      ).toBe('allow');
+    } finally {
+      await cleanup();
+    }
   }, 20_000);
 
   test('native agents without a permissions field register normally', async () => {
@@ -1197,6 +1411,40 @@ describe('createV2Setup e2e', () => {
           prompt: { text: 'unclassified child' },
         }),
       ).rejects.toThrow(/identity is unknown; prompt blocked/i);
+
+      // #1374: the child projects the host-finalized agent, whose global
+      // rules follow plugin registration. Ceilings still cap those globals.
+      ctx.agent.list = async () =>
+        [
+          {
+            id: 'v2-marketplace-agent',
+            permissions: [
+              ...packageRules,
+              { action: 'bash', resource: '*', effect: 'allow' },
+              { action: 'read', resource: '/global/*', effect: 'deny' },
+            ],
+          },
+        ] as never;
+      events.push({
+        type: 'session.created',
+        data: {
+          sessionID: 'ses_marketplace_global_child',
+          parentID: 'ses_marketplace_parent',
+          agent: 'v2-marketplace-agent',
+        },
+      });
+      const globalDeadline = Date.now() + 2_000;
+      while (childUpdates.length < 2 && Date.now() < globalDeadline) {
+        await Bun.sleep(10);
+      }
+      expect(childUpdates[1]?.sessionID).toBe('ses_marketplace_global_child');
+      const childPolicy = compilePermissionPolicy({
+        baselineRules: packageRules as V2PermissionRule[],
+        hostRules: childUpdates[1]?.permissions as V2PermissionRule[],
+      });
+      expect(childPolicy.decide('bash', 'ls')).toBe('deny');
+      expect(childPolicy.decide('read', '/global/secret')).toBe('deny');
+      expect(childPolicy.decide('read', 'src/index.ts')).toBe('allow');
     } finally {
       await cleanup();
     }
