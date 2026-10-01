@@ -410,6 +410,9 @@ describe('createV2Setup e2e', () => {
     ]);
     // The gate short-circuits before the service; the merged handler swallows
     // bridge errors, so assert the bridge did not fail its way into a no-op.
+    // flushLoggerForTesting: log() lands via an async writeChain, and the
+    // error-path line is asserted right after the awaited handler.
+    await flushLoggerForTesting();
     expect(readPluginLog()).not.toContain('interview context bridge failed');
 
     await cleanup();
