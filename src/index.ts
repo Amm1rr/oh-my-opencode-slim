@@ -366,6 +366,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       return resumed;
     }
     const parentID = v1ChildParents.get(sessionID);
+    // Only the child's first prompt follows its creation; later prompts
+    // (task_id resumes) are keyed by the child itself.
+    v1ChildParents.delete(sessionID);
     const queue = parentID ? pendingV1ChildModels.get(parentID) : undefined;
     const index =
       queue?.findIndex((pending) => pending.agentName === agentName) ?? -1;
@@ -2352,7 +2355,15 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
             )
           : undefined;
       const routedChildModel = modelFromMetadataString(routedChild?.entry.id);
-      if (routedChild && routedChildModel && output?.message) {
+      // A child already on the routed model (inherited from the parent)
+      // keeps its message untouched, including the inherited variant.
+      if (
+        routedChild &&
+        routedChildModel &&
+        output?.message &&
+        (output.message.model?.providerID !== routedChildModel.providerID ||
+          output.message.model?.modelID !== routedChildModel.modelID)
+      ) {
         output.message.model = {
           ...routedChildModel,
           ...(routedChild.entry.variant
