@@ -127,6 +127,46 @@ describe('task_status with a waiting child', () => {
     }
   });
 
+  test('#1375 permission reply with a properties envelope still clears its child wait', async () => {
+    resetChildInputWaitForTests();
+    const board = new BackgroundJobBoard();
+    registerBackgroundChild(board);
+    const hook = createInputWaitHook(board);
+    try {
+      for (const requestID of ['per_1375', 'per_other']) {
+        await routeMappedV2Event(hook, {
+          type: 'permission.asked',
+          data: {
+            id: requestID,
+            sessionID: 'ses_child1',
+            action: 'external_directory',
+            resources: ['/approved/scratch/report.txt'],
+          },
+        });
+      }
+      expect(getChildInputWait('ses_child1', 'per_1375')).toBeDefined();
+      expect(getChildInputWait('ses_child1', 'per_other')).toBeDefined();
+
+      // Same resolution payload as #1356 but with a bare `properties`
+      // envelope alongside `data` — previously suppressed synthesis, so
+      // the wait stuck and the parent kept seeing `waiting_input`.
+      await routeMappedV2Event(hook, {
+        type: 'permission.replied',
+        data: {
+          sessionID: 'ses_child1',
+          requestID: 'per_1375',
+          reply: 'once',
+        },
+        properties: {},
+      });
+
+      expect(getChildInputWait('ses_child1', 'per_other')).toBeDefined();
+      expect(getChildInputWait('ses_child1', 'per_1375')).toBeUndefined();
+    } finally {
+      resetChildInputWaitForTests();
+    }
+  });
+
   test('surfaces waiting_input with the question and answer guidance', async () => {
     resetChildInputWaitForTests();
     const board = new BackgroundJobBoard();

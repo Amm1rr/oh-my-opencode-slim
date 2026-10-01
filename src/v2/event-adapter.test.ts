@@ -901,6 +901,74 @@ describe('mapV2EventToV1 permission field mapping', () => {
     expect(mapV2EventToV1(ev)).toEqual([ev]);
   });
 
+  test('permission.replied with data payload plus empty properties still synthesizes (#1375)', () => {
+    const ev = deepFreeze({
+      type: 'permission.replied',
+      data: { sessionID: 'ses_p', requestID: 'per_1', reply: 'once' },
+      properties: {},
+    });
+    const out = mapV2EventToV1(ev);
+    expect(out).toHaveLength(2);
+    expect(out[0]).toBe(ev);
+    expect(out[1]).toEqual({
+      type: 'permission.replied',
+      properties: { sessionID: 'ses_p', requestID: 'per_1', reply: 'once' },
+    });
+  });
+
+  test('permission.replied with data payload plus foreign properties still synthesizes (#1375)', () => {
+    const out = mapV2EventToV1({
+      type: 'permission.replied',
+      data: { sessionID: 'ses_p', requestID: 'per_1', reply: 'always' },
+      properties: { sessionID: 'ses_p', requestID: 'per_other' },
+    });
+    expect(out).toHaveLength(2);
+    expect(out[1]).toEqual({
+      type: 'permission.replied',
+      properties: { sessionID: 'ses_p', requestID: 'per_1', reply: 'always' },
+    });
+  });
+
+  test('permission.replied accepts id as a requestID fallback (#1375)', () => {
+    const out = mapV2EventToV1({
+      type: 'permission.replied',
+      data: { sessionID: 'ses_p', id: 'per_1', reply: 'once' },
+    });
+    expect(out).toHaveLength(2);
+    expect(out[1]).toEqual({
+      type: 'permission.replied',
+      properties: { sessionID: 'ses_p', requestID: 'per_1', reply: 'once' },
+    });
+  });
+
+  test('permission.replied with id-only properties still synthesizes (#1375)', () => {
+    // Reply consumers read `properties.requestID`, never `properties.id`,
+    // so an envelope carrying the id under the ask spelling must not
+    // suppress synthesis.
+    const out = mapV2EventToV1({
+      type: 'permission.replied',
+      data: { sessionID: 'ses_p', requestID: 'per_1', reply: 'once' },
+      properties: { sessionID: 'ses_p', id: 'per_1' },
+    });
+    expect(out).toHaveLength(2);
+    expect(out[1]).toEqual({
+      type: 'permission.replied',
+      properties: { sessionID: 'ses_p', requestID: 'per_1', reply: 'once' },
+    });
+  });
+
+  test('permission.replied without identity stays passthrough-only (#1375)', () => {
+    expect(
+      mapV2EventToV1({
+        type: 'permission.replied',
+        data: { sessionID: 'ses_p', reply: 'once' },
+      }),
+    ).toHaveLength(1);
+    expect(
+      mapV2EventToV1({ type: 'permission.replied', properties: {} }),
+    ).toHaveLength(1);
+  });
+
   test('synthesized ask/replied pair arms then resolves the input-wait tracker', async () => {
     const { createTaskSessionManagerHook } = await import(
       '../hooks/task-session-manager'
