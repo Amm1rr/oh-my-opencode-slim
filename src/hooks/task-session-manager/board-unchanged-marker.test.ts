@@ -287,6 +287,30 @@ describe('latest board unchanged marker', () => {
     expect(isMarker(output.at(-1)?.parts[0]?.text)).toBe(false);
     expect(isMarker(boardParts(output)[1]?.text)).toBe(true);
   });
+
+  test('T9: an assistant-tail board message id follows its text, not the turn', async () => {
+    const { board, state } = setup();
+    const history = [
+      user('u1'),
+      {
+        info: { role: 'assistant', sessionID: SESSION, id: 'a1' },
+        parts: [{ type: 'text', text: 'Tool step' }],
+      },
+    ];
+    const first = (await inject(state, history)).at(-1);
+    expect((await inject(state, history)).at(-1)?.info.id).toBe(first?.info.id);
+    board.registerLaunch({
+      taskID: 'child-2',
+      parentSessionID: SESSION,
+      agent: 'oracle',
+      description: 'review changes',
+    });
+    const changed = (await inject(state, history)).at(-1);
+    expect(changed?.parts[0]?.text).toContain('child-2');
+    // Plugins that keep a message part's first-seen text by message id
+    // (magic-context) would otherwise replay the stale board all turn.
+    expect(changed?.info.id).not.toBe(first?.info.id);
+  });
 });
 
 describe('backgroundJobs.boardInjection switch (#1314 thread)', () => {

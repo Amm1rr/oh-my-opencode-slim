@@ -1465,7 +1465,7 @@ function injectLatestBoard(state: InjectionState, messages: unknown[]): void {
       messages,
       {
         ...trigger.info,
-        id: `${trigger.info.id ?? 'board'}-background-job-board`,
+        id: `${trigger.info.id ?? 'board'}-background-job-board-${djb2Hash(reminder)}`,
       },
       {
         text: reminder,
