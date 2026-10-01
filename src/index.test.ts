@@ -2675,18 +2675,32 @@ describe('plugin config model inheritance', () => {
     parentSessionID: string,
     callID: string,
     primary: { providerID: string; modelID: string },
+    options: { background?: boolean; completeBeforeChild?: boolean } = {},
   ) {
     const output = {
       args: {
         subagent_type: 'operator',
         description: 'verify fallback routing',
         prompt: 'return ok',
+        ...(options.background ? { background: true } : {}),
       },
     };
     await hooks['tool.execute.before']?.(
       { tool: 'task', sessionID: parentSessionID, callID } as never,
       output as never,
     );
+    if (options.completeBeforeChild) {
+      // A background task returns before its child's first prompt.
+      await hooks['tool.execute.after']?.(
+        {
+          tool: 'task',
+          sessionID: parentSessionID,
+          callID,
+          args: output.args,
+        } as never,
+        { title: '', output: 'started', metadata: {} } as never,
+      );
+    }
     const childID = `child-${callID}`;
     await hooks.event?.({
       event: {
@@ -2854,6 +2868,52 @@ describe('plugin config model inheritance', () => {
           providerID: expectedModel.slice(0, slash),
           modelID: expectedModel.slice(slash + 1),
         });
+      } finally {
+        await hooks.dispose?.();
+      }
+    },
+  );
+
+  test.each([
+    ['background', true, { providerID: 'openai', modelID: 'gpt-6-luna' }],
+    [
+      'foreground',
+      false,
+      { providerID: 'openrouter', modelID: 'openrouter/auto' },
+    ],
+  ] as const)(
+    'v1 %s task completion before the child prompt keeps the route only for background',
+    async (_label, background, expectedModel) => {
+      const hooks = await loadConfiguredPlugin({
+        agents: {
+          orchestrator: {
+            model: ['openrouter/openrouter/auto', 'openai/gpt-6-luna'],
+          },
+          operator: {
+            model: ['openrouter/openrouter/auto', 'openai/gpt-6-luna'],
+          },
+        },
+      });
+
+      try {
+        await hooks.config?.({ agent: {} });
+        await hooks['chat.message']?.(
+          {
+            sessionID: `orchestrator-${_label}`,
+            agent: 'orchestrator',
+            model: { providerID: 'openai', modelID: 'gpt-6-luna' },
+          } as never,
+          {} as never,
+        );
+        const routed = await delegateV1Child(
+          hooks,
+          `orchestrator-${_label}`,
+          `call-${_label}-early-after`,
+          { providerID: 'openrouter', modelID: 'openrouter/auto' },
+          { background, completeBeforeChild: true },
+        );
+        expect(routed.subagentType).toBe('operator');
+        expect(routed.childModel).toEqual(expectedModel);
       } finally {
         await hooks.dispose?.();
       }

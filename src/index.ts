@@ -333,6 +333,8 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   // which v1 publishes synchronously inside session.create.
   type PendingV1ChildModel = {
     callID?: string;
+    /** Background tasks return before their child prompts. */
+    background: boolean;
     agentName: string;
     entry: ModelChainEntry;
   };
@@ -346,14 +348,16 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     pendingV1ResumeModels.delete(sessionID);
   };
   const dropPendingV1ChildModelsForCall = (callID: string) => {
+    const isDropped = (pending: PendingV1ChildModel) =>
+      pending.callID === callID && !pending.background;
     for (const [parentID, queue] of pendingV1ChildModels) {
-      const kept = queue.filter((pending) => pending.callID !== callID);
+      const kept = queue.filter((pending) => !isDropped(pending));
       if (kept.length === 0) pendingV1ChildModels.delete(parentID);
       else if (kept.length !== queue.length)
         pendingV1ChildModels.set(parentID, kept);
     }
     for (const [childID, pending] of pendingV1ResumeModels) {
-      if (pending.callID === callID) pendingV1ResumeModels.delete(childID);
+      if (isDropped(pending)) pendingV1ResumeModels.delete(childID);
     }
   };
   const takePendingV1ChildModel = (
@@ -2198,6 +2202,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           if (selected && selected.index > 0) {
             const pending: PendingV1ChildModel = {
               ...(input.callID ? { callID: input.callID } : {}),
+              background: args.background === true,
               agentName: selected.agentName,
               entry: selected.entry,
             };
@@ -2685,14 +2690,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
 
     'tool.execute.after': async (input, output) => {
       // A foreground task that never reached its child prompt must not leave
-      // a routed model for a later delegation. Background tasks return before
-      // their child prompts, so their entry stays until the child consumes it.
-      const afterArgs = (input as { args?: { background?: unknown } }).args;
-      if (
-        input.tool.toLowerCase() === 'task' &&
-        input.callID &&
-        afterArgs?.background !== true
-      ) {
+      // a routed model for a later delegation. Background entries (flagged
+      // by the before-hook) stay until their child consumes them.
+      if (input.tool.toLowerCase() === 'task' && input.callID) {
         dropPendingV1ChildModelsForCall(input.callID);
       }
       await jsonErrorRecoveryAfter(input, output);
