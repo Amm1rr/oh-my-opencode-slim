@@ -277,7 +277,7 @@ function permissionAskedToV1(
  * - `form.created/replied/cancelled` → v1 `question.asked/replied/
  *   rejected` (QuestionV1 shapes; "global"-owned forms skipped);
  * - `permission.asked` → v1 field names (permission ← action, patterns ←
- *   resources). `permission.replied` needs no mapping (shapes match).
+ *   resources). `permission.replied` normalizes native `data` payloads.
  *
  * `interviewBridge.handleEvent` keeps receiving the RAW v2 event (the
  * setup pump dispatches it before iterating this array).
@@ -438,10 +438,17 @@ export function mapV2EventToV1(
   } else if (type === 'permission.asked') {
     const mapped = permissionAskedToV1(props);
     if (mapped) out.push(mapped);
+  } else if (type === 'permission.replied') {
+    // Native v2 carries the v1-compatible payload in `data`, while legacy
+    // consumers read `properties`. Keep raw-first delivery and normalize it.
+    if (
+      !isRecord(event.properties) &&
+      typeof props.sessionID === 'string' &&
+      typeof props.requestID === 'string'
+    ) {
+      out.push({ type, properties: { ...props } });
+    }
   }
-  // `permission.replied` needs no synthesis: v2's shape
-  // {sessionID, requestID, reply} IS the v1 PermissionV1 event shape, and
-  // the raw event is always dispatched first above.
 
   return out;
 }
