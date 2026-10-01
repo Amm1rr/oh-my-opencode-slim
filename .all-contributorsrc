@@ -1136,6 +1136,15 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "EmojiPati",
+      "name": "pati",
+      "avatar_url": "https://avatars.githubusercontent.com/u/49492351?v=4",
+      "profile": "https://github.com/EmojiPati",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "commitConvention": "angular"
