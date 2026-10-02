@@ -167,6 +167,9 @@ export type MultiplexerViewer = z.infer<typeof MultiplexerViewerSchema>;
  *
  * The schema strips unknown keys silently, so the raw input must be
  * inspected before validation to warn instead of dropping the key quietly.
+ * The same per-key check covers invalid `type`, `layout`, `main_pane_size`,
+ * `cmux_tui_binary`, and `viewer` values: any of them disables pane
+ * management with one diagnostic.
  */
 export const DEPRECATED_MULTIPLEXER_KEYS = ['zellij_pane_mode'] as const;
 
@@ -242,7 +245,10 @@ function invalidMultiplexerKeys(config: Record<string, unknown>): string[] {
   ) {
     invalid.push('cmux_tui_binary');
   }
-  if ('viewer' in config && !MultiplexerViewerSchema.safeParse(config.viewer).success) {
+  if (
+    'viewer' in config &&
+    !MultiplexerViewerSchema.safeParse(config.viewer).success
+  ) {
     invalid.push('viewer');
   }
   return invalid;

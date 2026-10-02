@@ -56,7 +56,9 @@ export interface PaneLifecycleConfig {
   /**
    * Viewer command flavor (FR-2 matrix), the TUI surface the viewer opens,
    * and, for `v2-remote`, the password forwarded into the viewer command.
-   * Absent means the v1 attach form on the full `tui`.
+   * The wiring always supplies this object; absent fields fall back at the
+   * adapter layer (`flavor` to the v1 attach form, `surface` to the full
+   * `tui`).
    */
   viewer?: {
     flavor?: ViewerFlavor;
@@ -636,13 +638,15 @@ export class PaneLifecycle {
           ...(this.config.viewer === undefined
             ? {}
             : {
-                viewerFlavor: this.config.viewer.flavor,
+                ...(this.config.viewer.flavor === undefined
+                  ? {}
+                  : { viewerFlavor: this.config.viewer.flavor }),
                 ...(this.config.viewer.password === undefined
                   ? {}
                   : { viewerPassword: this.config.viewer.password }),
                 ...(this.config.viewer.surface === undefined
                   ? {}
-                  : { viewer: this.config.viewer.surface }),
+                  : { viewerSurface: this.config.viewer.surface }),
               }),
         },
       );

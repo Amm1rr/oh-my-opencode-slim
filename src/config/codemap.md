@@ -165,7 +165,7 @@ This allows consumers to import directly from `src/config` rather than individua
 - `disabled_hooks`: List of hooks to disable (`phase-reminder`, `foreground-fallback`)
 - `disabled_commands`: List of slash commands to disable (`interview`, `deepwork`, `reflect`, `loop`)
 - Enum-backed disabled keys use whole-family replacement semantics: explicit `[]` overrides a lower layer, a mixed list replaces it with the valid subset, and a list containing only unknown names is treated as unset so the lower layer applies.
-- `multiplexer`: Unified pane management config (type, layout, sizes)
+- `multiplexer`: Unified pane management config (type, layout, sizes, viewer surface)
 - `tmux`: Legacy tmux configuration (migrated to multiplexer)
 - `interview`: Interview feature configuration
 - `backgroundJobs`: Background job configuration

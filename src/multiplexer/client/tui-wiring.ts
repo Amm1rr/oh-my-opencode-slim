@@ -26,6 +26,7 @@ import { loadPluginConfig } from '../../config/loader';
 import {
   type MultiplexerConfig,
   MultiplexerConfigSchema,
+  MultiplexerConfigStrictSchema,
   type MultiplexerType,
 } from '../../config/schema';
 import { isRecord } from '../../utils/guards';
@@ -449,12 +450,8 @@ function normalizeSessionStatus(
 }
 
 /** Last-resort defaults: pane management off, spec layout/size values. */
-const FALLBACK_MULTIPLEXER_CONFIG: MultiplexerConfig = {
-  type: 'none',
-  layout: 'main-vertical',
-  main_pane_size: 60,
-  viewer: 'tui',
-};
+const FALLBACK_MULTIPLEXER_CONFIG: MultiplexerConfig =
+  MultiplexerConfigStrictSchema.parse({});
 
 function parseMultiplexerConfig(value: unknown): MultiplexerConfig | null {
   try {

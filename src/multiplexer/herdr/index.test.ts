@@ -241,13 +241,14 @@ describe('HerdrMultiplexer', () => {
       'Mini worker',
       'http://localhost:4096',
       '/repo',
-      { viewerFlavor: 'v2-shared', viewer: 'mini' },
+      { viewerFlavor: 'v2-shared', viewerSurface: 'mini' },
     );
 
-    const runCommand = commands()
-      .filter((command) => command.includes('run'))
-      .at(-1)
-      ?.at(-1) ?? '';
+    const runCommand =
+      commands()
+        .filter((command) => command.includes('run'))
+        .at(-1)
+        ?.at(-1) ?? '';
     expect(runCommand).toBe("opencode mini --session 'session-mini'");
 
     crossSpawnMock.mockClear();
@@ -258,10 +259,11 @@ describe('HerdrMultiplexer', () => {
       '/repo',
       { viewerFlavor: 'v2-shared' },
     );
-    const tuiCommand = commands()
-      .filter((command) => command.includes('run'))
-      .at(-1)
-      ?.at(-1) ?? '';
+    const tuiCommand =
+      commands()
+        .filter((command) => command.includes('run'))
+        .at(-1)
+        ?.at(-1) ?? '';
     expect(tuiCommand).toBe("opencode --session 'session-tui' '/repo'");
   });
 

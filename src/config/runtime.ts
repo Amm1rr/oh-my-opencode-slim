@@ -44,8 +44,8 @@ import {
   type BackgroundJobsConfig,
   type CompanionConfig,
   type FailoverConfig,
-  MULTIPLEXER_MAIN_PANE_SIZE_DEFAULT,
   type MultiplexerConfig,
+  MultiplexerConfigStrictSchema,
   type ResolvedPluginConfig,
   type WebfetchConfig,
 } from './schema';
@@ -73,12 +73,8 @@ export interface HostConfigSnapshot {
 /** Per-directory registry backing the singleton instances. */
 const registry = new Map<string, RuntimeConfig>();
 
-const DEFAULT_MULTIPLEXER: MultiplexerConfig = {
-  type: 'none',
-  layout: 'main-vertical',
-  main_pane_size: MULTIPLEXER_MAIN_PANE_SIZE_DEFAULT,
-  viewer: 'tui',
-};
+const DEFAULT_MULTIPLEXER: MultiplexerConfig =
+  MultiplexerConfigStrictSchema.parse({});
 
 const DEFAULT_BACKGROUND_JOBS: BackgroundJobsConfig = {
   strategy: 'latest',

@@ -136,7 +136,7 @@ export class KittyMultiplexer implements Multiplexer {
         directory,
         {
           executable: resolveOpencodeExecutable(),
-          viewer: options?.viewer,
+          viewerSurface: options?.viewerSurface,
         },
       );
 

@@ -7,6 +7,7 @@
 
 import { existsSync } from 'node:fs';
 import { basename, isAbsolute } from 'node:path';
+import type { MultiplexerViewer } from '../config/schema';
 import { crossSpawn } from '../utils/compat';
 import { log } from '../utils/logger';
 
@@ -49,15 +50,16 @@ export type ViewerFlavor = 'v1' | 'v2-shared' | 'v2-remote';
 
 /**
  * Which opencode TUI surface a viewer command opens: the full `tui`
- * (default) or the lightweight `mini` interface.
+ * (default) or the lightweight `mini` interface. Derived from the config
+ * schema so the user-facing enum has one source of truth.
  */
-export type ViewerSurface = 'tui' | 'mini';
+export type ViewerSurface = MultiplexerViewer;
 
 export interface ViewerCommandOptions {
   /** Absolute host binary; defaults to the bare `opencode` name. */
   executable?: string;
   /** TUI surface to open; defaults to the full `tui`. */
-  viewer?: ViewerSurface;
+  viewerSurface?: ViewerSurface;
 }
 
 /**
@@ -72,12 +74,13 @@ export interface ViewerCommandOptions {
  *   inject it at pane creation through their native spawn-time environment
  *   mechanism, or through `withParentEnvPassword` where none exists.
  *
- * With `viewer: 'mini'` the same matrix targets the `opencode mini`
+ * With `viewerSurface: 'mini'` the same matrix targets the `opencode mini`
  * interface instead: the `mini` subcommand is inserted after the binary and
  * the v1 attach form is expressed as `mini --server <url>`, mirroring the
  * flags `mini` shares with the full TUI. Mini rejects a positional
- * directory, so the directory argument is omitted and the pane's cwd (the
- * spawned pane's working directory) carries the project.
+ * directory, so the directory argument is omitted; every adapter pins the
+ * pane to the child session's project directory by its own means (herdr
+ * `--cwd`, kitty `--cwd=`, tmux `-c`, Zellij `--cwd`, cmux-tui `cd`).
  */
 export function buildViewCommand(
   flavor: ViewerFlavor,
@@ -87,10 +90,10 @@ export function buildViewCommand(
   options: ViewerCommandOptions = {},
 ): string {
   const executable = options.executable ?? 'opencode';
+  const isMini = options.viewerSurface === 'mini';
   const exe =
     executable === 'opencode' ? executable : quoteShellArg(executable);
-  const surface = options.viewer === 'mini' ? ['mini'] : [];
-  if (flavor === 'v1' && surface.length === 0) {
+  if (flavor === 'v1' && !isMini) {
     return buildOpencodeAttachCommand(
       sessionId,
       serverUrl,
@@ -101,7 +104,7 @@ export function buildViewCommand(
   if (flavor === 'v1') {
     return [
       exe,
-      ...surface,
+      ...(isMini ? ['mini'] : []),
       '--server',
       quoteShellArg(serverUrl),
       '--session',
@@ -109,23 +112,24 @@ export function buildViewCommand(
     ].join(' ');
   }
   const viewDir = normalizePathForShell(directory);
+  const dirArgs = isMini ? [] : [quoteShellArg(viewDir)];
   if (flavor === 'v2-shared') {
     return [
       exe,
-      ...surface,
+      ...(isMini ? ['mini'] : []),
       '--session',
       quoteShellArg(sessionId),
-      ...(surface.length === 0 ? [quoteShellArg(viewDir)] : []),
+      ...dirArgs,
     ].join(' ');
   }
   return [
     exe,
-    ...surface,
+    ...(isMini ? ['mini'] : []),
     '--server',
     quoteShellArg(serverUrl),
     '--session',
     quoteShellArg(sessionId),
-    ...(surface.length === 0 ? [quoteShellArg(viewDir)] : []),
+    ...dirArgs,
   ].join(' ');
 }
 

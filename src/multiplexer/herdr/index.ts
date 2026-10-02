@@ -185,7 +185,7 @@ export class HerdrMultiplexer implements Multiplexer {
         sessionId,
         serverUrl,
         attachDir,
-        { viewer: options?.viewer },
+        { viewerSurface: options?.viewerSurface },
       );
 
       const runProc = crossSpawn([herdr, 'pane', 'run', paneId, opencodeCmd], {

@@ -436,6 +436,28 @@ describe('ZellijMultiplexer', () => {
     }
   });
 
+  test('viewer "mini" runs opencode mini and pins the pane directory', async () => {
+    const { ZellijMultiplexer } = await importFreshZellij();
+    const zellij = new ZellijMultiplexer('main-vertical', 60);
+
+    await zellij.spawnPane(
+      'session-mini',
+      'Mini worker',
+      'http://localhost:4096',
+      '/repo',
+      { viewerFlavor: 'v2-shared', viewerSurface: 'mini' },
+    );
+
+    const args = newPaneCommands()[0] ?? [];
+    // Mini commands omit the directory, so the pane pins it with `--cwd`.
+    const cwdIndex = args.indexOf('--cwd');
+    expect(cwdIndex).toBeGreaterThan(-1);
+    expect(args[cwdIndex + 1]).toBe('/repo');
+    const cmd = args.at(-1) ?? '';
+    expect(cmd).toContain("opencode mini --session 'session-mini'");
+    expect(cmd).not.toContain('/repo');
+  });
+
   test('fails closed with one diagnostic when the password bridge cannot run (non-Linux)', async () => {
     const originalPlatform = process.platform;
     Object.defineProperty(process, 'platform', {
