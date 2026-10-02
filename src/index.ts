@@ -310,6 +310,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
 
   // Observation-only prompt-cache watchdog; safe to create before config
   // loads and must see every event, so it sits outside the try block.
+  // `disabled_hooks: ["cache-monitor"]` gates the per-event call below;
+  // creation stays here so the pre-config event path needs no undefined
+  // handling.
   const cacheMonitor = createCacheMonitorHook();
 
   // Declare variables that must survive the try/catch for the return
@@ -577,7 +580,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   clearTuiAgentActivities(ctx.directory);
   let sessionLifecycle: SessionLifecycle;
 
-  let chatHeadersHook: ReturnType<typeof createChatHeadersHook>;
+  let chatHeadersHook: ReturnType<typeof createChatHeadersHook> | undefined;
   let foregroundFallback: ForegroundFallbackManager;
   let foregroundFallbackChains: Record<string, ForegroundFallbackModel[]> = {};
   let selectedMarketplacePackageIds: readonly string[] = [];
@@ -967,7 +970,12 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       companion: runtime.companion,
     });
 
-    chatHeadersHook = createChatHeadersHook(ctx);
+    // disabled_hooks: "chat-headers" keeps the hook unregistered on both
+    // hosts — the v2 bridge reads v1Hooks['chat.headers'] and skips the
+    // model.request registration when the key is absent.
+    if (!runtime.disabledHooks.has('chat-headers')) {
+      chatHeadersHook = createChatHeadersHook(ctx);
+    }
 
     // Initialize foreground fallback manager for runtime model switching.
     // Agents without a chain (e.g. councillor, owned by CouncilManager) are
@@ -1946,7 +1954,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         if (event.type !== 'session.deleted') return;
         internalSessionIds.delete(eventSessionID);
       }
-      await cacheMonitor.event(input);
+      if (!runtime.disabledHooks.has('cache-monitor')) {
+        await cacheMonitor.event(input);
+      }
       const rawStatus = event.properties?.status;
       const statusType =
         typeof rawStatus === 'string'
@@ -2331,7 +2341,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       }
     },
 
-    'chat.headers': chatHeadersHook['chat.headers'],
+    ...(chatHeadersHook
+      ? { 'chat.headers': chatHeadersHook['chat.headers'] }
+      : {}),
 
     // v1 compaction requests use the same message transform as normal turns.
     // v2 handles compaction in its separate session.compaction bridge.

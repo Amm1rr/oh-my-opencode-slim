@@ -7,7 +7,7 @@ import {
   spyOn,
   test,
 } from 'bun:test';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import path from 'node:path';
 import type { RegistryFactoryBridge } from './agents/registry-bridge';
@@ -1133,6 +1133,54 @@ describe('plugin reload generation cleanup', () => {
     return output;
   };
 
+  const readPluginLog = (): string => {
+    try {
+      return readdirSync(`${projectDir}/logs`)
+        .filter(
+          (f) => f.startsWith('oh-my-opencode-slim.') && f.endsWith('.log'),
+        )
+        .map((f) => readFileSync(`${projectDir}/logs/${f}`, 'utf8'))
+        .join('');
+    } catch {
+      return '';
+    }
+  };
+
+  /** Three-request sequence whose third entry is the field signature of a
+   * mid-session prompt-cache bust: a previously cache-hitting session
+   * reports zero cached tokens on a sizeable request. */
+  const feedCacheBustSequence = async (
+    hooks: Awaited<ReturnType<typeof plugin>>,
+    sessionID: string,
+  ) => {
+    const bustEvent = (
+      messageID: string,
+      input: number,
+      cacheRead: number,
+    ) => ({
+      event: {
+        type: 'message.updated',
+        properties: {
+          info: {
+            role: 'assistant',
+            sessionID,
+            id: messageID,
+            time: { completed: 1_700_000_000 },
+            tokens: {
+              input,
+              output: 100,
+              reasoning: 0,
+              cache: { read: cacheRead, write: 0 },
+            },
+          },
+        },
+      },
+    });
+    await hooks.event?.(bustEvent('m1', 8000, 0) as never);
+    await hooks.event?.(bustEvent('m2', 500, 9000) as never);
+    await hooks.event?.(bustEvent('m3', 12000, 0) as never);
+  };
+
   const taggedParts = (messages: MessageWithParts[], key: string) =>
     messages.flatMap((message) =>
       message.parts.filter((part) => isTaggedPart(part, key)),
@@ -1273,6 +1321,64 @@ describe('plugin reload generation cleanup', () => {
       await registerOrchestrator(hooks, sessionID);
       const output = await transform(hooks, reminderFixture(sessionID));
       expect(reminderParts(output.messages)).toHaveLength(0);
+    } finally {
+      await hooks.dispose?.();
+    }
+  });
+
+  test('disabled_hooks chat-headers keeps the hook unregistered', async () => {
+    await Bun.write(
+      `${projectDir}/oh-my-opencode-slim.json`,
+      JSON.stringify({
+        companion: { enabled: false },
+        disabled_hooks: ['chat-headers'],
+      }),
+    );
+    const disabled = await createHooks();
+    try {
+      expect(disabled['chat.headers']).toBeUndefined();
+    } finally {
+      await disabled.dispose?.();
+    }
+
+    // Control: the default config still registers the hook, so the
+    // absence above is the gate and not a dead registration path.
+    await Bun.write(
+      `${projectDir}/oh-my-opencode-slim.json`,
+      JSON.stringify({ companion: { enabled: false } }),
+    );
+    const enabled = await createHooks();
+    try {
+      expect(typeof enabled['chat.headers']).toBe('function');
+    } finally {
+      await enabled.dispose?.();
+    }
+  });
+
+  test('cache-monitor logs a bust warning on the default config', async () => {
+    const hooks = await createHooks();
+    try {
+      await feedCacheBustSequence(hooks, 'control');
+      await loggerModule.flushLoggerForTesting();
+      expect(readPluginLog()).toContain('prompt-cache bust');
+    } finally {
+      await hooks.dispose?.();
+    }
+  });
+
+  test('disabled_hooks cache-monitor stops the cache-bust watchdog', async () => {
+    await Bun.write(
+      `${projectDir}/oh-my-opencode-slim.json`,
+      JSON.stringify({
+        companion: { enabled: false },
+        disabled_hooks: ['cache-monitor'],
+      }),
+    );
+    const hooks = await createHooks();
+    try {
+      await feedCacheBustSequence(hooks, 'gated');
+      await loggerModule.flushLoggerForTesting();
+      expect(readPluginLog()).not.toContain('prompt-cache bust');
     } finally {
       await hooks.dispose?.();
     }

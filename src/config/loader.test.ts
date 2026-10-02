@@ -1143,6 +1143,26 @@ describe('onWarning callback', () => {
     expect(warnings[0]?.message).toContain('Valid values');
   });
 
+  test('accepts chat-headers and cache-monitor without stripping', () => {
+    const projectDir = path.join(tempDir, 'project');
+    const projectConfigDir = path.join(projectDir, '.opencode');
+    fs.mkdirSync(projectConfigDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectConfigDir, 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        disabled_hooks: ['chat-headers', 'cache-monitor'],
+      }),
+    );
+
+    const warnings: ConfigLoadWarning[] = [];
+    const config = loadPluginConfig(projectDir, {
+      onWarning: (warning) => warnings.push(warning),
+    });
+
+    expect(config.disabled_hooks).toEqual(['chat-headers', 'cache-monitor']);
+    expect(warnings).toHaveLength(0);
+  });
+
   test('strips unknown disabled_commands entries instead of rejecting the config', () => {
     const projectDir = path.join(tempDir, 'project');
     const projectConfigDir = path.join(projectDir, '.opencode');
