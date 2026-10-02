@@ -10,4 +10,5 @@ process.env.XDG_CONFIG_HOME = join(root, 'config');
 process.env.OPENCODE_LOG_DIR = join(root, 'log');
 // Takes precedence over XDG_CONFIG_HOME; tests that need it set their own.
 delete process.env.OPENCODE_CONFIG_DIR;
+// A signal or --bail skips this hook; that run's dir stays in tmpdir().
 afterAll(() => rmSync(root, { recursive: true, force: true }));
