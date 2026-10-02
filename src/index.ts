@@ -1759,10 +1759,24 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       });
       // Sidebar projection must land before the profiles are reported as
       // refreshed (the caller swaps only on an ok result).
+      //
+      // The refresh resolves inference fields for the core agent set only:
+      // `createAgents()` is marketplace-unaware, while the finalized registry
+      // is the authoritative roster and already includes marketplace agents.
+      // Union the fresh projection over the registry projection so a startup
+      // or watcher refresh cannot shrink the roster and drop marketplace
+      // agents from the sidebar; fresh core models still win.
+      const registry = resolvedAgentRegistry;
       recordTuiAgentModels(
         {
-          agentModels: projection.agentModels,
-          agentVariants: projection.agentVariants,
+          agentModels: {
+            ...(registry?.tuiAgentModels ?? {}),
+            ...projection.agentModels,
+          },
+          agentVariants: {
+            ...(registry?.tuiAgentVariants ?? {}),
+            ...projection.agentVariants,
+          },
         },
         ctx.directory,
       );
