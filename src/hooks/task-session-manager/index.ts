@@ -26,6 +26,11 @@ import {
 } from '../../utils/child-transcript';
 import { isRecord as isObjectRecord } from '../../utils/guards';
 import { getClient } from '../../utils/opencode-client';
+import { withTimeout } from '../../utils/session';
+import {
+  DEFAULT_RUNTIME_SESSION_STATUS_TIMEOUT_MS,
+  getRuntimeSessionStatusSnapshot,
+} from '../../utils/session-runtime-status';
 import { isGenuineOperatorMessage } from '../orchestrator-wake/index';
 import type { SessionLifecycle } from '../session-lifecycle';
 import { isMessageWithParts, isUserMessageWithParts } from '../types';
@@ -248,30 +253,42 @@ export function createTaskSessionManagerHook(
     agent: string,
   ): Promise<void> => {
     const boundary = historyBoundaries.get(parent);
-    if (boundary === undefined || rehydrateTombstones.has(requested)) return;
+    if (boundary === undefined) return;
     try {
       const client = getClient(_ctx);
       const query = { directory: _ctx.directory };
-      const { data: info } = await client.session.get({
-        path: { id: requested },
-        query,
-        throwOnError: true,
-      });
+      // Only the reads run under the deadline; adoption cannot run late.
+      const [{ data: info }, transcript, live] = await withTimeout(
+        Promise.all([
+          client.session.get({
+            path: { id: requested },
+            query,
+            throwOnError: true,
+          }),
+          client.session.messages({
+            path: { id: requested },
+            query: { ...query, limit: 1 },
+            throwOnError: true,
+          }),
+          getRuntimeSessionStatusSnapshot(_ctx),
+        ]),
+        DEFAULT_RUNTIME_SESSION_STATUS_TIMEOUT_MS,
+        'Host child adoption timed out',
+      );
       const suffix = info.title.match(/ \(@([^()]+) subagent\)$/);
+      const evidence = classifyTerminalEvidence(transcript);
       if (
         info.parentID !== parent ||
         !(info.time.created < boundary) ||
-        suffix?.[1] !== agent
+        suffix?.[1] !== agent ||
+        (evidence.verdict !== 'completed' && evidence.verdict !== 'error') ||
+        live.error !== undefined ||
+        live.malformedSessionIDs.has(requested) ||
+        (live.statuses.get(requested) ?? 'idle') !== 'idle' ||
+        options.isFallbackInProgress?.(requested) ||
+        historyBoundaries.get(parent) !== boundary ||
+        rehydrateTombstones.has(requested)
       )
-        return;
-      const evidence = classifyTerminalEvidence(
-        await client.session.messages({
-          path: { id: requested },
-          query: { ...query, limit: 1 },
-          throwOnError: true,
-        }),
-      );
-      if (evidence.verdict !== 'completed' && evidence.verdict !== 'error')
         return;
       backgroundJobBoard.adoptTerminal({
         taskID: requested,

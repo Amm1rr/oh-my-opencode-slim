@@ -1,4 +1,12 @@
-import { beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
+import {
+  beforeEach,
+  describe,
+  expect,
+  jest,
+  mock,
+  spyOn,
+  test,
+} from 'bun:test';
 import { DEFAULT_MAX_RETAINED_SNAPSHOTS } from '../../config/constants';
 import { SessionLifecycle } from '../../hooks/session-lifecycle';
 import { createTaskReviveTool } from '../../tools/task-revive';
@@ -16,6 +24,7 @@ import {
   createBackgroundJobTerminalGate,
 } from '../../utils/background-job-terminal-gate';
 import * as logger from '../../utils/logger';
+import { DEFAULT_RUNTIME_SESSION_STATUS_TIMEOUT_MS } from '../../utils/session-runtime-status';
 import {
   createPhaseReminderHook,
   PHASE_REMINDER_METADATA_KEY,
@@ -714,30 +723,42 @@ describe('task-session-manager hook', () => {
   });
 
   test('T-A: F4 resumes only a cropped own terminal child', async () => {
-    const clock = spyOn(Date, 'now').mockReturnValue(1000);
     const logs = spyOn(logger, 'log').mockImplementation(() => {});
-    const get = mock(async ({ path }: { path: { id: string } }) => {
-      if (path.id === 'ses_missing') throw new Error('host unavailable');
+    const host = (id: string) => {
+      if (id === 'ses_missing') throw new Error('host unavailable');
       return {
         data: {
-          parentID: path.id === 'ses_foreign' ? 'other' : 'parent-1',
+          parentID: id === 'ses_foreign' ? 'other' : 'parent-1',
           title:
-            path.id === 'ses_other_agent'
+            id === 'ses_other_agent'
               ? 'work (@oracle subagent)'
               : 'work (@explorer subagent)',
           time: { created: 150, updated: 160 },
         },
       };
-    });
+    };
+    const get = mock(async ({ path }: { path: { id: string } }) =>
+      host(path.id),
+    );
+    const status = mock(
+      async (): Promise<{ data: Record<string, unknown> }> => ({ data: {} }),
+    );
+    const fallback = new Set<string>();
+    const coordinator = new SessionLifecycle(() => {});
     const board = new BackgroundJobBoard();
     const { hook, complete } = createHook({
       backgroundJobBoard: board,
-      sessionClient: { get },
+      sessionClient: { get, status },
+      coordinator,
+      isFallbackInProgress: (id) => fallback.has(id),
     });
     complete('ses_own', 'done');
     complete('ses_error', 'child failed', true);
     complete('ses_foreign', 'done');
     complete('ses_other_agent', 'done');
+    complete('ses_gone', 'done');
+    complete('ses_slow', 'done');
+    complete('ses_late', 'done');
     const visible = (created: number) => ({
       messages: [
         {
@@ -797,6 +818,48 @@ describe('task-session-manager hook', () => {
       await refuse('ses_other_agent');
       await refuse('ses_missing');
       await refuse('ses_nonterminal');
+      // G1 busy
+      status.mockImplementationOnce(async () => ({
+        data: { ses_own: { type: 'busy' } },
+      }));
+      await refuse('ses_own');
+      // G1 status error
+      status.mockImplementationOnce(async () => {
+        throw new Error('status unavailable');
+      });
+      await refuse('ses_own');
+      // G1 malformed status
+      status.mockImplementationOnce(async () => ({
+        data: { ses_own: { type: 'compacting' } },
+      }));
+      await refuse('ses_own');
+      // G1 pending fallback
+      fallback.add('ses_error');
+      await refuse('ses_error');
+      fallback.clear();
+      // G2 deleted child
+      get.mockImplementationOnce(async ({ path }) => {
+        coordinator.dispatchSessionDeleted(path.id);
+        return host(path.id);
+      });
+      await refuse('ses_gone');
+      // G3 deadline and no late adoption
+      const reached = Promise.withResolvers<void>();
+      const delayed = Promise.withResolvers<void>();
+      get.mockImplementationOnce(async ({ path }) => {
+        reached.resolve();
+        await delayed.promise;
+        return host(path.id);
+      });
+      jest.useFakeTimers();
+      const stalled = refuse('ses_slow');
+      await reached.promise;
+      jest.advanceTimersByTime(DEFAULT_RUNTIME_SESSION_STATUS_TIMEOUT_MS);
+      delayed.resolve();
+      await stalled;
+      jest.useRealTimers();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(board.get('ses_slow')).toBeUndefined();
       await resume('ses_own');
       const own = board.get('ses_own');
       if (!own) throw new Error('own child was not adopted');
@@ -810,10 +873,16 @@ describe('task-session-manager hook', () => {
         terminalState: 'error',
         resultSummary: 'child failed',
       });
+      // G2 deleted parent
+      get.mockImplementationOnce(async ({ path }) => {
+        coordinator.dispatchSessionDeleted('parent-1');
+        return host(path.id);
+      });
+      await refuse('ses_late');
     } finally {
+      jest.useRealTimers();
       await hook.event({ event: { type: 'server.instance.disposed' } });
       logs.mockRestore();
-      clock.mockRestore();
     }
   });
 
