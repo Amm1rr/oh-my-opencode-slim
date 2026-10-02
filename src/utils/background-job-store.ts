@@ -1,4 +1,5 @@
 import type {
+  BackgroundJobAdoptionInput,
   BackgroundJobLaunchInput,
   BackgroundJobLease,
   BackgroundJobPromptMetadata,
@@ -172,6 +173,17 @@ export function clearBackgroundJobSuppression(
 export interface BackgroundJobStore {
   // ── Mutation methods ──────────────────────────────────────────────
   registerLaunch(input: BackgroundJobLaunchInput): BackgroundJobRecord;
+  /**
+   * Insert an already-terminal (`reconciled`) record for a child session the
+   * store does not hold; returns undefined when it does. Unlike
+   * `commitTerminal`, no terminal-gate token is consumed, so the caller must
+   * supply host evidence itself: an idle child whose transcript classifies as
+   * completed/error via `classifyTerminalEvidence`. Fires no terminal-state
+   * listener. Not a way to settle runs the terminal gate tracks.
+   */
+  adoptTerminal(
+    input: BackgroundJobAdoptionInput,
+  ): BackgroundJobRecord | undefined;
   acquireCancellationLease(
     taskID: string,
     generation: number,
