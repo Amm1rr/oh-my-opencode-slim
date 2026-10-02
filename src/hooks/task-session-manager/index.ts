@@ -246,6 +246,8 @@ export function createTaskSessionManagerHook(
     });
   const rehydrateState = getBackgroundJobLifecycleLedger(backgroundJobBoard);
   const rehydrateTombstones = rehydrateState.tombstones;
+  // Only adoptRequested reads boundaries, and v2 hosts never wire it.
+  const adoptionEnabled = options.hostFlavor !== 'v2';
   const historyBoundaries = new Map<string, number>();
   const adoptRequested = async (
     parent: string,
@@ -277,6 +279,20 @@ export function createTaskSessionManagerHook(
       );
       const suffix = info.title.match(/ \(@([^()]+) subagent\)$/);
       const evidence = classifyTerminalEvidence(transcript);
+      // Adopt only if every gate holds (else the caller's refusal stands),
+      // in condition order:
+      //  1. the host child's parent is this session;
+      //  2. it was created before the parent's oldest visible message, so
+      //     the call that launched it is no longer in the visible history;
+      //  3. its title suffix names the requested agent;
+      //  4. its last message is a terminal result (completed or error) per
+      //     classifyTerminalEvidence, the terminal gate's own classifier;
+      //  5. the runtime status read succeeded;
+      //  6. the child's status entry is well-formed;
+      //  7. the child is idle (no entry counts as idle);
+      //  8. no foreground fallback is pending for the child;
+      //  9. the parent's boundary did not change during the reads;
+      // 10. no deletion tombstone suppresses the child.
       if (
         info.parentID !== parent ||
         !(info.time.created < boundary) ||
@@ -694,8 +710,7 @@ export function createTaskSessionManagerHook(
         taskContextTracker,
         getLifecycleEpoch: () => rehydrateState.nextEpoch,
         hostFlavor: options.hostFlavor,
-        adoptRequested:
-          options.hostFlavor === 'v2' ? undefined : adoptRequested,
+        adoptRequested: adoptionEnabled ? adoptRequested : undefined,
       }),
 
     'tool.execute.after': async (
@@ -732,17 +747,20 @@ export function createTaskSessionManagerHook(
       output: { messages?: unknown },
     ): Promise<void> => {
       const messages = Array.isArray(output.messages) ? output.messages : [];
-      let viewSession: unknown;
-      let viewStart = Number.POSITIVE_INFINITY;
-      for (const message of messages) {
-        if (!isObjectRecord(message) || !isObjectRecord(message.info)) continue;
-        viewSession ??= message.info.sessionID;
-        const { time } = message.info;
-        if (isObjectRecord(time) && typeof time.created === 'number')
-          viewStart = Math.min(viewStart, time.created);
+      if (adoptionEnabled) {
+        let viewSession: unknown;
+        let viewStart = Number.POSITIVE_INFINITY;
+        for (const message of messages) {
+          if (!isObjectRecord(message) || !isObjectRecord(message.info))
+            continue;
+          viewSession ??= message.info.sessionID;
+          const { time } = message.info;
+          if (isObjectRecord(time) && typeof time.created === 'number')
+            viewStart = Math.min(viewStart, time.created);
+        }
+        if (typeof viewSession === 'string' && viewStart !== Infinity)
+          historyBoundaries.set(viewSession, viewStart);
       }
-      if (typeof viewSession === 'string' && viewStart !== Infinity)
-        historyBoundaries.set(viewSession, viewStart);
 
       // Keep still-running task tool results byte-stable so a live background
       // lane never rewrites mid-history bytes and invalidates the prompt
