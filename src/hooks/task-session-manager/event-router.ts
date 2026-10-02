@@ -8,6 +8,7 @@
 import type { BackgroundJobExecution } from '../../utils/background-job-board';
 import type { BackgroundJobStore } from '../../utils/background-job-store';
 import type { BackgroundJobSupervisor } from '../../utils/background-job-supervisor';
+import { isRecord } from '../../utils/guards';
 import { log } from '../../utils/logger';
 import {
   isFailoverError,
@@ -101,10 +102,6 @@ function eventFenceMap(
   const created = new Map<string, SessionEventGenerationFence>();
   sessionEventFences.set(key, created);
   return created;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null;
 }
 
 function finiteNumber(value: unknown): value is number {
