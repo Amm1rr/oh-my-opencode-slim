@@ -76,7 +76,7 @@ client.session.create({
   body: { title: 'secondary' },
 });
 
-// prompt (secondary-model, session.ts promptWithTimeout)
+// prompt (secondary-model)
 client.session.prompt({
   path: { id: 'ses_x' },
   query: { directory: '/d' },
