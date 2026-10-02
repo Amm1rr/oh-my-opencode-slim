@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import type { PluginInput } from '@opencode-ai/plugin';
 import {
   classifyAssistantTurnEvidence,
+  classifyTerminalEvidence,
   fetchChildTranscript,
   stringifyError,
 } from './child-transcript';
@@ -193,6 +194,23 @@ describe('classifyAssistantTurnEvidence', () => {
     );
     // Whole-string trim only: inner padding between parts is preserved.
     expect(evidence).toEqual({ kind: 'ready', text: 'first  \n\nsecond' });
+  });
+});
+
+describe('classifyTerminalEvidence', () => {
+  test('a role-less message after the baseline is unrecognized, never an answer', () => {
+    const response = {
+      data: [
+        message({ id: 'base', role: 'user' }),
+        {
+          info: { id: 'odd', time: { completed: 5 } },
+          parts: [{ type: 'text', text: 'the answer' }],
+        },
+      ],
+    };
+    expect(
+      classifyTerminalEvidence(response, { baselineMessageID: 'base' }),
+    ).toEqual({ verdict: 'retry', reason: 'unrecognized segment shape' });
   });
 });
 

@@ -40,6 +40,10 @@ export type ChildTerminalEvidence =
  * caller. A `response.error` payload is surfaced as a normalized `Error`
  * whose message is `stringifyError(response.error)`, matching the
  * error-surfacing style previously duplicated at the call sites.
+ *
+ * `limit` asks the host for only the newest N messages (still oldest-first);
+ * a host that ignores it returns the whole transcript, so callers must
+ * tolerate either.
  */
 export async function fetchChildTranscript(
   client: PluginInput['client'],

@@ -165,6 +165,7 @@ export function createRevivedRunTracker(options: {
   const captureBaseline = async (
     taskID: string,
   ): Promise<string | undefined> => {
+    // Only the newest message id is needed; skip the full transcript.
     const response = await fetchChildTranscript(
       getClient(options.input),
       taskID,
