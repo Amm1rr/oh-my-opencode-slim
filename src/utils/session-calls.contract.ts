@@ -49,10 +49,10 @@ const client = {
 // abort (foreground-fallback, cancel-task, index.ts)
 client.session.abort({ path: { id: 'ses_x' } });
 
-// messages (foreground-fallback, session.ts extractSessionResult)
+// messages (foreground-fallback tail, child-transcript fetchChildTranscript)
 client.session.messages({
   path: { id: 'ses_x' },
-  query: { directory: '/d' },
+  query: { directory: '/d', limit: 1 },
 });
 
 // message (chat-headers)

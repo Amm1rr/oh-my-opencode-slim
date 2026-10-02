@@ -169,6 +169,7 @@ export function createRevivedRunTracker(options: {
       getClient(options.input),
       taskID,
       options.input.directory,
+      1,
     );
     if (response === undefined) return undefined;
     const data =

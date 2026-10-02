@@ -45,6 +45,7 @@ export async function fetchChildTranscript(
   client: PluginInput['client'],
   sessionID: string,
   directory: string,
+  limit?: number,
 ): Promise<unknown> {
   const session = client.session;
   const messages =
@@ -54,7 +55,7 @@ export async function fetchChildTranscript(
   if (typeof messages !== 'function') return undefined;
   const response = await messages({
     path: { id: sessionID },
-    query: { directory },
+    query: { directory, limit },
   });
   const error = responseError(response);
   if (error !== undefined) throw new Error(stringifyError(error));
