@@ -39,6 +39,7 @@ import {
   buildViewCommand,
   findBinary,
   isPosixShell,
+  normalizePathForShell,
   quoteShellArg,
   resolveHostOpencodeBinary,
   shellSupportsHashComments,
@@ -532,7 +533,7 @@ export class CmuxMultiplexer implements Multiplexer {
     // so the FR-8 marker above it remains the first script line.
     const withCwd =
       options?.viewerSurface === 'mini'
-        ? `cd ${quoteShellArg(directory)} && ${viewerCommand}`
+        ? `cd ${quoteShellArg(normalizePathForShell(directory))} && ${viewerCommand}`
         : viewerCommand;
     const command = needsSecretBridge
       ? withParentEnvPassword(withCwd)
