@@ -820,6 +820,7 @@ describe('project config reading (FR-12)', () => {
         type: 'tmux',
         layout: 'tiled',
         main_pane_size: 70,
+        viewer: 'tui',
       });
     } finally {
       fs.rmSync(root, { recursive: true, force: true });

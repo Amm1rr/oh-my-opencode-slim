@@ -521,7 +521,7 @@ export class CmuxMultiplexer implements Multiplexer {
       sessionId,
       serverUrl,
       directory,
-      { executable: this.opencodeBinary },
+      { executable: this.opencodeBinary, viewer: options?.viewer },
     );
     const command = needsSecretBridge
       ? withParentEnvPassword(viewerCommand)

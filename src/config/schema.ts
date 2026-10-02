@@ -153,6 +153,14 @@ const MultiplexerMainPaneSizeSchema = z
 const MultiplexerCmuxTuiBinarySchema = z.string().min(1);
 
 /**
+ * Which opencode TUI surface subagent panes open. `tui` (default) is the
+ * full interface; `mini` launches the lightweight `opencode mini`.
+ */
+export const MultiplexerViewerSchema = z.enum(['tui', 'mini']);
+
+export type MultiplexerViewer = z.infer<typeof MultiplexerViewerSchema>;
+
+/**
  * Multiplexer keys accepted by versions before 2.4.x but no longer
  * supported. `zellij_pane_mode` selected the removed agent-tab placement;
  * zellij panes now always open in the tab containing the parent pane.
@@ -170,7 +178,8 @@ export const MULTIPLEXER_INVALID_VALUE_MESSAGE =
   'Invalid multiplexer config value; pane management is disabled. Expected ' +
   'type (auto|tmux|zellij|herdr|kitty|cmux-tui|none), layout ' +
   '(main-horizontal|main-vertical|tiled|even-horizontal|even-vertical), ' +
-  'main_pane_size (20-80), cmux_tui_binary (non-empty string).';
+  'main_pane_size (20-80), cmux_tui_binary (non-empty string), ' +
+  'viewer (tui|mini).';
 
 export const MULTIPLEXER_RENAMED_TYPE_MESSAGE =
   'multiplexer.type "cmux" was renamed to "cmux-tui"; update your config.';
@@ -232,6 +241,9 @@ function invalidMultiplexerKeys(config: Record<string, unknown>): string[] {
       .success
   ) {
     invalid.push('cmux_tui_binary');
+  }
+  if ('viewer' in config && !MultiplexerViewerSchema.safeParse(config.viewer).success) {
+    invalid.push('viewer');
   }
   return invalid;
 }
@@ -318,6 +330,10 @@ export const MultiplexerConfigStrictSchema = z.object({
   cmux_tui_binary: MultiplexerCmuxTuiBinarySchema.optional().describe(
     'Explicit path to the cmux-tui binary. When unset, the adapter probes ' +
       'PATH for `cmux-tui` first and falls back to `cmux`.',
+  ),
+  viewer: MultiplexerViewerSchema.default('tui').describe(
+    'Which opencode TUI surface subagent panes open. "tui" (default) is ' +
+      'the full interface; "mini" launches the lightweight `opencode mini`.',
   ),
 });
 

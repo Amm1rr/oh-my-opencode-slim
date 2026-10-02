@@ -199,6 +199,7 @@ export class ZellijMultiplexer implements Multiplexer {
       sessionId,
       serverUrl,
       directory,
+      { viewer: options?.viewer },
     );
     const opencodeCmd = needsSecretBridge
       ? withParentEnvPassword(viewerCommand)

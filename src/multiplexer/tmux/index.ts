@@ -87,6 +87,7 @@ export class TmuxMultiplexer implements Multiplexer {
         sessionId,
         serverUrl,
         directory,
+        { viewer: options?.viewer },
       )}`;
 
       // v2 remote hosts: the viewer must authenticate with

@@ -77,6 +77,7 @@ const DEFAULT_MULTIPLEXER: MultiplexerConfig = {
   type: 'none',
   layout: 'main-vertical',
   main_pane_size: MULTIPLEXER_MAIN_PANE_SIZE_DEFAULT,
+  viewer: 'tui',
 };
 
 const DEFAULT_BACKGROUND_JOBS: BackgroundJobsConfig = {

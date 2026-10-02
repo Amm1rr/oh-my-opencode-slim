@@ -47,9 +47,17 @@ export function buildOpencodeAttachCommand(
  */
 export type ViewerFlavor = 'v1' | 'v2-shared' | 'v2-remote';
 
+/**
+ * Which opencode TUI surface a viewer command opens: the full `tui`
+ * (default) or the lightweight `mini` interface.
+ */
+export type ViewerSurface = 'tui' | 'mini';
+
 export interface ViewerCommandOptions {
   /** Absolute host binary; defaults to the bare `opencode` name. */
   executable?: string;
+  /** TUI surface to open; defaults to the full `tui`. */
+  viewer?: ViewerSurface;
 }
 
 /**
@@ -63,6 +71,13 @@ export interface ViewerCommandOptions {
  *   `OPENCODE_PASSWORD` secret is never part of the command text; adapters
  *   inject it at pane creation through their native spawn-time environment
  *   mechanism, or through `withParentEnvPassword` where none exists.
+ *
+ * With `viewer: 'mini'` the same matrix targets the `opencode mini`
+ * interface instead: the `mini` subcommand is inserted after the binary and
+ * the v1 attach form is expressed as `mini --server <url>`, mirroring the
+ * flags `mini` shares with the full TUI. Mini rejects a positional
+ * directory, so the directory argument is omitted and the pane's cwd (the
+ * spawned pane's working directory) carries the project.
  */
 export function buildViewCommand(
   flavor: ViewerFlavor,
@@ -72,7 +87,10 @@ export function buildViewCommand(
   options: ViewerCommandOptions = {},
 ): string {
   const executable = options.executable ?? 'opencode';
-  if (flavor === 'v1') {
+  const exe =
+    executable === 'opencode' ? executable : quoteShellArg(executable);
+  const surface = options.viewer === 'mini' ? ['mini'] : [];
+  if (flavor === 'v1' && surface.length === 0) {
     return buildOpencodeAttachCommand(
       sessionId,
       serverUrl,
@@ -80,24 +98,34 @@ export function buildViewCommand(
       executable,
     );
   }
+  if (flavor === 'v1') {
+    return [
+      exe,
+      ...surface,
+      '--server',
+      quoteShellArg(serverUrl),
+      '--session',
+      quoteShellArg(sessionId),
+    ].join(' ');
+  }
   const viewDir = normalizePathForShell(directory);
-  const exe =
-    executable === 'opencode' ? executable : quoteShellArg(executable);
   if (flavor === 'v2-shared') {
     return [
       exe,
+      ...surface,
       '--session',
       quoteShellArg(sessionId),
-      quoteShellArg(viewDir),
+      ...(surface.length === 0 ? [quoteShellArg(viewDir)] : []),
     ].join(' ');
   }
   return [
     exe,
+    ...surface,
     '--server',
     quoteShellArg(serverUrl),
     '--session',
     quoteShellArg(sessionId),
-    quoteShellArg(viewDir),
+    ...(surface.length === 0 ? [quoteShellArg(viewDir)] : []),
   ].join(' ');
 }
 

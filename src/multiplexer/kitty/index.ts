@@ -134,7 +134,10 @@ export class KittyMultiplexer implements Multiplexer {
         sessionId,
         serverUrl,
         directory,
-        { executable: resolveOpencodeExecutable() },
+        {
+          executable: resolveOpencodeExecutable(),
+          viewer: options?.viewer,
+        },
       );
 
       // Normalize for Windows/MSYS2/Git Bash (backslashes would be treated as

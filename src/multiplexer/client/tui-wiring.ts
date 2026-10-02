@@ -453,6 +453,7 @@ const FALLBACK_MULTIPLEXER_CONFIG: MultiplexerConfig = {
   type: 'none',
   layout: 'main-vertical',
   main_pane_size: 60,
+  viewer: 'tui',
 };
 
 function parseMultiplexerConfig(value: unknown): MultiplexerConfig | null {
@@ -624,16 +625,15 @@ export async function createTuiPaneWiring(
       mainPaneSize: loaded.multiplexer.main_pane_size,
       stableIdleMs: options.stableIdleMs ?? DEFAULT_STABLE_IDLE_MS,
       readiness: options.readiness ?? DEFAULT_READINESS,
-      ...(options.viewerFlavor === undefined
-        ? {}
-        : {
-            viewer: {
-              flavor: options.viewerFlavor,
-              ...(options.viewerPassword === undefined
-                ? {}
-                : { password: options.viewerPassword }),
-            },
-          }),
+      viewer: {
+        ...(options.viewerFlavor === undefined
+          ? {}
+          : { flavor: options.viewerFlavor }),
+        ...(options.viewerPassword === undefined
+          ? {}
+          : { password: options.viewerPassword }),
+        surface: loaded.multiplexer.viewer,
+      },
     },
     logger,
   );
