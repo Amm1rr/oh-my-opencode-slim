@@ -26,6 +26,7 @@ import { loadPluginConfig } from '../../config/loader';
 import {
   type MultiplexerConfig,
   MultiplexerConfigSchema,
+  MultiplexerConfigStrictSchema,
   type MultiplexerType,
 } from '../../config/schema';
 import { isRecord } from '../../utils/guards';
@@ -104,8 +105,6 @@ export const SESSION_EVENT_TYPES = [
   'session.idle',
   'session.deleted',
 ] as const;
-
-export type SessionEventType = (typeof SESSION_EVENT_TYPES)[number];
 
 /** Minimal host event bus surface (`api.event`). */
 export interface ClientEventBus {
@@ -449,11 +448,8 @@ function normalizeSessionStatus(
 }
 
 /** Last-resort defaults: pane management off, spec layout/size values. */
-const FALLBACK_MULTIPLEXER_CONFIG: MultiplexerConfig = {
-  type: 'none',
-  layout: 'main-vertical',
-  main_pane_size: 60,
-};
+const FALLBACK_MULTIPLEXER_CONFIG: MultiplexerConfig =
+  MultiplexerConfigStrictSchema.parse({});
 
 function parseMultiplexerConfig(value: unknown): MultiplexerConfig | null {
   try {
@@ -624,16 +620,15 @@ export async function createTuiPaneWiring(
       mainPaneSize: loaded.multiplexer.main_pane_size,
       stableIdleMs: options.stableIdleMs ?? DEFAULT_STABLE_IDLE_MS,
       readiness: options.readiness ?? DEFAULT_READINESS,
-      ...(options.viewerFlavor === undefined
-        ? {}
-        : {
-            viewer: {
-              flavor: options.viewerFlavor,
-              ...(options.viewerPassword === undefined
-                ? {}
-                : { password: options.viewerPassword }),
-            },
-          }),
+      viewer: {
+        ...(options.viewerFlavor === undefined
+          ? {}
+          : { flavor: options.viewerFlavor }),
+        ...(options.viewerPassword === undefined
+          ? {}
+          : { password: options.viewerPassword }),
+        surface: loaded.multiplexer.viewer,
+      },
     },
     logger,
   );

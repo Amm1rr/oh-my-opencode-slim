@@ -153,12 +153,23 @@ const MultiplexerMainPaneSizeSchema = z
 const MultiplexerCmuxTuiBinarySchema = z.string().min(1);
 
 /**
+ * Which opencode TUI surface subagent panes open. `tui` (default) is the
+ * full interface; `mini` launches the lightweight `opencode mini`.
+ */
+export const MultiplexerViewerSchema = z.enum(['tui', 'mini']);
+
+export type MultiplexerViewer = z.infer<typeof MultiplexerViewerSchema>;
+
+/**
  * Multiplexer keys accepted by versions before 2.4.x but no longer
  * supported. `zellij_pane_mode` selected the removed agent-tab placement;
  * zellij panes now always open in the tab containing the parent pane.
  *
  * The schema strips unknown keys silently, so the raw input must be
  * inspected before validation to warn instead of dropping the key quietly.
+ * The same per-key check covers invalid `type`, `layout`, `main_pane_size`,
+ * `cmux_tui_binary`, and `viewer` values: any of them disables pane
+ * management with one diagnostic.
  */
 export const DEPRECATED_MULTIPLEXER_KEYS = ['zellij_pane_mode'] as const;
 
@@ -170,7 +181,8 @@ export const MULTIPLEXER_INVALID_VALUE_MESSAGE =
   'Invalid multiplexer config value; pane management is disabled. Expected ' +
   'type (auto|tmux|zellij|herdr|kitty|cmux-tui|none), layout ' +
   '(main-horizontal|main-vertical|tiled|even-horizontal|even-vertical), ' +
-  'main_pane_size (20-80), cmux_tui_binary (non-empty string).';
+  'main_pane_size (20-80), cmux_tui_binary (non-empty string), ' +
+  'viewer (tui|mini).';
 
 export const MULTIPLEXER_RENAMED_TYPE_MESSAGE =
   'multiplexer.type "cmux" was renamed to "cmux-tui"; update your config.';
@@ -232,6 +244,12 @@ function invalidMultiplexerKeys(config: Record<string, unknown>): string[] {
       .success
   ) {
     invalid.push('cmux_tui_binary');
+  }
+  if (
+    'viewer' in config &&
+    !MultiplexerViewerSchema.safeParse(config.viewer).success
+  ) {
+    invalid.push('viewer');
   }
   return invalid;
 }
@@ -318,6 +336,11 @@ export const MultiplexerConfigStrictSchema = z.object({
   cmux_tui_binary: MultiplexerCmuxTuiBinarySchema.optional().describe(
     'Explicit path to the cmux-tui binary. When unset, the adapter probes ' +
       'PATH for `cmux-tui` first and falls back to `cmux`.',
+  ),
+  viewer: MultiplexerViewerSchema.default('mini').describe(
+    'Which opencode TUI surface subagent panes open. "mini" (default) ' +
+      'launches the lightweight `opencode mini`; "tui" runs the full ' +
+      'interface.',
   ),
 });
 

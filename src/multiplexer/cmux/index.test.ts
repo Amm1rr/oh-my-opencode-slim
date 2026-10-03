@@ -253,6 +253,59 @@ describe('CmuxMultiplexer', () => {
     }
   });
 
+  test('viewer "mini" runs opencode mini in the pane', async () => {
+    const { runner, calls } = recorder();
+    const instance = mux({ runner });
+    const runScript = (): string =>
+      calls.find((argv) => argv.includes('run'))?.at(-1) ?? '';
+
+    expect(
+      await instance.spawnPane(
+        CHILD_ID,
+        DESCRIPTION,
+        'http://127.0.0.1:7777',
+        '/repo',
+        { viewerFlavor: 'v2-shared', viewerSurface: 'mini' },
+      ),
+    ).toEqual({ success: true, paneId: 'term_child' });
+
+    const mini = runScript();
+    expect(mini).toContain("cd '/repo' && ");
+    expect(mini).toContain("mini --session '" + CHILD_ID + "'");
+    expect(mini).not.toContain('--server');
+  });
+
+  test('viewer "mini" skips the cd prefix when the shell cannot parse &&', async () => {
+    const originalShell = process.env.SHELL;
+    process.env.SHELL = '/usr/bin/nu';
+    try {
+      const { runner, calls } = recorder();
+      const instance = mux({ runner });
+      const runScript = (): string =>
+        calls.find((argv) => argv.includes('run'))?.at(-1) ?? '';
+
+      expect(
+        await instance.spawnPane(
+          CHILD_ID,
+          DESCRIPTION,
+          'http://127.0.0.1:7777',
+          '/repo',
+          { viewerFlavor: 'v2-shared', viewerSurface: 'mini' },
+        ),
+      ).toEqual({ success: true, paneId: 'term_child' });
+
+      const mini = runScript();
+      expect(mini).not.toContain('cd ');
+      expect(mini).toContain("mini --session '" + CHILD_ID + "'");
+    } finally {
+      if (originalShell === undefined) {
+        delete process.env.SHELL;
+      } else {
+        process.env.SHELL = originalShell;
+      }
+    }
+  });
+
   test('fails closed with one diagnostic when the shell cannot run the /proc bridge', async () => {
     const originalPlatform = process.platform;
     Object.defineProperty(process, 'platform', {

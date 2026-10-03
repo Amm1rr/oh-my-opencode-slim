@@ -4,6 +4,7 @@ import { createSessionRecovery } from '../hooks/task-session-manager/session-rec
 import type { BackgroundJobLease } from '../utils/background-job-board';
 import { getBackgroundJobLifecycleLedger } from '../utils/background-job-store';
 import type { BackgroundJobSupervisor } from '../utils/background-job-supervisor';
+import { responseError } from '../utils/child-transcript';
 import { log } from '../utils/logger';
 import { getClient } from '../utils/opencode-client';
 import {
@@ -289,9 +290,9 @@ export function createTaskReviveTool(
           .then((response) => {
             if (owner.settled) return;
             owner.settled = true;
-            const responseError = getApiError(response);
-            if (responseError !== undefined) {
-              throw new Error(errorText(responseError));
+            const apiError = responseError(response);
+            if (apiError !== undefined) {
+              throw new Error(errorText(apiError));
             }
             // Retirement is not deletion. The accepted write is not resent
             // and is not compensated with abort. Settle only this lease.
@@ -468,9 +469,9 @@ async function ownInvalidatedAdmission(
     // No local abort timeout: an idle read cannot retire a token while the
     // remote write could still execute. Only actual settlement reaches here.
     if (!stillOwns()) return;
-    const responseError = getApiError(response);
-    if (responseError !== undefined)
-      throw new Error(`abort failed: ${errorText(responseError)}`);
+    const apiError = responseError(response);
+    if (apiError !== undefined)
+      throw new Error(`abort failed: ${errorText(apiError)}`);
 
     // Historical session.get outcomes cannot prove the accepted run stopped.
     // Take fresh live evidence after abort settlement, with a bounded budget.
@@ -578,14 +579,6 @@ function isReviveableRetainedJob(
     return true;
   }
   return job.state === 'reconciled' && job.terminalState !== undefined;
-}
-
-function getApiError(response: unknown): unknown {
-  if (!response || typeof response !== 'object') return undefined;
-  const record = response as Record<string, unknown>;
-  return record.error === undefined || record.error === null
-    ? undefined
-    : record.error;
 }
 
 /** Shared evidence/import owns recovery; only its explicit legacy result launches a cache row. */

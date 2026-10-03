@@ -21,8 +21,7 @@ import {
   isRefreshCurrent,
   makeRouteNavigator,
   paneWiringOptions,
-  readCompactSidebar,
-  readConfigInvalid,
+  readConfigState,
   resolveHoverBackground,
   resolveSidebarSlotOrder,
   resolveTuiPaneDirectory,
@@ -684,7 +683,7 @@ describe('splitSidebarModelId', () => {
   });
 });
 
-describe('readConfigInvalid', () => {
+describe('readConfigState', () => {
   let originalEnv: typeof process.env;
   let configHome: string;
 
@@ -713,7 +712,7 @@ describe('readConfigInvalid', () => {
         JSON.stringify({ agents: { oracle: { temperature: 5 } } }),
       );
 
-      expect(readConfigInvalid(projectDir)).toBe(true);
+      expect(readConfigState(projectDir).configInvalid).toBe(true);
     } finally {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
@@ -730,7 +729,7 @@ describe('readConfigInvalid', () => {
         JSON.stringify({ agents: { oracle: { model: 'valid/model' } } }),
       );
 
-      expect(readConfigInvalid(projectDir)).toBe(false);
+      expect(readConfigState(projectDir).configInvalid).toBe(false);
     } finally {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
@@ -756,7 +755,7 @@ describe('readConfigInvalid', () => {
 
       // Deprecated fallback keys are stripped with a warning; the config
       // loads successfully so the sidebar must NOT show "Config invalid".
-      expect(readConfigInvalid(projectDir)).toBe(false);
+      expect(readConfigState(projectDir).configInvalid).toBe(false);
     } finally {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
@@ -779,7 +778,7 @@ describe('readConfigInvalid', () => {
       // The string key is normalized to an array with a 'normalized' warning
       // (not invalid-schema), so the config loads fine and the sidebar must
       // NOT show "Config invalid".
-      expect(readConfigInvalid(projectDir)).toBe(false);
+      expect(readConfigState(projectDir).configInvalid).toBe(false);
     } finally {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
@@ -791,7 +790,7 @@ describe('readConfigInvalid', () => {
       const projectDir = path.join(tempDir, 'project');
       fs.mkdirSync(projectDir, { recursive: true });
 
-      expect(readCompactSidebar(projectDir)).toBe(true);
+      expect(readConfigState(projectDir).compactSidebar).toBe(true);
     } finally {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
@@ -808,7 +807,7 @@ describe('readConfigInvalid', () => {
         JSON.stringify({ compactSidebar: false }),
       );
 
-      expect(readCompactSidebar(projectDir)).toBe(false);
+      expect(readConfigState(projectDir).compactSidebar).toBe(false);
     } finally {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }

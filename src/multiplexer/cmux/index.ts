@@ -39,7 +39,10 @@ import {
   buildViewCommand,
   findBinary,
   isPosixShell,
+  normalizePathForShell,
+  quoteShellArg,
   resolveHostOpencodeBinary,
+  shellSupportsAndChain,
   shellSupportsHashComments,
   withParentEnvPassword,
 } from '../shared';
@@ -521,11 +524,23 @@ export class CmuxMultiplexer implements Multiplexer {
       sessionId,
       serverUrl,
       directory,
-      { executable: this.opencodeBinary },
+      {
+        executable: this.opencodeBinary,
+        viewerSurface: options?.viewerSurface,
+      },
     );
+    // Mini commands omit the directory and `pane run` has no cwd flag, so
+    // the command changes directory itself. The wrapper stays on one line,
+    // so the FR-8 marker above it remains the first script line. Shells
+    // that cannot parse `&&` (nu, cmd, PowerShell) keep the pre-pinning
+    // behavior instead: the pane inherits the anchor pane's cwd.
+    const withCwd =
+      options?.viewerSurface === 'mini' && shellSupportsAndChain()
+        ? `cd ${quoteShellArg(normalizePathForShell(directory))} && ${viewerCommand}`
+        : viewerCommand;
     const command = needsSecretBridge
-      ? withParentEnvPassword(viewerCommand)
-      : viewerCommand;
+      ? withParentEnvPassword(withCwd)
+      : withCwd;
     // FR-8 carrier: a POSIX comment data marker in the launch script. The
     // `cmd` branch has no `#` comments, so the marker is omitted there and
     // the cmux sweep cannot identify those views (documented limitation).

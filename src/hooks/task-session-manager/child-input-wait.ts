@@ -1,5 +1,4 @@
 import { getGlobalStore } from '../../utils/global-store';
-import { log } from '../../utils/logger';
 
 /**
  * Pending input waits (question / permission) on background child sessions.
@@ -11,11 +10,11 @@ import { log } from '../../utils/logger';
  *
  * This sidecar closes that hole: it records the open asks of board-tracked
  * RUNNING background children (keyed by taskID + request id, idempotent per
- * ask) and notifies listeners with the parent session and the ask content so
- * the parent can be woken. Entries clear on reply/reject, session deletion,
- * or terminal board state. Process-local via globalThis + Symbol.for so
- * independently created hook instances in the same JS process share one
- * store — same pattern as the user-wait gate.
+ * ask) for the event router to notify the parent with the ask content.
+ * Entries clear on reply/reject, session deletion, or terminal board state.
+ * Process-local via globalThis + Symbol.for so independently created hook
+ * instances in the same JS process share one store — same pattern as the
+ * user-wait gate.
  */
 
 export type ChildInputWaitKind = 'question' | 'permission';
@@ -45,13 +44,8 @@ export interface ChildInputWaitNotification {
   requestID: string;
 }
 
-type ChildInputWaitListener = (
-  notification: ChildInputWaitNotification,
-) => void;
-
 type ChildInputWaitStore = {
   waits: Map<string, ChildInputWaitRecord>;
-  listeners: ChildInputWaitListener[];
 };
 
 const STORE_KEY = 'oh-my-opencode-slim.child-input-wait';
@@ -59,45 +53,11 @@ const STORE_KEY = 'oh-my-opencode-slim.child-input-wait';
 function getStore(): ChildInputWaitStore {
   return getGlobalStore<ChildInputWaitStore>(STORE_KEY, () => ({
     waits: new Map(),
-    listeners: [],
   }));
 }
 
 function waitKey(taskID: string, requestID: string): string {
   return `${taskID}:${requestID}`;
-}
-
-/** Subscribe to newly opened child input waits. Best-effort: listener
- * failures are logged, never propagated to the event path. */
-export function onChildInputWait(listener: ChildInputWaitListener): void {
-  getStore().listeners.push(listener);
-}
-
-export function removeChildInputWaitListener(
-  listener: ChildInputWaitListener,
-): void {
-  const store = getStore();
-  store.listeners = store.listeners.filter((entry) => entry !== listener);
-}
-
-function notifyListeners(record: ChildInputWaitRecord): void {
-  const notification: ChildInputWaitNotification = {
-    parentSessionID: record.parentSessionID,
-    taskID: record.taskID,
-    kind: record.kind,
-    requestID: record.requestID,
-  };
-  for (const listener of getStore().listeners) {
-    try {
-      listener(notification);
-    } catch (error) {
-      log('Child input wait listener threw', {
-        taskID: record.taskID,
-        requestID: record.requestID,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
 }
 
 /**
@@ -223,7 +183,6 @@ export function noteChildInputWait(input: {
     record.patterns = sanitizePatterns(input.patterns);
   }
   store.waits.set(key, record);
-  notifyListeners(record);
   return record;
 }
 
@@ -273,5 +232,4 @@ export function listChildInputWaits(taskID?: string): ChildInputWaitRecord[] {
 export function resetChildInputWaitForTests(): void {
   const store = getStore();
   store.waits.clear();
-  store.listeners = [];
 }

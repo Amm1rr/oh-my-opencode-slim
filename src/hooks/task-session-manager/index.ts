@@ -544,8 +544,7 @@ export function createTaskSessionManagerHook(
   // A background child's open question/permission must wake the parent even
   // though the parent session itself has no input wait. The event router
   // forwards new asks through the options.onChildInputWait dep (exactly one
-  // notification per new request id); no global subscription here, so hook
-  // instances never double-notify.
+  // notification per new request id).
 
   if (options.coordinator) {
     options.coordinator.onSessionDeleted((sessionId) => {

@@ -8,6 +8,7 @@ import {
   parseContinuationModelSelection,
 } from '../hooks/task-session-manager/continuation-model-selection';
 import type { BackgroundJobStore } from '../utils/background-job-store';
+import { isRecord } from '../utils/guards';
 import { getClient } from '../utils/opencode-client';
 import { OperationTimeoutError, withTimeout } from '../utils/session';
 import { type DelegationWording, delegationWording } from '../v2/delegation';
@@ -276,10 +277,6 @@ function assertSuccessfulMessageResponse(response: unknown): void {
   throw new Error(
     `Task message transport failed: ${errorText(response.error)}`,
   );
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null;
 }
 
 function errorText(error: unknown): string {

@@ -44,6 +44,7 @@ import {
   configureBackgroundJobPersistence,
   loadInitialBackgroundJobPersistence,
 } from '../utils/background-job-persistence';
+import { isRecord } from '../utils/guards';
 import { INTERNAL_INITIATOR_METADATA_KEY } from '../utils/internal-initiator';
 import { initLogger, log } from '../utils/logger';
 import { OperationTimeoutError, withTimeout } from '../utils/session';
@@ -1649,10 +1650,6 @@ export interface V2ToolBridgeEvents {
   afterBridge: (
     event: Record<string, unknown> & { result?: unknown },
   ) => Promise<void>;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null;
 }
 
 function textContent(value: unknown): string {

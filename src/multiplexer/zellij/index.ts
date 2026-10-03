@@ -199,13 +199,19 @@ export class ZellijMultiplexer implements Multiplexer {
       sessionId,
       serverUrl,
       directory,
+      { viewerSurface: options?.viewerSurface },
     );
     const opencodeCmd = needsSecretBridge
       ? withParentEnvPassword(viewerCommand)
       : viewerCommand;
     // The name doubles as the pane title; the description is the FR-8
-    // metadata (owner pid + child session id) and must survive intact.
+    // metadata (owner pid + child session id) must survive intact.
     const paneName = description.replace(/"/g, '\\"');
+    // Mini commands omit the directory, so the pane pins the child session's
+    // project directory itself (`new-pane --cwd`; the adapter already gates
+    // on MIN_ZELLIJ_VERSION, which supports the flag).
+    const miniCwdArgs =
+      options?.viewerSurface === 'mini' ? ['--cwd', directory] : [];
     const targetTabId = await this.getParentTabId(zellij);
 
     // The parent tab is the anchor: without it there is no same-tab target,
@@ -217,6 +223,7 @@ export class ZellijMultiplexer implements Multiplexer {
       paneName,
       opencodeCmd,
       targetTabId,
+      miniCwdArgs,
     );
   }
 
@@ -237,6 +244,7 @@ export class ZellijMultiplexer implements Multiplexer {
     paneName: string,
     opencodeCmd: string,
     targetTabId: string,
+    miniCwdArgs: string[] = [],
   ): Promise<PaneResult> {
     const direction = this.directionArgs();
     const runOnce = async (directionArgs: string[]): Promise<PaneResult> => {
@@ -250,6 +258,7 @@ export class ZellijMultiplexer implements Multiplexer {
         '--name',
         paneName,
         '--close-on-exit',
+        ...miniCwdArgs,
         '--',
         'sh',
         '-lc',

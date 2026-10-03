@@ -50,13 +50,6 @@ export const DEFAULT_MODELS: Record<AgentName, string | undefined> = {
   councillor: undefined,
 };
 
-// Polling configuration
-export const POLL_INTERVAL_MS = 500;
-export const POLL_INTERVAL_BACKGROUND_MS = 2000;
-
-// Timeouts
-export const MAX_POLL_TIME_MS = 5 * 60 * 1000; // 5 minutes
-
 // Workflow reminders
 export const PHASE_REMINDER_TEXT = `!IMPORTANT! Scheduler workflow: pick the lightest workflow that fits. Direct work: execute and verify proportionately. Otherwise: plan lanes → dispatch background specialists → track task IDs → await hook-driven completion → reconcile terminal results → verify. !END!`;
 
@@ -83,9 +76,6 @@ export const NO_SHELL_READONLY_FILE_OPERATIONS_RULES = `**File Operations Rules*
 - READ-ONLY: inspect and report; do not modify files.
 - Use glob/grep/ast_grep_search for discovery and read for file contents.
 - Do not use bash or shell commands.`;
-
-// Polling stability
-export const STABLE_POLLS_THRESHOLD = 3;
 
 // Toast duration (ms) used by all OMOS toasts
 export const TOAST_DURATION_MS = 10_000;
