@@ -91,6 +91,14 @@ session against the host (existence and parent ownership, plus a live-state
 gate) and re-adopts an untracked child owned by the calling parent, then
 continues it with the new prompt.
 
+Untracked adoption requires a live session-status capability. On v2 hosts that
+only expose an idle wait, `task_revive` refuses adoption without aborting or
+prompting the child. Waiting cannot distinguish a session that was already idle
+from recovered work that finishes during the wait. Repeating the call does not
+restore the missing capability; inspect the existing session before deciding
+whether to dispatch more work. The bounded idle-wait path for already tracked
+retained sessions remains available.
+
 ---
 
 ## Execution Loop

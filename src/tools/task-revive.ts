@@ -614,6 +614,12 @@ async function resolveOrAdoptUntrackedTask(
     return generic;
   }
   if (data.parentID !== parentSessionID) return generic;
+  // Waiting for completion cannot distinguish an idle session from recovered
+  // work that is still running. Untracked adoption must not queue a duplicate
+  // continuation merely because that work finishes during the wait.
+  if (typeof getClient(options.input).session.status !== 'function') {
+    return `${prefix}. This host does not expose the live session-status capability required to safely adopt an untracked session. Waiting for completion cannot establish whether recovered work is already running. No session was adopted, aborted, or prompted. Retrying task_revive on this host will not resolve the missing capability; inspect the existing session before deciding whether to dispatch more work.`;
+  }
   const snapshot = await getRuntimeSessionStatusSnapshot(options.input, {
     timeoutMs: options.verifyAbortMs ?? 1_500,
   });
