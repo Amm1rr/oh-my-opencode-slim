@@ -482,6 +482,39 @@ describe('preset inheritance', () => {
     });
   });
 
+  test('a later permission layer keeps its written key order through the merge', () => {
+    // Key order is precedence (opencode evaluates the compiled rules
+    // last-match-wins), so a layer writing {"*": "deny", "read": "allow"}
+    // intends read to survive the wildcard. The merge must not pin
+    // redefined keys to their base positions — the later layer's entries
+    // come first in its written order, base keys it does not mention
+    // follow.
+    const presets = parsePresets({
+      presets: {
+        base: {
+          agents: {
+            oracle: { permission: { read: 'ask', glob: 'allow' } },
+          },
+        },
+        child: {
+          extends: 'base',
+          agents: {
+            oracle: {
+              permission: { '*': 'deny', read: 'allow' },
+            },
+          },
+        },
+      },
+    });
+
+    const resolved = resolvePreset('child', presets);
+    expect(
+      Object.keys(
+        (resolved.oracle as { permission?: object }).permission ?? {},
+      ),
+    ).toEqual(['*', 'read', 'glob']);
+  });
+
   test('deep-merges nested objects and replaces arrays', () => {
     const presets = parsePresets({
       presets: {
