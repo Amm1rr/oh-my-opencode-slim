@@ -222,7 +222,7 @@ an MCP tool remains authoritative.
 | `disabled_skills` | string[] | `[]` | Skill names to disable globally. Disabled skills are not granted to agents, and disabled bundled skills are not registered; listing `reflect` here also disables the `/reflect` command |
 | `disabled_hooks` | string[] | `[]` | Hook names to disable globally: `"phase-reminder"` stops orchestrator phase-reminder injection; `"foreground-fallback"` disables automatic foreground model fallback, same effect as `fallback.enabled = false`; `"deepwork-guard"` turns the deepwork receipt/claim guard off (see `deepworkGuardMode`); `"chat-headers"` stops the Copilot `x-initiator` header from being stamped (v1 `chat.headers` and the v2 `model.request` bridge); `"cache-monitor"` stops the prompt-cache bust watchdog, so cache warnings are never logged; the on-demand tool guards `"json-error-recovery"`, `"tool-loop-guard"`, `"search-path-guard"`, `"absolute-path-rescue"`, and `"apply-patch"` stop intercepting tool calls entirely, so malformed output, repeated identical calls, and invalid or guessed paths surface raw to the model. Unknown values are stripped with a warning when the config loads; a value consisting only of unknown names is treated as unset, so a lower config layer's list still applies |
 | `disabled_commands` | string[] | `[]` | Slash commands to disable globally: `"interview"`, `"deepwork"`, `"reflect"`, or `"loop"`. Disabled commands are neither registered nor intercepted at execution time, so a user-defined command with the same name is left untouched. Listing `reflect` in `disabled_skills` also disables the `/reflect` command. Unknown values are stripped with a warning when the config loads; a value consisting only of unknown names is treated as unset, so a lower config layer's list still applies |
-| `fallback.enabled` | boolean | `true` | Enable Slim's foreground model-chain failover. It does not configure OpenCode provider/AI-SDK retries. On **v2 hosts** Slim's automatic foreground fallback is disabled regardless (temporary compatibility limitation: the v2 `switchModel` has no per-turn/atomic conditional form, so an in-flight switch could commit after a newer user turn has taken over). Host-native retries still run, but the configured chain is not executed automatically. Re-enable only once a host atomic conditional-switch capability is confirmed — not merely because a `switchModel` method exists. |
+| `fallback.enabled` | boolean | `true` | Enable Slim's foreground model-chain failover. It does not configure OpenCode provider/AI-SDK retries. On **v2 hosts** the replay path (abort + re-prompt) stays disabled — the v2 `switchModel` has no per-turn/atomic conditional form, so an in-flight replay could commit after a newer user turn has taken over — while the retry-hook steering path runs: host retry events are absorbed up to `fallback.maxRetries`, then the model is switched in place via the host `session.switchModel` and the host retries the current turn on the new model. The same switch disables both paths. |
 | `fallback.maxRetries` | number | `3` | Number of host retry events Slim absorbs before advancing the foreground model chain. The budget stays spent across model switches; a completed successful assistant response, an observed return to the configured primary for a fresh descent, or session deletion re-arms it. Terminal `session.error` and `message.updated` failures advance immediately without charging it. `0` advances on the first retry event. This does not configure OpenCode provider or background subagent retries. |
 | `fallback.initialRetryDelayMs` | number | `0` | Delay in milliseconds before triggering the first fallback on a failover-worthy error. Gives intercepting plugins time to recover the current model before the fallback chain advances. 0 disables. |
 | `fallback.retryDelayMs` | number | `500` | Delay in milliseconds between consecutive fallback attempts after the initial trigger. 0 disables. |
@@ -527,15 +527,24 @@ OpenCode's provider retry policy. A value of `0` allows no host retry events
 before foreground failover; it does not prevent OpenCode from retrying a
 provider request in a child session.
 
-On v2 hosts, Slim's automatic foreground fallback is disabled entirely
-(temporary compatibility limitation): the v2 `switchModel` has no per-turn /
-atomic conditional form, so `session.error`, `message.updated` and
-`session.status` retry cannot keep host and manager state consistent — an
-in-flight switch could commit on the host after a newer user turn has taken
-over. Host-native retries and their decisions are left untouched, but the
-configured fallback chain is not executed automatically. This must only be
-re-enabled once a host atomic conditional-switch capability is confirmed, not
-merely because a `switchModel` method exists.
+On v2 hosts, the two fallback paths are gated separately. The replay path
+(abort + re-prompt driven by `session.error`, `message.updated` and
+`session.status` retry) stays disabled: the v2 `switchModel` has no
+per-turn/atomic conditional form, so an in-flight replay could commit on the
+host after a newer user turn has taken over. The retry-hook steering path
+runs instead: the host invokes the session `retry` hook at its own retry
+decision points, Slim absorbs host retries up to `fallback.maxRetries`, then
+switches the model in place via `session.switchModel` and mutates the retry
+decision so the host retries the current turn on the new model — no
+transcript replay, so the per-turn race cannot occur. Descent bookkeeping
+stays live on v2 (turn detection, agent/model tracking, and the resets on a
+successful response or a new user turn), so a later episode in the same
+session starts a fresh descent instead of inheriting the previous one.
+`fallback.initialRetryDelayMs` has no effect on the steering path (there is
+no replay to delay; the host's own retry backoff is the recovery window) —
+a one-time log line notes the divergence. Both paths share the same user
+switches: `fallback.enabled` and `disabled_hooks: ["foreground-fallback"]`
+disable steering too.
 
 ### Agent Display Names
 

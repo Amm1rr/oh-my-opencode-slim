@@ -998,20 +998,25 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       backgroundJobBoard: backgroundJobCoordinator,
       revivedRunTracker,
     });
-    // The current v2 host interface has no per-turn/atomic conditional switch,
-    // so an in-flight switch can commit on the host after a newer user turn has
-    // taken over. Disable the manager's automatic intervention entirely on v2
-    // (unregistering only the retry hook is not enough: session.error,
-    // message.updated and session.status retry all reach the replay path).
+    // The current v2 host interface has no per-turn/atomic conditional
+    // switch, so an in-flight REPLAY (abort + re-prompt) can commit on the
+    // host after a newer user turn has taken over — the replay path stays
+    // disabled on v2 (a3ac0bee). The retry-hook steering path performs no
+    // replay: it mutates the host's in-flight retry decision and switches
+    // the model in place via session.switchModel, so the a3ac0bee race
+    // cannot occur. Steering is host-agnostic (only v2 hosts invoke the
+    // hook) and follows the same user switches as the replay path
+    // (fallback.enabled / disabled_hooks).
     const fallbackUserEnabled =
       runtime.fallback.enabled !== false &&
       !runtime.disabledHooks.has('foreground-fallback');
     const fallbackEnabled = fallbackUserEnabled && hostFlavor !== 'v2';
+    const v2RetryEnabled = fallbackUserEnabled;
     if (fallbackUserEnabled && hostFlavor === 'v2') {
       // Deterministic notice: no timestamps or per-call ids. Do not log when
       // the user explicitly disabled fallback, including via disabled_hooks.
       log(
-        '[foreground-fallback] automatic fallback disabled on v2 hosts (no atomic per-turn model switch)',
+        '[foreground-fallback] v2 replay fallback disabled (no atomic per-turn model switch); retry-hook steering active',
       );
     }
     foregroundFallbackChains = runtime.modelArrays;
@@ -1042,6 +1047,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           : undefined;
       },
       (sessionID) => backgroundJobCoordinator.hasRunning(sessionID),
+      v2RetryEnabled,
     );
 
     deepworkCommandHook = createDeepworkCommandHook();
