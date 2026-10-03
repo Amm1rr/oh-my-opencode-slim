@@ -390,6 +390,126 @@ describe('loadPluginConfig', () => {
 
     fs.rmSync(customDir, { recursive: true, force: true });
   });
+
+  test('project multiplexer block does not clobber user viewer with the parsed default', () => {
+    const projectDir = path.join(tempDir, 'project');
+    const projectConfigDir = path.join(projectDir, '.opencode');
+    fs.mkdirSync(path.join(userConfigDir, 'opencode'), {
+      recursive: true,
+    });
+    fs.mkdirSync(projectConfigDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(userConfigDir, 'opencode', 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        multiplexer: { type: 'cmux-tui', viewer: 'mini' },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(projectConfigDir, 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        multiplexer: { layout: 'tiled' },
+      }),
+    );
+
+    const config = loadPluginConfig(projectDir);
+
+    expect(config.multiplexer).toEqual({
+      type: 'cmux-tui',
+      layout: 'tiled',
+      main_pane_size: 60,
+      viewer: 'mini',
+    });
+  });
+
+  test('project multiplexer keys still override the user layer when explicitly set', () => {
+    const projectDir = path.join(tempDir, 'project');
+    const projectConfigDir = path.join(projectDir, '.opencode');
+    fs.mkdirSync(path.join(userConfigDir, 'opencode'), {
+      recursive: true,
+    });
+    fs.mkdirSync(projectConfigDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(userConfigDir, 'opencode', 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        multiplexer: { type: 'tmux', viewer: 'mini' },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(projectConfigDir, 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        multiplexer: { type: 'herdr', viewer: 'tui' },
+      }),
+    );
+
+    const config = loadPluginConfig(projectDir);
+
+    expect(config.multiplexer).toEqual({
+      type: 'herdr',
+      layout: 'main-vertical',
+      main_pane_size: 60,
+      viewer: 'tui',
+    });
+  });
+
+  test('user multiplexer survives when the project config has no multiplexer block', () => {
+    const projectDir = path.join(tempDir, 'project');
+    const projectConfigDir = path.join(projectDir, '.opencode');
+    fs.mkdirSync(path.join(userConfigDir, 'opencode'), {
+      recursive: true,
+    });
+    fs.mkdirSync(projectConfigDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(userConfigDir, 'opencode', 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        multiplexer: { viewer: 'mini' },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(projectConfigDir, 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        agents: { oracle: { model: 'test/model' } },
+      }),
+    );
+
+    const config = loadPluginConfig(projectDir);
+
+    expect(config.multiplexer).toEqual({
+      type: 'none',
+      layout: 'main-vertical',
+      main_pane_size: 60,
+      viewer: 'mini',
+    });
+  });
+
+  test('project main_pane_size does not reset the user multiplexer type', () => {
+    const projectDir = path.join(tempDir, 'project');
+    const projectConfigDir = path.join(projectDir, '.opencode');
+    fs.mkdirSync(path.join(userConfigDir, 'opencode'), {
+      recursive: true,
+    });
+    fs.mkdirSync(projectConfigDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(userConfigDir, 'opencode', 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        multiplexer: { type: 'tmux', layout: 'tiled' },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(projectConfigDir, 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        multiplexer: { main_pane_size: 40 },
+      }),
+    );
+
+    const config = loadPluginConfig(projectDir);
+
+    expect(config.multiplexer).toEqual({
+      type: 'tmux',
+      layout: 'tiled',
+      main_pane_size: 40,
+      viewer: 'tui',
+    });
+  });
 });
 
 describe('onWarning callback', () => {
