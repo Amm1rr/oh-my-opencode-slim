@@ -15,12 +15,14 @@ import { stateFilePath } from './companion/manager';
 import { RuntimeConfig } from './config/runtime';
 import * as wakeHooks from './hooks';
 import { isTaggedPart, stripTaggedContent } from './hooks/cache-safe-injection';
+import { JSON_ERROR_REMINDER } from './hooks/json-error-recovery/hook';
 import {
   getWakeProgress,
   resetOrchestratorWakeGateForTests,
 } from './hooks/orchestrator-wake/wake-gate';
 import { PHASE_REMINDER_METADATA_KEY } from './hooks/phase-reminder';
 import { BACKGROUND_JOB_BOARD_METADATA_KEY } from './hooks/task-session-manager';
+import { LOOP_GUARD_WARNING } from './hooks/tool-loop-guard/hook';
 import type { MessageWithParts } from './hooks/types';
 import pluginModuleDefault, { OhMyOpenCodeLite as plugin } from './index';
 import { MarketplaceStore } from './marketplace/store';
@@ -1379,6 +1381,163 @@ describe('plugin reload generation cleanup', () => {
       await feedCacheBustSequence(hooks, 'gated');
       await loggerModule.flushLoggerForTesting();
       expect(readPluginLog()).not.toContain('prompt-cache bust');
+    } finally {
+      await hooks.dispose?.();
+    }
+  });
+
+  test('disabled_hooks tool guards stop intercepting tool calls entirely', async () => {
+    await Bun.write(
+      `${projectDir}/oh-my-opencode-slim.json`,
+      JSON.stringify({
+        companion: { enabled: false },
+        disabled_hooks: [
+          'json-error-recovery',
+          'tool-loop-guard',
+          'search-path-guard',
+          'absolute-path-rescue',
+          'apply-patch',
+        ],
+      }),
+    );
+    await Bun.write(`${projectDir}/sample.txt`, 'alpha\nbeta\ngamma\n');
+    await mkdir(`${projectDir}/src`, { recursive: true });
+    await Bun.write(`${projectDir}/src/app.ts`, 'export {};\n');
+    const hooks = await createHooks();
+    try {
+      // apply-patch: the unrecoverable patch passes through untouched.
+      const patchText =
+        '*** Begin Patch\n*** Update File: sample.txt\n@@\n-missing\n+omega\n*** End Patch';
+      const patchOutput = { args: { patchText } };
+      await hooks['tool.execute.before']?.(
+        {
+          tool: 'apply_patch',
+          sessionID: 'guards-off',
+          callID: 'g-1',
+        } as never,
+        patchOutput as never,
+      );
+      expect(patchOutput.args.patchText).toBe(patchText);
+
+      // absolute-path-rescue: the guessed path is left as written.
+      const guessed = `/${path.basename(projectDir)}/src/app.ts`;
+      const rescueOutput = { args: { filePath: guessed } };
+      await hooks['tool.execute.before']?.(
+        { tool: 'read', sessionID: 'guards-off', callID: 'g-2' } as never,
+        rescueOutput as never,
+      );
+      expect(rescueOutput.args.filePath).toBe(guessed);
+
+      // search-path-guard: grep on a missing path resolves instead of
+      // rejecting.
+      await expect(
+        hooks['tool.execute.before']?.(
+          { tool: 'grep', sessionID: 'guards-off', callID: 'g-3' } as never,
+          {
+            args: { path: `${projectDir}/does-not-exist/missing.txt` },
+          } as never,
+        ),
+      ).resolves.toBeUndefined();
+
+      // tool-loop-guard: three identical calls never append the warning.
+      for (const callID of ['g-4', 'g-5', 'g-6']) {
+        await hooks['tool.execute.before']?.(
+          { tool: 'read', sessionID: 'loop-off', callID } as never,
+          { args: { filePath: 'a.ts' } } as never,
+        );
+        const output = { output: '...file contents...', metadata: {} };
+        await hooks['tool.execute.after']?.(
+          { tool: 'read', sessionID: 'loop-off', callID } as never,
+          output as never,
+        );
+        expect(output.output).toBe('...file contents...');
+      }
+
+      // json-error-recovery: the malformed output surfaces raw.
+      const jsonOutput = {
+        title: 'Tool Error',
+        output: "JSON parse error: expected '}' in JSON body",
+        metadata: {},
+      };
+      await hooks['tool.execute.after']?.(
+        { tool: 'Edit', sessionID: 'guards-off', callID: 'g-7' } as never,
+        jsonOutput as never,
+      );
+      expect(jsonOutput.output).toBe(
+        "JSON parse error: expected '}' in JSON body",
+      );
+    } finally {
+      await hooks.dispose?.();
+    }
+  });
+
+  test('tool guards act on the default config (positive control)', async () => {
+    await Bun.write(`${projectDir}/sample.txt`, 'alpha\nbeta\ngamma\n');
+    await mkdir(`${projectDir}/src`, { recursive: true });
+    await Bun.write(`${projectDir}/src/app.ts`, 'export {};\n');
+    const hooks = await createHooks();
+    try {
+      // apply-patch rejects the unrecoverable patch.
+      const patchText =
+        '*** Begin Patch\n*** Update File: sample.txt\n@@\n-missing\n+omega\n*** End Patch';
+      await expect(
+        hooks['tool.execute.before']?.(
+          {
+            tool: 'apply_patch',
+            sessionID: 'guards-on',
+            callID: 'c-1',
+          } as never,
+          { args: { patchText } } as never,
+        ),
+      ).rejects.toThrow('apply_patch verification failed');
+
+      // absolute-path-rescue rewrites the guessed path to the existing
+      // suffix.
+      const rescueOutput = {
+        args: { filePath: `/${path.basename(projectDir)}/src/app.ts` },
+      };
+      await hooks['tool.execute.before']?.(
+        { tool: 'read', sessionID: 'guards-on', callID: 'c-2' } as never,
+        rescueOutput as never,
+      );
+      expect(rescueOutput.args.filePath).toBe(`${projectDir}/src/app.ts`);
+
+      // search-path-guard rejects grep on a missing path.
+      await expect(
+        hooks['tool.execute.before']?.(
+          { tool: 'grep', sessionID: 'guards-on', callID: 'c-3' } as never,
+          {
+            args: { path: `${projectDir}/does-not-exist/missing.txt` },
+          } as never,
+        ),
+      ).rejects.toThrow('Search path does not exist');
+
+      // tool-loop-guard warns on the third identical call.
+      let thirdOutput: { output: unknown } | undefined;
+      for (const callID of ['c-4', 'c-5', 'c-6']) {
+        await hooks['tool.execute.before']?.(
+          { tool: 'read', sessionID: 'loop-on', callID } as never,
+          { args: { filePath: 'a.ts' } } as never,
+        );
+        thirdOutput = { output: '...file contents...', metadata: {} };
+        await hooks['tool.execute.after']?.(
+          { tool: 'read', sessionID: 'loop-on', callID } as never,
+          thirdOutput as never,
+        );
+      }
+      expect(String(thirdOutput?.output)).toContain(LOOP_GUARD_WARNING);
+
+      // json-error-recovery appends the reminder.
+      const jsonOutput = {
+        title: 'Tool Error',
+        output: "JSON parse error: expected '}' in JSON body",
+        metadata: {},
+      };
+      await hooks['tool.execute.after']?.(
+        { tool: 'Edit', sessionID: 'guards-on', callID: 'c-7' } as never,
+        jsonOutput as never,
+      );
+      expect(String(jsonOutput.output)).toContain(JSON_ERROR_REMINDER);
     } finally {
       await hooks.dispose?.();
     }

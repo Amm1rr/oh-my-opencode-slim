@@ -2218,18 +2218,27 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     },
 
     'tool.execute.before': async (input, output) => {
-      await applyPatch['tool.execute.before'](input as never, output as never);
+      if (!runtime.disabledHooks.has('apply-patch')) {
+        await applyPatch['tool.execute.before'](
+          input as never,
+          output as never,
+        );
+      }
       // Rewrite guessed non-existing absolute paths BEFORE the search
       // guard: the guard blocks grep/glob on missing paths, so running
       // the rescue after it would never see a rescuable path (#1143).
-      await absolutePathRescue['tool.execute.before'](
-        input as never,
-        output as never,
-      );
-      await searchPathGuard['tool.execute.before'](
-        input as never,
-        output as never,
-      );
+      if (!runtime.disabledHooks.has('absolute-path-rescue')) {
+        await absolutePathRescue['tool.execute.before'](
+          input as never,
+          output as never,
+        );
+      }
+      if (!runtime.disabledHooks.has('search-path-guard')) {
+        await searchPathGuard['tool.execute.before'](
+          input as never,
+          output as never,
+        );
+      }
       await deepworkGuardHook['tool.execute.before'](
         input as never,
         output as never,
@@ -2280,10 +2289,12 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       // In particular, search-path-guard can reject grep/glob before the host
       // emits tool.execute.after; running the loop guard first would leave a
       // pending call-key entry with no completion to consume it.
-      await toolLoopGuard['tool.execute.before'](
-        input as never,
-        output as never,
-      );
+      if (!runtime.disabledHooks.has('tool-loop-guard')) {
+        await toolLoopGuard['tool.execute.before'](
+          input as never,
+          output as never,
+        );
+      }
     },
 
     'command.execute.before': async (input, output) => {
@@ -2772,11 +2783,15 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       if (input.tool.toLowerCase() === 'task' && input.callID) {
         dropPendingV1ChildModelsForCall(input.callID);
       }
-      await jsonErrorRecoveryAfter(input, output);
-      await toolLoopGuard['tool.execute.after'](
-        input as never,
-        output as never,
-      );
+      if (!runtime.disabledHooks.has('json-error-recovery')) {
+        await jsonErrorRecoveryAfter(input, output);
+      }
+      if (!runtime.disabledHooks.has('tool-loop-guard')) {
+        await toolLoopGuard['tool.execute.after'](
+          input as never,
+          output as never,
+        );
+      }
       await taskSessionManagerAfter(input, output);
     },
   } as Hooks & {
