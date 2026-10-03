@@ -272,6 +272,7 @@ describe('PluginConfigSchema disabled_hooks and disabled_commands', () => {
       'search-path-guard',
       'absolute-path-rescue',
       'apply-patch',
+      'council-inject',
     ]);
     expect(DISABLED_COMMANDS_VALUES).toEqual([
       'interview',

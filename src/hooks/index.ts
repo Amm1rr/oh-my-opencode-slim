@@ -3,6 +3,10 @@ export { createApplyPatchHook } from './apply-patch';
 export { createAutoUpdateCheckerHook } from './auto-update-checker';
 export { createCacheMonitorHook } from './cache-monitor';
 export { createChatHeadersHook } from './chat-headers';
+export {
+  COUNCIL_INJECT_METADATA_KEY,
+  createCouncilInjectHook,
+} from './council-inject';
 export { createDeepworkCommandHook } from './deepwork';
 export { createDeepworkGuardHook } from './deepwork-guard';
 export {

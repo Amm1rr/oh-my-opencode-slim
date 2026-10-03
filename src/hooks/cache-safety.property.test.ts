@@ -364,16 +364,20 @@ describe('cache-safety: pipeline drift guard', () => {
     // step. Update createPipeline() in this file to match, then update this
     // expectation — the property tests are only meaningful while the two
     // stay in lockstep.
-    expect(orderedCalls).toEqual(['taskSessionManagerHook', 'phaseReminder']);
+    expect(orderedCalls).toEqual([
+      'taskSessionManagerHook',
+      'phaseReminder',
+      'councilInject',
+    ]);
     expect(source).toContain(
       'await taskSessionManagerHook.injectBackgroundJobBoard(',
     );
 
-    // One handler definition plus the two remaining dispatch calls above.
+    // One handler definition plus the three remaining dispatch calls above.
     const literalCount = source.split(
       "'experimental.chat.messages.transform'",
     ).length;
-    expect(literalCount - 1).toBe(3);
+    expect(literalCount - 1).toBe(4);
   });
 
   test('every hook module defining a message transform is covered here', async () => {
@@ -393,6 +397,7 @@ describe('cache-safety: pipeline drift guard', () => {
     // above (in the same order as src/index.ts) so the cache-safety
     // properties cover it, then add it to this list.
     expect(hookFilesWithTransforms.sort()).toEqual([
+      'council-inject/index.ts',
       'phase-reminder/index.ts',
       'task-session-manager/index.ts',
     ]);

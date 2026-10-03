@@ -15,6 +15,7 @@ import { RuntimeConfig } from '../config/runtime';
 import { BackgroundJobBoard, createInternalAgentTextPart } from '../utils';
 import { createDisplayNameMentionRewriter } from '../utils/agent-variant';
 import { isTaggedPart } from './cache-safe-injection';
+import { createCouncilInjectHook } from './council-inject';
 import { processImageAttachments } from './image-hook';
 import { createPhaseReminderHook } from './phase-reminder';
 import { SessionLifecycle } from './session-lifecycle';
@@ -88,6 +89,11 @@ export function createPipeline(options: PipelineOptions = {}): Pipeline {
     shouldInject: shouldInjectOrchestratorReminder,
   });
 
+  const councilInject = createCouncilInjectHook({
+    seats: ['councillor-alpha'],
+    wording: { tool: 'task', agentParam: 'subagent_type' },
+  });
+
   const run = async (output: TransformOutput): Promise<void> => {
     for (const message of output.messages as MessageWithParts[]) {
       if (message.info.role !== 'user') continue;
@@ -110,6 +116,10 @@ export function createPipeline(options: PipelineOptions = {}): Pipeline {
       output as never,
     );
     await phaseReminder['experimental.chat.messages.transform'](
+      {} as never,
+      output as never,
+    );
+    await councilInject['experimental.chat.messages.transform'](
       {} as never,
       output as never,
     );

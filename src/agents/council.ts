@@ -15,7 +15,14 @@ export function ensureCouncilCompactionException(prompt: string): string {
   return `${prompt}\n\n${COUNCIL_COMPACTION_EXCEPTION}`;
 }
 
-const COUNCIL_SYNTHESIS_REINFORCEMENT = `\n\n---\n\nYou MUST follow the Synthesis Process steps before producing output: review each councillor response individually by name, then produce the required output with a synthesized Council Response, a Per-Councillor Details section using each councillor's exact seat name (e.g. "alpha", not the model label), and a Council Summary with Consensus Level (unanimous|majority|split), Agreed Points, Disagreements + resolution, Remaining Uncertainty, and Recommended Action. ${COUNCIL_COMPACTION_EXCEPTION}`;
+// The synthesis reinforcement must survive a custom prompt override. When
+// the effective base prompt still carries the report format, a lean pointer
+// suffices; when an override dropped it, the fallback carries the required
+// structure itself. The compaction exception is kept in both places
+// deliberately — a custom prompt override must not be able to drop it.
+const COUNCIL_SYNTHESIS_POINTER = `\n\n---\n\nYou MUST follow the Synthesis Process and Required Output Format above. ${COUNCIL_COMPACTION_EXCEPTION}`;
+
+const COUNCIL_SYNTHESIS_FALLBACK = `\n\n---\n\nYou MUST produce: ## Council Response (the best synthesized answer), ## Per-Councillor Details (each councillor by exact seat name, e.g. "alpha", not the model label; note failed or timed-out seats instead of omitting them), and ## Council Summary (Consensus Level: unanimous|majority|split; Agreed Points; Disagreements + resolution; Remaining Uncertainty; Recommended Action). ${COUNCIL_COMPACTION_EXCEPTION}`;
 
 const COUNCIL_AGENT_PROMPT = `You are the Council agent - a \
 synthesizer for multi-model consensus.
@@ -75,19 +82,23 @@ export function createCouncilAgent(
   customPrompt?: string,
   customAppendPrompt?: string,
 ): AgentDefinition {
-  const prompt =
-    resolvePrompt(
-      'council',
-      customPrompt,
-      undefined,
-      COUNCIL_AGENT_PROMPT,
-      customAppendPrompt,
-    ) + COUNCIL_SYNTHESIS_REINFORCEMENT;
+  const base = resolvePrompt(
+    'council',
+    customPrompt,
+    undefined,
+    COUNCIL_AGENT_PROMPT,
+    customAppendPrompt,
+  );
+  // A custom prompt that dropped the report format gets it back via the
+  // fallback; the default prompt keeps the lean pointer.
+  const prompt = base.includes('## Council Response')
+    ? base + COUNCIL_SYNTHESIS_POINTER
+    : base + COUNCIL_SYNTHESIS_FALLBACK;
 
   return {
     name: 'council',
     description:
-      'Multi-model consensus agent that synthesizes viewpoints from council members to make informed decisions with higher confidence than single models',
+      'Multi-model consensus agent that synthesizes viewpoints from council members',
     config: {
       model,
       prompt,

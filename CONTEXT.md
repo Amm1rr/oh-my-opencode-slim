@@ -15,7 +15,7 @@ A glossary of the terms used in this project's domain. Definitions describe what
 - **Observer** — Subagent for visual/media analysis (images, PDFs, diagrams). Disabled by default.
 - **Council** — A multi-LLM agent that runs several councillors and synthesizes their views.
 - **Councillor** — A read-only LLM advisor dispatched as a subagent by the orchestrator. Each councillor is registered as `councillor-<name>` from the council preset. Not hidden; visible in the TUI as panes.
-- **Agent mode** — SDK classification of an agent: `primary` (orchestrator), `subagent` (specialist), or `all` (council, both user-facing and delegatable).
+- **Agent mode** — SDK classification of an agent: `primary` (orchestrator) or `subagent` (specialist, including council — the synthesizer is dispatched by the orchestrator, never switched to as a primary).
 - **Protected agent** — An agent that cannot be disabled (orchestrator).
 - **Custom agent** — A user-defined agent supplied via config, distinct from the built-ins.
 - **ACP agent** — An external agent defined via the Agent Communication Protocol, run through `acp_run`.
