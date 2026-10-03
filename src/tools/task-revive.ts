@@ -43,7 +43,7 @@ export function createTaskReviveTool(
   const idParam = idParamFor(options.input);
   const task_revive = tool({
     description:
-      'Revive a retained background task in its existing session with a new prompt. Tracking does not survive a host restart; an untracked session owned by this parent is verified against the host and re-adopted on demand.',
+      'Revive a retained background task in its existing session with a new prompt. An untracked session ID (e.g. after a host restart) is verified against the host and re-adopted on demand.',
     args: {
       ...taskRefArgs(idParam),
       prompt: z.string().min(1).describe('Prompt for the revived task'),

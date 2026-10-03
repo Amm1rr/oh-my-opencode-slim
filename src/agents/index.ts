@@ -20,7 +20,7 @@ import {
   createCouncilAgent,
   ensureCouncilCompactionException,
 } from './council';
-import { buildCouncillorAgents, getCouncillorSeatName } from './council-agents';
+import { buildCouncillorAgents } from './council-agents';
 import { createCouncillorAgent } from './councillor';
 import { createDesignerAgent } from './designer';
 import { createExplorerAgent } from './explorer';
@@ -1083,19 +1083,16 @@ export function createAgents(
     updatedPrompt = `${updatedPrompt}\n\n${rewrittenAcps.join('\n\n')}`;
   }
 
-  // Inject council-dispatch block if dynamic councillors exist (flatten mode)
+  // Static pointer, not the full procedure: the Council Mode dispatch block
+  // is appended per-message by the council-inject hook when a council trigger
+  // is detected. The seat list lives here because hidden councillors appear
+  // in no host catalog — this line is the orchestrator's only always-present
+  // source of seat IDs.
   if (councillorAgents.length > 0) {
-    const dispatchList = councillorAgents
-      .map(
-        (a: AgentDefinition) =>
-          `   - ${vocab.tool}(${vocab.agentParam}='${a.name}', description='Councillor ${getCouncillorSeatName(a.name)} on <brief topic>', prompt=<user's question>)`,
-      )
-      .join('\n');
-    updatedPrompt = `${updatedPrompt}\n\n## Council Mode\n\nWhen you need to run a council or the user asks for consensus/multiple opinions, use this procedure INSTEAD of delegating to @council:\n\n1. If the question references an external resource (PR, URL, issue, doc), fetch its content FIRST using your own tools (webfetch/bash/gh), then embed a concise summary in the prompt you send to each councillor — councillors have read-only codebase access only and cannot fetch external content themselves.\n2. Dispatch the user's question (with any fetched context) to each councillor in PARALLEL via ${vocab.tool}():\n${dispatchList}\n3. Collect ALL councillor responses. If any councillor returns empty or does not respond within 3 minutes, proceed without it — do not wait indefinitely. If a councillor's response is empty, retry that councillor once before continuing.\n4. Call ${vocab.tool}(${vocab.agentParam}='council', description='Synthesize council report') with a prompt that includes the original user question AND all councillor responses. For each councillor, label its response with its seat name AND its model (e.g. "alpha (gpt-6-luna)"). Format each councillor's seat name and response clearly separated. If a councillor failed or timed out, include that status explicitly (e.g. "beta (gemini-3-pro): FAILED/TIMED OUT") instead of omitting it. Skip only councillors that returned empty after one retry.\n5. Present the council's synthesized report.\n\nThis ensures each councillor runs with its own model and the council agent synthesizes the full multi-model consensus.${
-      vocab.modelParam
-        ? ` The ${vocab.tool} tool also accepts an optional \`${vocab.modelParam}\` argument ("providerID/modelID"). Only set it when the user explicitly asks for a specific model or variant; never guess the ID — look it up with the models tool first, filtering to your own provider.`
-        : ''
-    }`;
+    const seatList = councillorAgents
+      .map((a: AgentDefinition) => a.name)
+      .join(', ');
+    updatedPrompt = `${updatedPrompt}\n\n## Council\nSeats: ${seatList} — dispatch via ${vocab.tool}() when the user asks for consensus; full procedure auto-injected on council keywords.`;
   }
 
   orchestrator.config.prompt = updatedPrompt;
@@ -1133,11 +1130,7 @@ export function getAgentConfigsFromDefinitions(
       hidden?: boolean;
     },
   ): void => {
-    if (name === 'council') {
-      // Council is callable both as a primary agent (user-facing)
-      // and as a subagent (orchestrator can delegate to it)
-      sdkConfig.mode = 'all';
-    } else if (name === 'councillor' || name.startsWith('councillor-')) {
+    if (name === 'councillor' || name.startsWith('councillor-')) {
       // Internal agent - subagent mode, hidden from @ autocomplete.
       // Dynamic councillors are named councillor-<seat> (see council-agents.ts).
       sdkConfig.mode = 'subagent';

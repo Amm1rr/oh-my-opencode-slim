@@ -33,11 +33,13 @@ import { RuntimeConfig } from './config/runtime';
 import { getBuildInfo } from './generated/build-info';
 import { HEALTH_CHECK, minimumExpectedToolCount } from './health-check';
 import {
+  COUNCIL_INJECT_METADATA_KEY,
   createAbsolutePathRescueHook,
   createApplyPatchHook,
   createAutoUpdateCheckerHook,
   createCacheMonitorHook,
   createChatHeadersHook,
+  createCouncilInjectHook,
   createDeepworkCommandHook,
   createDeepworkGuardHook,
   createJsonErrorRecoveryHook,
@@ -590,6 +592,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   let loopCommandHook: ReturnType<typeof createLoopCommandHook>;
   let taskSessionManagerHook: ReturnType<typeof createTaskSessionManagerHook>;
   let phaseReminder: ReturnType<typeof createPhaseReminderHook> | undefined;
+  let councilInject: ReturnType<typeof createCouncilInjectHook> | undefined;
   let applyPatch: ReturnType<typeof createApplyPatchHook>;
   let searchPathGuard: ReturnType<typeof createSearchPathGuardHook>;
   let absolutePathRescue: ReturnType<typeof createAbsolutePathRescueHook>;
@@ -1279,6 +1282,22 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       phaseReminder = createPhaseReminderHook({
         shouldInject: shouldInjectOrchestratorReminder,
       });
+    }
+
+    // Keyword-triggered Council Mode injection: same gate pattern as the
+    // phase reminder, scoped to sessions with configured councillor seats.
+    // The seat list comes from the same agentDefs the orchestrator prompt's
+    // seat pointer uses, so the two can never disagree.
+    if (!runtime.disabledHooks.has('council-inject')) {
+      const councilSeats = agentDefs
+        .filter((a) => a.name.startsWith('councillor-'))
+        .map((a) => a.name);
+      if (councilSeats.length > 0) {
+        councilInject = createCouncilInjectHook({
+          seats: councilSeats,
+          wording: delegation,
+        });
+      }
     }
 
     applyPatch = createApplyPatchHook(ctx);
@@ -2769,9 +2788,16 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           typedOutput as never,
         );
       }
+      if (councilInject) {
+        await councilInject['experimental.chat.messages.transform'](
+          input as never,
+          typedOutput as never,
+        );
+      }
       await taskSessionManagerHook.injectBackgroundJobBoard(input, typedOutput);
       if (compacting) {
         stripTaggedContent(typedOutput.messages, PHASE_REMINDER_METADATA_KEY);
+        stripTaggedContent(typedOutput.messages, COUNCIL_INJECT_METADATA_KEY);
       }
     },
 

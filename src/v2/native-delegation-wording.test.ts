@@ -137,26 +137,33 @@ describe('buildOrchestratorPrompt delegation vocabulary', () => {
  * subagent tool supports the optional `model` parameter. */
 const MODEL_PARAM_SENTENCE = ` The subagent tool also accepts an optional \`model\` argument ("providerID/modelID"). Only set it when the user explicitly asks for a specific model or variant; never guess the ID — look it up with the models tool first, filtering to your own provider.`;
 
-describe('createAgents council dispatch vocabulary', () => {
-  test('v2 hostFlavor emits subagent(agent=...) dispatch instructions', () => {
+describe('createAgents council seat pointer vocabulary', () => {
+  test('v2 hostFlavor emits a subagent() seat pointer, not the full procedure', () => {
     const prompt = orchestratorPromptFor('v2');
 
-    expect(prompt).toContain('## Council Mode');
-    expect(prompt).toContain("subagent(agent='councillor-alpha'");
-    expect(prompt).toContain('in PARALLEL via subagent():');
-    expect(prompt).toContain("subagent(agent='council'");
+    // Static pointer: seat IDs + native vocabulary only. The full Council
+    // Mode dispatch procedure is appended per-message by the council-inject
+    // hook when a council trigger is detected — never carried statically.
+    expect(prompt).toContain('## Council');
+    expect(prompt).toContain('Seats: councillor-alpha');
+    expect(prompt).toContain('dispatch via subagent()');
+    expect(prompt).not.toContain('## Council Mode');
+    expect(prompt).not.toContain('in PARALLEL');
+    // The model-param guidance survives only in the orchestrator base
+    // prompt now that the block no longer restates it.
     expect(prompt).toContain(MODEL_PARAM_SENTENCE);
     expect(prompt).not.toContain('subagent_type');
     expect(prompt).not.toContain('task(');
   });
 
-  test('v1 (no hostFlavor) keeps the exact v1 council dispatch sentence', () => {
+  test('v1 (no hostFlavor) keeps the task() seat pointer', () => {
     const prompt = orchestratorPromptFor();
 
-    expect(prompt).toContain('## Council Mode');
-    expect(prompt).toContain("task(subagent_type='councillor-alpha'");
-    expect(prompt).toContain('in PARALLEL via task():');
-    expect(prompt).toContain("task(subagent_type='council'");
+    expect(prompt).toContain('## Council');
+    expect(prompt).toContain('Seats: councillor-alpha');
+    expect(prompt).toContain('dispatch via task()');
+    expect(prompt).not.toContain('## Council Mode');
+    expect(prompt).not.toContain('subagent(');
     expect(prompt).not.toContain(MODEL_PARAM_SENTENCE);
   });
 

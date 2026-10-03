@@ -40,6 +40,25 @@ describe('createCouncilAgent', () => {
     expect(prompt).toContain(COMPACTION_EXCEPTION);
   });
 
+  test('custom prompt override retains the required report format', () => {
+    const prompt = councilPrompt(
+      'test/model',
+      'Custom council prompt with no format rules.',
+    );
+    // The fallback reinforcement restores the format the override dropped.
+    expect(prompt).toContain('You MUST produce: ## Council Response');
+    expect(prompt).toContain('## Per-Councillor Details');
+    expect(prompt).toContain('## Council Summary');
+  });
+
+  test('default prompt keeps the lean pointer, not the fallback', () => {
+    const prompt = councilPrompt('test/model');
+    expect(prompt).toContain(
+      'You MUST follow the Synthesis Process and Required Output Format above',
+    );
+    expect(prompt).not.toContain('You MUST produce: ## Council Response');
+  });
+
   test('ensureCouncilCompactionException is idempotent', () => {
     const once = ensureCouncilCompactionException('custom council prompt');
     const twice = ensureCouncilCompactionException(once);

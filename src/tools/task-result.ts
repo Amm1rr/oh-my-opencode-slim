@@ -66,9 +66,7 @@ export function createTaskResultTool(
   const idParam = idParamFor(options.input);
   return {
     task_result: tool({
-      description: `Retrieve the final text already produced by a specialist task, or inspect its active state without resuming or re-running it.
-
-Use this when the user asks to see a prior task's full result, or before retrying work whose completed output may already answer the request. If the task is still running, this returns a status message; only a completed task returns its final text. Accepts either the native ${idParam} or the parent-scoped alias shown in the Background Job Board. This tool is read-only and never sends a new prompt to the specialist.`,
+      description: `Read-only: return a completed specialist task's final text, or a status line while it is still running. Never re-runs or re-prompts the specialist. Use this when the user asks to see a prior task's full result, or before retrying work whose completed output may already answer the request. Accepts the native ${idParam} or the parent-scoped alias from the Background Job Board.`,
       args: {
         ...taskRefArgs(idParam),
       },

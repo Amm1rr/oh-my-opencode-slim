@@ -356,7 +356,7 @@ If any agent fails to respond, check your provider authentication and config fil
 ### 04. Council: The Chorus of Minds
 
 > [!NOTE]
-> **Why doesn't Orchestrator auto-call Council more often?** This is intentional. Council runs multiple models at once, so automatic delegation is kept strict because it is usually the highest-cost path in the system. In practice, Council is meant to be used manually when you want it, for example: <code>@council compare these two architectures</code>.
+> **Why doesn't Orchestrator auto-call Council more often?** This is intentional. Council runs multiple models at once, so automatic delegation is kept strict because it is usually the highest-cost path in the system. In practice, ask for it in your message — mentioning `council`, `@council`, `consensus`, or `共识` injects the Council Mode procedure into that turn and the orchestrator dispatches every councillor seat in parallel, for example: <code>run a council on these two architectures</code>. The full procedure is never carried statically: sessions that never ask for a council pay zero tokens for it, and the injection can be turned off entirely with <code>disabled_hooks: ["council-inject"]</code>.
 
 <table>
   <tr>
@@ -641,7 +641,7 @@ Use this section as a map: start with installation, then jump to features, confi
 
 | Doc | What it covers |
 |-----|----------------|
-| **[Council](docs/council.md)** | Run multiple models in parallel and synthesize a single answer with `@council` |
+| **[Council](docs/council.md)** | Run multiple models in parallel and synthesize a single answer — keyword-triggered via the orchestrator's Council Mode procedure |
 | **[Custom Agents](docs/configuration.md#custom-agents)** | Define your own specialists with custom prompts, models, MCP access, and Orchestrator delegation rules |
 | **[ACP Agents](docs/acp-agents.md)** | Connect external ACP-compatible agents such as Claude Code ACP or Gemini ACP as delegatable subagents; tool and plan progress streams to the TUI while they work |
 | **[Multiplexer Integration](docs/multiplexer-integration.md)** | Watch agents work live in Tmux, Zellij, Herdr, cmux, or kitty panes |

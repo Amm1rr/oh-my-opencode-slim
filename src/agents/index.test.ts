@@ -1163,20 +1163,40 @@ describe('tool permissions', () => {
   });
 });
 
-test('orchestrator prompt includes Council Mode block when councillors exist', () => {
+test('orchestrator prompt carries the council seat pointer when councillors exist', () => {
   const agents = createAgents(runtimeFor({ council: councilConfig() }));
   const orchestrator = agents.find((a) => a.name === 'orchestrator');
   const prompt = orchestrator?.config.prompt as string;
-  expect(prompt).toContain('## Council Mode');
-  expect(prompt).toContain("task(subagent_type='councillor-alpha'");
-  expect(prompt).toContain('proceed without it');
+  expect(prompt).toContain('## Council');
+  expect(prompt).toContain('Seats: councillor-alpha');
+  expect(prompt).toContain('dispatch via task()');
+  // The full dispatch procedure is appended per-message by the
+  // council-inject hook, never carried statically.
+  expect(prompt).not.toContain('## Council Mode');
+  expect(prompt).not.toContain('proceed without it');
 });
 
-test('orchestrator prompt excludes Council Mode when no councillors', () => {
+test('orchestrator prompt excludes the council pointer when no councillors', () => {
   const agents = createAgents(runtimeFor());
   const orchestrator = agents.find((a) => a.name === 'orchestrator');
   const prompt = orchestrator?.config.prompt as string;
-  expect(prompt).not.toContain('## Council Mode');
+  // Contamination-proof: assert on the pointer's distinctive plugin-owned
+  // phrase, not the generic '## Council' header (user-level prompt files
+  // may legitimately contain their own Council sections).
+  expect(prompt).not.toContain(
+    'full procedure auto-injected on council keywords',
+  );
+});
+
+test('council registers as a subagent, not a switchable primary', () => {
+  const runtime = runtimeFor({ council: councilConfig() });
+  const agents = createAgents(runtime);
+  const configs = getAgentConfigsFromDefinitions(runtime, agents) as Record<
+    string,
+    { mode?: string; hidden?: boolean }
+  >;
+  expect(configs.council.mode).toBe('subagent');
+  expect(configs.council.hidden).toBeUndefined();
 });
 
 describe('isSubagent type guard', () => {
@@ -1328,7 +1348,11 @@ describe('createAgents', () => {
     expect(names).toContain('council');
     expect(names).toContain('councillor');
     expect(names).toContain('councillor-alpha');
-    expect(orchestrator?.config.prompt).toContain('@council');
+    // The static council anchor is the seat pointer line; the full procedure
+    // (including the @council synthesis step) is injected per-turn by the
+    // council-inject hook only on council-triggered messages.
+    expect(orchestrator?.config.prompt).toContain('## Council');
+    expect(orchestrator?.config.prompt).toContain('Seats: councillor-alpha');
     expect(configs.council).toBeDefined();
     expect(configs.councillor).toMatchObject({
       mode: 'subagent',
