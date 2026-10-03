@@ -1172,6 +1172,15 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "mustbethecode",
+      "name": "GWA",
+      "avatar_url": "https://avatars.githubusercontent.com/u/42842700?v=4",
+      "profile": "https://mustbethecode.com/",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "commitConvention": "angular"

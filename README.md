@@ -676,7 +676,7 @@ Use this section as a map: start with installation, then jump to features, confi
   <p><sub>Every merged contribution leaves a mark on the realm.</sub></p>
 
   <!-- ALL-CONTRIBUTORS-BADGE:START - Do not remove or modify this section -->
-[![All Contributors](https://img.shields.io/badge/all_contributors-129-orange.svg?style=flat-square)](#contributors-)
+[![All Contributors](https://img.shields.io/badge/all_contributors-130-orange.svg?style=flat-square)](#contributors-)
 <!-- ALL-CONTRIBUTORS-BADGE:END -->
 </div>
 
@@ -859,6 +859,7 @@ Use this section as a map: start with installation, then jump to features, confi
       <td align="center" valign="top" width="16.66%"><a href="https://github.com/unsnow-iac"><img src="https://avatars.githubusercontent.com/u/256081678?v=4?s=100" width="100px;" alt="unsnow-iac"/><br /><sub><b>unsnow-iac</b></sub></a><br /><a href="https://github.com/alvinunreal/oh-my-opencode-slim/commits?author=unsnow-iac" title="Code">💻</a></td>
       <td align="center" valign="top" width="16.66%"><a href="https://github.com/guidan-nick"><img src="https://avatars.githubusercontent.com/u/224735395?v=4?s=100" width="100px;" alt="guidan-nick"/><br /><sub><b>guidan-nick</b></sub></a><br /><a href="https://github.com/alvinunreal/oh-my-opencode-slim/commits?author=guidan-nick" title="Code">💻</a></td>
       <td align="center" valign="top" width="16.66%"><a href="https://rclb.dev/"><img src="https://avatars.githubusercontent.com/u/856570?v=4?s=100" width="100px;" alt="Rodrigo Belem"/><br /><sub><b>Rodrigo Belem</b></sub></a><br /><a href="https://github.com/alvinunreal/oh-my-opencode-slim/commits?author=rbelem" title="Code">💻</a></td>
+      <td align="center" valign="top" width="16.66%"><a href="https://mustbethecode.com/"><img src="https://avatars.githubusercontent.com/u/42842700?v=4?s=100" width="100px;" alt="GWA"/><br /><sub><b>GWA</b></sub></a><br /><a href="https://github.com/alvinunreal/oh-my-opencode-slim/commits?author=mustbethecode" title="Code">💻</a></td>
     </tr>
   </tbody>
 </table>
