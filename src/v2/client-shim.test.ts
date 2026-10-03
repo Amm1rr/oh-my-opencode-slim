@@ -1492,7 +1492,12 @@ describe('v2 client shim foreground-fallback integration', () => {
       role: 'user',
       time: { created: 1789774955129 },
     });
-    expect(user.parts).toEqual([]);
+    expect(user.parts).toEqual([{ type: 'text', text: 'probe' }]);
+    expect(user.info.sourceType).toBe('user');
+    expect(idle.info).toMatchObject({
+      sourceType: 'idle',
+      outcome: 'succeeded',
+    });
     // Assistant: time/finish preserved; tool state passes through in the
     // v1 vocabulary the transcript classifier reads.
     expect(assistant.info).toMatchObject({

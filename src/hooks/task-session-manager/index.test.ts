@@ -140,6 +140,7 @@ type HookOptions = {
   pendingCallTracker?: PendingCallTracker;
   getModelForAgent?: (agentType: string) => string | undefined;
   hostFlavor?: string;
+  isDisposed?: () => boolean;
 };
 
 function createHook(options?: HookOptions) {
@@ -222,6 +223,7 @@ function createHook(options?: HookOptions) {
       idleReconcileDelayMs: options?.idleReconcileDelayMs,
       runtimeStatusReconcileDelayMs: options?.runtimeStatusReconcileDelayMs,
       hostFlavor: options?.hostFlavor,
+      isDisposed: options?.isDisposed,
     },
   );
 
@@ -884,6 +886,82 @@ describe('task-session-manager hook', () => {
       await hook.event({ event: { type: 'server.instance.disposed' } });
       logs.mockRestore();
     }
+  });
+
+  test('native v1 adoption waits for host evidence and dispose writes no lease', async () => {
+    let disposed = false;
+    let releaseGet: (value: unknown) => void = () => {};
+    const get = mock(
+      () =>
+        new Promise((resolve) => {
+          releaseGet = resolve;
+        }),
+    );
+    const board = new BackgroundJobBoard();
+    const pendingCallTracker = createPendingCallTracker();
+    const markUsed = spyOn(board, 'markUsed');
+    const acquire = spyOn(board, 'acquireRelaunchLease');
+    const adopt = spyOn(board, 'adoptTerminal');
+    const { hook, complete } = createHook({
+      backgroundJobBoard: board,
+      pendingCallTracker,
+      sessionClient: {
+        get,
+        status: mock(async () => ({ data: {} })),
+      },
+      isDisposed: () => disposed,
+    });
+    complete('ses_waiting', 'done');
+    await hook['experimental.chat.messages.transform'](
+      {},
+      {
+        messages: [
+          {
+            info: {
+              role: 'assistant',
+              sessionID: 'parent-1',
+              time: { created: 100 },
+            },
+            parts: [],
+          },
+          {
+            info: {
+              role: 'user',
+              agent: 'orchestrator',
+              sessionID: 'parent-1',
+              time: { created: 500 },
+            },
+            parts: [{ type: 'text', text: 'continue' }],
+          },
+        ],
+      },
+    );
+    const pending = hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'dispose-adopt' },
+      {
+        args: {
+          task_id: 'ses_waiting',
+          subagent_type: 'explorer',
+          prompt: 'continue',
+        },
+      },
+    );
+    disposed = true;
+    releaseGet({
+      data: {
+        parentID: 'parent-1',
+        title: 'work (@explorer subagent)',
+        time: { created: 50, updated: 160 },
+      },
+    });
+    await expect(pending).rejects.toThrow(
+      'The plugin instance was disposed. No action was sent. No session was created.',
+    );
+    expect(board.get('ses_waiting')).toBeUndefined();
+    expect(adopt).not.toHaveBeenCalled();
+    expect(acquire).not.toHaveBeenCalled();
+    expect(markUsed).not.toHaveBeenCalled();
+    expect(pendingCallTracker.peekByParent('parent-1')).toBeUndefined();
   });
 
   test('rehydrates historical background tasks and keeps absent children provisional', async () => {
@@ -2124,7 +2202,9 @@ describe('task-session-manager hook', () => {
           },
           beforeAcknowledgement,
         ),
-      ).rejects.toThrow(/unreconciled; task\(\) cannot resume/);
+      ).rejects.toThrow(
+        /unreconciled; task\(\) cannot resume[\s\S]*task_revive\(task_id:/,
+      );
       expect(beforeAcknowledgement.args.task_id).toBe(original.alias);
 
       board.markReconciled(original.taskID);
@@ -5904,7 +5984,9 @@ describe('task-session-manager hook', () => {
         { tool: 'task', sessionID: 'parent-1', callID: 'call-1' },
         unreconciled,
       ),
-    ).rejects.toThrow(/unreconciled; task\(\) cannot resume/);
+    ).rejects.toThrow(
+      /unreconciled; task\(\) cannot resume[\s\S]*task_revive\(task_id:/,
+    );
     expect(unreconciled.args.task_id).toBe('ora-1');
 
     board.markReconciled('done-1');
@@ -6118,7 +6200,9 @@ describe('task-session-manager hook', () => {
         { tool: 'task', sessionID: 'parent-1', callID: 'resume' },
         resume,
       ),
-    ).rejects.toThrow(/was not dropped; no new session was created/);
+    ).rejects.toThrow(
+      /was not dropped; no new session was created[\s\S]*task_revive\(task_id: "ses_custom123"/,
+    );
     expect(resume.args.task_id).toBe('ses_custom123');
   });
 
@@ -6133,7 +6217,9 @@ describe('task-session-manager hook', () => {
         { tool: 'task', sessionID: 'parent-1', callID: 'resume' },
         resume,
       ),
-    ).rejects.toThrow(/was not dropped; no new session was created/);
+    ).rejects.toThrow(
+      /was not dropped; no new session was created[\s\S]*task_revive\(task_id: "fix-99"/,
+    );
     expect(resume.args.task_id).toBe('fix-99');
   });
 
@@ -6373,7 +6459,9 @@ describe('task-session-manager hook', () => {
         { tool: 'task', sessionID: 'parent-1', callID: 'resume-1' },
         spawn,
       ),
-    ).rejects.toThrow(/was not dropped; no new session was created/);
+    ).rejects.toThrow(
+      /was not dropped; no new session was created[\s\S]*task_revive\(task_id: "474bd269-eac6-40a9-9408-9fe430e8cd19"/,
+    );
     expect(spawn.args.task_id).toBe('474bd269-eac6-40a9-9408-9fe430e8cd19');
   });
 

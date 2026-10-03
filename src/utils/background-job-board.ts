@@ -111,6 +111,10 @@ export interface BackgroundJobRecord {
   totalErrors?: number;
   timeoutCount?: number;
   lastErrorAt?: number;
+  /** In-memory only: this row is a verified old host round, not a live run. */
+  verifiedRetainedRound?: true;
+  /** Recovery has not sent a prompt; importing a row does not own host work. */
+  recoveredWithoutPrompt?: true;
 }
 
 export interface BackgroundJobBoardOptions {
@@ -127,6 +131,31 @@ export interface BackgroundJobBoardOptions {
    * shared persistence high-water marks (0 without a storage backend —
    * exactly the pre-persistence behavior). */
   aliasCounterHighWater?: (parentSessionID: string, prefix: string) => number;
+  /**
+   * Production boards start each parent unverified. Until a complete host
+   * history floor is applied, new records use the task ID as their alias
+   * and creation still succeeds. Default false keeps direct fixtures on
+   * the historical immediate counter.
+   */
+  deferNumberedAliases?: boolean;
+}
+
+/** Verified host session placed directly into a terminal retained state.
+ * This is a cache observation, not a new model run. */
+export interface RestoreRetainedSessionInput {
+  taskID: string;
+  parentSessionID: string;
+  agent: string;
+  description: string;
+  objective?: string;
+  state: 'completed' | 'error' | 'cancelled' | 'stopped';
+  background: boolean;
+  resultSummary?: string;
+  /** Trusted historical alias. Omit to display the exact session id. */
+  alias?: string;
+  /** Evidence timestamp. Omitted values stay 0; never the recovery clock. */
+  launchedAt?: number;
+  completedAt?: number;
 }
 
 export interface BackgroundJobLaunchInput {
@@ -232,6 +261,11 @@ const AGENT_PREFIX: Record<string, string> = {
   oracle: 'ora',
 };
 
+/** Numbered-alias prefix for an agent. Unknown agents use a 3-letter fallback. */
+export function aliasPrefixForAgent(agent: string): string {
+  return AGENT_PREFIX[agent] ?? (agent.slice(0, 3) || 'job');
+}
+
 export class BackgroundJobBoard implements BackgroundJobStore {
   private terminalGate?: BackgroundJobTerminalGate;
   private readonly jobs = new Map<string, BackgroundJobRecord>();
@@ -252,6 +286,9 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     parentSessionID: string,
     prefix: string,
   ) => number;
+  private readonly deferNumberedAliases: boolean;
+  /** Parents whose numbered aliases were enabled by a verified history floor. */
+  private readonly numberedAliasReady = new Set<string>();
 
   constructor(options: BackgroundJobBoardOptions = {}) {
     this.maxReusablePerAgent =
@@ -264,6 +301,48 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     this.delegationTool = options.delegationTool ?? 'task';
     this.aliasCounterHighWater =
       options.aliasCounterHighWater ?? aliasHighWaterMark;
+    this.deferNumberedAliases = options.deferNumberedAliases === true;
+  }
+
+  /** False only while this production parent is still waiting for a verified floor. */
+  isNumberedAliasReady(parentSessionID: string): boolean {
+    if (!this.deferNumberedAliases) return true;
+    return this.numberedAliasReady.has(parentSessionID);
+  }
+
+  /**
+   * Raise in-memory counters to max(local, current backend, verified history)
+   * and enable numbering for this parent. Does not clear or rewrite the
+   * backend high-water mark. Returns false, changing nothing, if a counter
+   * cannot be incremented safely.
+   */
+  applyVerifiedAliasFloor(
+    parentSessionID: string,
+    maxima: Readonly<Record<string, number>>,
+  ): boolean {
+    const parent = parentSessionID.trim();
+    if (!parent) return false;
+    const prefixes = new Set<string>(Object.keys(maxima));
+    const parentKey = `${parent}:`;
+    for (const key of this.counters.keys()) {
+      if (key.startsWith(parentKey)) prefixes.add(key.slice(parentKey.length));
+    }
+    const next = new Map<string, number>();
+    for (const prefix of prefixes) {
+      if (!prefix) return false;
+      const history = maxima[prefix] ?? 0;
+      if (!isSafeAliasFloor(history)) return false;
+      const local = this.counters.get(`${parent}:${prefix}`) ?? 0;
+      const backend = this.aliasCounterHighWater(parent, prefix);
+      const floor = Math.max(local, backend, history);
+      if (!isSafeAliasFloor(floor)) return false;
+      next.set(prefix, floor);
+    }
+    for (const [prefix, floor] of next) {
+      this.counters.set(`${parent}:${prefix}`, floor);
+    }
+    if (this.deferNumberedAliases) this.numberedAliasReady.add(parent);
+    return true;
   }
 
   addTerminalStateListener(listener: TerminalStateListener): void {
@@ -403,6 +482,8 @@ export class BackgroundJobBoard implements BackgroundJobStore {
         resultSummary: undefined,
         lastStatusError: undefined,
         terminalState: undefined,
+        verifiedRetainedRound: undefined,
+        recoveredWithoutPrompt: undefined,
         lastLaunchedAt: now,
         runStartedAt: now,
         deadlineExceededAt: undefined,
@@ -474,7 +555,11 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       lastLiveBusyAt: now,
       lastUsedAt: now,
       updatedAt: now,
-      alias: this.nextAlias(input.parentSessionID, input.agent),
+      alias: this.aliasForNewRecord(
+        input.parentSessionID,
+        input.agent,
+        input.taskID,
+      ),
       contextFiles: [],
       totalErrors: 0,
       timeoutCount: 0,
@@ -1429,6 +1514,13 @@ export class BackgroundJobBoard implements BackgroundJobStore {
               'Active, uncertain, or unacknowledged terminal sessions are not reusable.',
             ]
           : ['Cancelled or errored sessions are not reusable.']),
+        ...(this.delegationTool === 'task'
+          ? [
+              'Continue an existing session with task_revive even when it is not listed here. task_result only reads a result and is not required before task_revive.',
+            ]
+          : [
+              'Completed sessions continue with subagent() by exact session id even when they are not listed. Cancelled, errored, and stopped sessions use task_revive.',
+            ]),
         ...(retained.length > 0
           ? [
               `Stopped sessions without a terminal result are retained for task_revive, not ${this.delegationTool}().`,
@@ -1619,8 +1711,121 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     return lines.join('\n');
   }
 
+  /**
+   * Insert one absent, unleased host session as an already-terminal cache
+   * row. Does not launch, notify, occupy a slot, or allocate an alias.
+   * Returns undefined when the row or a lease appeared first.
+   */
+  restoreRetainedSession(
+    input: RestoreRetainedSessionInput,
+  ): BackgroundJobRecord | undefined {
+    const taskID = input.taskID.trim();
+    const parentSessionID = input.parentSessionID.trim();
+    const agent = input.agent.trim();
+    if (!taskID || !parentSessionID || !agent) return undefined;
+    if (
+      input.state !== 'completed' &&
+      input.state !== 'error' &&
+      input.state !== 'cancelled' &&
+      input.state !== 'stopped'
+    ) {
+      return undefined;
+    }
+    if (this.jobs.has(taskID) || this.liveLeases.has(taskID)) return undefined;
+
+    const requestedAlias = input.alias?.trim();
+    let alias = taskID;
+    if (requestedAlias && requestedAlias !== taskID) {
+      const taken = this.list(parentSessionID).some(
+        (job) => job.alias === requestedAlias,
+      );
+      if (!taken) {
+        this.noteTrustedAlias(parentSessionID, agent, requestedAlias);
+        alias = requestedAlias;
+      }
+    }
+
+    const launchedAt = finiteEvidenceTime(input.launchedAt) ?? 0;
+    const completedAt = finiteEvidenceTime(input.completedAt);
+    const observedAt = completedAt ?? launchedAt;
+    if (this.jobs.has(taskID) || this.liveLeases.has(taskID)) return undefined;
+    const generation = ++this.executionSequence;
+    const record: BackgroundJobRecord = {
+      taskID,
+      parentSessionID,
+      agent,
+      description: input.description.trim() || `recovered ${agent} session`,
+      ...(input.objective !== undefined ? { objective: input.objective } : {}),
+      state: input.state,
+      background: input.background === true,
+      timedOut: false,
+      recoverableAfterLiveBusy: false,
+      statusUncertain: false,
+      cancellationRequested: input.state === 'cancelled',
+      terminalUnreconciled: true,
+      launchedAt,
+      lastLaunchedAt: launchedAt,
+      generation,
+      terminalRevision: input.state === 'stopped' ? 0 : 1,
+      activityRevision: 0,
+      taskGeneration: 1,
+      runStartedAt: launchedAt,
+      updatedAt: observedAt,
+      lastUsedAt: observedAt,
+      ...(completedAt !== undefined ? { completedAt } : {}),
+      ...(input.resultSummary !== undefined
+        ? { resultSummary: input.resultSummary }
+        : {}),
+      alias,
+      ...(input.state === 'stopped' ? {} : { terminalState: input.state }),
+      verifiedRetainedRound: true,
+      recoveredWithoutPrompt: true,
+      contextFiles: [],
+      totalErrors: input.state === 'error' ? 1 : 0,
+      timeoutCount: 0,
+    };
+    this.setJob(record);
+    return record;
+  }
+
+  /** Advance the existing alias high-water to a trusted historical value.
+   * Does not allocate a new counter. */
+  private noteTrustedAlias(
+    parentSessionID: string,
+    agent: string,
+    alias: string,
+  ): void {
+    const prefix = aliasPrefixForAgent(agent);
+    const match = new RegExp(`^${escapeRegExp(prefix)}-([0-9]+)$`).exec(alias);
+    if (!match?.[1]) return;
+    const counter = Number(match[1]);
+    if (!Number.isSafeInteger(counter) || counter < 1) return;
+    const key = `${parentSessionID}:${prefix}`;
+    const current = Math.max(
+      this.counters.get(key) ?? 0,
+      this.aliasCounterHighWater(parentSessionID, prefix),
+    );
+    if (counter <= current) return;
+    this.counters.set(key, counter);
+    bumpAliasHighWaterMark(parentSessionID, prefix, counter);
+  }
+
+  private aliasForNewRecord(
+    parentSessionID: string,
+    agent: string,
+    taskID: string,
+  ): string {
+    if (
+      this.deferNumberedAliases &&
+      !this.numberedAliasReady.has(parentSessionID)
+    ) {
+      return taskID;
+    }
+    return this.nextAlias(parentSessionID, agent);
+  }
+
   private nextAlias(parentSessionID: string, agent: string): string {
-    const prefix = AGENT_PREFIX[agent] ?? (agent.slice(0, 3) || 'job');
+    const prefix = aliasPrefixForAgent(agent);
     const key = `${parentSessionID}:${prefix}`;
     // Seed from the persisted high-water mark so a post-restart board
     // never reuses a historical alias. The alias→taskID mapping is NOT
@@ -1821,4 +2026,20 @@ function promptSafe(value: string): string {
 function normalizeCancelReason(reason?: string): string {
   const normalized = reason?.replace(/\s+/g, ' ').trim();
   return normalized ? `cancelled: ${normalized}` : 'cancelled';
+}
+
+function finiteEvidenceTime(value: number | undefined): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? value
+    : undefined;
+}
+
+function isSafeAliasFloor(value: number): boolean {
+  return (
+    Number.isSafeInteger(value) && value >= 0 && value < Number.MAX_SAFE_INTEGER
+  );
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

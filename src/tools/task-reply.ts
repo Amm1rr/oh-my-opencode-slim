@@ -11,7 +11,13 @@ import {
 import type { BackgroundJobStore } from '../utils/background-job-store';
 import { getClient } from '../utils/opencode-client';
 import { OperationTimeoutError, withTimeout } from '../utils/session';
-import { idParamFor, readTaskRef, taskRefArgs } from './task-ref';
+import {
+  type CanonicalTaskResolver,
+  currentToolCallID,
+  idParamFor,
+  readTaskRef,
+  taskRefArgs,
+} from './task-ref';
 
 const z = tool.schema;
 const DEFAULT_REPLY_TIMEOUT_MS = 10_000;
@@ -73,6 +79,8 @@ export function createTaskReplyTool(options: {
   input: PluginInput;
   backgroundJobBoard: BackgroundJobStore;
   replyTimeoutMs?: number;
+  resolveCanonicalTaskRef?: CanonicalTaskResolver;
+  isDisposed?: () => boolean;
 }): Record<'task_reply', ToolDefinition> {
   const idParam = idParamFor(options.input);
   const task_reply = tool({
@@ -104,12 +112,27 @@ export function createTaskReplyTool(options: {
       if (!requested) throw new Error(`task_reply requires ${idParam}`);
       const requestID = args.request_id.trim();
       if (!requestID) throw new Error('task_reply requires request_id');
-
-      const job = options.backgroundJobBoard.resolve(
-        parentSessionID,
-        requested,
-      );
-      if (!job) throw new Error(`Unknown task ID or alias: ${requested}`);
+      const canonical = options.resolveCanonicalTaskRef
+        ? await options.resolveCanonicalTaskRef(
+            parentSessionID,
+            requested,
+            currentToolCallID(toolContext),
+          )
+        : undefined;
+      if (options.isDisposed?.()) {
+        throw new Error(
+          'The plugin instance was disposed. No action was sent.',
+        );
+      }
+      if (canonical?.kind === 'refused') throw new Error(canonical.reason);
+      const identity =
+        canonical?.kind === 'exact' ? canonical.taskID : requested;
+      const job = canonical
+        ? options.backgroundJobBoard.get(identity)
+        : options.backgroundJobBoard.resolve(parentSessionID, requested);
+      if (!job || job.parentSessionID !== parentSessionID) {
+        throw new Error(`Unknown task ID or alias: ${identity}`);
+      }
       if (job.state !== 'running') {
         throw new Error(
           `Task ${requested} cannot be answered: board state is ${job.state}, not running`,
@@ -209,6 +232,11 @@ export function createTaskReplyTool(options: {
       async function replyPermission(
         response: 'once' | 'always' | 'reject',
       ): Promise<unknown> {
+        if (options.isDisposed?.()) {
+          throw new Error(
+            'The plugin instance was disposed. No action was sent.',
+          );
+        }
         const permission = client.permission;
         if (typeof permission?.reply === 'function') {
           return await permission.reply({

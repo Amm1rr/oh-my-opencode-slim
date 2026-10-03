@@ -210,6 +210,21 @@ export function createTaskSessionManagerHook(
     /** Host flavor marker ('v2' on OpenCode v2 hosts); selects the native
      *  delegation vocabulary in model-visible tool guidance. Defaults v1. */
     hostFlavor?: string;
+    recoverRetainedSession?: (request: {
+      parentSessionID: string;
+      requested: string;
+      agent?: string;
+    }) => Promise<import('./session-recovery').RetainedRecoveryResult>;
+    prepareAliasNumbering?: (
+      parentSessionID: string,
+      excludeCallID?: string,
+    ) => Promise<{ enabled: boolean; stopped?: boolean }>;
+    resolveCanonicalTaskRef?: (
+      parentSessionID: string,
+      requested: string,
+      excludeCallID?: string,
+    ) => Promise<import('./session-recovery').CanonicalTaskReference>;
+    isDisposed?: () => boolean;
     shouldManageSession: (sessionID: string) => boolean;
     /** Register a session as orchestrator when the transform hook detects
      *  an orchestrator message but the session isn't in the agent map yet. */
@@ -253,9 +268,10 @@ export function createTaskSessionManagerHook(
     parent: string,
     requested: string,
     agent: string,
-  ): Promise<void> => {
+  ): Promise<'adopted' | 'unchecked' | 'rejected'> => {
     const boundary = historyBoundaries.get(parent);
-    if (boundary === undefined) return;
+    if (boundary === undefined) return 'unchecked';
+    if (options.isDisposed?.()) return 'rejected';
     try {
       const client = getClient(_ctx);
       const query = { directory: _ctx.directory };
@@ -303,10 +319,11 @@ export function createTaskSessionManagerHook(
         (live.statuses.get(requested) ?? 'idle') !== 'idle' ||
         options.isFallbackInProgress?.(requested) ||
         historyBoundaries.get(parent) !== boundary ||
+        options.isDisposed?.() ||
         rehydrateTombstones.has(requested)
       )
-        return;
-      backgroundJobBoard.adoptTerminal({
+        return 'rejected';
+      const adopted = backgroundJobBoard.adoptTerminal({
         taskID: requested,
         parentSessionID: parent,
         agent,
@@ -316,8 +333,10 @@ export function createTaskSessionManagerHook(
         terminalState: evidence.verdict,
         resultSummary: evidence.text,
       });
+      return adopted ? 'adopted' : 'rejected';
     } catch (error) {
       log('[task-session-manager] host child adoption failed', String(error));
+      return 'rejected';
     }
   };
 
@@ -709,6 +728,10 @@ export function createTaskSessionManagerHook(
         taskContextTracker,
         getLifecycleEpoch: () => rehydrateState.nextEpoch,
         hostFlavor: options.hostFlavor,
+        recoverRetainedSession: options.recoverRetainedSession,
+        prepareAliasNumbering: options.prepareAliasNumbering,
+        resolveCanonicalTaskRef: options.resolveCanonicalTaskRef,
+        isDisposed: options.isDisposed,
         adoptRequested: adoptionEnabled ? adoptRequested : undefined,
       }),
 

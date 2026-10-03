@@ -12,7 +12,13 @@ import { isRecord } from '../utils/guards';
 import { getClient } from '../utils/opencode-client';
 import { OperationTimeoutError, withTimeout } from '../utils/session';
 import { type DelegationWording, delegationWording } from '../v2/delegation';
-import { idParamFor, readTaskRef, taskRefArgs } from './task-ref';
+import {
+  type CanonicalTaskResolver,
+  currentToolCallID,
+  idParamFor,
+  readTaskRef,
+  taskRefArgs,
+} from './task-ref';
 
 const z = tool.schema;
 const MAX_MESSAGE_LENGTH = 500;
@@ -33,6 +39,8 @@ export function createTaskMessageTool(options: {
   input: PluginInput;
   backgroundJobBoard: BackgroundJobStore;
   messageTimeoutMs?: number;
+  resolveCanonicalTaskRef?: CanonicalTaskResolver;
+  isDisposed?: () => boolean;
 }): Record<'task_message', ToolDefinition> {
   const idParam = idParamFor(options.input);
   const task_message = tool({
@@ -56,16 +64,31 @@ export function createTaskMessageTool(options: {
 
       const requested = readTaskRef(args, idParam);
       if (!requested) throw new Error(`task_message requires ${idParam}`);
-      const job = options.backgroundJobBoard.resolve(
-        parentSessionID,
-        requested,
-      );
-      if (!job) throw new Error(`Unknown task ID or alias: ${requested}`);
+      const canonical = options.resolveCanonicalTaskRef
+        ? await options.resolveCanonicalTaskRef(
+            parentSessionID,
+            requested,
+            currentToolCallID(toolContext),
+          )
+        : undefined;
+      if (options.isDisposed?.()) {
+        throw new Error(
+          'The plugin instance was disposed. No action was sent.',
+        );
+      }
+      if (canonical?.kind === 'refused') throw new Error(canonical.reason);
+      const identity =
+        canonical?.kind === 'exact' ? canonical.taskID : requested;
+      const job = canonical
+        ? options.backgroundJobBoard.get(identity)
+        : options.backgroundJobBoard.resolve(parentSessionID, requested);
+      if (!job || job.parentSessionID !== parentSessionID) {
+        throw new Error(`Unknown task ID or alias: ${identity}`);
+      }
 
       const currentJob = getCurrentTaskMessageJob(
         options.backgroundJobBoard,
         parentSessionID,
-        requested,
         job.taskID,
         job.generation,
         delegation,
@@ -87,7 +110,6 @@ export function createTaskMessageTool(options: {
         getCurrentTaskMessageJob(
           options.backgroundJobBoard,
           parentSessionID,
-          requested,
           lease.taskID,
           lease.generation,
           delegation,
@@ -119,6 +141,11 @@ export function createTaskMessageTool(options: {
           } finally {
             lookupController.abort();
           }
+          if (options.isDisposed?.()) {
+            throw new Error(
+              'The plugin instance was disposed. No action was sent.',
+            );
+          }
           if (!modelSelection) {
             throw new Error(
               `Task ${requested} has no authoritative model identity; refusing message`,
@@ -138,10 +165,14 @@ export function createTaskMessageTool(options: {
           lease,
           () => {
             assertMessageLease(options.backgroundJobBoard, lease, requested);
+            if (options.isDisposed?.()) {
+              throw new Error(
+                'The plugin instance was disposed. No action was sent.',
+              );
+            }
             const currentJob = getCurrentTaskMessageJob(
               options.backgroundJobBoard,
               parentSessionID,
-              requested,
               lease.taskID,
               lease.generation,
               delegation,
@@ -171,7 +202,6 @@ export function createTaskMessageTool(options: {
         const latestJob = getCurrentTaskMessageJob(
           options.backgroundJobBoard,
           parentSessionID,
-          requested,
           lease.taskID,
           lease.generation,
           delegation,
@@ -334,36 +364,30 @@ async function readCurrentChildModel(
 function getCurrentTaskMessageJob(
   backgroundJobBoard: BackgroundJobStore,
   parentSessionID: string,
-  requested: string,
   expectedTaskID: string,
   expectedGeneration: number,
   delegation: DelegationWording,
 ): NonNullable<ReturnType<BackgroundJobStore['get']>> {
   const current = backgroundJobBoard.get(expectedTaskID);
-  const resolved = backgroundJobBoard.resolve(parentSessionID, requested);
-  if (!current || !resolved || resolved.taskID !== expectedTaskID) {
+  if (!current || current.parentSessionID !== parentSessionID) {
     throw new Error(
-      `Task ${requested} is no longer tracked; refusing stale message`,
+      `Task ${expectedTaskID} is no longer tracked; refusing stale message`,
     );
   }
-  if (
-    current.taskID !== expectedTaskID ||
-    current.generation !== expectedGeneration ||
-    resolved.generation !== expectedGeneration
-  ) {
+  if (current.generation !== expectedGeneration) {
     throw new Error(
-      `Task ${requested} run generation changed; refusing stale message`,
+      `Task ${expectedTaskID} run generation changed; refusing stale message`,
     );
   }
   if (current.cancellationRequested) {
     throw new Error(
-      `Task ${requested} cannot queue a message: cancellation was requested`,
+      `Task ${expectedTaskID} cannot queue a message: cancellation was requested`,
     );
   }
   if (current.state !== 'running') {
     if (current.state === 'stopped') {
       throw new Error(
-        `Task ${requested} stopped without a terminal result. task_message only queues messages for running tasks and does not continue it. Use task_revive with ${delegation.resumeParam}: "${requested}" to continue the retained session.`,
+        `Task ${expectedTaskID} stopped without a terminal result. task_message only queues messages for running tasks and does not continue it. Use task_revive with ${delegation.resumeParam}: "${expectedTaskID}" to continue the retained session.`,
       );
     }
     const terminalState =
@@ -372,11 +396,11 @@ function getCurrentTaskMessageJob(
         : current.state;
     if (['completed', 'error', 'cancelled'].includes(terminalState)) {
       throw new Error(
-        `Task ${requested} is terminal (${terminalState}). task_message only queues messages for running tasks and does not continue it. Call task_result first if its terminal result is not yet acknowledged; once it appears under Reusable Sessions, resume it with ${delegation.tool} by passing ${delegation.resumeParam}: "${requested}", its existing ${current.agent} specialist, a new prompt, and background: true.`,
+        `Task ${expectedTaskID} is terminal (${terminalState}). task_message only queues messages for running tasks and does not continue it. Continue that same session with task_revive and ${delegation.resumeParam}: "${expectedTaskID}".`,
       );
     }
     throw new Error(
-      `Task ${requested} cannot queue a message: board state is ${current.state}, not running`,
+      `Task ${expectedTaskID} cannot queue a message: board state is ${current.state}, not running`,
     );
   }
   return current;

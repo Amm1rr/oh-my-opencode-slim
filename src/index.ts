@@ -67,6 +67,10 @@ import {
 } from './hooks/task-session-manager/child-input-wait';
 import { createBackgroundFallbackHandoff } from './hooks/task-session-manager/fallback-observation-transfer';
 import { createRevivedRunTracker } from './hooks/task-session-manager/revived-run-tracker';
+import {
+  createAliasAuthority,
+  createSessionRecovery,
+} from './hooks/task-session-manager/session-recovery';
 import type { ToolLoopGuardHook } from './hooks/tool-loop-guard/hook';
 import {
   findLatestUserMessage,
@@ -332,6 +336,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   // Host flavor ('v2' on OpenCode v2 hosts via the client shim, undefined on
   // v1). Survives the try block so prompt-assembly hooks can use it.
   let hostFlavor: string | undefined;
+  let instanceDisposed = false;
   // v1 task() cannot select a model per call. The task before-hook records
   // the fallback chosen for a delegation; the child's first chat.message
   // rewrites its model before the host persists it (the host loop reads the
@@ -827,6 +832,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       readContextMinLines: runtime.backgroundJobs.readContextMinLines,
       readContextMaxFiles: runtime.backgroundJobs.readContextMaxFiles,
       delegationTool: delegation.tool,
+      deferNumberedAliases: true,
     });
     admissionRuntimeLease = acquireAdmissionRuntime(
       ctx.directory,
@@ -1038,6 +1044,18 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     deepworkCommandHook = createDeepworkCommandHook();
     reflectCommandHook = createReflectCommandHook();
     loopCommandHook = createLoopCommandHook();
+    const recoverRetainedSession = createSessionRecovery({
+      input: ctx,
+      backgroundJobBoard: backgroundJobCoordinator,
+      isDisposed: () => instanceDisposed,
+      hostFlavor,
+    });
+    const aliasAuthority = createAliasAuthority({
+      input: ctx,
+      board: backgroundJobBoard,
+      isDisposed: () => instanceDisposed,
+      hostFlavor,
+    });
     taskSessionManagerHook = createTaskSessionManagerHook(ctx, {
       terminalGate,
       strategy: runtime.backgroundJobs.strategy,
@@ -1072,6 +1090,10 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         foregroundFallback.getActiveFallbackModel(sessionID) ??
         sessionMetadata.getModel(sessionID),
       hostFlavor,
+      recoverRetainedSession,
+      prepareAliasNumbering: aliasAuthority.prepareParent,
+      resolveCanonicalTaskRef: aliasAuthority.resolveCanonical,
+      isDisposed: () => instanceDisposed,
       shouldManageSession: (sessionID) =>
         sessionMetadata.getAgent(sessionID) === 'orchestrator' ||
         sessionMetadata.isTaskManaged(sessionID),
@@ -1314,19 +1336,28 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       shouldManageSession: (sessionID) =>
         sessionMetadata.getAgent(sessionID) === 'orchestrator' ||
         sessionMetadata.isTaskManaged(sessionID),
+      recoverRetainedSession,
+      resolveCanonicalTaskRef: aliasAuthority.resolveCanonical,
+      isDisposed: () => instanceDisposed,
     });
     taskMessageTools = createTaskMessageTool({
       input: ctx,
       backgroundJobBoard: backgroundJobCoordinator,
+      resolveCanonicalTaskRef: aliasAuthority.resolveCanonical,
+      isDisposed: () => instanceDisposed,
     });
     taskReplyTools = createTaskReplyTool({
       input: ctx,
       backgroundJobBoard: backgroundJobCoordinator,
+      resolveCanonicalTaskRef: aliasAuthority.resolveCanonical,
+      isDisposed: () => instanceDisposed,
     });
     taskResultTools = createTaskResultTool({
       input: ctx,
       backgroundJobBoard: backgroundJobCoordinator,
       terminalGate,
+      resolveCanonicalTaskRef: aliasAuthority.resolveCanonical,
+      isDisposed: () => instanceDisposed,
     });
     taskReviveTools = createTaskReviveTool({
       terminalGate,
@@ -1337,11 +1368,16 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         sessionMetadata.isTaskManaged(sessionID),
       backgroundJobSupervisor,
       revivedRunTracker,
+      recoverRetainedSession,
+      isDisposed: () => instanceDisposed,
+      resolveCanonicalTaskRef: aliasAuthority.resolveCanonical,
     });
     taskStatusTools = createTaskStatusTool({
       input: ctx,
       backgroundJobBoard: backgroundJobCoordinator,
       activityTracker: taskActivityTracker,
+      resolveCanonicalTaskRef: aliasAuthority.resolveCanonical,
+      isDisposed: () => instanceDisposed,
     });
     waitForUserTools = createWaitForUserTool({
       shouldManageSession: (sessionID) =>
@@ -1899,8 +1935,10 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     },
 
     event: async (input) => {
-      if (input.event.type === 'server.instance.disposed')
+      if (input.event.type === 'server.instance.disposed') {
+        instanceDisposed = true;
         terminalGate?.dispose();
+      }
       // Token-stream deltas fire on every reasoning/text chunk. Slim has no
       // work for them; skip the rest of the fan-out. v2 names:
       // session.next.{text,reasoning}.delta.
@@ -2181,6 +2219,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     },
 
     dispose: async () => {
+      // Synchronous: v2 setup calls this directly and does not emit the
+      // public server.instance.disposed event first.
+      instanceDisposed = true;
       registryBridge.retire();
       terminalGate?.dispose();
       // Cancel pending initial-delay fallback timers so a reloaded

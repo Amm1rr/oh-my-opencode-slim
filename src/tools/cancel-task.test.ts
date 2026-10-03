@@ -609,3 +609,230 @@ describe('task_cancel tool', () => {
     ).rejects.toThrow('requires sessionID');
   });
 });
+
+test('an old session outcome does not confirm a new cancellation', async () => {
+  const { board, taskCancel } = createTool({
+    status: null,
+    get: async () => ({ data: { outcome: 'succeeded', time: { idle: 1 } } }),
+    verifyAbortMs: 20,
+    abortRetryIntervalMs: 0,
+    stableStoppedMs: 0,
+  });
+  board.registerLaunch({
+    taskID: 'ses_1',
+    parentSessionID: 'parent-1',
+    agent: 'explorer',
+  });
+  const output = await taskCancel.execute({ task_id: 'ses_1' }, context);
+  expect(String(output)).toContain('did not stay stopped');
+  expect(board.get('ses_1')?.state).not.toBe('cancelled');
+});
+
+test('a current interrupted idle confirms cancellation without the old session outcome', async () => {
+  const now = 5_000;
+  spyOn(Date, 'now').mockImplementation(() => now);
+  const board = new BackgroundJobBoard();
+  const abort = mock(async () => ({}));
+  const getSession = mock(async () => ({
+    data: { outcome: 'succeeded', time: { idle: 1 } },
+  }));
+  const messages = mock(async () => ({
+    data: [
+      {
+        info: {
+          id: 'msg_user',
+          role: 'user',
+          sourceType: 'user',
+          time: { created: 10 },
+        },
+        parts: [{ type: 'text', text: 'ask' }],
+      },
+      {
+        info: {
+          id: 'msg_idle',
+          role: 'system',
+          sourceType: 'idle',
+          outcome: 'interrupted',
+          time: { created: now },
+        },
+        parts: [],
+      },
+    ],
+  }));
+  const tools = createCancelTaskTool({
+    input: {
+      directory: '/test/project',
+      client: { session: { abort, get: getSession, messages } },
+    } as never,
+    backgroundJobBoard: board,
+    shouldManageSession: () => true,
+    verifyAbortMs: 50,
+    abortRetryIntervalMs: 0,
+    stableStoppedMs: 0,
+  });
+  board.registerLaunch({
+    taskID: 'ses_1',
+    parentSessionID: 'parent-1',
+    agent: 'explorer',
+  });
+  const output = await tools.task_cancel.execute({ task_id: 'ses_1' }, context);
+  expect(String(output)).toContain('state: cancelled');
+  expect(board.get('ses_1')?.state).toBe('cancelled');
+});
+
+test('old interrupted plus a new user without a closing idle does not cancel', async () => {
+  const { board, taskCancel } = createTool({
+    status: null,
+    get: async () => ({ data: { outcome: 'interrupted', time: { idle: 1 } } }),
+    verifyAbortMs: 30,
+    abortRetryIntervalMs: 0,
+    stableStoppedMs: 0,
+  });
+  const messages = mock(async () => ({
+    data: [
+      {
+        info: {
+          id: 'msg_old_user',
+          role: 'user',
+          sourceType: 'user',
+          time: { created: 1 },
+        },
+        parts: [{ type: 'text', text: 'old' }],
+      },
+      {
+        info: {
+          id: 'msg_old_idle',
+          role: 'system',
+          sourceType: 'idle',
+          outcome: 'interrupted',
+          time: { created: 2 },
+        },
+        parts: [],
+      },
+      {
+        info: {
+          id: 'msg_new_user',
+          role: 'user',
+          sourceType: 'user',
+          time: { created: 3 },
+        },
+        parts: [{ type: 'text', text: 'new' }],
+      },
+    ],
+  }));
+  (mockClient.session as { messages: unknown }).messages = messages;
+  board.registerLaunch({
+    taskID: 'ses_1',
+    parentSessionID: 'parent-1',
+    agent: 'explorer',
+  });
+  const output = await taskCancel.execute({ task_id: 'ses_1' }, context);
+  expect(String(output)).toContain('did not stay stopped');
+  expect(board.get('ses_1')?.state).not.toBe('cancelled');
+});
+
+test('a pending idle wait does not publish cancellation until it settles', async () => {
+  const board = new BackgroundJobBoard();
+  let release: () => void = () => {};
+  const pending = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let published = false;
+  const tools = createCancelTaskTool({
+    input: {
+      directory: '/test/project',
+      client: {
+        session: {
+          abort: async () => ({}),
+          get: async () => ({ data: { outcome: 'interrupted' } }),
+        },
+      },
+      experimental_v2: {
+        waitForSessionIdle: () => pending,
+      },
+    } as never,
+    backgroundJobBoard: board,
+    shouldManageSession: () => true,
+    verifyAbortMs: 200,
+    abortRetryIntervalMs: 0,
+    stableStoppedMs: 0,
+  });
+  board.registerLaunch({
+    taskID: 'ses_1',
+    parentSessionID: 'parent-1',
+    agent: 'explorer',
+  });
+  const running = tools.task_cancel.execute({ task_id: 'ses_1' }, context);
+  await Bun.sleep(20);
+  expect(board.get('ses_1')?.state).toBe('running');
+  published = board.get('ses_1')?.state === 'cancelled';
+  expect(published).toBe(false);
+  release();
+  const output = await running;
+  expect(String(output)).toContain('state: cancelled');
+});
+
+test('a hung context read ends within the deadline and releases the lease', async () => {
+  const board = new BackgroundJobBoard();
+  const tools = createCancelTaskTool({
+    input: {
+      directory: '/test/project',
+      client: {
+        session: {
+          abort: async () => ({}),
+          get: async () => ({
+            data: { outcome: 'interrupted', time: { idle: 1 } },
+          }),
+          messages: () => new Promise(() => {}),
+        },
+      },
+    } as never,
+    backgroundJobBoard: board,
+    shouldManageSession: () => true,
+    verifyAbortMs: 40,
+    abortRetryIntervalMs: 0,
+    stableStoppedMs: 0,
+  });
+  board.registerLaunch({
+    taskID: 'ses_1',
+    parentSessionID: 'parent-1',
+    agent: 'explorer',
+  });
+  const output = await tools.task_cancel.execute({ task_id: 'ses_1' }, context);
+  expect(String(output)).toContain('did not stay stopped');
+  expect(board.get('ses_1')?.state).not.toBe('cancelled');
+  expect(board.acquireCancellationLease('ses_1', 1)).toBeDefined();
+});
+
+test('dropping the row during the idle wait does not publish cancellation', async () => {
+  const board = new BackgroundJobBoard();
+  const tools = createCancelTaskTool({
+    input: {
+      directory: '/test/project',
+      client: {
+        session: {
+          abort: async () => ({}),
+          get: async () => ({ data: { outcome: 'interrupted' } }),
+        },
+      },
+      experimental_v2: {
+        waitForSessionIdle: async () => {
+          board.drop('ses_1');
+        },
+      },
+    } as never,
+    backgroundJobBoard: board,
+    shouldManageSession: () => true,
+    verifyAbortMs: 200,
+    abortRetryIntervalMs: 0,
+    stableStoppedMs: 0,
+  });
+  board.registerLaunch({
+    taskID: 'ses_1',
+    parentSessionID: 'parent-1',
+    agent: 'explorer',
+  });
+  const output = await tools.task_cancel.execute({ task_id: 'ses_1' }, context);
+  expect(String(output)).not.toContain('state: cancelled');
+  expect(board.get('ses_1')).toBeUndefined();
+});

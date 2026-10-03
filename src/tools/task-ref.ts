@@ -1,5 +1,8 @@
 import { tool } from '@opencode-ai/plugin';
+import type { CanonicalTaskReference } from '../hooks/task-session-manager/session-recovery';
 import { controlParamName } from '../v2/adapters';
+
+export type { CanonicalTaskReference };
 
 const z = tool.schema;
 
@@ -52,4 +55,24 @@ export function readTaskRef(
   const alias = param === 'task_id' ? 'sessionID' : 'task_id';
   const value = args[param] ?? args[alias];
   return typeof value === 'string' ? value.trim() : '';
+}
+
+export type CanonicalTaskResolver = (
+  parentSessionID: string,
+  requested: string,
+  excludeCallID?: string,
+) => Promise<CanonicalTaskReference>;
+
+export function currentToolCallID(
+  toolContext:
+    | {
+        callID?: string;
+        messageID?: string;
+      }
+    | undefined,
+): string | undefined {
+  const callID = toolContext?.callID;
+  return typeof callID === 'string' && callID.trim().length > 0
+    ? callID.trim()
+    : undefined;
 }

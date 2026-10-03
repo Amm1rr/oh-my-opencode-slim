@@ -470,10 +470,13 @@ describe('task controls through the real v2 client shim', () => {
       await entered.promise;
       expect(wait.mock.calls).toEqual([[{ sessionID: 'ses_child' }]]);
       expect(h.host.interrupt).toHaveBeenCalledTimes(running ? 1 : 0);
-      expect(h.baseline).toHaveBeenCalledTimes(1);
+      // A running cancel must settle the same idle wait before baseline.
+      // A retained session captures baseline and then waits before prompt.
+      expect(h.baseline).toHaveBeenCalledTimes(running ? 0 : 1);
       expect(h.host.prompt).not.toHaveBeenCalled();
       idle.resolve();
       const output = String(await pending);
+      expect(h.baseline).toHaveBeenCalledTimes(1);
       expect(output).toContain('generation: 2');
       expect(output).toContain('status: started');
       expect(h.host.prompt).toHaveBeenCalledWith({

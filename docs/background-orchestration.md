@@ -90,6 +90,19 @@ recovery channel is explicit: `task_revive` on a raw session ID verifies the
 session against the host (existence and parent ownership, plus a live-state
 gate) and re-adopts an untracked child owned by the calling parent, then
 continues it with the new prompt.
+Recovery verifies the original agent and latest delivered round before importing
+a retained terminal row. This cache-only import does not launch or notify.
+The production board issues numbered aliases only after a bounded read of that
+parent's complete host history establishes a floor from the local counter,
+backend high-water mark, and verified `prefix-N` markers. Missing, truncated,
+compacted, still-open, or unmarked history leaves numbering off, not task
+creation: refer to the new task by its exact session ID. A later verified read
+can enable numbering without reusing a historical alias.
+
+The continuation guidance changes the static orchestrator prompt and board
+wording. Existing sessions incur a one-time prompt-cache re-warm on their
+first request with this version; this is not a cache-neutral release. The
+new guidance remains deterministic and does not rewrite earlier messages.
 
 ---
 
@@ -183,11 +196,14 @@ The orchestrator should use background completion events to:
 - surface failures or blocked tasks clearly.
 
 Use `task_status` to inspect a task and `task_result` to collect its result.
+`task_result` is a read, not a required step before every continuation.
 `task_message` queues a non-interrupting message and returns `queued`; it does
 not stop the current generation. Use `task_cancel` to stop a generation while
 retaining its session, then inspect and reconcile any partial file changes before
-launching replacement work. Use `task_revive` to resume a retained session with a
-new instruction.
+launching replacement work. On v1, continue an existing session with
+`task_revive` even when it is missing from Reusable Sessions. A new task still
+uses `task()` without an id. `task_revive` verifies the host session and
+continues in that same child; it does not spawn a replacement.
 
 A cancelled, errored, or stopped retained session may be revived immediately
 once its retained state has been verified safe. Acknowledgement controls parent
