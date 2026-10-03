@@ -337,9 +337,10 @@ export const MultiplexerConfigStrictSchema = z.object({
     'Explicit path to the cmux-tui binary. When unset, the adapter probes ' +
       'PATH for `cmux-tui` first and falls back to `cmux`.',
   ),
-  viewer: MultiplexerViewerSchema.default('tui').describe(
-    'Which opencode TUI surface subagent panes open. "tui" (default) is ' +
-      'the full interface; "mini" launches the lightweight `opencode mini`.',
+  viewer: MultiplexerViewerSchema.default('mini').describe(
+    'Which opencode TUI surface subagent panes open. "mini" (default) ' +
+      'launches the lightweight `opencode mini`; "tui" runs the full ' +
+      'interface.',
   ),
 });
 

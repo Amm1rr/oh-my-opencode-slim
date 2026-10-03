@@ -507,7 +507,7 @@ describe('loadPluginConfig', () => {
       type: 'tmux',
       layout: 'tiled',
       main_pane_size: 40,
-      viewer: 'tui',
+      viewer: 'mini',
     });
   });
 });

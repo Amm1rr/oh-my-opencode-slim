@@ -337,7 +337,7 @@ describe('MultiplexerConfigSchema', () => {
       type: 'none',
       layout: 'main-vertical',
       main_pane_size: 60,
-      viewer: 'tui',
+      viewer: 'mini',
     });
   });
 
@@ -402,15 +402,15 @@ describe('MultiplexerConfigSchema', () => {
     expect(warnSpy).not.toHaveBeenCalled();
   });
 
-  it('accepts viewer "mini" and defaults viewer to "tui" when unset', () => {
-    const mini = MultiplexerConfigSchema.parse({
+  it('accepts viewer "tui" and defaults viewer to "mini" when unset', () => {
+    const tui = MultiplexerConfigSchema.parse({
       type: 'herdr',
-      viewer: 'mini',
+      viewer: 'tui',
     });
     const unset = MultiplexerConfigSchema.parse({ type: 'herdr' });
 
-    expect(mini.viewer).toBe('mini');
-    expect(unset.viewer).toBe('tui');
+    expect(tui.viewer).toBe('tui');
+    expect(unset.viewer).toBe('mini');
     expect(warnSpy).not.toHaveBeenCalled();
   });
 
@@ -452,7 +452,7 @@ describe('MultiplexerConfigSchema', () => {
         type: 'tmux',
         layout: 'tiled',
         main_pane_size: 40,
-        viewer: 'tui',
+        viewer: 'mini',
       });
       expect(first.data.agents?.oracle?.model).toBe('valid/model');
     }
