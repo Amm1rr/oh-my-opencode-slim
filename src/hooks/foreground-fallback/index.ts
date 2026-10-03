@@ -637,6 +637,7 @@ export class ForegroundFallbackManager {
     this.initialDelayUsed.delete(sessionID);
     this.sessionRetries.delete(sessionID);
     this.retryAttempt.delete(sessionID);
+    this.v2RetryNotices.delete(sessionID);
     this.cancelInitialDelay(sessionID);
   }
 
@@ -946,7 +947,14 @@ export class ForegroundFallbackManager {
    * Call this from the plugin's `event` hook for every event received.
    */
   async handleEvent(rawEvent: unknown): Promise<void> {
-    if (!this.enabled) return;
+    // Bookkeeping (turn detection, agent/model tracking, descent-state
+    // resets) must run whenever ANY path is enabled: on v2 the replay
+    // interventions below stay gated, but without the resets a later
+    // turn in the same session inherits the previous descent's
+    // tried/retry/exhaustion state and skips fallbacks that are
+    // available again. Intervention branches are gated on `enabled`
+    // individually.
+    if (!this.enabled && !this.v2RetryEnabled) return;
     const event = rawEvent as { type: string; properties?: unknown };
     if (!event?.type) return;
 
@@ -1041,7 +1049,7 @@ export class ForegroundFallbackManager {
           info.finish === 'content-filter' && !isFailoverError(info.error)
             ? contentFilterError
             : info.error;
-        if (messageError && isFailoverError(messageError)) {
+        if (this.enabled && messageError && isFailoverError(messageError)) {
           const incidentID = this.incidentForMessageError(
             sessionID,
             messageID,
@@ -1067,6 +1075,7 @@ export class ForegroundFallbackManager {
           this.chainExhaustion.delete(sessionID);
           this.lastFallbackTime.delete(sessionID);
           this.initialDelayUsed.delete(sessionID);
+          this.v2RetryNotices.delete(sessionID);
           // A success also ends any failure streak, so the models the
           // streak marked tried are no longer proven dead. Static-chain
           // agents already get this from the re-arm reset (a new turn
@@ -1107,7 +1116,12 @@ export class ForegroundFallbackManager {
           | undefined;
         if (!props) break;
         const sessionID = eventSessionID(props);
-        if (!sessionID || !props.error || !isFailoverError(props.error)) {
+        if (
+          !this.enabled ||
+          !sessionID ||
+          !props.error ||
+          !isFailoverError(props.error)
+        ) {
           break;
         }
         const incidentID = this.incidentForSessionError(
@@ -1148,7 +1162,7 @@ export class ForegroundFallbackManager {
           (isFailoverError(props.error) ||
             (props.status.message !== undefined &&
               isFailoverError({ message: props.status.message })));
-        if (isFailoverRetry) {
+        if (isFailoverRetry && this.enabled) {
           // Guard: stale retry event from a previous model's retry loop.
           // After a fallback, lastTriggerModel holds the OLD model (set by
           // isDeduped before the fallback), while sessionModel holds the NEW
@@ -1320,26 +1334,22 @@ export class ForegroundFallbackManager {
       )
         return;
       if (!failover) return;
-      // Honor the configured initial delay by deferring the first switch
-      // through the host's own retry decision: ask for one delayed retry
-      // of the current model (a recovery window for intercepting
-      // plugins); the next retry event then advances the chain. Replaces
-      // the old silent skip, which made the whole steering path a no-op
-      // whenever initialRetryDelayMs was configured. Permanent
-      // quota/billing errors bypass the delay and advance immediately.
+      // initialRetryDelayMs has no steering form: the delay exists to give
+      // intercepting plugins a recovery window before a REPLAY, and
+      // steering performs no replay — the host's own retry backoff is
+      // the window. Note the divergence once per session instead of the
+      // old silent skip, which disabled the whole steering path whenever
+      // the delay was configured.
       if (
         this.initialRetryDelayMs > 0 &&
-        !this.initialDelayUsed.has(sessionID) &&
-        !isPermanentQuotaBillingError(event.error)
+        !this.initialDelayUsed.has(sessionID)
       ) {
         this.initialDelayUsed.add(sessionID);
-        event.decision = { retry: true, delay: this.initialRetryDelayMs };
-        log('[foreground-fallback] retry hook deferred first switch', {
+        log('[foreground-fallback] retry hook ignores initial delay', {
           sessionID,
           from,
           delayMs: this.initialRetryDelayMs,
         });
-        return;
       }
       if (
         this.sessionTried.get(sessionID)?.has(from) &&

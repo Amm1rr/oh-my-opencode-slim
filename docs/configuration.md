@@ -535,10 +535,13 @@ runs instead: the host invokes the session `retry` hook at its own retry
 decision points, Slim absorbs host retries up to `fallback.maxRetries`, then
 switches the model in place via `session.switchModel` and mutates the retry
 decision so the host retries the current turn on the new model — no
-transcript replay, so the per-turn race cannot occur.
-`fallback.initialRetryDelayMs` is honored on v2 by deferring the first
-switch through the retry decision's delay (one delayed same-model retry;
-permanent quota/billing errors bypass it). Both paths share the same user
+transcript replay, so the per-turn race cannot occur. Descent bookkeeping
+stays live on v2 (turn detection, agent/model tracking, and the resets on a
+successful response or a new user turn), so a later episode in the same
+session starts a fresh descent instead of inheriting the previous one.
+`fallback.initialRetryDelayMs` has no effect on the steering path (there is
+no replay to delay; the host's own retry backoff is the recovery window) —
+a one-time log line notes the divergence. Both paths share the same user
 switches: `fallback.enabled` and `disabled_hooks: ["foreground-fallback"]`
 disable steering too.
 

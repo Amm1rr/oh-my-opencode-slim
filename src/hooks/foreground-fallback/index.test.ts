@@ -1327,53 +1327,79 @@ describe('foreground fallback redo: host retry budget', () => {
     }
   });
 
-  test('v2 steering defers the first switch by the configured initial delay', async () => {
+  test('v2 steering ignores the configured initial delay', async () => {
     const mgr = new ForegroundFallbackManager(
       makeChains({ orchestrator: ['test/a', 'test/b', 'test/c'] }),
       true,
       { directory: '/test', hostFlavor: 'v2' } as never,
-      0, // maxRetries: switch immediately once the delay is spent
+      0,
       undefined,
       undefined,
-      250, // initialRetryDelayMs
-      0, // retryDelayMs
+      250, // initialRetryDelayMs — no replay to delay on the steering path
+      0,
     );
     const switchModel = mock(async () => ({}));
-    const first = retryEvent('v2-delay', 'a', { retry: true, delay: 77 });
-    await mgr.handleV2Retry(first, switchModel);
-    // The host is asked for one delayed retry of the current model; no
-    // switch yet.
-    expect(first.decision).toEqual({ retry: true, delay: 250 });
-    expect(switchModel).not.toHaveBeenCalled();
-    const second = retryEvent('v2-delay', 'a', { retry: true, delay: 77 });
-    await mgr.handleV2Retry(second, switchModel);
+    const event = retryEvent('v2-delay', 'a', { retry: true, delay: 77 });
+    await mgr.handleV2Retry(event, switchModel);
+    // No deferred same-model retry: the first failover event switches.
     expect(switchModel).toHaveBeenCalledTimes(1);
     expect(switchModel).toHaveBeenCalledWith('v2-delay', {
       providerID: 'test',
       id: 'b',
     });
-    expect(second.decision).toEqual({ retry: true, delay: 0 });
+    expect(event.decision).toEqual({ retry: true, delay: 0 });
   });
 
-  test('v2 steering bypasses the initial delay for permanent quota errors', async () => {
+  test('v2 bookkeeping resets descent state without replay interventions', async () => {
     const mgr = new ForegroundFallbackManager(
       makeChains({ orchestrator: ['test/a', 'test/b', 'test/c'] }),
-      true,
+      false, // replay path off (v2)
       { directory: '/test', hostFlavor: 'v2' } as never,
       0,
       undefined,
       undefined,
-      250,
       0,
+      0,
+      undefined,
+      undefined,
+      undefined,
+      true, // steering on
     );
     const switchModel = mock(async () => ({}));
-    const event = {
-      ...retryEvent('v2-perm', 'a', { retry: true, delay: 77 }),
-      error: { message: 'personal-team-blocked:spending-limit' },
-    };
-    await mgr.handleV2Retry(event, switchModel);
+    // First descent: a -> b.
+    await mgr.handleV2Retry(
+      retryEvent('v2-reset', 'a', { retry: true }),
+      switchModel,
+    );
     expect(switchModel).toHaveBeenCalledTimes(1);
-    expect(event.decision).toEqual({ retry: true, delay: 0 });
+    // A completed successful assistant response resets the descent
+    // bookkeeping even with the replay path disabled.
+    await mgr.handleEvent({
+      type: 'message.updated',
+      properties: {
+        info: {
+          id: 'm-v2-ok',
+          sessionID: 'v2-reset',
+          role: 'assistant',
+          agent: 'orchestrator',
+          providerID: 'test',
+          modelID: 'b',
+          finish: 'stop',
+          time: { completed: Date.now() },
+        },
+      },
+    });
+    // The next failure on the primary starts a fresh descent: b is
+    // available again instead of being skipped for c.
+    await mgr.handleV2Retry(
+      retryEvent('v2-reset', 'a', { retry: true }),
+      switchModel,
+    );
+    expect(switchModel).toHaveBeenCalledTimes(2);
+    expect(switchModel).toHaveBeenLastCalledWith('v2-reset', {
+      providerID: 'test',
+      id: 'b',
+    });
   });
 
   test('willAttemptFallback follows the steering flag on v2', () => {
