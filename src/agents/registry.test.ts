@@ -327,6 +327,59 @@ describe('finalized existing-agent registry', () => {
     expect(managed.disable).toBeUndefined();
   });
 
+  test('read-only matrix survives assembly with the wildcard base first', () => {
+    const runtime = runtimeFor({});
+    const registry = build(runtime, {
+      mcp: {
+        context7: { type: 'remote' },
+        gh_grep: { type: 'remote' },
+      },
+    });
+    const permission = (
+      registry.managedAgentConfig.librarian as {
+        permission?: Record<string, unknown>;
+      }
+    ).permission;
+    expect(permission).toBeDefined();
+    // Order pin: opencode evaluates the compiled rules last-match-wins, so
+    // the wildcard base must still be first after the default-permission
+    // rebuild and the registry MCP fill.
+    expect(Object.keys(permission as object)[0]).toBe('*');
+    // The registry fill is the single MCP derivation site (effective mcps:
+    // librarian defaults, no user narrowing).
+    expect(permission).toMatchObject({
+      'context7_*': 'allow',
+      'gh_grep_*': 'allow',
+    });
+    // The blanket read allow re-states the host's env-file safeguards after
+    // itself, so at the compiled-policy level secrets stay behind the ask
+    // and normal reads stay allowed.
+    const policy = registry.nativePolicies.librarian;
+    expect(policy.decide('read', 'src/x.ts')).toBe('allow');
+    expect(policy.decide('read', '.env')).toBe('ask');
+    expect(policy.decide('read', 'config/.env.local')).toBe('ask');
+    expect(policy.decide('read', '.env.example')).toBe('allow');
+  });
+
+  test('an explicit agents.explorer.permission replaces the built-in matrix', () => {
+    const runtime = runtimeFor({
+      agents: { explorer: { permission: { bash: 'deny' } } },
+    });
+    const registry = build(runtime, {});
+    const permission = (
+      registry.managedAgentConfig.explorer as {
+        permission?: Record<string, unknown>;
+      }
+    ).permission;
+    // Wholesale replace, not merge: the matrix's wildcard base and
+    // read-class allows are gone; only the user's map (plus the appended
+    // default denies) remains. Opting out of the matrix is one key.
+    expect(permission?.bash).toBe('deny');
+    expect(permission?.read).toBeUndefined();
+    expect(permission?.glob).toBeUndefined();
+    expect(permission?.['*']).toBeUndefined();
+  });
+
   test('host explorer disable still disables plugin explorer (#1383)', () => {
     const runtime = runtimeFor({});
     const registry = build(runtime, {
@@ -1171,6 +1224,83 @@ describe('finalized existing-agent registry', () => {
       'context7_*': 'allow',
       'gh_grep_*': 'allow',
     });
+  });
+
+  test('narrowing agents.librarian.mcps denies the removed MCP', () => {
+    // The mcps array is authoritative for MCP gating: the registry fill
+    // derives every <mcp>_* rule from the effective list and the built-in
+    // matrix bakes none, so narrowing must actually deny. (A matrix draft
+    // pre-seeded <mcp>_* allows that the absent-only fill could not
+    // override, silently defeating this narrowing.)
+    const runtime = runtimeFor({
+      agents: { librarian: { mcps: ['gh_grep'] } },
+    });
+    const registry = build(runtime, {
+      mcp: {
+        context7: { type: 'remote' },
+        gh_grep: { type: 'remote' },
+      },
+    });
+    const permission = (
+      registry.managedAgentConfig.librarian as {
+        permission?: Record<string, unknown>;
+      }
+    ).permission;
+    expect(permission).toMatchObject({
+      'gh_grep_*': 'allow',
+      'context7_*': 'deny',
+    });
+  });
+
+  test('extension packages do not inherit the builtin matrix', () => {
+    // Declared skills and MCPs must project to allow through the empty
+    // source map; the builtin matrix's "*": "deny" must not leak into the
+    // package, where permissionEffect's wildcard fallback would silently
+    // deny every declared skill and MCP.
+    const runtime = runtimeFor({
+      agents: { 'package-explorer': { displayName: 'ExtensionVisible' } },
+    });
+    const registry = build(
+      runtime,
+      {
+        mcp: {
+          context7: { type: 'remote' },
+          'extra-mcp': { type: 'remote' },
+        },
+      },
+      marketplaceOptions(
+        ['team/explorer-extension'],
+        marketplaceStore({
+          'team/explorer-extension': marketplacePackage(
+            'team/explorer-extension',
+            {
+              agentName: 'package-explorer',
+              skills: ['skill-a'],
+              mcps: ['extra-mcp'],
+              tools: ['read'],
+              extends: { builtin: 'explorer', promptMode: 'append' },
+            },
+          ),
+        }),
+      ),
+    );
+    const canonical = registry.getSdkAgentProjection()['package-explorer'] as {
+      permission: Record<string, unknown>;
+    };
+    const visible = registry.getSdkAgentProjection().ExtensionVisible as {
+      permission: Record<string, unknown>;
+    };
+    expect(canonical.permission).toMatchObject({
+      read: 'allow',
+      skill: { 'skill-a': 'allow' },
+      'extra-mcp_*': 'allow',
+    });
+    expect(canonical.permission['context7_*']).toBe('deny');
+    expect(visible.permission).toEqual(canonical.permission);
+    const policy = registry.nativePolicies['package-explorer'];
+    expect(policy.decide('skill', 'skill-a')).toBe('allow');
+    expect(policy.decide('read', 'src/x.ts')).toBe('allow');
+    expect(policy.decide('bash', 'ls')).toBe('deny');
   });
 
   test('projects marketplace SDK and v2 child policy with default-deny ceilings', () => {

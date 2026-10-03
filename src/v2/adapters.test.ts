@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { createReadOnlyAgentPermission } from '../agents/permissions';
+import { PermissionConfigSchema } from '../config/schema';
 import {
   adaptPermissions,
   adaptTool,
@@ -169,6 +170,50 @@ describe('adaptPermissions', () => {
     expect(evaluatePermission(rules, 'read', 'src/v2/adapters.ts')).toBe(
       'allow',
     );
+    expect(evaluatePermission(rules, 'edit', 'src/v2/adapters.ts')).toBe(
+      'deny',
+    );
+    expect(evaluatePermission(rules, 'bash', 'ls')).toBe('deny');
+  });
+
+  test('config-parsed permissions keep author order through the pipeline', () => {
+    // Regression: zod's shaped object emitted declared keys first and
+    // catchall keys after, moving the author's "*": "deny" base BEHIND the
+    // specific allows — under last-match-wins that denied the allows, so a
+    // read-only preset lost every file tool. The record parse must keep
+    // the author's key order, and the compiled rules must keep the
+    // wildcard deny before the allows.
+    const parsed = PermissionConfigSchema.parse({
+      '*': 'deny',
+      bash: 'deny',
+      edit: 'deny',
+      write: 'deny',
+      apply_patch: 'deny',
+      ast_grep_replace: 'deny',
+      task: 'deny',
+      question: 'deny',
+      read: 'allow',
+      glob: 'allow',
+      grep: 'allow',
+      lsp: 'allow',
+      list: 'allow',
+      codesearch: 'allow',
+      ast_grep_search: 'allow',
+      external_directory: 'allow',
+    });
+    expect(Object.keys(parsed).at(0)).toBe('*');
+    const rules = adaptPermissions(parsed);
+    const wildcardDenyIdx = rules.findIndex(
+      (r) => r.action === '*' && r.resource === '*' && r.effect === 'deny',
+    );
+    const readAllowIdx = rules.findIndex(
+      (r) => r.action === 'read' && r.resource === '*' && r.effect === 'allow',
+    );
+    expect(wildcardDenyIdx).toBeLessThan(readAllowIdx);
+    expect(evaluatePermission(rules, 'read', 'src/v2/adapters.ts')).toBe(
+      'allow',
+    );
+    expect(evaluatePermission(rules, 'glob', 'src/**/*.ts')).toBe('allow');
     expect(evaluatePermission(rules, 'edit', 'src/v2/adapters.ts')).toBe(
       'deny',
     );
