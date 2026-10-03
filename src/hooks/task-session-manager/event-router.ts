@@ -8,6 +8,7 @@
 import type { BackgroundJobExecution } from '../../utils/background-job-board';
 import type { BackgroundJobStore } from '../../utils/background-job-store';
 import type { BackgroundJobSupervisor } from '../../utils/background-job-supervisor';
+import { isRecord } from '../../utils/guards';
 import { log } from '../../utils/logger';
 import {
   isFailoverError,
@@ -46,9 +47,9 @@ type BackgroundJobRecord = NonNullable<ReturnType<BackgroundJobStore['get']>>;
  * non-NamedError payloads.
  */
 function structuredErrorMessage(error: unknown): string | undefined {
-  if (!isRecordLike(error)) return undefined;
+  if (!isRecord(error)) return undefined;
   const data = error.data;
-  if (isRecordLike(data)) {
+  if (isRecord(data)) {
     const inner = data.message;
     // Whitespace-only strings must not bypass the generic fallback
     // (an empty board summary is worse than "Session error").
@@ -57,10 +58,6 @@ function structuredErrorMessage(error: unknown): string | undefined {
   const direct = error.message;
   if (typeof direct === 'string' && direct.trim().length > 0) return direct;
   return undefined;
-}
-
-function isRecordLike(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null;
 }
 
 interface SessionEventGenerationFence {
@@ -101,10 +98,6 @@ function eventFenceMap(
   const created = new Map<string, SessionEventGenerationFence>();
   sessionEventFences.set(key, created);
   return created;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null;
 }
 
 function finiteNumber(value: unknown): value is number {
@@ -1008,15 +1001,11 @@ function routeChildInputWait(
       now: deps.now?.(),
     });
     if (record) {
-      // The hook instance also subscribes to the sidecar globally (for asks
-      // observed by other instances); notify the direct dep here so callers
-      // that only hold this hook still see the ask. noteChildInputWait only
-      // notifies global subscribers on the FIRST ask per request id, and
-      // this direct call mirrors that for true duplicates. A raw v2
-      // permission.asked can arrive before its normalized v1-shaped copy;
-      // when the duplicate enriches the stored wait with action/resources,
-      // re-notify so the queued parent wake can replace its stale
-      // "unknown" delta before delivery.
+      // Notify the direct dep once per request id (true duplicates are
+      // suppressed). A raw v2 permission.asked can arrive before its
+      // normalized v1-shaped copy; when the duplicate enriches the stored
+      // wait with action/resources, re-notify so the queued parent wake can
+      // replace its stale "unknown" delta before delivery.
       const enrichedDuplicate =
         existingSnapshot !== undefined &&
         (existingSnapshot.questionsLength < (record.questions?.length ?? 0) ||

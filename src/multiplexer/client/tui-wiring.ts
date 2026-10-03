@@ -105,8 +105,6 @@ export const SESSION_EVENT_TYPES = [
   'session.deleted',
 ] as const;
 
-export type SessionEventType = (typeof SESSION_EVENT_TYPES)[number];
-
 /** Minimal host event bus surface (`api.event`). */
 export interface ClientEventBus {
   on(type: string, handler: (event: unknown) => void): () => void;

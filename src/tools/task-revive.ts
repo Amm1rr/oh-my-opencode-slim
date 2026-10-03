@@ -4,6 +4,7 @@ import type { BackgroundJobLease } from '../utils/background-job-board';
 import { getSuppressionTombstone } from '../utils/background-job-persistence';
 import { clearBackgroundJobSuppression } from '../utils/background-job-store';
 import type { BackgroundJobSupervisor } from '../utils/background-job-supervisor';
+import { responseError } from '../utils/child-transcript';
 import { log } from '../utils/logger';
 import { getClient } from '../utils/opencode-client';
 import {
@@ -263,9 +264,9 @@ export function createTaskReviveTool(
           .then((response) => {
             if (owner.settled) return;
             owner.settled = true;
-            const responseError = getApiError(response);
-            if (responseError !== undefined) {
-              throw new Error(errorText(responseError));
+            const apiError = responseError(response);
+            if (apiError !== undefined) {
+              throw new Error(errorText(apiError));
             }
             // Deletion wins, but it leaves this write's lease alive. Only
             // that precise case may compensate; all stale owners/generations
@@ -415,9 +416,9 @@ async function ownInvalidatedAdmission(
     // No local abort timeout: an idle read cannot retire a token while the
     // remote write could still execute. Only actual settlement reaches here.
     if (!stillOwns()) return;
-    const responseError = getApiError(response);
-    if (responseError !== undefined)
-      throw new Error(`abort failed: ${errorText(responseError)}`);
+    const apiError = responseError(response);
+    if (apiError !== undefined)
+      throw new Error(`abort failed: ${errorText(apiError)}`);
 
     // Historical session.get outcomes cannot prove the accepted run stopped.
     // Take fresh live evidence after abort settlement, with a bounded budget.
@@ -532,14 +533,6 @@ function isReviveableRetainedJob(
   return job.state === 'reconciled' && job.terminalState !== undefined;
 }
 
-function getApiError(response: unknown): unknown {
-  if (!response || typeof response !== 'object') return undefined;
-  const record = response as Record<string, unknown>;
-  return record.error === undefined || record.error === null
-    ? undefined
-    : record.error;
-}
-
 /**
  * Untracked-revive guidance, distinguished by what the host still knows.
  *
@@ -606,7 +599,7 @@ async function resolveOrAdoptUntrackedTask(
       path: { id: requested },
       query: { directory: options.input.directory },
     });
-    if (getApiError(response) !== undefined) return generic;
+    if (responseError(response) !== undefined) return generic;
     const probed = (response as Record<string, unknown> | undefined)?.data;
     if (probed === undefined || probed === null) return generic;
     data = probed as Record<string, unknown>;
