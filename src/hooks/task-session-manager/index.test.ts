@@ -1950,7 +1950,9 @@ describe('task-session-manager hook', () => {
           },
           beforeAcknowledgement,
         ),
-      ).rejects.toThrow(/unreconciled; task\(\) cannot resume/);
+      ).rejects.toThrow(
+        /unreconciled; task\(\) cannot resume[\s\S]*task_revive\(task_id:/,
+      );
       expect(beforeAcknowledgement.args.task_id).toBe(original.alias);
 
       board.markReconciled(original.taskID);
@@ -5730,7 +5732,9 @@ describe('task-session-manager hook', () => {
         { tool: 'task', sessionID: 'parent-1', callID: 'call-1' },
         unreconciled,
       ),
-    ).rejects.toThrow(/unreconciled; task\(\) cannot resume/);
+    ).rejects.toThrow(
+      /unreconciled; task\(\) cannot resume[\s\S]*task_revive\(task_id:/,
+    );
     expect(unreconciled.args.task_id).toBe('ora-1');
 
     board.markReconciled('done-1');
@@ -5944,7 +5948,9 @@ describe('task-session-manager hook', () => {
         { tool: 'task', sessionID: 'parent-1', callID: 'resume' },
         resume,
       ),
-    ).rejects.toThrow(/was not dropped; no new session was created/);
+    ).rejects.toThrow(
+      /was not dropped; no new session was created[\s\S]*task_revive\(task_id: "ses_custom123"/,
+    );
     expect(resume.args.task_id).toBe('ses_custom123');
   });
 
@@ -5959,7 +5965,9 @@ describe('task-session-manager hook', () => {
         { tool: 'task', sessionID: 'parent-1', callID: 'resume' },
         resume,
       ),
-    ).rejects.toThrow(/was not dropped; no new session was created/);
+    ).rejects.toThrow(
+      /was not dropped; no new session was created[\s\S]*task_revive\(task_id: "fix-99"/,
+    );
     expect(resume.args.task_id).toBe('fix-99');
   });
 
@@ -6199,7 +6207,9 @@ describe('task-session-manager hook', () => {
         { tool: 'task', sessionID: 'parent-1', callID: 'resume-1' },
         spawn,
       ),
-    ).rejects.toThrow(/was not dropped; no new session was created/);
+    ).rejects.toThrow(
+      /was not dropped; no new session was created[\s\S]*task_revive\(task_id: "474bd269-eac6-40a9-9408-9fe430e8cd19"/,
+    );
     expect(spawn.args.task_id).toBe('474bd269-eac6-40a9-9408-9fe430e8cd19');
   });
 

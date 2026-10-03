@@ -1169,6 +1169,14 @@ export function createBackgroundJobTerminalGate(options: {
     run: RunRef,
     signal: TerminalSignal = { kind: 'inspect' },
   ): Promise<GateResult> {
+    const retained = board.get(run.taskID);
+    if (
+      retained?.verifiedRetainedRound === true &&
+      retained.generation === run.generation &&
+      retained.state !== 'running'
+    ) {
+      return Promise.resolve({ kind: 'committed', record: retained });
+    }
     const token = capture(run);
     if (!token) return Promise.resolve({ kind: 'stale' });
     const value = observation(run);

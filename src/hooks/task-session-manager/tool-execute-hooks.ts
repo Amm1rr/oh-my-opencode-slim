@@ -19,6 +19,7 @@ import {
   parseTaskLaunchOutput,
   parseTaskStatusOutput,
 } from '../../utils';
+import type { BackgroundJobRecord } from '../../utils/background-job-board';
 import type { BackgroundJobTerminalGate } from '../../utils/background-job-terminal-gate';
 import { isRecord as isObjectRecord } from '../../utils/guards';
 import { log } from '../../utils/logger';
@@ -27,6 +28,14 @@ import { type DelegationWording, delegationWording } from '../../v2/delegation';
 import { isMissingRememberedSessionError } from './board-injection';
 import type { PendingTaskCall } from './pending-call-tracker';
 import { convertSameProviderBackgroundTask } from './same-provider-policy';
+import {
+  appendChildRefSuffix,
+  type CanonicalTaskReference,
+  noteExactSessionAlias,
+  pluginDisposedMessage,
+  type RetainedRecoveryResult,
+  unrecognizedTaskReferenceMessage,
+} from './session-recovery';
 import { normalizeLateCancelledTaskOutput } from './status-utils';
 import { extractReadFiles } from './task-context-tracker';
 
@@ -62,6 +71,15 @@ function refuseExplicitTaskId(
   throw new Error(message);
 }
 
+function isNativeContinuableCompleted(
+  job: BackgroundJobRecord,
+  agentType: string,
+): boolean {
+  if (job.agent !== agentType) return false;
+  if (job.state === 'completed') return true;
+  return job.state === 'reconciled' && job.terminalState === 'completed';
+}
+
 function refuseKnownTaskResume(
   requested: string,
   job: ResumeRefusalJob,
@@ -87,7 +105,9 @@ function refuseKnownTaskResume(
   if (job.terminalUnreconciled) {
     refuseExplicitTaskId(
       requested,
-      `${label}: ${job.state}, unreconciled; ${delegation.tool}() cannot resume until acknowledgement. Use task_revive now, or wait for ack then ${delegation.tool}(). No new session was created.`,
+      delegation.tool === 'task'
+        ? `${label}: ${job.state}, unreconciled; task() cannot resume until acknowledgement. Call task_revive(task_id: "${job.taskID}", prompt: "...") directly; it continues that same session. task_result is not required first. This prompt was not sent.`
+        : `${label}: ${job.state}, unreconciled; ${delegation.tool}() cannot resume this session. Use task_revive with a new prompt. It was not dropped; no new session was created. This prompt was not sent.`,
       { state: job.state, terminalUnreconciled: true },
     );
   }
@@ -132,6 +152,21 @@ export async function handleToolExecuteBefore(
      * delegation vocabulary for model-visible refusal guidance. Defaults to
      * v1 wording. */
     hostFlavor?: string;
+    recoverRetainedSession?: (request: {
+      parentSessionID: string;
+      requested: string;
+      agent?: string;
+    }) => Promise<RetainedRecoveryResult>;
+    prepareAliasNumbering?: (
+      parentSessionID: string,
+      excludeCallID?: string,
+    ) => Promise<{ enabled: boolean; stopped?: boolean }>;
+    resolveCanonicalTaskRef?: (
+      parentSessionID: string,
+      requested: string,
+      excludeCallID?: string,
+    ) => Promise<CanonicalTaskReference>;
+    isDisposed?: () => boolean;
   },
 ): Promise<void> {
   const toolName = input.tool.toLowerCase();
@@ -174,6 +209,33 @@ export async function handleToolExecuteBefore(
   }
 
   const agentType = args.subagent_type.trim();
+  if (typeof args.task_id === 'string' && args.task_id.trim() !== '') {
+    const canonical = deps.resolveCanonicalTaskRef
+      ? await deps.resolveCanonicalTaskRef(
+          input.sessionID,
+          args.task_id.trim(),
+          input.callID,
+        )
+      : undefined;
+    if (deps.isDisposed?.() || canonical?.kind === 'refused') {
+      refuseExplicitTaskId(
+        args.task_id.trim(),
+        canonical?.kind === 'refused'
+          ? canonical.reason
+          : pluginDisposedMessage(),
+        { unresolved: true },
+      );
+    }
+    if (canonical?.kind === 'exact') args.task_id = canonical.taskID;
+  } else if (deps.prepareAliasNumbering) {
+    const prepared = await deps.prepareAliasNumbering(
+      input.sessionID,
+      input.callID,
+    );
+    if (prepared.stopped || deps.isDisposed?.()) {
+      throw new Error(`${pluginDisposedMessage()} No session was created.`);
+    }
+  }
   let background = args.background === true;
   if (background) {
     const conversion = convertSameProviderBackgroundTask({
@@ -247,20 +309,89 @@ export async function handleToolExecuteBefore(
         );
       }
 
-      if (knownManagedTask) {
+      let continuable: BackgroundJobRecord | undefined;
+      if (
+        knownManagedTask &&
+        deps.hostFlavor === 'v2' &&
+        isNativeContinuableCompleted(knownManagedTask, agentType)
+      ) {
+        continuable = knownManagedTask;
+      } else if (knownManagedTask) {
         refuseKnownTaskResume(
           requested,
           knownManagedTask,
           agentType,
           delegation,
         );
+      } else if (deps.hostFlavor === 'v2' && deps.recoverRetainedSession) {
+        const recovery = await deps.recoverRetainedSession({
+          parentSessionID: input.sessionID,
+          requested,
+          agent: agentType,
+        });
+        if (deps.isDisposed?.()) {
+          throw new Error(`${pluginDisposedMessage()} No session was created.`);
+        }
+        const restored = deps.backgroundJobBoard.resolve(
+          input.sessionID,
+          requested,
+        );
+        if (restored && isNativeContinuableCompleted(restored, agentType)) {
+          continuable = restored;
+        } else if (restored) {
+          refuseKnownTaskResume(requested, restored, agentType, delegation);
+        } else {
+          if (deps.isDisposed?.()) {
+            throw new Error(
+              `${pluginDisposedMessage()} No session was created.`,
+            );
+          }
+          const reason =
+            recovery.kind === 'refused'
+              ? recovery.reason
+              : 'the host session could not be restored';
+          refuseExplicitTaskId(
+            requested,
+            `Task ${requested}: ${delegation.tool}() cannot resolve this ${delegation.resumeParam}. ${reason} It was not dropped; no new session was created. This prompt was not sent.`,
+            { unresolved: true },
+          );
+        }
+      } else {
+        refuseExplicitTaskId(
+          requested,
+          delegation.tool === 'task'
+            ? unrecognizedTaskReferenceMessage(requested)
+            : `Task ${requested}: ${delegation.tool}() cannot resolve this ${delegation.resumeParam}. It was not dropped; no new session was created. Omit ${delegation.resumeParam} on a separate call to start a new session.`,
+          { unresolved: true },
+        );
       }
-      refuseExplicitTaskId(
-        requested,
-        `Task ${requested}: ${delegation.tool}() cannot resolve this ${delegation.resumeParam}. It was not dropped; no new session was created. Omit ${delegation.resumeParam} on a separate call to start a new session.`,
-        { unresolved: true },
-      );
+      if (continuable) {
+        if (deps.isDisposed?.()) {
+          throw new Error(`${pluginDisposedMessage()} No session was created.`);
+        }
+        const relaunchLease = deps.backgroundJobBoard.acquireRelaunchLease(
+          continuable.taskID,
+          continuable.generation,
+        );
+        if (!relaunchLease) {
+          throw new Error(
+            `Task ${requested} cannot be resumed safely: its current generation is already owned by another lifecycle operation. Do not launch a duplicate with the same ${delegation.resumeParam}.`,
+          );
+        }
+        if (deps.isDisposed?.()) {
+          deps.backgroundJobBoard.releaseLease(relaunchLease);
+          throw new Error(`${pluginDisposedMessage()} No session was created.`);
+        }
+        args.task_id = continuable.taskID;
+        deps.taskContextTracker.pendingManagedTaskIds.add(continuable.taskID);
+        deps.backgroundJobBoard.markUsed(input.sessionID, continuable.taskID);
+        pendingCall.resumedTaskId = continuable.taskID;
+        pendingCall.relaunchLease = relaunchLease;
+      }
     } else {
+      if (deps.isDisposed?.()) {
+        throw new Error(`${pluginDisposedMessage()} No session was created.`);
+      }
       const relaunchLease = deps.backgroundJobBoard.acquireRelaunchLease(
         remembered.taskID,
         remembered.generation,
@@ -269,6 +400,10 @@ export async function handleToolExecuteBefore(
         throw new Error(
           `Task ${requested} cannot be resumed safely: its current generation is already owned by another lifecycle operation. Do not launch a duplicate with the same ${delegation.resumeParam}.`,
         );
+      }
+      if (deps.isDisposed?.()) {
+        deps.backgroundJobBoard.releaseLease(relaunchLease);
+        throw new Error(`${pluginDisposedMessage()} No session was created.`);
       }
       args.task_id = remembered.taskID;
       deps.taskContextTracker.pendingManagedTaskIds.add(remembered.taskID);
@@ -308,6 +443,13 @@ export async function handleToolExecuteBefore(
     }
   }
 
+  if (deps.isDisposed?.()) {
+    if (pendingCall.relaunchLease) {
+      deps.backgroundJobBoard.releaseLease(pendingCall.relaunchLease);
+      pendingCall.relaunchLease = undefined;
+    }
+    throw new Error(`${pluginDisposedMessage()} No session was created.`);
+  }
   try {
     deps.pendingCallTracker.add(pendingCall);
     if (pendingCall.background && deps.backgroundTaskConcurrency) {
@@ -327,6 +469,9 @@ export async function handleToolExecuteBefore(
         });
         pendingCall.concurrencyTicket = ticket;
         await ticket.ready;
+        if (deps.isDisposed?.()) {
+          throw new Error(`${pluginDisposedMessage()} No session was created.`);
+        }
       }
     }
   } catch (error) {
@@ -438,6 +583,7 @@ export async function handleToolExecuteAfter(
   );
   const exactCallConfirmed =
     exactCallID !== undefined && pending?.callId === exactCallID;
+  let childRefAllowed = exactCallConfirmed;
   let identityTaskID: string | undefined;
   if (!pending && typeof output.output === 'string') {
     // No tool call ID (or unknown one): resolve identity via the task
@@ -452,6 +598,7 @@ export async function handleToolExecuteAfter(
         deps.backgroundJobBoard,
       );
       if (pending) {
+        childRefAllowed = true;
         log(
           '[task-session-manager] resolved task output identity via early-registered task ID',
           { taskID: identityTaskID, callID: pending.callId },
@@ -482,6 +629,7 @@ export async function handleToolExecuteAfter(
       },
     );
     if (pending) {
+      childRefAllowed = false;
       log(
         '[task-session-manager] unresolvable no-ID take; consuming first-match pending (drain fallback)',
         {
@@ -565,6 +713,7 @@ export async function handleToolExecuteAfter(
       deps.bindConcurrencyTicket?.(record.taskID, pending);
       deps.clearRehydrateTombstone?.(launch.taskID);
       if (exactCallConfirmed) deps.backgroundJobSupervisor?.onLaunch(record);
+      appendRegisteredChildRef(output, record, pending, childRefAllowed);
       log('[task-session-manager] background task launch registered', {
         taskID: record.taskID,
         alias: record.alias,
@@ -598,6 +747,7 @@ export async function handleToolExecuteAfter(
         deps.backgroundJobBoard,
         controlParamName(deps.hostFlavor),
       );
+      appendRegisteredChildRef(output, record, pending, childRefAllowed);
       if (exactCallConfirmed) deps.backgroundJobSupervisor?.onLaunch(record);
       await deps.terminalGate.reconcile(record, {
         kind: 'output',
@@ -688,6 +838,7 @@ export async function handleToolExecuteAfter(
       if (exactCallConfirmed) {
         deps.backgroundJobSupervisor?.onLaunch(promoted);
       }
+      appendRegisteredChildRef(output, promoted, pending, childRefAllowed);
       deps.taskContextTracker.pendingManagedTaskIds.add(taskId);
     } else {
       deps.taskContextTracker.pendingManagedTaskIds.delete(taskId);
@@ -819,4 +970,34 @@ function registerTaskOutputLaunch(
     });
     return undefined;
   }
+}
+
+function appendRegisteredChildRef(
+  output: { output: unknown },
+  record: {
+    taskID: string;
+    parentSessionID: string;
+    agent: string;
+    alias: string;
+    provisional?: boolean;
+  },
+  pending: PendingTaskCall,
+  allowed: boolean,
+): void {
+  if (!allowed || record.provisional) return;
+  if (pending.identityUnresolved) return;
+  if (record.parentSessionID !== pending.parentSessionId) return;
+  if (record.agent !== pending.agentType) return;
+  if (typeof output.output !== 'string') return;
+  if (parseTaskIdFromTaskOutput(output.output) !== record.taskID) return;
+  const text =
+    record.alias === record.taskID
+      ? noteExactSessionAlias(output.output, record.taskID)
+      : output.output;
+  output.output = appendChildRefSuffix(text, {
+    parentSessionID: record.parentSessionID,
+    agent: record.agent,
+    alias: record.alias,
+    sessionID: record.taskID,
+  });
 }

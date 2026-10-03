@@ -130,19 +130,41 @@ function filesFromBody(
  * no v1 transcript equivalent, so it maps to the v1 `system` role — the
  * role transcript consumers already skip when scanning for the trailing
  * turn. Every other entry keeps its v2 role name. */
+function messageTime(time: unknown): Record<string, unknown> | undefined {
+  if (typeof time === 'number' && Number.isFinite(time))
+    return { created: time };
+  if (!isRecord(time)) return undefined;
+  return time;
+}
+
 function toV1Message(m: Record<string, unknown>) {
-  const role = m.role ?? m.type;
+  const sourceType = typeof m.type === 'string' ? m.type : undefined;
+  const role = sourceType === 'idle' ? 'system' : (sourceType ?? m.role);
+  const time = messageTime(m.time);
+  const contentParts = Array.isArray(m.content)
+    ? (m.content as Array<Record<string, unknown>>).map((part) => ({ ...part }))
+    : [];
+  const text =
+    contentParts.length === 0 && typeof m.text === 'string'
+      ? m.text
+      : contentParts.length === 0 &&
+          isRecord(m.payload) &&
+          typeof m.payload.text === 'string'
+        ? m.payload.text
+        : undefined;
   return {
     info: {
       id: m.id,
-      role: role === 'idle' ? 'system' : role,
-      ...(isRecord(m.time) ? { time: m.time } : {}),
+      role,
+      ...(typeof sourceType === 'string' ? { sourceType } : {}),
+      ...(typeof m.agent === 'string' ? { agent: m.agent } : {}),
+      ...(typeof m.parentID === 'string' ? { parentID: m.parentID } : {}),
+      ...(typeof m.outcome === 'string' ? { outcome: m.outcome } : {}),
+      ...(time ? { time } : {}),
       ...(m.finish !== undefined ? { finish: m.finish } : {}),
       ...(m.error !== undefined ? { error: m.error } : {}),
     },
-    parts: Array.isArray(m.content)
-      ? (m.content as Array<Record<string, unknown>>).map((p) => ({ ...p }))
-      : [],
+    parts: text === undefined ? contentParts : [{ type: 'text', text }],
   };
 }
 
@@ -367,6 +389,10 @@ export function buildPluginInput(
       ...(s.context
         ? {
             messages: async (args: Record<string, unknown>) => {
+              const context = s.context;
+              if (!context) {
+                throw new Error('[v2] session.context is unavailable');
+              }
               const query = isRecord(args?.query) ? args.query : undefined;
               const limit = query?.limit;
               // Bounded tail read (foreground-fallback replay): the v2
@@ -380,18 +406,44 @@ export function buildPluginInput(
                 limit > 0 &&
                 typeof s.messages === 'function'
               ) {
-                const page = (await s.messages({
+                const page = await s.messages({
                   sessionID: sessionIDOf(args),
                   limit,
                   order: 'desc',
-                })) as { data?: Array<Record<string, unknown>> } | undefined;
-                const items = Array.isArray(page?.data) ? page.data : [];
-                return { data: items.slice().reverse().map(toV1Message) };
+                });
+                if (!isRecord(page) || !Array.isArray(page.data)) {
+                  throw new Error(
+                    '[v2] session.messages did not return a page',
+                  );
+                }
+                const preserved: Record<string, unknown> = {
+                  data: page.data
+                    .slice()
+                    .reverse()
+                    .map((message) =>
+                      toV1Message(
+                        isRecord(message) ? message : { type: 'unknown' },
+                      ),
+                    ),
+                };
+                if ('cursor' in page) preserved.cursor = page.cursor;
+                if ('next' in page) preserved.next = page.next;
+                return preserved;
               }
+              const raw = await context({
+                sessionID: sessionIDOf(args),
+              });
+              if (!Array.isArray(raw) || !raw.every(isRecord)) {
+                throw new Error('[v2] session.context did not return an array');
+              }
+              const cut = raw.some(
+                (message) =>
+                  message.type === 'compaction' &&
+                  message.status === 'completed',
+              );
               return {
-                data: (
-                  (await s.context?.({ sessionID: sessionIDOf(args) })) ?? []
-                ).map(toV1Message),
+                data: raw.map(toV1Message),
+                page: { source: 'session.context', complete: !cut },
               };
             },
           }

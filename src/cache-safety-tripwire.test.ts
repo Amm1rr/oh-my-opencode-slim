@@ -91,6 +91,10 @@ const ALLOWLIST = new Map<string, string>([
     'hooks/deepwork-guard/index.ts',
     'Date.now() timestamps claim markers and receipts under .slim/deepwork/.runtime/ (machine-owned bookkeeping the workflow never reads); the completion gate deny message carries only slugs and paths, never timestamps.',
   ],
+  [
+    'hooks/task-session-manager/session-recovery.ts',
+    'Date.now() bounds read-only host evidence and alias-history deadlines; recovery clocks never enter prompt content or restored evidence timestamps.',
+  ],
 ]);
 
 async function scanForViolations(): Promise<string[]> {

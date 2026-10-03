@@ -6,6 +6,7 @@ import type {
   BackgroundJobStatusInput,
   BackgroundJobTerminalInput,
   ContextFile,
+  RestoreRetainedSessionInput,
   WallClockTimeoutClaimInput,
 } from './background-job-board';
 import {
@@ -172,6 +173,10 @@ export function clearBackgroundJobSuppression(
 export interface BackgroundJobStore {
   // ── Mutation methods ──────────────────────────────────────────────
   registerLaunch(input: BackgroundJobLaunchInput): BackgroundJobRecord;
+  /** Cache-only import of an absent verified host session. */
+  restoreRetainedSession(
+    input: RestoreRetainedSessionInput,
+  ): BackgroundJobRecord | undefined;
   acquireCancellationLease(
     taskID: string,
     generation: number,

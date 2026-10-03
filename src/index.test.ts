@@ -2168,8 +2168,8 @@ describe('plugin TUI agent activity', () => {
 
     const snapshot = readTuiSnapshot(projectDir);
     expect(snapshot.sessionParents['child-launch-first']).toBe('parent-1');
-    expect(snapshot.sessionDetails['child-launch-first']?.alias).toMatch(
-      /^ora-\d+$/,
+    expect(snapshot.sessionDetails['child-launch-first']?.alias).toBe(
+      'child-launch-first',
     );
     expect(snapshot.activeSessions['child-launch-first']).toBe('oracle');
   });
@@ -2192,8 +2192,8 @@ describe('plugin TUI agent activity', () => {
 
     const snapshot = readTuiSnapshot(projectDir);
     expect(snapshot.sessionParents['child-busy-first']).toBe('parent-2');
-    expect(snapshot.sessionDetails['child-busy-first']?.alias).toMatch(
-      /^ora-\d+$/,
+    expect(snapshot.sessionDetails['child-busy-first']?.alias).toBe(
+      'child-busy-first',
     );
   });
 

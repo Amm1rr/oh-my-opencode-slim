@@ -202,6 +202,21 @@ export function createTaskSessionManagerHook(
     /** Host flavor marker ('v2' on OpenCode v2 hosts); selects the native
      *  delegation vocabulary in model-visible tool guidance. Defaults v1. */
     hostFlavor?: string;
+    recoverRetainedSession?: (request: {
+      parentSessionID: string;
+      requested: string;
+      agent?: string;
+    }) => Promise<import('./session-recovery').RetainedRecoveryResult>;
+    prepareAliasNumbering?: (
+      parentSessionID: string,
+      excludeCallID?: string,
+    ) => Promise<{ enabled: boolean; stopped?: boolean }>;
+    resolveCanonicalTaskRef?: (
+      parentSessionID: string,
+      requested: string,
+      excludeCallID?: string,
+    ) => Promise<import('./session-recovery').CanonicalTaskReference>;
+    isDisposed?: () => boolean;
     shouldManageSession: (sessionID: string) => boolean;
     /** Register a session as orchestrator when the transform hook detects
      *  an orchestrator message but the session isn't in the agent map yet. */
@@ -627,6 +642,10 @@ export function createTaskSessionManagerHook(
         taskContextTracker,
         getLifecycleEpoch: () => rehydrateState.nextEpoch,
         hostFlavor: options.hostFlavor,
+        recoverRetainedSession: options.recoverRetainedSession,
+        prepareAliasNumbering: options.prepareAliasNumbering,
+        resolveCanonicalTaskRef: options.resolveCanonicalTaskRef,
+        isDisposed: options.isDisposed,
       }),
 
     'tool.execute.after': async (

@@ -106,9 +106,13 @@ interface LooseMessage {
   info?: {
     id?: unknown;
     role?: unknown;
+    parentID?: unknown;
+    agent?: unknown;
+    sourceType?: unknown;
+    outcome?: unknown;
     error?: unknown;
     finish?: unknown;
-    time?: { completed?: unknown };
+    time?: { created?: unknown; completed?: unknown };
   };
   parts?: unknown[];
 }
@@ -337,4 +341,340 @@ export function classifyAssistantTurnEvidence(
     .join('\n\n')
     .trim();
   return text.length > 0 ? { kind: 'ready', text } : { kind: 'textless' };
+}
+
+export interface CurrentRoundClassification {
+  verdict: 'completed' | 'error' | 'interrupted' | 'incomplete' | 'unreadable';
+  text?: string;
+  reason?: string;
+  /** Timestamp of the latest delivered user message, when the host provided one. */
+  startedAt?: number;
+  /** Assistant completion time for this round, when the host provided one. */
+  completedAt?: number;
+}
+
+function transcriptOrderKey(message: TranscriptMessage): number | undefined {
+  const time = message.info?.time;
+  if (!isRecord(time)) return undefined;
+  if (typeof time.created === 'number' && Number.isFinite(time.created)) {
+    return time.created;
+  }
+  if (typeof time.completed === 'number' && Number.isFinite(time.completed)) {
+    return time.completed;
+  }
+  return undefined;
+}
+
+function assistantCompletedAt(message: TranscriptMessage): number | undefined {
+  const time = message.info?.time;
+  if (!isRecord(time)) return undefined;
+  return typeof time.completed === 'number' && Number.isFinite(time.completed)
+    ? time.completed
+    : undefined;
+}
+
+function isInterruptSignal(message: TranscriptMessage): boolean {
+  const finish = message.info?.finish;
+  if (finish === 'abort' || finish === 'aborted') return true;
+  const error = message.info?.error;
+  if (error === undefined || error === null) return false;
+  const text = stringifyError(error).toLowerCase();
+  return text.includes('abort') || text.includes('interrupted');
+}
+
+function messageIdentity(message: TranscriptMessage): string | undefined {
+  const id = message.info?.id;
+  return typeof id === 'string' && id.length > 0 ? id : undefined;
+}
+
+function messageParentIdentity(message: TranscriptMessage): string | undefined {
+  const parentID = message.info?.parentID;
+  return typeof parentID === 'string' && parentID.length > 0
+    ? parentID
+    : undefined;
+}
+
+/**
+ * Order a transcript without trusting array position.
+ * Different timestamps sort by time. Equal timestamps use an assistant
+ * parentID link or the host message id. A tie that cannot be proved is
+ * unreadable; the array is not reversed as a guess.
+ */
+export function orderTranscriptMessages(
+  messages: TranscriptMessage[],
+): TranscriptMessage[] | 'unreadable' {
+  const rows = messages.map((message) => ({
+    message,
+    time: transcriptOrderKey(message),
+    id: messageIdentity(message),
+    parentID: messageParentIdentity(message),
+  }));
+  if (rows.some((row) => row.time === undefined)) return 'unreadable';
+  const seen = new Set<string>();
+  for (const row of rows) {
+    if (!row.id) continue;
+    if (seen.has(row.id)) return 'unreadable';
+    seen.add(row.id);
+  }
+  for (const row of rows) {
+    if (!row.parentID) continue;
+    if (row.parentID === row.id) return 'unreadable';
+    const parent = rows.find((item) => item.id === row.parentID);
+    if (!parent || parent.time === undefined || row.time === undefined)
+      continue;
+    if (parent.time > row.time) return 'unreadable';
+    if (parent.time === row.time && parent.id && row.id && parent.id > row.id) {
+      return 'unreadable';
+    }
+  }
+  let unreadable = false;
+  const sorted = [...rows].sort((left, right) => {
+    if (left.time !== right.time) return (left.time ?? 0) - (right.time ?? 0);
+    if (left.parentID && left.parentID === right.id) return 1;
+    if (right.parentID && right.parentID === left.id) return -1;
+    if (left.id && right.id) {
+      return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
+    }
+    unreadable = true;
+    return 0;
+  });
+  return unreadable ? 'unreadable' : sorted.map((row) => row.message);
+}
+
+/**
+ * Classify only the latest delivered user round.
+ *
+ * Pending tool parts from an older round do not block a later completed
+ * round, and an older assistant answer is not reused once a newer user
+ * message exists.
+ */
+export function classifyCurrentDeliveredRound(
+  response: unknown,
+): CurrentRoundClassification {
+  if (response === undefined) {
+    return {
+      verdict: 'unreadable',
+      reason: 'transcript source unavailable',
+    };
+  }
+  if (responseError(response) !== undefined) {
+    return { verdict: 'unreadable', reason: 'transcript read failed' };
+  }
+  if (!isRecord(response) || !Array.isArray(response.data)) {
+    return { verdict: 'unreadable', reason: 'malformed transcript response' };
+  }
+
+  const messages: TranscriptMessage[] = [];
+  for (const entry of response.data) {
+    if (
+      !isRecord(entry) ||
+      !isRecord(entry.info) ||
+      (!['assistant', 'user', 'system'].includes(String(entry.info.role)) &&
+        typeof entry.info.id !== 'string')
+    ) {
+      return { verdict: 'unreadable', reason: 'malformed transcript entries' };
+    }
+    if (
+      entry.parts !== undefined &&
+      (!Array.isArray(entry.parts) ||
+        entry.parts.some(
+          (part) => !isRecord(part) || typeof part.type !== 'string',
+        ))
+    ) {
+      return { verdict: 'unreadable', reason: 'malformed transcript parts' };
+    }
+    messages.push(entry);
+  }
+
+  const sorted = orderTranscriptMessages(messages);
+  if (sorted === 'unreadable') {
+    return {
+      verdict: 'unreadable',
+      reason: 'transcript order is not verifiable',
+    };
+  }
+
+  let latestUser = -1;
+  for (let index = sorted.length - 1; index >= 0; index -= 1) {
+    if (sorted[index]?.info?.role === 'user') {
+      latestUser = index;
+      break;
+    }
+  }
+  if (latestUser < 0) {
+    return { verdict: 'unreadable', reason: 'no delivered user round' };
+  }
+  const startedAt = transcriptOrderKey(sorted[latestUser] as TranscriptMessage);
+
+  let assistant = -1;
+  for (let index = sorted.length - 1; index > latestUser; index -= 1) {
+    if (sorted[index]?.info?.role === 'assistant') {
+      assistant = index;
+      break;
+    }
+  }
+  if (assistant < 0) return { verdict: 'incomplete', startedAt };
+
+  const turn = sorted[assistant] as TranscriptMessage;
+  if (isInterruptSignal(turn)) {
+    return {
+      verdict: 'interrupted',
+      startedAt,
+      completedAt: assistantCompletedAt(turn),
+    };
+  }
+  const evidence = classifyAssistantTurnEvidence(
+    sorted,
+    assistant,
+    latestUser,
+    true,
+  );
+  const completedAt = assistantCompletedAt(turn);
+  switch (evidence.kind) {
+    case 'ready':
+      return {
+        verdict: 'completed',
+        text: evidence.text,
+        startedAt,
+        completedAt,
+      };
+    case 'error':
+      return {
+        verdict: 'error',
+        text: evidence.errorText,
+        startedAt,
+        completedAt,
+      };
+    default:
+      return { verdict: 'incomplete', startedAt };
+  }
+}
+
+function sourceTypeOf(message: TranscriptMessage): string | undefined {
+  const source = message.info?.sourceType ?? message.info?.role;
+  return typeof source === 'string' ? source : undefined;
+}
+
+function outcomeOf(message: TranscriptMessage): string | undefined {
+  const outcome = message.info?.outcome;
+  return typeof outcome === 'string' && outcome.length > 0
+    ? outcome
+    : undefined;
+}
+
+function textOf(message: TranscriptMessage): string {
+  const parts = Array.isArray(message.parts) ? message.parts : [];
+  return parts
+    .filter(
+      (part) =>
+        isRecord(part) && part.type === 'text' && typeof part.text === 'string',
+    )
+    .map((part) => (part as { text: string }).text.trim())
+    .filter((text) => text.length > 0)
+    .join('\n');
+}
+
+/**
+ * Historical v2 round. The latest user or synthetic message is the input
+ * boundary. Only an idle/outcome after that boundary can confirm the round.
+ * An older idle or Session-level outcome is not reused, and a missing time
+ * is not treated as zero.
+ */
+export function classifyV2HistoricalRound(
+  response: unknown,
+): CurrentRoundClassification {
+  if (response === undefined) {
+    return { verdict: 'unreadable', reason: 'transcript source unavailable' };
+  }
+  if (responseError(response) !== undefined) {
+    return { verdict: 'unreadable', reason: 'transcript read failed' };
+  }
+  if (!isRecord(response) || !Array.isArray(response.data)) {
+    return { verdict: 'unreadable', reason: 'malformed transcript response' };
+  }
+  const messages: TranscriptMessage[] = [];
+  for (const entry of response.data) {
+    if (!isRecord(entry) || !isRecord(entry.info)) {
+      return { verdict: 'unreadable', reason: 'malformed transcript entries' };
+    }
+    messages.push(entry);
+  }
+  const sorted = orderTranscriptMessages(messages);
+  if (sorted === 'unreadable') {
+    return {
+      verdict: 'unreadable',
+      reason: 'transcript order is not verifiable',
+    };
+  }
+  let boundary = -1;
+  for (let index = sorted.length - 1; index >= 0; index -= 1) {
+    const source = sourceTypeOf(sorted[index] as TranscriptMessage);
+    if (source === 'user' || source === 'synthetic') {
+      boundary = index;
+      break;
+    }
+  }
+  if (boundary < 0) {
+    return { verdict: 'unreadable', reason: 'no delivered user round' };
+  }
+  const startedAt = transcriptOrderKey(sorted[boundary] as TranscriptMessage);
+  let assistant = -1;
+  let closingIdle = -1;
+  for (let index = boundary + 1; index < sorted.length; index += 1) {
+    const message = sorted[index] as TranscriptMessage;
+    const source = sourceTypeOf(message);
+    if (source === 'user' || source === 'synthetic') break;
+    if (source === 'assistant') {
+      assistant = index;
+      closingIdle = -1;
+      continue;
+    }
+    if (source === 'idle') closingIdle = index;
+  }
+  if (closingIdle < 0) return { verdict: 'incomplete', startedAt };
+  const idle = sorted[closingIdle] as TranscriptMessage;
+  const idleOutcome = outcomeOf(idle);
+  const completedAt =
+    transcriptOrderKey(idle) ??
+    (assistant >= 0
+      ? assistantCompletedAt(sorted[assistant] as TranscriptMessage)
+      : undefined);
+  if (idleOutcome === undefined) {
+    return { verdict: 'unreadable', reason: 'idle outcome is missing' };
+  }
+  if (assistant >= 0 && closingIdle < assistant) {
+    return { verdict: 'incomplete', startedAt };
+  }
+  if (idleOutcome === 'interrupted') {
+    return { verdict: 'interrupted', startedAt, completedAt };
+  }
+  if (idleOutcome === 'failed') {
+    const turn =
+      assistant >= 0 ? (sorted[assistant] as TranscriptMessage) : undefined;
+    return {
+      verdict: 'error',
+      text:
+        (turn ? textOf(turn) : '') ||
+        'The historical round failed before an assistant result.',
+      startedAt,
+      completedAt,
+    };
+  }
+  if (idleOutcome !== 'succeeded') {
+    return {
+      verdict: 'unreadable',
+      reason: `unrecognized idle outcome ${idleOutcome}`,
+    };
+  }
+  if (assistant < 0) return { verdict: 'incomplete', startedAt };
+  const text = textOf(sorted[assistant] as TranscriptMessage);
+  if (!text) return { verdict: 'incomplete', startedAt };
+  return {
+    verdict: 'completed',
+    text,
+    startedAt,
+    completedAt:
+      assistantCompletedAt(sorted[assistant] as TranscriptMessage) ??
+      completedAt,
+  };
 }

@@ -22,11 +22,23 @@ describe('orchestrator prompt', () => {
     expect(prompt).toContain('Do not rely on ordinary text alone');
   });
 
-  test('shows the host-specific task continuation call without nested code spans', () => {
+  test('sends existing-session work to task_revive without requiring the reusable list', () => {
     const prompt = buildOrchestratorPrompt();
 
     expect(prompt).toContain(
-      '`task(subagent_type: "<agent>", task_id: "<task-id>", prompt: "...", background: true)`',
+      '`task_revive(task_id: "<task-id>", prompt: "...")`',
+    );
+    expect(prompt).toContain(
+      'even when that session is not listed under Reusable Sessions',
+    );
+    expect(prompt).toContain(
+      'not required before continuing an existing session',
+    );
+    expect(prompt).not.toContain(
+      'Only sessions listed under Reusable Sessions may be resumed',
+    );
+    expect(prompt).not.toContain(
+      'use `task_revive` only for Retained / Recovery tasks',
     );
   });
 
