@@ -298,6 +298,28 @@ describe('runDoctorCheck', () => {
     expect(issuePaths?.filter((p) => p === 'multiplexer.type')).toHaveLength(1);
   });
 
+  test('invalid multiplexer.viewer is reported with the multiplexer.viewer path', () => {
+    const projectDir = path.join(tempDir, 'project');
+    const configDir = path.join(projectDir, '.opencode');
+    fs.mkdirSync(configDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(configDir, 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        multiplexer: { type: 'herdr', viewer: 'nano' },
+      }),
+    );
+
+    const result = runDoctorCheck(projectDir);
+
+    expect(result.ok).toBe(false);
+    expect(result.configs[1].ok).toBe(false);
+    expect(result.configs[1].error?.kind).toBe('invalid-schema');
+    const issuePaths = result.configs[1].error?.issues?.map((i) =>
+      i.path.join('.'),
+    );
+    expect(issuePaths).toContain('multiplexer.viewer');
+  });
+
   test('valid multiplexer config returns ok', () => {
     const projectDir = path.join(tempDir, 'project');
     const configDir = path.join(projectDir, '.opencode');
@@ -318,6 +340,7 @@ describe('runDoctorCheck', () => {
       type: 'tmux',
       layout: 'tiled',
       main_pane_size: 40,
+      viewer: 'mini',
     });
   });
 

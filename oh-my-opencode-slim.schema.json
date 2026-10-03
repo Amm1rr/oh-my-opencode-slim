@@ -3141,6 +3141,15 @@
           "description": "Explicit path to the cmux-tui binary. When unset, the adapter probes PATH for `cmux-tui` first and falls back to `cmux`.",
           "type": "string",
           "minLength": 1
+        },
+        "viewer": {
+          "default": "mini",
+          "description": "Which opencode TUI surface subagent panes open. \"mini\" (default) launches the lightweight `opencode mini`; \"tui\" runs the full interface.",
+          "type": "string",
+          "enum": [
+            "tui",
+            "mini"
+          ]
         }
       }
     },

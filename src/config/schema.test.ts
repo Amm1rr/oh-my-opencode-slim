@@ -337,6 +337,7 @@ describe('MultiplexerConfigSchema', () => {
       type: 'none',
       layout: 'main-vertical',
       main_pane_size: 60,
+      viewer: 'mini',
     });
   });
 
@@ -401,6 +402,33 @@ describe('MultiplexerConfigSchema', () => {
     expect(warnSpy).not.toHaveBeenCalled();
   });
 
+  it('accepts viewer "tui" and defaults viewer to "mini" when unset', () => {
+    const tui = MultiplexerConfigSchema.parse({
+      type: 'herdr',
+      viewer: 'tui',
+    });
+    const unset = MultiplexerConfigSchema.parse({ type: 'herdr' });
+
+    expect(tui.viewer).toBe('tui');
+    expect(unset.viewer).toBe('mini');
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('disables pane management for an invalid viewer value', () => {
+    const result = PluginConfigSchema.safeParse({
+      multiplexer: { type: 'herdr', viewer: 'nano' },
+    });
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.multiplexer?.type).toBe('none');
+    }
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    const message = warnSpy.mock.calls[0]?.[0] as string;
+    expect(message).toContain('Invalid multiplexer config value');
+    expect(message).toContain('viewer');
+  });
+
   it('strips the removed zellij_pane_mode key with exactly one deprecation warning', () => {
     // Two parses stand in for the user + project config layers: the rest of
     // the config must load and the warning must fire only once per process.
@@ -424,6 +452,7 @@ describe('MultiplexerConfigSchema', () => {
         type: 'tmux',
         layout: 'tiled',
         main_pane_size: 40,
+        viewer: 'mini',
       });
       expect(first.data.agents?.oracle?.model).toBe('valid/model');
     }

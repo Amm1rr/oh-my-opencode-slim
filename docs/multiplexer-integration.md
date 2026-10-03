@@ -258,6 +258,7 @@ inside that pane).
 | `layout` | string | `"main-vertical"` | Layout preset: `main-vertical`, `main-horizontal`, `tiled`, `even-horizontal`, `even-vertical`. Each adapter maps it to its nearest native expression; cmux-tui has no layout expression and ignores it (see [Layouts](#layouts)) |
 | `main_pane_size` | number | `60` | Main pane size percentage (`20`–`80`). Applied by tmux for the `main-*` layouts; ignored by Zellij, Herdr, kitty, and cmux-tui |
 | `cmux_tui_binary` | string | omitted | Explicit path to the cmux-tui binary. When omitted, the client resolves `cmux-tui` first, then `cmux`, on `PATH` |
+| `viewer` | string | `"mini"` | Which opencode TUI surface subagent panes open. `"mini"` (default) runs `opencode mini` (requires an opencode build with the `mini` subcommand); `"tui"` runs the full interface. Mini commands omit the directory argument, so each adapter pins the pane to the child session's project directory itself (herdr and kitty set it natively, tmux passes `-c`, Zellij passes `--cwd`, cmux-tui prefixes `cd`). Changing the value takes effect on the next opencode start |
 
 All `multiplexer.*` values are read by the client only. An invalid value
 disables pane management (fail-closed) with a once-per-process diagnostic.

@@ -19,6 +19,7 @@ import {
   InterviewConfigSchema,
   LEGACY_FALLBACK_KEYS,
   type MarketplaceActivation,
+  MultiplexerConfigSchema,
   PluginConfigSchema,
   type RawPluginConfig,
   type ResolvedPluginConfig,
@@ -320,6 +321,42 @@ function retainExplicitBackgroundJobsFields(
   };
 }
 
+/**
+ * Zod applies multiplexer defaults while parsing each layer. Keep those
+ * defaults from masquerading as explicitly configured overrides; the merged
+ * multiplexer config is normalized after all layers are merged.
+ */
+function retainExplicitMultiplexerFields(
+  parsedConfig: RawPluginConfig,
+  rawConfig: unknown,
+): RawPluginConfig {
+  if (!parsedConfig.multiplexer) {
+    return parsedConfig;
+  }
+
+  const rawMultiplexer =
+    isPlainRecord(rawConfig) && isPlainRecord(rawConfig.multiplexer)
+      ? rawConfig.multiplexer
+      : undefined;
+  if (!rawMultiplexer) {
+    return { ...parsedConfig, multiplexer: undefined };
+  }
+
+  const explicit: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(
+    parsedConfig.multiplexer as unknown as Record<string, unknown>,
+  )) {
+    if (Object.hasOwn(rawMultiplexer, key)) {
+      explicit[key] = value;
+    }
+  }
+
+  return {
+    ...parsedConfig,
+    multiplexer: explicit as RawPluginConfig['multiplexer'],
+  };
+}
+
 /** Keep parsed leaf values only where the sanitized raw layer kept the key, recursing into plain objects. */
 function retainSanitizedValues(
   parsed: Record<string, unknown>,
@@ -536,6 +573,7 @@ export function loadPluginConfigFromPath(
     // merged interview config is normalized after all layers are merged.
     let layerConfig = retainExplicitInterviewFields(result.data, rawConfig);
     layerConfig = retainExplicitBackgroundJobsFields(layerConfig, rawConfig);
+    layerConfig = retainExplicitMultiplexerFields(layerConfig, rawConfig);
 
     // Zod applies webfetch.enabled's default while parsing each layer. Keep
     // that default from masquerading as an explicitly configured override;
@@ -785,6 +823,12 @@ export function loadPluginConfig(
     config.backgroundJobs = BackgroundJobsConfigSchema.parse(
       config.backgroundJobs,
     );
+  }
+  if (config.multiplexer) {
+    // Per-layer parsing kept only explicitly configured multiplexer keys
+    // (see retainExplicitMultiplexerFields), so defaults apply once here,
+    // after all layers are merged.
+    config.multiplexer = MultiplexerConfigSchema.parse(config.multiplexer);
   }
 
   // Override preset from environment variable if set

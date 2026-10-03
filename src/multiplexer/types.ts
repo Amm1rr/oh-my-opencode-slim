@@ -6,7 +6,7 @@
  */
 
 import type { MultiplexerLayout } from '../config/schema';
-import type { ViewerFlavor } from './shared';
+import type { ViewerFlavor, ViewerSurface } from './shared';
 
 export interface PaneResult {
   success: boolean;
@@ -37,6 +37,13 @@ export interface PaneSpawnOptions {
    * none exists.
    */
   viewerPassword?: string;
+  /**
+   * Which opencode TUI surface the viewer command opens: the full `tui`
+   * (default) or the `mini` interface. Distinct from `viewerFlavor`, which
+   * selects the host attachment form; `viewerSurface` selects the opencode
+   * TUI that renders the session.
+   */
+  viewerSurface?: ViewerSurface;
 }
 
 /**

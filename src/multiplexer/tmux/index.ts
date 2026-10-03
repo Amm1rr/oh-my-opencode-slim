@@ -87,6 +87,7 @@ export class TmuxMultiplexer implements Multiplexer {
         sessionId,
         serverUrl,
         directory,
+        { viewerSurface: options?.viewerSurface },
       )}`;
 
       // v2 remote hosts: the viewer must authenticate with
@@ -105,6 +106,9 @@ export class TmuxMultiplexer implements Multiplexer {
         this.storedLayout,
         opencodeCmd,
         viewerSecretArgs,
+        // Mini commands omit the directory, so the split pins the child
+        // session's project directory itself.
+        options?.viewerSurface === 'mini' ? ['-c', directory] : [],
       );
       const paneId = result.stdout.trim();
 
@@ -349,6 +353,7 @@ export class TmuxMultiplexer implements Multiplexer {
     layout: MultiplexerLayout,
     opencodeCmd: string,
     viewerSecretArgs: string[] = [],
+    miniCwdArgs: string[] = [],
   ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
     const args = [
       '-S',
@@ -361,6 +366,7 @@ export class TmuxMultiplexer implements Multiplexer {
       '#{pane_id}',
       ...this.targetArgs(targetPane),
       ...viewerSecretArgs,
+      ...miniCwdArgs,
       opencodeCmd,
     ];
     log('[tmux] spawnPane: executing', {

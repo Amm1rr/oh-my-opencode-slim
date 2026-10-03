@@ -242,6 +242,27 @@ describe('KittyMultiplexer', () => {
     expect(shared).not.toContain('attach');
   });
 
+  test('viewer "mini" runs opencode mini in the launched window', async () => {
+    const { KittyMultiplexer } = await importFreshKitty();
+    const kitty = new KittyMultiplexer();
+
+    await kitty.spawnPane(
+      'session-mini',
+      'Mini worker',
+      'http://localhost:4096',
+      '/repo',
+      { viewerFlavor: 'v2-shared', viewerSurface: 'mini' },
+    );
+
+    const launch = commandContaining('launch');
+    // kitty pins the working directory natively (`--cwd=`) for every pane.
+    expect(launch?.some((arg) => arg === '--cwd=/repo')).toBe(true);
+    const cmd = launch?.at(-1) ?? '';
+    expect(cmd).toContain("mini --session 'session-mini'");
+    expect(cmd).not.toContain('--server');
+    expect(cmd).not.toContain("'/repo'");
+  });
+
   test('spawnPane parses integer window id from launch stdout', async () => {
     const { KittyMultiplexer } = await importFreshKitty();
     const kitty = new KittyMultiplexer();
