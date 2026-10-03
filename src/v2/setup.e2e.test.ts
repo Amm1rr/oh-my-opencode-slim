@@ -2305,6 +2305,38 @@ describe('createV2Setup e2e', () => {
     expect(logText).not.toContain('[v2] v1 dispose failed');
   }, 20_000);
 
+  test('disabled_hooks chat-headers skips the model.request bridge registration', async () => {
+    await Bun.write(
+      path.join(projectDir, '.opencode', 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        companion: { enabled: false },
+        disabled_hooks: ['chat-headers'],
+      }),
+    );
+    const { ctx, calls } = makeMockV2Context(projectDir);
+    const cleanup = await createV2Setup()(ctx);
+
+    // The v1 chat.headers key is absent, so the v2 bridge skips both the
+    // marker observer and the model.request registration; the rest of the
+    // session hooks still register.
+    expect(calls.hooks).not.toContain('session:model.request');
+    expect(calls.hooks).toContain('session:context');
+    expect(calls.hooks).toContain('session:prompt');
+
+    await cleanup();
+
+    // Control: the default config registers the model.request bridge, so
+    // the absence above is the gate and not a dead registration path.
+    await Bun.write(
+      path.join(projectDir, '.opencode', 'oh-my-opencode-slim.json'),
+      JSON.stringify({ companion: { enabled: false } }),
+    );
+    const control = makeMockV2Context(projectDir);
+    const controlCleanup = await createV2Setup()(control.ctx);
+    expect(control.calls.hooks).toContain('session:model.request');
+    await controlCleanup();
+  }, 20_000);
+
   test('host rejecting the model.request hook name fails setup loudly', async () => {
     // Hook-name rejection is a host contract
     // violation, not a degrade path — the error propagates out of setup

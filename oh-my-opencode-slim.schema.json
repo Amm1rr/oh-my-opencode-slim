@@ -3080,14 +3080,21 @@
       }
     },
     "disabled_hooks": {
-      "description": "Hook names to disable completely. Valid values: phase-reminder, foreground-fallback, deepwork-guard. \"phase-reminder\" is not registered, so orchestrator phase reminders are never injected; \"foreground-fallback\" marks the fallback manager inert: it is still constructed but never triggers automatic intervention, same effect as fallback.enabled = false. Unknown values are stripped with a warning when the config loads. A value consisting only of unknown names is treated as unset, so a lower config layer's list still applies.",
+      "description": "Hook names to disable completely. Valid values: phase-reminder, foreground-fallback, deepwork-guard, chat-headers, cache-monitor, json-error-recovery, tool-loop-guard, search-path-guard, absolute-path-rescue, apply-patch. \"phase-reminder\" is not registered, so orchestrator phase reminders are never injected; \"foreground-fallback\" marks the fallback manager inert: it is still constructed but never triggers automatic intervention, same effect as fallback.enabled = false; \"chat-headers\" is not registered, so the Copilot x-initiator header is never stamped (v1 chat.headers and the v2 model.request bridge); \"cache-monitor\" stops the prompt-cache bust watchdog, so cache warnings are never logged; the on-demand tool guards (\"json-error-recovery\", \"tool-loop-guard\", \"search-path-guard\", \"absolute-path-rescue\", \"apply-patch\") stop intercepting tool calls entirely, so malformed output, repeated identical calls, and invalid or guessed paths surface raw to the model. Unknown values are stripped with a warning when the config loads. A value consisting only of unknown names is treated as unset, so a lower config layer's list still applies.",
       "type": "array",
       "items": {
         "type": "string",
         "enum": [
           "phase-reminder",
           "foreground-fallback",
-          "deepwork-guard"
+          "deepwork-guard",
+          "chat-headers",
+          "cache-monitor",
+          "json-error-recovery",
+          "tool-loop-guard",
+          "search-path-guard",
+          "absolute-path-rescue",
+          "apply-patch"
         ]
       }
     },

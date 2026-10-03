@@ -265,6 +265,13 @@ describe('PluginConfigSchema disabled_hooks and disabled_commands', () => {
       'phase-reminder',
       'foreground-fallback',
       'deepwork-guard',
+      'chat-headers',
+      'cache-monitor',
+      'json-error-recovery',
+      'tool-loop-guard',
+      'search-path-guard',
+      'absolute-path-rescue',
+      'apply-patch',
     ]);
     expect(DISABLED_COMMANDS_VALUES).toEqual([
       'interview',
