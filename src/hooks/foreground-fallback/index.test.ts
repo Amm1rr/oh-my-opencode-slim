@@ -1260,6 +1260,155 @@ describe('foreground fallback redo: host retry budget', () => {
     expect(switchModel).toHaveBeenCalledTimes(3);
   });
 
+  test('v2 steering disabled leaves the retry hook inert', async () => {
+    const mgr = new ForegroundFallbackManager(
+      makeChains({ orchestrator: ['test/a', 'test/b', 'test/c'] }),
+      false,
+      { directory: '/test', hostFlavor: 'v2' } as never,
+      0,
+      undefined,
+      undefined,
+      0,
+      0,
+      undefined,
+      undefined,
+      undefined,
+      false,
+    );
+    const switchModel = mock(async () => ({}));
+    const event = retryEvent('v2-inert', 'a', { retry: true, delay: 77 });
+    await mgr.handleV2Retry(event, switchModel);
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(event.decision).toEqual({ retry: true, delay: 77 });
+  });
+
+  test('v2 retry hook logs a one-shot delivery notice per session and model', async () => {
+    const captured: string[] = [];
+    const capture = spyOn(logger, 'log').mockImplementation(
+      (message: string) => {
+        captured.push(message);
+      },
+    );
+    try {
+      const mgr = new ForegroundFallbackManager(
+        makeChains({ orchestrator: ['test/a', 'test/b', 'test/c'] }),
+        false,
+        { directory: '/test', hostFlavor: 'v2' } as never,
+        0,
+        undefined,
+        undefined,
+        0,
+        0,
+        undefined,
+        undefined,
+        undefined,
+        false,
+      );
+      const switchModel = mock(async () => ({}));
+      await mgr.handleV2Retry(
+        retryEvent('v2-notice', 'a', { retry: true }),
+        switchModel,
+      );
+      await mgr.handleV2Retry(
+        retryEvent('v2-notice', 'a', { retry: true }),
+        switchModel,
+      );
+      // Same session, different failing model: a second notice.
+      await mgr.handleV2Retry(
+        retryEvent('v2-notice', 'b', { retry: true }),
+        switchModel,
+      );
+      const notices = captured.filter(
+        (message) => message === '[foreground-fallback] v2 retry hook observed',
+      );
+      expect(notices).toHaveLength(2);
+    } finally {
+      capture.mockRestore();
+    }
+  });
+
+  test('v2 steering defers the first switch by the configured initial delay', async () => {
+    const mgr = new ForegroundFallbackManager(
+      makeChains({ orchestrator: ['test/a', 'test/b', 'test/c'] }),
+      true,
+      { directory: '/test', hostFlavor: 'v2' } as never,
+      0, // maxRetries: switch immediately once the delay is spent
+      undefined,
+      undefined,
+      250, // initialRetryDelayMs
+      0, // retryDelayMs
+    );
+    const switchModel = mock(async () => ({}));
+    const first = retryEvent('v2-delay', 'a', { retry: true, delay: 77 });
+    await mgr.handleV2Retry(first, switchModel);
+    // The host is asked for one delayed retry of the current model; no
+    // switch yet.
+    expect(first.decision).toEqual({ retry: true, delay: 250 });
+    expect(switchModel).not.toHaveBeenCalled();
+    const second = retryEvent('v2-delay', 'a', { retry: true, delay: 77 });
+    await mgr.handleV2Retry(second, switchModel);
+    expect(switchModel).toHaveBeenCalledTimes(1);
+    expect(switchModel).toHaveBeenCalledWith('v2-delay', {
+      providerID: 'test',
+      id: 'b',
+    });
+    expect(second.decision).toEqual({ retry: true, delay: 0 });
+  });
+
+  test('v2 steering bypasses the initial delay for permanent quota errors', async () => {
+    const mgr = new ForegroundFallbackManager(
+      makeChains({ orchestrator: ['test/a', 'test/b', 'test/c'] }),
+      true,
+      { directory: '/test', hostFlavor: 'v2' } as never,
+      0,
+      undefined,
+      undefined,
+      250,
+      0,
+    );
+    const switchModel = mock(async () => ({}));
+    const event = {
+      ...retryEvent('v2-perm', 'a', { retry: true, delay: 77 }),
+      error: { message: 'personal-team-blocked:spending-limit' },
+    };
+    await mgr.handleV2Retry(event, switchModel);
+    expect(switchModel).toHaveBeenCalledTimes(1);
+    expect(event.decision).toEqual({ retry: true, delay: 0 });
+  });
+
+  test('willAttemptFallback follows the steering flag on v2', () => {
+    const steering = new ForegroundFallbackManager(
+      makeChains({ orchestrator: ['test/a', 'test/b', 'test/c'] }),
+      false,
+      { directory: '/test', hostFlavor: 'v2' } as never,
+      0,
+      undefined,
+      undefined,
+      0,
+      0,
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
+    expect(steering.willAttemptFallback('v2-wa')).toBe(true);
+    const inert = new ForegroundFallbackManager(
+      makeChains({ orchestrator: ['test/a', 'test/b', 'test/c'] }),
+      false,
+      { directory: '/test', hostFlavor: 'v2' } as never,
+      0,
+      undefined,
+      undefined,
+      0,
+      0,
+      undefined,
+      undefined,
+      undefined,
+      false,
+    );
+    expect(inert.willAttemptFallback('v2-wa')).toBe(false);
+  });
+
   test('T7: mapped v2 failed execution prompts once without charging host retries', async () => {
     const sid = 'v2-failed-execution';
     const { manager, mocks } = makeManager({ maxRetries: 2 });
