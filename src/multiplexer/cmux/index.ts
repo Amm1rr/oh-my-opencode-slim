@@ -42,6 +42,7 @@ import {
   normalizePathForShell,
   quoteShellArg,
   resolveHostOpencodeBinary,
+  shellSupportsAndChain,
   shellSupportsHashComments,
   withParentEnvPassword,
 } from '../shared';
@@ -530,9 +531,11 @@ export class CmuxMultiplexer implements Multiplexer {
     );
     // Mini commands omit the directory and `pane run` has no cwd flag, so
     // the command changes directory itself. The wrapper stays on one line,
-    // so the FR-8 marker above it remains the first script line.
+    // so the FR-8 marker above it remains the first script line. Shells
+    // that cannot parse `&&` (nu, cmd, PowerShell) keep the pre-pinning
+    // behavior instead: the pane inherits the anchor pane's cwd.
     const withCwd =
-      options?.viewerSurface === 'mini'
+      options?.viewerSurface === 'mini' && shellSupportsAndChain()
         ? `cd ${quoteShellArg(normalizePathForShell(directory))} && ${viewerCommand}`
         : viewerCommand;
     const command = needsSecretBridge

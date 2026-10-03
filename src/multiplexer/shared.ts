@@ -147,6 +147,18 @@ export function isPosixShell(shell: string): boolean {
 }
 
 /**
+ * Whether the shell parses `a && b` as a command sequence. Everything in
+ * POSIX_SHELLS does, and fish has supported `&&` since 3.0; nu, cmd, and
+ * PowerShell do not. Adapters that chain commands into the viewer script
+ * must gate on this the same way they gate POSIX-only constructs.
+ */
+const AND_CHAIN_SHELLS = new Set([...POSIX_SHELLS, 'fish']);
+
+export function shellSupportsAndChain(shell = process.env.SHELL): boolean {
+  return AND_CHAIN_SHELLS.has(shellName(shell ?? '/bin/sh'));
+}
+
+/**
  * Wraps `command` in a POSIX script that recovers the viewer password from
  * this process's own `/proc/<pid>/environ` (readable by the owning user only)
  * and exports it as `OPENCODE_PASSWORD` before running the command. Adapters
