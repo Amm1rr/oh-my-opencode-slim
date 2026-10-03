@@ -336,6 +336,45 @@ function messageParentIdentity(message: TranscriptMessage): string | undefined {
     : undefined;
 }
 
+function finiteCreated(message: TranscriptMessage): number | undefined {
+  const time = message.info?.time;
+  return isRecord(time) &&
+    typeof time.created === 'number' &&
+    Number.isFinite(time.created)
+    ? time.created
+    : undefined;
+}
+
+function exclusiveEqualCreatedLink(
+  rows: Array<{
+    message: TranscriptMessage;
+    time: number | undefined;
+    id?: string;
+  }>,
+  parent: { message: TranscriptMessage; time: number | undefined; id?: string },
+  child: { message: TranscriptMessage; id?: string; parentID?: string },
+): boolean {
+  if (
+    parent.message.info?.role !== 'user' ||
+    child.message.info?.role !== 'assistant'
+  ) {
+    return false;
+  }
+  const parentCreated = finiteCreated(parent.message);
+  const childCreated = finiteCreated(child.message);
+  if (
+    !parent.id ||
+    !child.id ||
+    child.parentID !== parent.id ||
+    parentCreated === undefined ||
+    parentCreated !== childCreated
+  ) {
+    return false;
+  }
+  const bucket = rows.filter((item) => item.time === parent.time);
+  return bucket.length === 2 && bucket.every((item) => item.id);
+}
+
 /**
  * Order a transcript without trusting array position.
  * Different timestamps sort by time. Equal timestamps use an assistant
@@ -365,7 +404,13 @@ export function orderTranscriptMessages(
     if (!parent || parent.time === undefined || row.time === undefined)
       continue;
     if (parent.time > row.time) return 'unreadable';
-    if (parent.time === row.time && parent.id && row.id && parent.id > row.id) {
+    if (
+      parent.time === row.time &&
+      parent.id &&
+      row.id &&
+      parent.id > row.id &&
+      !exclusiveEqualCreatedLink(rows, parent, row)
+    ) {
       return 'unreadable';
     }
   }
@@ -458,6 +503,16 @@ export function classifyCurrentDeliveredRound(
   if (assistant < 0) return { verdict: 'incomplete', startedAt };
 
   const turn = sorted[assistant] as TranscriptMessage;
+  const declaredParent = messageParentIdentity(turn);
+  const latestUserID = messageIdentity(sorted[latestUser] as TranscriptMessage);
+  if (declaredParent && declaredParent !== latestUserID) {
+    return latestUserID
+      ? { verdict: 'incomplete', startedAt }
+      : {
+          verdict: 'unreadable',
+          reason: 'assistant parent is not the latest user',
+        };
+  }
   if (isInterruptSignal(turn)) {
     return {
       verdict: 'interrupted',

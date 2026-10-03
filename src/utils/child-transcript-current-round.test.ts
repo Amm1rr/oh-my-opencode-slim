@@ -245,38 +245,103 @@ test('equal timestamps without an id or parent link are unreadable', () => {
   });
 });
 
-test('a parentID that contradicts the message id is not completed', () => {
+test('an equal-time parent link completes when the user id sorts after the reply', () => {
+  const messages = [
+    user('msg_z', 100),
+    assistant('msg_a', 100, 100, 'answer', { parentID: 'msg_z' }),
+  ];
+  for (const data of [messages, [...messages].reverse()]) {
+    expect(classifyCurrentDeliveredRound({ data })).toMatchObject({
+      verdict: 'completed',
+      text: 'answer',
+    });
+  }
+});
+
+test('a reply parented to an older user does not complete the newer round', () => {
+  const round = classifyCurrentDeliveredRound({
+    data: [
+      user('msg_old', 90),
+      user('msg_new', 100, 'next'),
+      assistant('msg_zreply', 100, 100, 'OLD-SECRET', { parentID: 'msg_old' }),
+    ],
+  });
+  expect(round.verdict).toBe('incomplete');
+  expect(round.text).toBeUndefined();
+  expect(JSON.stringify(round)).not.toContain('OLD-SECRET');
+});
+
+test('a declared parent is unreadable when the latest user has no id', () => {
   const round = classifyCurrentDeliveredRound({
     data: [
       {
-        info: {
-          id: 'msg_a',
-          role: 'user',
-          agent: 'fixer',
-          time: { created: 10 },
-        },
+        info: { role: 'user', agent: 'fixer', time: { created: 90 } },
         parts: [{ type: 'text', text: 'ask' }],
       },
-      {
-        info: {
-          id: 'msg_b',
-          role: 'assistant',
-          parentID: 'msg_a',
-          finish: 'stop',
-          time: { created: 10, completed: 10 },
-        },
-        parts: [{ type: 'text', text: 'answer' }],
-      },
-    ].map((message, index) => {
-      if (index === 1) {
-        message.info.id = 'msg_0';
-        message.info.parentID = 'msg_z';
-      } else {
-        message.info.id = 'msg_z';
-      }
-      return message;
-    }),
+      assistant('msg_a', 100, 100, 'answer', { parentID: 'msg_missing' }),
+    ],
+  });
+  expect(round).toEqual({
+    verdict: 'unreadable',
+    reason: 'assistant parent is not the latest user',
+  });
+});
+
+test('an assistant that is actually earlier than its parent is unreadable', () => {
+  const round = classifyCurrentDeliveredRound({
+    data: [
+      assistant('msg_a', 90, 90, 'early', { parentID: 'msg_z' }),
+      user('msg_z', 100),
+    ],
+  });
+  expect(round).toEqual({
+    verdict: 'unreadable',
+    reason: 'transcript order is not verifiable',
+  });
+});
+
+test('duplicate message ids stay unreadable', () => {
+  const round = classifyCurrentDeliveredRound({
+    data: [user('msg_z', 100), assistant('msg_z', 101, 101, 'answer')],
   });
   expect(round.verdict).toBe('unreadable');
-  expect(round.text).toBeUndefined();
+});
+
+test('a third message in an equal-time bucket is not ordered by a reversed parent id', () => {
+  const round = classifyCurrentDeliveredRound({
+    data: [
+      user('msg_z', 100),
+      assistant('msg_a', 100, 100, 'answer', { parentID: 'msg_z' }),
+      {
+        info: { id: 'msg_m', role: 'system', time: { created: 100 } },
+        parts: [],
+      },
+    ],
+  });
+  expect(round.verdict).toBe('unreadable');
+});
+
+test('a valid equal-time link keeps an error or interruption terminal', () => {
+  const errored = classifyCurrentDeliveredRound({
+    data: [
+      assistant('msg_a', 100, 100, '', {
+        parentID: 'msg_z',
+        finish: 'error',
+        error: { message: 'provider exploded' },
+      }),
+      user('msg_z', 100),
+    ],
+  });
+  expect(errored.verdict).toBe('error');
+  const interrupted = classifyCurrentDeliveredRound({
+    data: [
+      user('msg_z', 100),
+      assistant('msg_a', 100, 100, 'partial', {
+        parentID: 'msg_z',
+        finish: 'aborted',
+        error: { name: 'Aborted', message: 'aborted' },
+      }),
+    ],
+  });
+  expect(interrupted.verdict).toBe('interrupted');
 });
