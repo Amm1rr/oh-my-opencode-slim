@@ -188,6 +188,17 @@ export interface BackgroundJobStatusInput {
   now?: number;
 }
 
+export interface BackgroundJobAdoptionInput {
+  taskID: string;
+  parentSessionID: string;
+  agent: string;
+  description: string;
+  terminalState: 'completed' | 'error';
+  resultSummary?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface WallClockTimeoutClaimInput {
   taskID: string;
   generation: number;
@@ -487,7 +498,39 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       return updated;
     }
 
+    const record = this.createLaunchRecord(input, now, generation);
+    this.setJob(record);
+    return record;
+  }
+
+  adoptTerminal(
+    input: BackgroundJobAdoptionInput,
+  ): BackgroundJobRecord | undefined {
+    if (this.jobs.has(input.taskID)) return;
     const record: BackgroundJobRecord = {
+      ...this.createLaunchRecord(
+        { ...input, background: true },
+        input.createdAt,
+        ++this.executionSequence,
+      ),
+      state: 'reconciled',
+      terminalState: input.terminalState,
+      terminalRevision: 1,
+      completedAt: input.updatedAt,
+      updatedAt: input.updatedAt,
+      lastUsedAt: input.updatedAt,
+      resultSummary: input.resultSummary,
+    };
+    this.setJob(record);
+    return record;
+  }
+
+  private createLaunchRecord(
+    input: BackgroundJobLaunchInput,
+    now: number,
+    generation: number,
+  ): BackgroundJobRecord {
+    return {
       taskID: input.taskID,
       // Keep the property absent for ordinary launches and legacy records.
       ...(input.provisional === true ? { provisional: true } : {}),
@@ -521,9 +564,6 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       totalErrors: 0,
       timeoutCount: 0,
     };
-
-    this.setJob(record);
-    return record;
   }
 
   updateStatus(

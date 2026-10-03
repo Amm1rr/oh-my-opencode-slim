@@ -24,6 +24,8 @@ function readState() {
   return JSON.parse(readFileSync(stateFilePath(), 'utf8'));
 }
 
+const previousXdg = process.env.XDG_DATA_HOME;
+
 beforeEach(() => {
   mkdirSync(TEST_DIR, { recursive: true });
   process.env.XDG_DATA_HOME = XDG_DIR;
@@ -34,7 +36,8 @@ afterEach(() => {
     manager.onExit();
   }
   rmSync(TEST_DIR, { recursive: true, force: true });
-  delete process.env.XDG_DATA_HOME;
+  if (previousXdg === undefined) delete process.env.XDG_DATA_HOME;
+  else process.env.XDG_DATA_HOME = previousXdg;
 });
 
 function make(

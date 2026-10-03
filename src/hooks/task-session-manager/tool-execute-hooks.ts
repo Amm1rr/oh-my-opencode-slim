@@ -167,6 +167,11 @@ export async function handleToolExecuteBefore(
       excludeCallID?: string,
     ) => Promise<CanonicalTaskReference>;
     isDisposed?: () => boolean;
+    adoptRequested?: (
+      parent: string,
+      requested: string,
+      agent: string,
+    ) => Promise<'adopted' | 'unchecked' | 'rejected'>;
   },
 ): Promise<void> {
   const toolName = input.tool.toLowerCase();
@@ -286,7 +291,7 @@ export async function handleToolExecuteBefore(
   });
   if (typeof args.task_id === 'string' && args.task_id.trim() !== '') {
     const requested = args.task_id.trim();
-    const remembered =
+    let remembered =
       deps.backgroundJobBoard.resolveReusable(
         input.sessionID,
         requested,
@@ -309,13 +314,12 @@ export async function handleToolExecuteBefore(
         );
       }
 
-      let continuable: BackgroundJobRecord | undefined;
       if (
         knownManagedTask &&
         deps.hostFlavor === 'v2' &&
         isNativeContinuableCompleted(knownManagedTask, agentType)
       ) {
-        continuable = knownManagedTask;
+        remembered = knownManagedTask;
       } else if (knownManagedTask) {
         refuseKnownTaskResume(
           requested,
@@ -323,72 +327,75 @@ export async function handleToolExecuteBefore(
           agentType,
           delegation,
         );
-      } else if (deps.hostFlavor === 'v2' && deps.recoverRetainedSession) {
-        const recovery = await deps.recoverRetainedSession({
-          parentSessionID: input.sessionID,
-          requested,
-          agent: agentType,
-        });
-        if (deps.isDisposed?.()) {
-          throw new Error(`${pluginDisposedMessage()} No session was created.`);
-        }
-        const restored = deps.backgroundJobBoard.resolve(
-          input.sessionID,
-          requested,
-        );
-        if (restored && isNativeContinuableCompleted(restored, agentType)) {
-          continuable = restored;
-        } else if (restored) {
-          refuseKnownTaskResume(requested, restored, agentType, delegation);
-        } else {
+      } else {
+        let adoption: 'adopted' | 'unchecked' | 'rejected' | undefined;
+        if (
+          deps.hostFlavor !== 'v2' &&
+          requested.startsWith('ses_') &&
+          deps.adoptRequested
+        ) {
+          adoption = await deps.adoptRequested(
+            input.sessionID,
+            requested,
+            agentType,
+          );
           if (deps.isDisposed?.()) {
             throw new Error(
               `${pluginDisposedMessage()} No session was created.`,
             );
           }
-          const reason =
-            recovery.kind === 'refused'
-              ? recovery.reason
-              : 'the host session could not be restored';
+          if (adoption === 'adopted') {
+            remembered = deps.backgroundJobBoard.resolveReusable(
+              input.sessionID,
+              requested,
+              agentType,
+            );
+          }
+        } else if (deps.hostFlavor === 'v2' && deps.recoverRetainedSession) {
+          const recovery = await deps.recoverRetainedSession({
+            parentSessionID: input.sessionID,
+            requested,
+            agent: agentType,
+          });
+          if (deps.isDisposed?.()) {
+            throw new Error(
+              `${pluginDisposedMessage()} No session was created.`,
+            );
+          }
+          const restored = deps.backgroundJobBoard.resolve(
+            input.sessionID,
+            requested,
+          );
+          if (restored && isNativeContinuableCompleted(restored, agentType)) {
+            remembered = restored;
+          } else if (restored) {
+            refuseKnownTaskResume(requested, restored, agentType, delegation);
+          } else {
+            const reason =
+              recovery.kind === 'refused'
+                ? recovery.reason
+                : 'the host session could not be restored';
+            refuseExplicitTaskId(
+              requested,
+              `Task ${requested}: ${delegation.tool}() cannot resolve this ${delegation.resumeParam}. ${reason} It was not dropped; no new session was created. This prompt was not sent.`,
+              { unresolved: true },
+            );
+          }
+        }
+        if (!remembered) {
           refuseExplicitTaskId(
             requested,
-            `Task ${requested}: ${delegation.tool}() cannot resolve this ${delegation.resumeParam}. ${reason} It was not dropped; no new session was created. This prompt was not sent.`,
+            adoption === 'rejected' ||
+              adoption === 'adopted' ||
+              delegation.tool !== 'task'
+              ? `Task ${requested}: ${delegation.tool}() cannot resolve this ${delegation.resumeParam}. It was not dropped; no new session was created. Omit ${delegation.resumeParam} on a separate call to start a new session.`
+              : unrecognizedTaskReferenceMessage(requested),
             { unresolved: true },
           );
         }
-      } else {
-        refuseExplicitTaskId(
-          requested,
-          delegation.tool === 'task'
-            ? unrecognizedTaskReferenceMessage(requested)
-            : `Task ${requested}: ${delegation.tool}() cannot resolve this ${delegation.resumeParam}. It was not dropped; no new session was created. Omit ${delegation.resumeParam} on a separate call to start a new session.`,
-          { unresolved: true },
-        );
       }
-      if (continuable) {
-        if (deps.isDisposed?.()) {
-          throw new Error(`${pluginDisposedMessage()} No session was created.`);
-        }
-        const relaunchLease = deps.backgroundJobBoard.acquireRelaunchLease(
-          continuable.taskID,
-          continuable.generation,
-        );
-        if (!relaunchLease) {
-          throw new Error(
-            `Task ${requested} cannot be resumed safely: its current generation is already owned by another lifecycle operation. Do not launch a duplicate with the same ${delegation.resumeParam}.`,
-          );
-        }
-        if (deps.isDisposed?.()) {
-          deps.backgroundJobBoard.releaseLease(relaunchLease);
-          throw new Error(`${pluginDisposedMessage()} No session was created.`);
-        }
-        args.task_id = continuable.taskID;
-        deps.taskContextTracker.pendingManagedTaskIds.add(continuable.taskID);
-        deps.backgroundJobBoard.markUsed(input.sessionID, continuable.taskID);
-        pendingCall.resumedTaskId = continuable.taskID;
-        pendingCall.relaunchLease = relaunchLease;
-      }
-    } else {
+    }
+    if (remembered) {
       if (deps.isDisposed?.()) {
         throw new Error(`${pluginDisposedMessage()} No session was created.`);
       }

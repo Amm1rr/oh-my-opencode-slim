@@ -387,6 +387,7 @@ describe('MarketplaceService', () => {
       try {
         const service = new MarketplaceService({
           rootDir: root,
+          projectDir: root,
           pluginVersion: '3.5.0',
           registryClient: {
             downloadV3: async () => {

@@ -20,9 +20,17 @@ import {
   createBackgroundJobTerminalGate,
   readSessionInfoForObservation,
 } from '../../utils/background-job-terminal-gate';
-import { fetchChildTranscript } from '../../utils/child-transcript';
+import {
+  classifyTerminalEvidence,
+  fetchChildTranscript,
+} from '../../utils/child-transcript';
 import { isRecord as isObjectRecord } from '../../utils/guards';
 import { getClient } from '../../utils/opencode-client';
+import { withTimeout } from '../../utils/session';
+import {
+  DEFAULT_RUNTIME_SESSION_STATUS_TIMEOUT_MS,
+  getRuntimeSessionStatusSnapshot,
+} from '../../utils/session-runtime-status';
 import { isGenuineOperatorMessage } from '../orchestrator-wake/index';
 import type { SessionLifecycle } from '../session-lifecycle';
 import { isMessageWithParts, isUserMessageWithParts } from '../types';
@@ -253,6 +261,84 @@ export function createTaskSessionManagerHook(
     });
   const rehydrateState = getBackgroundJobLifecycleLedger(backgroundJobBoard);
   const rehydrateTombstones = rehydrateState.tombstones;
+  // Only adoptRequested reads boundaries, and v2 hosts never wire it.
+  const adoptionEnabled = options.hostFlavor !== 'v2';
+  const historyBoundaries = new Map<string, number>();
+  const adoptRequested = async (
+    parent: string,
+    requested: string,
+    agent: string,
+  ): Promise<'adopted' | 'unchecked' | 'rejected'> => {
+    const boundary = historyBoundaries.get(parent);
+    if (boundary === undefined) return 'unchecked';
+    if (options.isDisposed?.()) return 'rejected';
+    try {
+      const client = getClient(_ctx);
+      const query = { directory: _ctx.directory };
+      // Only the reads run under the deadline; adoption cannot run late.
+      const [{ data: info }, transcript, live] = await withTimeout(
+        Promise.all([
+          client.session.get({
+            path: { id: requested },
+            query,
+            throwOnError: true,
+          }),
+          client.session.messages({
+            path: { id: requested },
+            query: { ...query, limit: 1 },
+            throwOnError: true,
+          }),
+          getRuntimeSessionStatusSnapshot(_ctx),
+        ]),
+        DEFAULT_RUNTIME_SESSION_STATUS_TIMEOUT_MS,
+        'Host child adoption timed out',
+      );
+      const suffix = info.title.match(/ \(@([^()]+) subagent\)$/);
+      const evidence = classifyTerminalEvidence(transcript);
+      // Adopt only if every gate holds (else the caller's refusal stands),
+      // in condition order:
+      //  1. the host child's parent is this session;
+      //  2. it was created before the parent's oldest visible message, so
+      //     the call that launched it is no longer in the visible history;
+      //  3. its title suffix names the requested agent;
+      //  4. its last message is a terminal result (completed or error) per
+      //     classifyTerminalEvidence, the terminal gate's own classifier;
+      //  5. the runtime status read succeeded;
+      //  6. the child's status entry is well-formed;
+      //  7. the child is idle (no entry counts as idle);
+      //  8. no foreground fallback is pending for the child;
+      //  9. the parent's boundary did not change during the reads;
+      // 10. no deletion tombstone suppresses the child.
+      if (
+        info.parentID !== parent ||
+        !(info.time.created < boundary) ||
+        suffix?.[1] !== agent ||
+        (evidence.verdict !== 'completed' && evidence.verdict !== 'error') ||
+        live.error !== undefined ||
+        live.malformedSessionIDs.has(requested) ||
+        (live.statuses.get(requested) ?? 'idle') !== 'idle' ||
+        options.isFallbackInProgress?.(requested) ||
+        historyBoundaries.get(parent) !== boundary ||
+        options.isDisposed?.() ||
+        rehydrateTombstones.has(requested)
+      )
+        return 'rejected';
+      const adopted = backgroundJobBoard.adoptTerminal({
+        taskID: requested,
+        parentSessionID: parent,
+        agent,
+        description: info.title.slice(0, -suffix[0].length),
+        createdAt: info.time.created,
+        updatedAt: info.time.updated,
+        terminalState: evidence.verdict,
+        resultSummary: evidence.text,
+      });
+      return adopted ? 'adopted' : 'rejected';
+    } catch (error) {
+      log('[task-session-manager] host child adoption failed', String(error));
+      return 'rejected';
+    }
+  };
 
   // Transcript-backed stop gate (false-stop incident): shared by the
   // quiescent stop-confirmation timer and the periodic runtime-status
@@ -501,6 +587,7 @@ export function createTaskSessionManagerHook(
       }
       terminalJobsInjectedByParent.delete(sessionId);
       pendingInjectedTerminalJobsByParent.delete(sessionId);
+      historyBoundaries.delete(sessionId);
       injectionState.retainedBoardSnapshots.delete(sessionId);
       injectionState.retainedTailBoards.delete(sessionId);
       // Orphaned reopen corrections must never surface in a recreated
@@ -646,6 +733,7 @@ export function createTaskSessionManagerHook(
         prepareAliasNumbering: options.prepareAliasNumbering,
         resolveCanonicalTaskRef: options.resolveCanonicalTaskRef,
         isDisposed: options.isDisposed,
+        adoptRequested: adoptionEnabled ? adoptRequested : undefined,
       }),
 
     'tool.execute.after': async (
@@ -682,6 +770,20 @@ export function createTaskSessionManagerHook(
       output: { messages?: unknown },
     ): Promise<void> => {
       const messages = Array.isArray(output.messages) ? output.messages : [];
+      if (adoptionEnabled) {
+        let viewSession: unknown;
+        let viewStart = Number.POSITIVE_INFINITY;
+        for (const message of messages) {
+          if (!isObjectRecord(message) || !isObjectRecord(message.info))
+            continue;
+          viewSession ??= message.info.sessionID;
+          const { time } = message.info;
+          if (isObjectRecord(time) && typeof time.created === 'number')
+            viewStart = Math.min(viewStart, time.created);
+        }
+        if (typeof viewSession === 'string' && viewStart !== Infinity)
+          historyBoundaries.set(viewSession, viewStart);
+      }
 
       // Keep still-running task tool results byte-stable so a live background
       // lane never rewrites mid-history bytes and invalidates the prompt
