@@ -812,6 +812,10 @@ The field accepts either:
 1. **Shorthand string** — `"ask"`, `"allow"`, or `"deny"` applied to all tools
 2. **Object** — keys are tool names, values are `"ask" | "allow" | "deny"` or (for rule keys) a pattern-to-action map
 
+**Key order is precedence.** Entries compile into ordered `{action, resource, effect}` rules that opencode evaluates last-match-wins (the host parses `permission` with `propertyOrder: "original"`, and the plugin preserves your key order verbatim). Put the wildcard base first and specific rules after it: `{"*": "deny", "read": "allow"}` denies everything except `read`; the reverse order denies `read` too. The same applies inside a pattern map (`bash: {"*": "ask", "git status*": "allow"}`) and across preset inheritance: a later layer's `"*"` lands after the base layer's specific rules and overrides them, while a key the base layer already defines keeps its base position when a later layer redefines it — merging `{"*": "deny", "read": "allow"}` onto a base that already sets `read` yields `read` first and `"*"` last, so the deny wins. When a layer needs to position a key around a wildcard, define both in the same layer.
+
+**Built-in read-only roles ship an enforced matrix.** `explorer`, `librarian`, `oracle`, and `observer` carry a read-only permission matrix (wildcard deny + inspection and web-research allows) built into their definitions, so the read-only boundary holds with zero configuration. An explicit `agents.<name>.permission` replaces the matrix wholesale — opting out or extending it is one entry, never a merge.
+
 **Example: read-only `planner` agent:**
 
 ```jsonc
@@ -823,7 +827,12 @@ The field accepts either:
       "skills": [],
       "mcps": ["context7", "gh_grep"],
       "permission": {
-        "edit": "deny",
+        // Order is precedence: the wildcard base must come first.
+        "*": "deny",
+        "read": "allow",
+        "glob": "allow",
+        "grep": "allow",
+        "list": "allow",
         "bash": {
           "*": "ask",
           "git status*": "allow",

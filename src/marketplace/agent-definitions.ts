@@ -115,6 +115,13 @@ function createExtendedDefinition(
   );
   const config: AgentConfig = { ...roleAgent.config };
   if (explicitModel === undefined) delete config.model;
+  // Packages must not inherit the builtin's definition-level matrix:
+  // projectMarketplacePermission interprets absent keys through the
+  // wildcard fallback, so the matrix's "*": "deny" would silently deny
+  // every skill and MCP the manifest declares. Package enforcement is
+  // ceiling + projection; the source map carries only package-author
+  // permission (re-applied via the marketplace owner override).
+  delete config.permission;
   const startupVariant = firstModelVariant(manifest.model);
   if (startupVariant !== undefined) config.variant = startupVariant;
   return withPackagePolicy(
