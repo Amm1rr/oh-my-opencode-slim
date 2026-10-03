@@ -15,6 +15,7 @@ import {
   MarketplaceActivationSchema,
   MultiplexerConfigSchema,
   MultiplexerConfigStrictSchema,
+  PermissionConfigSchema,
   PluginConfigSchema,
   PresetSchema,
   ProviderModelIdSchema,
@@ -51,6 +52,48 @@ describe('ProviderModelIdSchema', () => {
     ]) {
       expect(ProviderModelIdSchema.safeParse(id).success).toBe(false);
     }
+  });
+});
+
+describe('PermissionConfigSchema', () => {
+  it('preserves the author key order — order is precedence', () => {
+    // opencode compiles the entries into rules and evaluates them
+    // last-match-wins, so the wildcard base must stay first. A shaped
+    // z.object() parse used to emit declared keys first and catchall keys
+    // after, inverting the order.
+    const parsed = PermissionConfigSchema.parse({
+      '*': 'deny',
+      read: 'allow',
+      glob: 'allow',
+      edit: 'deny',
+    });
+    expect(Object.keys(parsed)).toEqual(['*', 'read', 'glob', 'edit']);
+  });
+
+  it('keeps string-only keys string-only', () => {
+    expect(PermissionConfigSchema.safeParse({ question: 'deny' }).success).toBe(
+      true,
+    );
+    expect(
+      PermissionConfigSchema.safeParse({ webfetch: { 'https://*': 'allow' } })
+        .success,
+    ).toBe(false);
+    // Rule keys still accept pattern maps.
+    expect(
+      PermissionConfigSchema.safeParse({
+        bash: { 'git status*': 'allow', '*': 'ask' },
+      }).success,
+    ).toBe(true);
+  });
+
+  it('preserves nested pattern-map order — order is precedence there too', () => {
+    // A pattern map's entry order is also precedence: opencode compiles
+    // each pair into a {action, resource, effect} rule and evaluates
+    // last-match-wins, so the broad pattern must precede the narrow one.
+    const parsed = PermissionConfigSchema.parse({
+      bash: { '*': 'ask', 'git status*': 'allow' },
+    }) as { bash: Record<string, string> };
+    expect(Object.keys(parsed.bash)).toEqual(['*', 'git status*']);
   });
 });
 

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { STRING_ONLY_PERMISSION_KEYS } from '../agents/permissions';
 import { MarketplacePackageIdSchema } from '../marketplace/schemas';
 import {
   AGENT_THEME_COLORS,
@@ -20,29 +21,27 @@ const PermissionRuleSchema = z.union([
   z.record(z.string(), PermissionActionSchema),
 ]);
 
-// Known keys are typed for typo protection; .catchall() types the index
-// signature to match the SDK's PermissionConfig, so no cast is needed at
-// the assignment site. Unknown tool keys are still validated as rules.
+// A permission object's key order IS its precedence: opencode compiles the
+// entries into {action, resource, effect} rules and evaluates them
+// last-match-wins, so authors write the wildcard base ("*": "deny") first
+// and specific allows after. zod's z.object() emits declared keys first and
+// catchall keys after, which silently inverted that order and made a
+// read-only preset deny its own allows. A record parse preserves author
+// order; the string-only keys keep their narrower validation below.
 const PermissionObjectSchema = z
-  .object({
-    read: PermissionRuleSchema.optional(),
-    edit: PermissionRuleSchema.optional(),
-    glob: PermissionRuleSchema.optional(),
-    grep: PermissionRuleSchema.optional(),
-    list: PermissionRuleSchema.optional(),
-    bash: PermissionRuleSchema.optional(),
-    task: PermissionRuleSchema.optional(),
-    external_directory: PermissionRuleSchema.optional(),
-    lsp: PermissionRuleSchema.optional(),
-    skill: PermissionRuleSchema.optional(),
-    todowrite: PermissionActionSchema.optional(),
-    question: PermissionActionSchema.optional(),
-    webfetch: PermissionActionSchema.optional(),
-    websearch: PermissionActionSchema.optional(),
-    codesearch: PermissionActionSchema.optional(),
-    doom_loop: PermissionActionSchema.optional(),
-  })
-  .catchall(PermissionRuleSchema);
+  .record(z.string(), PermissionRuleSchema)
+  .superRefine((permission, ctx) => {
+    for (const key of STRING_ONLY_PERMISSION_KEYS) {
+      const value = permission[key];
+      if (value !== undefined && typeof value !== 'string') {
+        ctx.addIssue({
+          code: 'custom',
+          path: [key],
+          message: "Expected 'ask' | 'allow' | 'deny'",
+        });
+      }
+    }
+  });
 
 export const PermissionConfigSchema = z.union([
   PermissionActionSchema,
