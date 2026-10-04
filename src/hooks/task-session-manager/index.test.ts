@@ -141,6 +141,7 @@ type HookOptions = {
   getModelForAgent?: (agentType: string) => string | undefined;
   hostFlavor?: string;
   isDisposed?: () => boolean;
+  boardInjection?: boolean;
 };
 
 function createHook(options?: HookOptions) {
@@ -224,6 +225,7 @@ function createHook(options?: HookOptions) {
       runtimeStatusReconcileDelayMs: options?.runtimeStatusReconcileDelayMs,
       hostFlavor: options?.hostFlavor,
       isDisposed: options?.isDisposed,
+      boardInjection: options?.boardInjection,
     },
   );
 
@@ -1718,6 +1720,57 @@ describe('task-session-manager hook', () => {
       ),
     ).toHaveLength(1);
     expect(boardText(resetRequest)).toContain('completed, unreconciled');
+  });
+
+  test('board-off still retires consumed terminal jobs without injecting any board part', async () => {
+    const board = new BackgroundJobBoard();
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'map hooks',
+    });
+    board.updateStatus({
+      taskID: 'child-1',
+      state: 'completed',
+      resultSummary: 'done',
+    });
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      boardInjection: false,
+      idleReconcileDelayMs: 0,
+    });
+
+    // First real orchestrator turn: no board part is placed, but the
+    // natively delivered terminal job registers for consumption.
+    const firstRequest = createMessages('parent-1', 'first turn');
+    await transformMessages(hook, firstRequest);
+    expect(
+      firstRequest.messages.flatMap((message) =>
+        message.parts.filter((part) => isBoardPartForTest(part)),
+      ),
+    ).toHaveLength(0);
+    expect(board.get('child-1')).toMatchObject({
+      state: 'completed',
+      terminalUnreconciled: true,
+    });
+
+    // Next real turn with an advanced prompt shape retires the job.
+    const secondRequest = createAnchoredMessages('parent-1', [
+      'first turn',
+      'consumed the native result',
+      'next step',
+    ]);
+    await transformMessages(hook, secondRequest);
+    expect(
+      secondRequest.messages.flatMap((message) =>
+        message.parts.filter((part) => isBoardPartForTest(part)),
+      ),
+    ).toHaveLength(0);
+    expect(board.get('child-1')).toMatchObject({
+      state: 'reconciled',
+      terminalUnreconciled: false,
+    });
   });
 
   test('retains checkpoint snapshots across fresh storage-derived message arrays', async () => {

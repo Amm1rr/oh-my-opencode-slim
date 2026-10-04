@@ -1382,17 +1382,39 @@ function injectLatestBoard(state: InjectionState, messages: unknown[]): void {
     reconcileConsumedTerminalJobs(state, sessionID, shapeKey);
   }
 
-  const boardMeta =
-    state.boardInjection === false
-      ? undefined
-      : state.backgroundJobBoard.formatForPromptWithMetadata(sessionID);
-  const reminder = boardMeta?.text;
-  if (!reminder) return;
-
   const textPart = trigger.parts.find(
     (part) => part.type === 'text' && typeof part.text === 'string',
   );
   if (!textPart || isInternalInitiatorPart(textPart)) return;
+
+  if (state.boardInjection === false) {
+    // Board injection disabled: the native background notifier owns
+    // terminal delivery (first publications are native-owned on both
+    // hosts), so no board part is placed — but terminal jobs still
+    // register against the current prompt shape so the consumption
+    // reconciliation above keeps retiring them on the parent's next real
+    // activity. Without this, the store stays "completed"/unreconciled
+    // forever and every hasTerminalUnreconciled consumer wedges: explicit
+    // task-id resumes are refused, same-objective dispatches stay
+    // deduplicated, and delegated-work detection never clears.
+    const nativeExecutions =
+      state.backgroundJobBoard.formatForPromptWithMetadata(sessionID)
+        ?.terminalUnreconciledTaskIDs ?? [];
+    if (nativeExecutions.length > 0) {
+      rememberInjectedTerminalJobs(
+        state,
+        sessionID,
+        nativeExecutions,
+        shapeKey ?? promptShapeKey(realMessages(messages, state.metadataKey)),
+      );
+    }
+    return;
+  }
+
+  const boardMeta =
+    state.backgroundJobBoard.formatForPromptWithMetadata(sessionID);
+  const reminder = boardMeta?.text;
+  if (!reminder) return;
 
   if (boardMeta.terminalUnreconciledTaskIDs.length > 0) {
     rememberInjectedTerminalJobs(
@@ -1769,6 +1791,29 @@ function injectCheckpointBoard(
     !hasPendingToolResults(currentMessages);
 
   const replayBaseMessage = triggeringMessage ?? tailMessage;
+
+  if (state.boardInjection === false) {
+    // Board injection disabled (see injectLatestBoard for the full
+    // rationale): register natively delivered terminal jobs against the
+    // current prompt shape so consumption reconciliation keeps retiring
+    // them, then stop — no snapshot exists to place or replay in this
+    // mode, and reopen corrections are board-flavored notices that stay
+    // off with the board (#1314).
+    if (canSurface) {
+      const nativeExecutions =
+        state.backgroundJobBoard.formatForPromptWithMetadata(sessionID)
+          ?.terminalUnreconciledTaskIDs ?? [];
+      if (nativeExecutions.length > 0) {
+        rememberInjectedTerminalJobs(
+          state,
+          sessionID,
+          nativeExecutions,
+          shapeKey,
+        );
+      }
+    }
+    return;
+  }
   const snapshotState = updateBoardHistoryState(
     state,
     sessionID,
