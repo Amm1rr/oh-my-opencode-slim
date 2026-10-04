@@ -10,7 +10,10 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type { MultiplexerConfig } from '../../config/schema';
+import {
+  type MultiplexerConfig,
+  MultiplexerConfigSchema,
+} from '../../config/schema';
 import type { Multiplexer, PaneResult, PaneSpawnOptions } from '../types';
 import {
   createOnceGate,
@@ -149,6 +152,7 @@ class FakeAdapter implements Multiplexer {
     subagentType?: string;
     viewerFlavor?: string;
     viewerPassword?: string;
+    viewerSurface?: PaneSpawnOptions['viewerSurface'];
   }> = [];
   readonly closes: string[] = [];
   /** FR-8 sweep capability: panes this fake multiplexer reports. */
@@ -185,6 +189,7 @@ class FakeAdapter implements Multiplexer {
       subagentType: options?.subagentType,
       viewerFlavor: options?.viewerFlavor,
       viewerPassword: options?.viewerPassword,
+      viewerSurface: options?.viewerSurface,
     });
     return this.spawnResult;
   }
@@ -528,6 +533,54 @@ function v2Execution(sessionId = CHILD): unknown {
 }
 
 describe('v2 host seams (FR-2/FR-3)', () => {
+  test('defaults viewer to tui on v1 hosts', async () => {
+    const h = await createHarness({
+      config: {
+        multiplexer: MultiplexerConfigSchema.parse({ type: 'auto' }),
+        invalid: false,
+      },
+    });
+    h.bus.emit('session.created', createdEvent());
+    await flush();
+    expect(h.adapters.get('tmux')?.spawns[0]?.viewerSurface).toBe('tui');
+    await h.wiring.dispose();
+  });
+
+  test('defaults viewer to mini on v2 hosts', async () => {
+    const feed = createV2EventFeed();
+    const h = await createHarness({
+      config: {
+        multiplexer: MultiplexerConfigSchema.parse({ type: 'auto' }),
+        invalid: false,
+      },
+      sessionEvents: (handler) => subscribeV2SessionEvents(feed.data, handler),
+      viewers: { flavor: 'v2-shared' },
+    });
+    feed.emit('session.created', v2Created());
+    await flush();
+    expect(h.adapters.get('tmux')?.spawns[0]?.viewerSurface).toBe('mini');
+    await h.wiring.dispose();
+  });
+
+  test('explicit tui viewer overrides the v2 default', async () => {
+    const feed = createV2EventFeed();
+    const h = await createHarness({
+      config: {
+        multiplexer: MultiplexerConfigSchema.parse({
+          type: 'auto',
+          viewer: 'tui',
+        }),
+        invalid: false,
+      },
+      sessionEvents: (handler) => subscribeV2SessionEvents(feed.data, handler),
+      viewers: { flavor: 'v2-remote' },
+    });
+    feed.emit('session.created', v2Created());
+    await flush();
+    expect(h.adapters.get('tmux')?.spawns[0]?.viewerSurface).toBe('tui');
+    await h.wiring.dispose();
+  });
+
   test('v2 created events open panes and directory-less execution events stay attributed', async () => {
     const feed = createV2EventFeed();
     const h = await createHarness({
@@ -820,7 +873,6 @@ describe('project config reading (FR-12)', () => {
         type: 'tmux',
         layout: 'tiled',
         main_pane_size: 70,
-        viewer: 'mini',
       });
     } finally {
       fs.rmSync(root, { recursive: true, force: true });

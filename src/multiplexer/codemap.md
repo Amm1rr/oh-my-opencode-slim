@@ -189,7 +189,7 @@ interface MultiplexerConfig {
   type: 'tmux' | 'zellij' | 'herdr' | 'cmux-tui' | 'kitty' | 'auto' | 'none';
   layout: 'main-horizontal' | 'main-vertical' | 'tiled' | 'even-horizontal' | 'even-vertical';
   main_pane_size?: number; // Percentage for main pane (20-80), tmux main-* only
-  viewer: 'tui' | 'mini';  // TUI surface subagent panes open (default 'tui')
+   viewer?: 'tui' | 'mini'; // Host default: v1 'tui', v2 'mini'; explicit wins
 }
 ```
 
@@ -197,6 +197,11 @@ interface MultiplexerConfig {
 once-per-process warning and never reaches the adapter layer. Invalid
 `type`/`layout`/`main_pane_size`/`cmux_tui_binary`/`viewer` values disable
 pane management with a once-per-process diagnostic.
+
+The host wiring resolves an omitted viewer. v1 mini uses `attach ... --dir
+<dir> --mini` (OpenCode >= 1.17.10), without extra pane-cwd pinning; v2 mini
+uses the `mini` subcommand without a positional directory, so adapters pin
+the cwd. Herdr and kitty always set their native cwd flags.
 
 ### Environment Detection
 

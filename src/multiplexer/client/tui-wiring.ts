@@ -619,7 +619,9 @@ export async function createTuiPaneWiring(
       viewer: {
         viewerFlavor: options.viewerFlavor,
         viewerPassword: options.viewerPassword,
-        viewerSurface: loaded.multiplexer.viewer,
+        viewerSurface:
+          loaded.multiplexer.viewer ??
+          ((options.viewerFlavor ?? 'v1') === 'v1' ? 'tui' : 'mini'),
       },
     },
     logger,
