@@ -55,12 +55,13 @@ multiplexer-specific command translation.
   back to the TUI launch directory), so resumed cross-directory sessions keep
   their child panes. Owns
   admission (`multiplexer.type` × client environment), config reading, plugin
-  log initialization, serverUrl reflection (`api.client.client.getConfig()
-  .baseUrl` + `/session/status` probe, embedded-sentinel fail-closed), raw
-  event projection (`properties.info.directory`, `properties.status.type`),
-  the periodic reconcile pass, and best-effort disposal. Those are the v1
-  defaults: the v2 `setup()` calls it with options from `v2-host.ts` (base
-  URL, authenticated probe, readers and projected events) that replace them.
+  log initialization, serverUrl reflection (v1: `api.client.client.getConfig()
+  .baseUrl` + `/session/status` probe; embedded-sentinel fail-closed), raw
+  event projection (v1: `properties.info.directory`,
+  `properties.status.type`), the periodic reconcile pass, and best-effort
+  disposal. The v2 `setup()` calls it with options from `v2-host.ts` (base
+  URL, authenticated `server.info()` probe, status/list readers and projected
+  events) that replace the v1 reflection, probe, readers and projection.
 - **`sweep.ts`**: FR-8 crash-leftover sweep. Closes views whose encoded owner
   pid is dead **and** whose child session is gone; candidates come from pane
   titles (tmux/zellij/herdr/kitty) or, for cmux-tui, `terminal list` +
@@ -104,8 +105,9 @@ There is no cross-process or process-global pane state anymore:
 
 ### Event-Driven Architecture
 
-The TUI client subscribes to the host event bus for `session.created`,
-`session.status`, `session.idle`, and `session.deleted`:
+The TUI client subscribes to the host event bus (v2: the `ctx.data` feed,
+projected by `v2-host.ts`) for `session.created`, `session.status`,
+`session.idle`, and `session.deleted`:
 
 - **New-pane eligibility**: the event must belong to this client's project
   directory, its `parentID` must equal the displayed session, and admission
@@ -123,6 +125,9 @@ The TUI client subscribes to the host event bus for `session.created`,
 ## Flow
 
 ### Pane Creation Flow (client)
+
+Shown for v1. On v2, `v2-host.ts` supplies the base URL, an authenticated
+`server.info()` probe and `session.list` + `session.active` readers instead.
 
 ```
 1. Client starts → createTuiPaneWiring():
@@ -178,10 +183,12 @@ The server entry (`src/index.ts`) must not reach `src/multiplexer/client/*` or
 ### Dependencies
 
 - **Config Schema** (`src/config/schema.ts`): `MultiplexerConfig`
-  (type/layout/main_pane_size) plus the deprecated-key sanitizer.
+  (type/layout/main_pane_size/cmux_tui_binary/viewer) plus the deprecated-key
+  sanitizer.
 - **Logger** (`src/utils/logger.ts`): plugin log sink for all diagnostics.
 - **OpenCode host**: TUI event bus (`api.event`), SDK client (`api.client`),
-  route (`api.route.current`).
+  route (`api.route.current`); on v2 the `ctx.data` feed, `ctx.client`,
+  `ctx.ui.router.current()` and `ctx.location`, through `v2-host.ts`.
 
 ### Configuration
 
@@ -190,6 +197,7 @@ interface MultiplexerConfig {
   type: 'tmux' | 'zellij' | 'herdr' | 'cmux-tui' | 'kitty' | 'auto' | 'none';
   layout: 'main-horizontal' | 'main-vertical' | 'tiled' | 'even-horizontal' | 'even-vertical';
   main_pane_size?: number; // Percentage for main pane (20-80), tmux main-* only
+  cmux_tui_binary?: string; // Explicit cmux-tui binary path
   viewer?: 'tui' | 'mini'; // Host default: v1 'tui', v2 'mini'; explicit wins
 }
 ```

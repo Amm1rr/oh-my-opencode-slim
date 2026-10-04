@@ -83,12 +83,16 @@ export interface PaneLifecycleConfig {
   mainPaneSize: number;
   stableIdleMs: number;           // FR-10 debounce window
   readiness: ReadinessPolicy;
+  viewer?: Pick<PaneSpawnOptions, 'viewerFlavor' | 'viewerPassword' | 'viewerSurface'>;
 }
 ```
 
 ## Flow
 
 ### Pane Creation Flow
+
+Shown for v1. On v2, `v2-host.ts` supplies the base URL, an authenticated
+`server.info()` probe and `session.list` + `session.active` readers instead.
 
 ```
 1. Client startup → createTuiPaneWiring():
@@ -145,7 +149,7 @@ export interface PaneLifecycleConfig {
 
 - **Config Schema** (`src/config/schema.ts`): `MultiplexerConfig` definition
 - **Logger** (`src/utils/logger.ts`): Plugin log sink for all diagnostics
-- **OpenCode host**: TUI event bus (`api.event`), SDK client (`api.client`), route (`api.route.current`)
+- **OpenCode host**: TUI event bus (`api.event`), SDK client (`api.client`), route (`api.route.current`); on v2 the `ctx.data` feed, `ctx.client`, `ctx.ui.router.current()` and `ctx.location`, through `v2-host.ts`
 
 ## Testing
 

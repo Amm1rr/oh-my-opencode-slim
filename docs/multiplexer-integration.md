@@ -370,7 +370,7 @@ a structured, distinguishable reason:
 | `admission-unavailable` | `auto` detected no supported multiplexer, or the config was invalid |
 | `not-our-child` | The child's `parentID` is not the session this client currently displays |
 | `host-unreachable` | Embedded host (no listener / sentinel URL) or the server probe failed |
-| `readiness-timeout` | The child did not appear in `/session/status` within the bounded retry budget |
+| `readiness-timeout` | The child did not appear in `/session/status` (v2: the directory's session list) within the bounded retry budget |
 | `adapter-unavailable` | The adapter cannot run here (binary missing, old version, protocol self-check failed, no control plane, or the platform/shell cannot support the viewer-secret bridge) |
 | `adapter-not-found` | The adapter could not resolve its anchor target; **no multiplexer command is issued** |
 | `adapter-hard` | The multiplexer command failed for another reason |
@@ -442,13 +442,14 @@ produces one `multiplexer.host-unsupported` record per process; shared and
   rebalances the whole window; two clients sharing one tmux window can
   interleave layout updates. Scope is limited to anchors this client created,
   but visual interleaving is possible and harmless.
-- **Readiness requires the child to be live.** Before creating a pane the
-  client polls `/session/status` with the project directory (sent as the
+- **On v1, readiness requires the child to be live.** Before creating a pane
+  the client polls `/session/status` with the project directory (sent as the
   pre-encoded `x-opencode-directory` header) with bounded retries. A child that
   was created but never ran never appears in the live status table and gets no
   pane (`readiness-timeout`). Real `task` dispatches make the child busy
   immediately, so this only affects synthetic sessions created through the REST
-  API.
+  API. On v2 the status reader also lists idle sessions, so such a child still
+  gets a pane as long as it is among the directory's 200 newest sessions.
 - **Embedded hosts and v2 `--standalone` hosts have no pane feature** (see
   [Deployment Modes](#deployment-modes)). On v2 `--standalone`, a configured
   `multiplexer.type` is ignored and one diagnostic per process is logged; use
@@ -531,10 +532,13 @@ removed or changed behavior, with migration guidance:
 2. `admission-none` → set `multiplexer.type` to `auto` or the right adapter.
 3. `admission-mismatch` → the configured adapter is not the one the client is
    inside (for example `type: "zellij"` while running in tmux).
-4. `host-unreachable` → the host has no reachable listener; restart with
-   `--port` or use `serve` + `attach`.
+4. `host-unreachable` → on v1 the host has no reachable listener; restart with
+   `--port` or use `serve` + `attach`. On v2 shared or `--server` hosts the
+   authenticated `server.info()` probe failed; check the shared service or the
+   `--server` URL.
 5. `readiness-timeout` → the child never became visible in `/session/status`
-   (see [Known Limitations](#known-limitations)).
+   (v2: the directory's session list; see
+   [Known Limitations](#known-limitations)).
 
 **Panes open in the wrong place**
 
