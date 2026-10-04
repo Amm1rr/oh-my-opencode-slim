@@ -187,6 +187,10 @@ describe('alias numbering', () => {
     } = {},
   ): Promise<(string | undefined)[]> {
     const projectDir = await mkdtemp(join(tmpdir(), 'omo-alias-numbering-'));
+    // Another file's mock.module of opencode-client outlives mock.restore().
+    spyOn(opencodeClient, 'getClient').mockImplementation(
+      (value) => (value as { client: unknown }).client as never,
+    );
     const hooks = await OhMyOpenCodeLite({
       client: {
         app: { log: async () => ({}) },
