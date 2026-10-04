@@ -20,6 +20,7 @@ import {
   extractChannel,
   findPluginEntry,
   getCachedVersion,
+  getCurrentRuntimePackageJsonPath,
   getLatestCompatibleVersion,
   getLocalDevVersion,
   updateInstallerManagedVersions,
@@ -111,7 +112,12 @@ async function runBackgroundUpdateCheck(
   }
 
   if (latestInfo.blockedByMajor && latestInfo.latestMajorVersion) {
-    showMajorUpgradeToast(ctx, latestInfo.latestMajorVersion);
+    showMajorUpgradeToast(
+      ctx,
+      latestInfo.latestMajorVersion,
+      currentVersion,
+      getCurrentRuntimePackageJsonPath(),
+    );
     log(
       `[auto-update-checker] Major update available; skipping auto-update: ${latestInfo.latestMajorVersion}`,
     );
@@ -311,11 +317,19 @@ async function runBackgroundUpdateCheck(
   }
 }
 
-function showMajorUpgradeToast(ctx: PluginInput, version: string): void {
+function showMajorUpgradeToast(
+  ctx: PluginInput,
+  version: string,
+  currentVersion: string,
+  runtimePackageJsonPath: string | null,
+): void {
+  const runningFrom = runtimePackageJsonPath
+    ? `Running v${currentVersion} from ${runtimePackageJsonPath}.`
+    : `Running v${currentVersion}.`;
   showToast(
     ctx,
     `oh-my-opencode-slim v${version} is available.`,
-    'It requires OpenCode background subagents.\nRun: bunx oh-my-opencode-slim@latest install',
+    `${runningFrom}\nIt requires OpenCode background subagents.\nRefresh the cached copy: bunx oh-my-opencode-slim@latest install`,
     'info',
     12_000,
   );
