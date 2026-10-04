@@ -58,8 +58,8 @@ multiplexer-specific command translation.
   log initialization, serverUrl reflection (`api.client.client.getConfig()
   .baseUrl` + `/session/status` probe, embedded-sentinel fail-closed), raw
   event projection (`properties.info.directory`, `properties.status.type`),
-  the periodic reconcile pass, and best-effort disposal. The v2 `setup()` is
-  deliberately not wired.
+  the periodic reconcile pass, and best-effort disposal. The v2 `setup()`
+  wires it through `v2-host.ts`.
 - **`sweep.ts`**: FR-8 crash-leftover sweep. Closes views whose encoded owner
   pid is dead **and** whose child session is gone; candidates come from pane
   titles (tmux/zellij/herdr/kitty) or, for cmux-tui, `terminal list` +
@@ -165,7 +165,7 @@ The TUI client subscribes to the host event bus for `session.created`,
 ### Consumers
 
 - **TUI entry** (`src/tui.ts`): the only production wiring point for the
-  client-side pane lifecycle (v1 `tui()`; the v2 `setup()` stays unwired).
+  client-side pane lifecycle (v1 `tui()` and the v2 `setup()`).
 - **Adapters**: instantiated by the lifecycle core per operation through
   `factory.ts`; the sweep uses the same instances via its structural
   capability.
@@ -189,7 +189,7 @@ interface MultiplexerConfig {
   type: 'tmux' | 'zellij' | 'herdr' | 'cmux-tui' | 'kitty' | 'auto' | 'none';
   layout: 'main-horizontal' | 'main-vertical' | 'tiled' | 'even-horizontal' | 'even-vertical';
   main_pane_size?: number; // Percentage for main pane (20-80), tmux main-* only
-   viewer?: 'tui' | 'mini'; // Host default: v1 'tui', v2 'mini'; explicit wins
+  viewer?: 'tui' | 'mini'; // Host default: v1 'tui', v2 'mini'; explicit wins
 }
 ```
 

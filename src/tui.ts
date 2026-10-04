@@ -83,10 +83,10 @@ const ACTIVITY_FRAMES = [
 const v2HostUnsupportedGate = createOnceGate();
 
 /**
- * Pane creation lives in the v1 TUI entry only (NFR-6): a multiplexer
- * configured on a v2 host is ignored. Records that at most once per process
- * so the disabled feature is self-explaining instead of silently dropping
- * config; callers re-run it whenever the config is (re)read.
+ * Standalone and invalid v2 hosts cannot create panes (NFR-6): a multiplexer
+ * configured there is ignored. Records that at most once per process so the
+ * disabled feature is self-explaining instead of silently dropping config;
+ * callers re-run it whenever the config is (re)read.
  */
 function warnV2HostUnsupportedMultiplexer(
   configuredType: MultiplexerType,
@@ -2061,7 +2061,7 @@ const plugin: TuiDualContractModule = {
       api.lifecycle.onDispose(disposeCommands);
     }
 
-    // Client-side pane lifecycle (v1 only; v2 `setup()` stays unwired). The
+    // Client-side pane lifecycle (v1; the v2 `setup()` wires its own). The
     // wiring owns admission, config, log init, serverUrl reflection and the
     // event projection; disposal closes this client's panes best-effort.
     const paneWiring = await createTuiPaneWiring({

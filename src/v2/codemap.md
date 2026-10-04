@@ -82,9 +82,9 @@ The v2 runtime surface and plugin contracts are adapted through the following da
 
 ## Limitations (see `docs/opencode-v2-compatibility.md`)
 
-Multiplexer pane creation is v1-TUI-only by design (the v2 `setup()` is not
-wired, NFR-6; a configured `multiplexer.type` on a v2 host is ignored with one
-diagnostic per process). The orchestrator-wake scheduler runs on v2 in
+Multiplexer panes work on shared and `--server` v2 hosts; standalone and
+invalid hosts ignore a configured `multiplexer.type` with one diagnostic per
+process (NFR-6). The orchestrator-wake scheduler runs on v2 in
 children-driven degraded mode
 (list+promptAsync gate, `session.list({parentID})` enumeration with the
 event-tracked fallback, outcome-based condition with a 3×-interval staleness
