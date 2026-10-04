@@ -3,7 +3,6 @@ import {
   beforeEach,
   describe,
   expect,
-  jest,
   mock,
   spyOn,
   test,
@@ -3350,7 +3349,7 @@ describe('plugin config model inheritance', () => {
     },
   );
 
-  test('v1 background child claims only its new prompt, not other parents or later prompts', async () => {
+  test('v1 background child claims only its new prompt, not other parents or later prompts; failed lookups abort both reads', async () => {
     let hooks = await loadConfiguredPlugin(delegatedFallbackConfig);
     try {
       await selectParent(hooks, fallback);
@@ -3383,33 +3382,18 @@ describe('plugin config model inheritance', () => {
         childOutput as never,
       );
       expect(childOutput.message.model).toEqual(primary);
-    } finally {
-      await hooks.dispose?.();
-    }
-  });
-
-  test('v1 child lookup aborts both host reads at the deadline', async () => {
-    const hooks = await loadConfiguredPlugin(delegatedFallbackConfig);
-    try {
-      await selectParent(hooks, fallback);
-      await hooks['tool.execute.before']?.(
-        { tool: 'task', sessionID: 'parent', callID: 'slow' } as never,
-        { args: { subagent_type: 'operator', background: true } } as never,
-      );
       const signals: (AbortSignal | undefined)[] = [];
-      const hang = ({ signal }: { signal?: AbortSignal }) =>
-        new Promise(() => signals.push(signal));
-      client.session.get = client.session.messages = hang;
-      jest.useFakeTimers();
-      const prompt = hooks['chat.message']?.(
-        { sessionID: 'slow-child', agent: 'operator' } as never,
+      const read = ({ signal }: { signal?: AbortSignal }) =>
+        new Promise((_, reject) => {
+          if (signals.push(signal) > 1) reject(new Error('host down'));
+        });
+      client.session.get = client.session.messages = read;
+      await hooks['chat.message']?.(
+        { sessionID: 'failed', agent: 'operator' } as never,
         {} as never,
       );
-      jest.advanceTimersByTime(5_000);
-      await prompt;
       expect(signals.map((signal) => signal?.aborted)).toEqual([true, true]);
     } finally {
-      jest.useRealTimers();
       await hooks.dispose?.();
     }
   });
