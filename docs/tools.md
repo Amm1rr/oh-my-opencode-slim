@@ -101,7 +101,10 @@ its timeout signals cancellation of the lookup and releases the lease even if th
 settles, because no message write has started.
 
 On v2, `task_message` inherits the session's persisted agent/model/variant instead
-of reading and pinning selection per call; v1 retains its authoritative lookup.
+of reading and pinning selection per call. On v1 it pins the newest valid user or
+assistant model/variant in the bounded transcript, skipping compaction summaries;
+the session's saved selection can predate a hook rewrite. No valid identity means
+no message is sent.
 The v2 write uses `delivery: "queue", resume: false`: it updates the transcript
 without scheduling execution, never via a synthetic message or selection switch.
 Host errors are not retried with weaker semantics. A pending write still retains
