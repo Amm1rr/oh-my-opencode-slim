@@ -154,6 +154,13 @@ describe('RuntimeConfig', () => {
     });
     expect(runtime.backgroundJobs.maxSessionsPerAgent).toBe(2);
     expect(runtime.backgroundJobs.strategy).toBe('latest');
+    // v1-parity defaults: board injection and periodic wake evaluation stay
+    // enabled when no config layer sets them (v2 hosts derive otherwise at
+    // load time; RuntimeConfig itself is flavor-agnostic).
+    expect(runtime.backgroundJobs.boardInjection).toBe(true);
+    expect(runtime.backgroundJobs.orchestratorWake.periodicWakeEnabled).toBe(
+      true,
+    );
     expect(runtime.backgroundJobs.concurrency).toEqual({
       defaultConcurrency: 0,
       providerConcurrency: {},

@@ -60,12 +60,19 @@ export function buildOrchestratorPrompt(
   waitForUserEnabled = true,
   wakeSchedulerEnabled = true,
   hostFlavor?: string,
+  boardInjectionEnabled = true,
 ): string {
   // Native delegation vocabulary: `subagent(...)` with `agent` on v2 hosts,
   // `task(...)` with `subagent_type` on v1. Construction-time constant per
   // host, so the prompt stays byte-stable across a session (cache-safe).
   const vocab = delegationVocabulary(hostFlavor);
   const directRevive = vocab.tool !== 'subagent';
+  // Board-aware wording: when the Background Job Board is not injected,
+  // prompt lines must point at the pull channel (`task_status`) instead of
+  // a panel the model can never see. Construction-time constant (cache-safe).
+  const boardChannel = boardInjectionEnabled
+    ? 'the Background Job Board and current conversation'
+    : '`task_status` and the current conversation';
   // Filter agent descriptions
   const enabledAgents = Object.entries(ROLE_ROUTING_BLOCKS)
     .filter(([name]) => !disabledAgents?.has(name))
@@ -82,8 +89,11 @@ export function buildOrchestratorPrompt(
     },
   ).join('\n');
 
+  const resumeChannelSentence = boardInjectionEnabled
+    ? 'the system resumes automatically via the Background Job Board and orchestrator wake scheduler'
+    : 'the system resumes automatically via background completion notifications and the orchestrator wake scheduler';
   const externalManualWaitInstruction = waitForUserEnabled
-    ? '- When work must pause while the user completes an external manual operation, first give the user concrete manual steps, then call `wait_for_user` as your final tool action and end the turn. Do not rely on ordinary text alone to mark this waiting state, and do not call more tools after `wait_for_user`. Background tasks are not external manual work — never use `wait_for_user` to await them; the system resumes automatically via the Background Job Board and orchestrator wake scheduler.'
+    ? `- When work must pause while the user completes an external manual operation, first give the user concrete manual steps, then call \`wait_for_user\` as your final tool action and end the turn. Do not rely on ordinary text alone to mark this waiting state, and do not call more tools after \`wait_for_user\`. Background tasks are not external manual work — never use \`wait_for_user\` to await them; ${resumeChannelSentence}.`
     : '- When work must pause while the user completes an external manual operation, first give the user concrete manual steps, then use the `question` tool as the blocking boundary and ask them to respond when finished. `wait_for_user` is disabled, so do not reference or call it.';
   const continueExistingSentence = directRevive
     ? `To continue an existing session with new work, call \`task_revive(${vocab.resumeParam}: "<task-id>", prompt: "...")\` directly, even when that session is not listed under Reusable Sessions. Do not use \`${vocab.tool}()\` with an explicit \`${vocab.resumeParam}\` for that continuation.`
@@ -92,11 +102,19 @@ export function buildOrchestratorPrompt(
     ? 'New work uses `task()` without a task_id. New work in an existing session prefers `task_revive()`, even when that session is not listed under Reusable Sessions. `task_result()` only reads a result; it is not a required step before every continuation. Active / Unreconciled sessions are not resumable with `task()`.'
     : `Completed sessions continue with \`${vocab.tool}()\` by exact session id even when they are not listed. Cancelled, errored, and stopped sessions use task_revive. Active sessions are not resumable with \`${vocab.tool}()\`.`;
   const reuseInstruction = directRevive
-    ? 'When continuing a specialist session, pass its exact session id or saved alias to `task_revive`. Saying "reuse" in prose is not enough. If the board lists `fix-1 / ses_abc / fixer`, call `task_revive(task_id: "fix-1", prompt: "...")` or `task_revive(task_id: "ses_abc", prompt: "...")`. If an alias cannot be verified, use the exact session id and do not start a replacement session.'
+    ? `When continuing a specialist session, pass its exact session id or saved alias to \`task_revive\`. Saying "reuse" in prose is not enough. ${
+        boardInjectionEnabled
+          ? 'If the board lists `fix-1 / ses_abc / fixer`'
+          : 'If you hold a reusable session id or alias such as `fix-1 / ses_abc / fixer`'
+      }, call \`task_revive(task_id: "fix-1", prompt: "...")\` or \`task_revive(task_id: "ses_abc", prompt: "...")\`. If an alias cannot be verified, use the exact session id and do not start a replacement session.`
     : `When reusing a specialist session, you MUST pass the existing session or alias in the ${vocab.tool} tool's \`${vocab.resumeParam}\` argument. Saying "reuse" in prose is not enough. If an alias cannot be verified, use the exact session id and do not start a replacement session.`;
   const reuseExample = directRevive
     ? 'Do not omit task_id to start a replacement session after a refused explicit id. A refused `task()` call did not send the prompt.'
-    : `If the Background Job Board lists \`fix-1 / ses_abc / fixer\`, call ${vocab.tool} with \`${vocab.agentParam}: "fixer"\` and \`${vocab.resumeParam}: "fix-1"\` or \`${vocab.resumeParam}: "ses_abc"\`. If an alias cannot be verified, use the exact session id and do not start a replacement session.`;
+    : `If ${
+        boardInjectionEnabled
+          ? 'the Background Job Board lists'
+          : 'you hold a reusable session from'
+      } \`fix-1 / ses_abc / fixer\`, call ${vocab.tool} with \`${vocab.agentParam}: "fixer"\` and \`${vocab.resumeParam}: "fix-1"\` or \`${vocab.resumeParam}: "ses_abc"\`. If an alias cannot be verified, use the exact session id and do not start a replacement session.`;
   const emptyResumeSentence = directRevive
     ? 'An empty task_id is refused and does not start a session. Omit task_id only to start new work.'
     : `An empty \`${vocab.resumeParam}\` is refused and does not start a session. Omit it only to start new work. If an explicit \`${vocab.resumeParam}\` is refused, do not retry the same objective as a new spawn.`;
@@ -166,7 +184,7 @@ ${enabledParallelExamples}
 Balance: respect dependencies, avoid parallelizing what must be sequential, and avoid overlapping write ownership.
 
 ### Background Task Discipline
-- Before dispatching a specialist, check the Background Job Board and current conversation for an existing task that already covers the objective.
+- Before dispatching a specialist, check ${boardChannel} for an existing task that already covers the objective.
 - \`task_result\` returns only a completed specialist's final assistant message. Never use \`${vocab.tool}(..., ${vocab.resumeParam}: ...)\` to fetch output, check progress, or instruct a live child: any resume starts new model work. Read a finished result when it looks missing; that read is not required before continuing an existing session.
 - Live child tasks: \`task_status\` is read-only state inspection; \`task_message\` only queues a concise, non-interrupting communication and is not a recovery operation. A queued-message response confirms only that the message was accepted by the transport; never claim that the child saw, read, acknowledged, or acted on it. There is no safe live-prompt channel.
 - Use \`task_cancel\` only when the user asks, or when a running lane is obsolete, wrong, or conflicts with a safer replacement plan. Cancellation retains the child session and rolls nothing back — inspect and reconcile partial changes before any replacement or follow-up.
@@ -181,14 +199,22 @@ Balance: respect dependencies, avoid parallelizing what must be sequential, and 
 ${
   wakeSchedulerEnabled
     ? `#### End Turn After Background Tasks
-After spawning independent background tasks and remaining non-overlapping work, end the turn with a brief status: completion hooks and the wake scheduler resume you automatically. Do not call \`wait_for_user\` to await background task completion and do not poll for status with repeated tool calls; the correct flow is launch → brief status → end turn → resume → reconcile. The board is ambient status: never restate, quote, or acknowledge it in visible replies.
+After spawning independent background tasks and remaining non-overlapping work, end the turn with a brief status: completion hooks and the wake scheduler resume you automatically. Do not call \`wait_for_user\` to await background task completion and do not poll for status with repeated tool calls; the correct flow is launch → brief status → end turn → resume → reconcile. ${
+        boardInjectionEnabled
+          ? 'The board is ambient status'
+          : 'Background status is ambient'
+      }: never restate, quote, or acknowledge it in visible replies.
 
 `
     : ''
 }### Active Task Amendments
 - A running task cannot receive another \`${vocab.tool}\` call, even with its \`${vocab.resumeParam}\`. Do not resume, replace, or cancel it merely because the user adds to its scope. An unreconciled completed session is not running; continue it with ${directRevive ? '`task_revive`' : '`subagent` and its existing session id'}.
 - For an additive request to a running lane, record the amendment in the parent conversation, tell the user it is queued, and wait for that lane's terminal result. Then continue the same specialist by its existing session id, even if it is not listed under Reusable Sessions.
-- Cancel a running task only when its current objective is genuinely obsolete or must be replaced; never create-and-cancel speculative duplicate sessions. A \`running [resumed]\` board label reflects lifecycle bookkeeping, not confirmation that a new instruction reached the specialist.
+- Cancel a running task only when its current objective is genuinely obsolete or must be replaced; never create-and-cancel speculative duplicate sessions. ${
+    boardInjectionEnabled
+      ? 'A `running [resumed]` board label'
+      : 'A `running [resumed]` status'
+  } reflects lifecycle bookkeeping, not confirmation that a new instruction reached the specialist.
 
 ### Design Handoff Discipline
 - When @designer completes UI/UX work, treat layout, spacing, hierarchy, motion, color, affordances, and component feel as intentional design output.
@@ -261,6 +287,7 @@ export function createOrchestratorAgent(
   waitForUserEnabled = true,
   wakeSchedulerEnabled = true,
   hostFlavor?: string,
+  boardInjectionEnabled = true,
 ): AgentDefinition {
   const basePrompt = buildOrchestratorPrompt(
     disabledAgents,
@@ -268,6 +295,7 @@ export function createOrchestratorAgent(
     waitForUserEnabled,
     wakeSchedulerEnabled,
     hostFlavor,
+    boardInjectionEnabled,
   );
   const prompt = resolvePrompt(
     'orchestrator',

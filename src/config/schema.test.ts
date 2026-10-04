@@ -839,6 +839,7 @@ describe('PluginConfigSchema backgroundJobs', () => {
         enabled: true,
         intervalMs: 300_000,
         mode: 'auto',
+        periodicWakeEnabled: true,
         wakeOnTerminalPublication: true,
         publicationWakeMinIntervalMs: 30_000,
       });
@@ -863,6 +864,7 @@ describe('PluginConfigSchema backgroundJobs', () => {
         enabled: false,
         intervalMs: 120_000,
         mode: 'auto',
+        periodicWakeEnabled: true,
         wakeOnTerminalPublication: false,
         publicationWakeMinIntervalMs: 120_000,
       });
@@ -954,6 +956,7 @@ describe('PluginConfigSchema backgroundJobs', () => {
           enabled: true,
           intervalMs: 300_000,
           mode: 'auto',
+          periodicWakeEnabled: true,
           wakeOnTerminalPublication: true,
           publicationWakeMinIntervalMs: 30_000,
         });

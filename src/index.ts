@@ -760,6 +760,10 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     eventDirectoryScope = createEventDirectoryScope(directory);
     log('[plugin] instance scope', { directory });
 
+    // Read the host flavor marker before config load: it bounds project
+    // config discovery, and v2 hosts derive leaner background-job defaults
+    // (see loadPluginConfig), so the flavor must be known when the config
+    // is first resolved — and on every later in-session reload.
     hostFlavor = (ctx as Parameters<Plugin>[0] & { hostFlavor?: string })
       .hostFlavor;
     config = loadPluginConfig(ctx.directory, { hostFlavor });
@@ -1157,6 +1161,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
 
     orchestratorWakeScheduler = createOrchestratorWakeScheduler(ctx, {
       config: runtime.backgroundJobs.orchestratorWake,
+      boardInjectionEnabled: runtime.backgroundJobs.boardInjection,
       shouldManageSession: (sessionID) =>
         sessionMetadata.getAgent(sessionID) === 'orchestrator',
       hasInputWait: (sessionID) =>
@@ -1271,8 +1276,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       // native notifier and remain the plugin's to deliver (v1 behaves
       // the same: the native task tool arms notifyBackgroundResult per
       // background call). Edge: if a native delivery is ever lost
-      // host-side, the job falls back to board injection on the parent's
-      // next activity (pre-branch parity).
+      // host-side, the job falls back to the passive display channel on
+      // the parent's next activity — board injection when enabled, or
+      // nothing until the next task_status/task_result pull otherwise.
       if (record.terminalRevision === 1) {
         log('[orchestrator-wake] terminal publication wake skipped', {
           sessionID: record.parentSessionID,
@@ -2824,6 +2830,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
                   true,
                   true,
                   hostFlavor,
+                  runtime.backgroundJobs.boardInjection,
                 );
         // Dedup by the EFFECTIVE prompt, not by default-prompt markers:
         // a custom replacement without `<Role>` previously slipped past

@@ -61,4 +61,35 @@ describe('orchestrator prompt', () => {
     expect(prompt).not.toContain('End Turn After Background Tasks');
     expect(prompt).toContain('Do not immediately wait after spawning');
   });
+
+  test('defaults to board-aware wording while board injection is on', () => {
+    const prompt = buildOrchestratorPrompt();
+
+    expect(prompt).toContain('the Background Job Board');
+    expect(prompt).toContain('The board is ambient status');
+  });
+
+  test('drops every Background Job Board reference when board injection is off', () => {
+    const prompt = buildOrchestratorPrompt(
+      undefined,
+      undefined,
+      true,
+      true,
+      undefined,
+      false,
+    );
+
+    expect(prompt).not.toContain('Background Job Board');
+    expect(prompt).not.toContain('If the board lists');
+    expect(prompt).not.toContain('The board is ambient status');
+    // The pull channel replaces the panel in every affected line.
+    expect(prompt).toContain(
+      'the system resumes automatically via background completion notifications and the orchestrator wake scheduler',
+    );
+    expect(prompt).toContain(
+      'check `task_status` and the current conversation for an existing task',
+    );
+    expect(prompt).toContain('Background status is ambient');
+    expect(prompt.match(/`task_status`/g)?.length ?? 0).toBeGreaterThan(2);
+  });
 });

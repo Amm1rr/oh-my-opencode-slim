@@ -1459,6 +1459,111 @@ function solePartMetadata(
   return parts[0]?.metadata as Record<string, unknown> | undefined;
 }
 
+test('v2 derived board-off defaults still retire consumed terminal jobs', async () => {
+  resetOrchestratorWakeGateForTests();
+  const capture = captureGateLogs();
+  try {
+    const promptAsync = mock(async () => ({}));
+    let hostChildren: Array<Record<string, unknown>> = [
+      { id: 'child', parentID: 'parent' },
+    ];
+    const probe = v2ShimClient({
+      outcome: 'succeeded',
+      wakeSurface: {
+        listChildren: () => hostChildren,
+        promptAsync,
+      },
+    });
+    // No boardInjection override: the v2 host-flavor derived default
+    // (board off) applies, exercising the native-delivery registration
+    // that keeps consumption reconciliation alive without the board.
+    const { h, pump, awaitPublication } = await openV2Lifecycle(probe, {
+      hostFlavor: 'v2',
+    });
+
+    await h.requestTask('native', 'v2 board-off reconcile probe');
+    await pump({
+      type: 'session.created',
+      data: { sessionID: 'child', parentID: 'parent', agent: 'explorer' },
+    });
+    await pump({
+      type: 'session.execution.started',
+      data: { sessionID: 'child' },
+    });
+    hostChildren = [
+      {
+        id: 'child',
+        parentID: 'parent',
+        outcome: 'succeeded',
+        time: { updated: Date.now() },
+      },
+    ];
+    await pump({
+      type: 'session.execution.succeeded',
+      data: { sessionID: 'child' },
+    });
+    const first = await awaitPublication('child', 0);
+    expect(first).toMatchObject({ state: 'completed' });
+    expect(h.board.getState('child')).toBe('completed');
+
+    // The parent consumes the natively delivered report: two real
+    // request cycles, and no board part ever appears in the payload.
+    const userMsg = (id: string, text: string) => ({
+      info: {
+        id,
+        sessionID: 'parent',
+        role: 'user',
+        agent: 'orchestrator',
+        time: { created: Date.now() },
+      },
+      parts: [{ type: 'text', text }],
+    });
+    const assistantMsg = (id: string, text: string) => ({
+      info: {
+        id,
+        sessionID: 'parent',
+        role: 'assistant',
+        time: { completed: Date.now() },
+      },
+      parts: [{ type: 'text', text }],
+    });
+    const requestCycle = async (messages: Array<Record<string, unknown>>) => {
+      await h.hooks['experimental.chat.messages.transform']?.(
+        {} as never,
+        { messages } as never,
+      );
+      for (const message of messages) {
+        const parts = (
+          message as { parts?: Array<Record<string, unknown> | undefined> }
+        ).parts;
+        for (const part of parts ?? []) {
+          const metadata = part?.metadata as
+            | Record<string, unknown>
+            | undefined;
+          expect(
+            metadata &&
+              Object.hasOwn(metadata, BACKGROUND_JOB_BOARD_METADATA_KEY),
+          ).toBeFalsy();
+        }
+      }
+    };
+    await requestCycle([userMsg('u1', 'check the background result')]);
+    await requestCycle([
+      userMsg('u1', 'check the background result'),
+      assistantMsg('a1', 'consumed the report'),
+      userMsg('u2', 'next step'),
+    ]);
+
+    // Consumption retirement is flavor-independent: the store advances
+    // past "completed" once the parent's prompt shape moved on, so
+    // hasTerminalUnreconciled consumers (wait_for_user guard,
+    // delegated-work detection) do not wedge.
+    expect(h.board.getState('child')).toBe('reconciled');
+  } finally {
+    capture.restore();
+  }
+});
+
 test('reopen-after-reconcile: child self-continuation republishes, wakes the idle parent, and corrects the parent', async () => {
   resetOrchestratorWakeGateForTests();
   const capture = captureGateLogs();
@@ -1484,6 +1589,10 @@ test('reopen-after-reconcile: child self-continuation republishes, wakes the idl
       // publication wake is observable without a half-minute sleep.
       configOverrides: {
         orchestratorWake: { publicationWakeMinIntervalMs: 1_000 },
+        // This suite exercises the BOARD-ON reconcile/correction contract.
+        // v2 hosts derive boardInjection=false when no layer configures it,
+        // so the board-dependent assertions here opt in explicitly.
+        boardInjection: true,
       },
     });
 
