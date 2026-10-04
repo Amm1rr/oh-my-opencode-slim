@@ -300,23 +300,18 @@ export function createSessionProfileBridge(
         });
         return;
       }
-      if (!profile.model) {
+      const registered = options.registeredProfiles?.[resolved.agent]?.model;
+      if (
+        !profile.model ||
+        (registered && resolved.model && !sameModel(resolved.model, registered))
+      ) {
+        // Nothing to switch, or the host already runs a per-call model.
         captured.set(sessionID, profile);
         prune();
-        emitLog('[v2][profile] child session captured without a model', {
+        emitLog('[v2][profile] child session captured without a model switch', {
           sessionID,
           agent: resolved.agent,
         });
-        return;
-      }
-      const registered = options.registeredProfiles?.[resolved.agent]?.model;
-      if (
-        registered &&
-        resolved.model &&
-        !sameModel(resolved.model, registered)
-      ) {
-        captured.set(sessionID, profile);
-        prune();
         return;
       }
       const switchModel = options.session?.switchModel;

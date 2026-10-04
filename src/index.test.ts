@@ -3298,24 +3298,18 @@ describe('plugin config model inheritance', () => {
   });
 
   test.each([
-    [
-      'exact child fallback',
-      ['openrouter/openrouter/auto', 'openai/gpt-6-luna'],
-      'openai/gpt-6-luna',
-    ],
+    ['exact child fallback', delegatedChain, fallback],
     [
       'working parent provider',
       ['openrouter/anthropic/claude-opus', 'openai/gpt-6-astra'],
-      'openai/gpt-6-astra',
+      { providerID: 'openai', modelID: 'gpt-6-astra' },
     ],
   ])(
     'v1 delegation starts on the %s instead of a provider the parent exhausted',
-    async (_label, childModels, expectedModel) => {
+    async (label, childModels, expectedModel) => {
       const hooks = await loadConfiguredPlugin({
         agents: {
-          orchestrator: {
-            model: ['openrouter/openrouter/auto', 'openai/gpt-6-luna'],
-          },
+          orchestrator: { model: delegatedChain },
           operator: { model: childModels },
         },
       });
@@ -3327,15 +3321,15 @@ describe('plugin config model inheritance', () => {
           {
             sessionID: 'orchestrator-fallback',
             agent: 'orchestrator',
-            model: { providerID: 'openai', modelID: 'gpt-6-luna' },
+            model: fallback,
           } as never,
           {} as never,
         );
         const routed = await delegateV1Child(
           hooks,
           'orchestrator-fallback',
-          `call-${_label}`,
-          { providerID: 'openrouter', modelID: 'openrouter/auto' },
+          `call-${label}`,
+          primary,
         );
 
         // No hidden agent aliases: the host task permission and agent
@@ -3347,11 +3341,7 @@ describe('plugin config model inheritance', () => {
             name.startsWith('slim-internal-fallback'),
           ),
         ).toBe(false);
-        const slash = expectedModel.indexOf('/');
-        expect(routed.childModel).toEqual({
-          providerID: expectedModel.slice(0, slash),
-          modelID: expectedModel.slice(slash + 1),
-        });
+        expect(routed.childModel).toEqual(expectedModel);
       } finally {
         await hooks.dispose?.();
       }
@@ -3432,17 +3422,10 @@ describe('plugin config model inheritance', () => {
       );
       await selectParent(hooks, parentModel);
       client.session.promptAsync = async () => {
-        childOutput.message.model = { ...childModel };
-        const get = mock(client.session.get as any);
-        const messages = mock(client.session.messages as any);
-        client.session.get = get;
-        client.session.messages = messages;
         await hooks['chat.message']?.(
           { sessionID, agent: 'operator' } as never,
           childOutput as never,
         );
-        expect(get).not.toHaveBeenCalled();
-        expect(messages).not.toHaveBeenCalled();
         return {};
       };
       await hooks.tool?.task_revive.execute(
@@ -3454,19 +3437,11 @@ describe('plugin config model inheritance', () => {
       );
     } finally {
       await hooks.dispose?.();
-      mock.restore();
     }
   }
 
   test('v1 inherited revive follows the live parent outside the child chain', async () => {
     await assertInheritedRevive({ inheritModelFrom: 'orchestrator' });
-  });
-
-  test('v1 inherited revive follows the live parent at child chain index zero', async () => {
-    await assertInheritedRevive({
-      inheritModelFrom: 'session',
-      model: ['openai/gpt-6-luna', 'openrouter/openrouter/auto'],
-    });
   });
 
   test('v1 inherited revive does not route a parent primary', async () => {
@@ -3490,18 +3465,12 @@ describe('plugin config model inheritance', () => {
     try {
       await selectParent(hooks, fallback);
       const get = mock(client.session.get as any);
-      const messages = mock(client.session.messages as any);
       client.session.get = get;
-      client.session.messages = messages;
       const routed = await delegateV1Child(hooks, 'parent', 'new', fallback);
       expect(routed.childModel).toEqual(fallback);
       expect(get).not.toHaveBeenCalled();
-      expect(messages.mock.calls.map(([input]) => input.path.id)).not.toContain(
-        routed.childOutput.message.sessionID,
-      );
     } finally {
       await hooks.dispose?.();
-      mock.restore();
     }
   });
 

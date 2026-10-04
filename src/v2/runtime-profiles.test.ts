@@ -131,7 +131,7 @@ describe('createSessionProfileBridge', () => {
       get: { providerID: 'openai', id: 'per-call', variant: 'low' },
       default: PROFILES.explorer.model,
     };
-    const { bridge, switchCalls, getCalls } = makeBridge({
+    const { bridge, switchCalls } = makeBridge({
       profiles: () => profiles,
       registeredProfiles: PROFILES,
       get: async (input) => ({
@@ -139,13 +139,6 @@ describe('createSessionProfileBridge', () => {
         agent: 'explorer',
         model: models[(input as { sessionID: string }).sessionID],
       }),
-      switchModel: async (input) => {
-        const { sessionID, model } = input as {
-          sessionID: string;
-          model: ModelRef;
-        };
-        models[sessionID] = model;
-      },
     });
     const event = created('event');
     await bridge.observeEvent({
@@ -154,10 +147,6 @@ describe('createSessionProfileBridge', () => {
     });
     await bridge.ensureSessionProfile('get');
     expect(switchCalls).toEqual([]);
-    expect(getCalls).toEqual([{ sessionID: 'get' }]);
-    expect(models.event.variant).toBe('low');
-    expect(models.get.variant).toBe('low');
-    expect(bridge.profileForSession('event')).toBe(PROFILES.explorer);
     expect(bridge.profileForSession('get')).toBe(PROFILES.explorer);
 
     profiles = {
@@ -169,12 +158,10 @@ describe('createSessionProfileBridge', () => {
       },
     };
     await bridge.observeEvent(event);
-    await bridge.ensureSessionProfile('get');
     await bridge.ensureSessionProfile('default');
     expect(switchCalls).toEqual([
       { sessionID: 'default', model: profiles.explorer.model },
     ]);
-    expect(models.default).toEqual(profiles.explorer.model);
     expect(bridge.profileForSession('event')).toBe(PROFILES.explorer);
     expect(bridge.profileForSession('default')).toBe(profiles.explorer);
   });

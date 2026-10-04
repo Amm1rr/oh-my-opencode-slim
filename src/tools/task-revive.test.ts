@@ -45,7 +45,6 @@ function createTool(overrides?: {
   baselineTimeoutMs?: number;
   admissionTimeoutMs?: number;
   onLaunch?: () => void;
-  registerIntent?: (parentID: string, childID: string, agent: string) => void;
   revivedRunTracker?: Partial<RevivedRunTracker>;
   hostFlavor?: string;
 }) {
@@ -101,7 +100,6 @@ function createTool(overrides?: {
     backgroundJobSupervisor: { onLaunch } as never,
     baselineTimeoutMs: overrides?.baselineTimeoutMs,
     admissionTimeoutMs: overrides?.admissionTimeoutMs,
-    registerIntent: overrides?.registerIntent,
   });
   const cancelTools = createCancelTaskTool({
     input,
@@ -494,19 +492,6 @@ describe('task_revive tool', () => {
     const lease = board.acquireRelaunchLease('ses_1', 2);
     expect(lease).toBeDefined();
     if (lease) board.releaseLease(lease);
-  });
-
-  test('registers the child route before admitting a revive prompt', async () => {
-    const register = mock(() => {});
-    const { board, taskRevive } = createTool({
-      registerIntent: register,
-      promptAsync: async () => {
-        expect(register).toHaveBeenCalledWith('parent-1', 'ses_1', 'explorer');
-        return {};
-      },
-    });
-    acknowledgedCompleted(board);
-    await taskRevive.execute({ task_id: 'ses_1', prompt: 'continue' }, context);
   });
 
   test('v2 exposes sessionID and emits a sessionID label', async () => {

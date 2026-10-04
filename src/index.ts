@@ -198,9 +198,10 @@ type ModelChainEntry = { id: string; variant?: string };
 type DelegatedModelSelection = {
   agentName: string;
   entry: ModelChainEntry;
-  index: number;
-  /** Present for inheritance; true only on a real parent fallback. */
-  inheritedFallback?: boolean;
+  /** The parent runs a real fallback that should move this child. */
+  route: boolean;
+  /** Inherited children already start on the parent's live model. */
+  inherited?: true;
 };
 
 function modelProvider(model: string): string | undefined {
@@ -221,30 +222,26 @@ function selectDelegatedModel(input: {
   parentModel: string | undefined;
   parentChain: ModelChainEntry[] | undefined;
 }): DelegatedModelSelection | undefined {
-  const { agentName, childChain, parentModel } = input;
+  const { agentName, childChain, parentChain, parentModel } = input;
   if (!parentModel) return undefined;
-  const parentChain = input.parentChain;
   const parentIndex =
     parentChain?.findIndex((entry) => entry.id === parentModel) ?? -1;
+  const exact =
+    childChain?.findIndex((entry) => entry.id === parentModel) ?? -1;
 
   if (input.followsParent) {
-    const index = childChain?.findIndex((entry) => entry.id === parentModel);
     return {
       agentName,
-      entry:
-        index !== undefined && index >= 0
-          ? (childChain?.[index] as ModelChainEntry)
-          : { id: parentModel },
-      index: index ?? -1,
-      inheritedFallback: parentIndex > 0,
+      entry: childChain?.[exact] ?? { id: parentModel },
+      route: parentIndex > 0,
+      inherited: true,
     };
   }
 
   if (!childChain?.length || !parentChain || parentIndex <= 0) return undefined;
 
-  const exact = childChain.findIndex((entry) => entry.id === parentModel);
   if (exact >= 0) {
-    return { agentName, entry: childChain[exact], index: exact };
+    return { agentName, entry: childChain[exact], route: exact > 0 };
   }
 
   const activeProvider = modelProvider(parentModel);
@@ -256,7 +253,7 @@ function selectDelegatedModel(input: {
       return {
         agentName,
         entry: childChain[sameProvider],
-        index: sameProvider,
+        route: sameProvider > 0,
       };
     }
   }
@@ -273,7 +270,7 @@ function selectDelegatedModel(input: {
     return provider === undefined || !exhaustedProviders.has(provider);
   });
   return viable >= 0
-    ? { agentName, entry: childChain[viable], index: viable }
+    ? { agentName, entry: childChain[viable], route: viable > 0 }
     : undefined;
 }
 
@@ -711,8 +708,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     agentType: string,
   ) => {
     const selected = resolveDelegatedModelForParent(agentType, parentID);
-    if (selected?.inheritedFallback !== undefined && !childID) return;
-    if (selected && (selected.inheritedFallback ?? selected.index > 0)) {
+    if (selected?.route && (childID || !selected.inherited)) {
       v1DelegatedIntents.push({
         parentID,
         agentName: selected.agentName,
@@ -2600,10 +2596,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           childRoute.agentName,
           childRoute.parentID,
         );
-      const routedChildModel =
-        routedChild && (routedChild.inheritedFallback ?? routedChild.index > 0)
-          ? modelFromMetadataString(routedChild.entry.id)
-          : undefined;
+      const routedChildModel = routedChild?.route
+        ? modelFromMetadataString(routedChild.entry.id)
+        : undefined;
       // A child already on the routed model (inherited from the parent)
       // keeps its message untouched, including the inherited variant.
       if (

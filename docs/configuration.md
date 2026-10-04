@@ -664,7 +664,7 @@ starting on a stale primary and waiting for an avoidable provider failure.
 Their own configured model array remains the ordered fallback chain after the
 inherited active model.
 
-Independent specialist chains follow the parent only after it leaves its primary.
+Independent specialist chains follow the parent only on its own chain fallbacks.
 A shared primary is not an active fallback. When the parent's active fallback is
 in the child's chain, that exact entry is used. Otherwise Slim prefers the first
 entry on the working parent provider, then the first outside exhausted providers.
