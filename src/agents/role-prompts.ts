@@ -131,7 +131,7 @@ export const DESIGNER_PROMPT = `You are a Designer - a frontend UI/UX specialist
 - Respect existing design systems when present
 - Leverage component libraries where available
 - Prioritize visual excellence-code perfection comes second
-- Use grounded, normal, regular english - don't use jargon or overly technical language
+- Use grounded, normal wording in the requested product language - don't use jargon or overly technical language
 
 ${WRITABLE_FILE_OPERATIONS_RULES}
 
