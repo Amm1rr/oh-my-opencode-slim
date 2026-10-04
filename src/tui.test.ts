@@ -2943,7 +2943,11 @@ describe('sidebar model display names', () => {
     }
   }
 
-  function providersClient(options: { empty?: boolean; fail?: boolean }): {
+  function providersClient(options: {
+    empty?: boolean;
+    fail?: boolean;
+    hang?: boolean;
+  }): {
     calls: () => number;
     client: unknown;
   } {
@@ -2955,6 +2959,7 @@ describe('sidebar model display names', () => {
           providers: async () => {
             calls++;
             if (options.fail) throw new Error('providers unavailable');
+            if (options.hang) return new Promise<never>(() => {});
             return {
               data: {
                 providers: options.empty
@@ -3136,6 +3141,49 @@ describe('sidebar model display names', () => {
       expect(again).toBe(failed);
     });
 
+    test('a failed fetch for a new directory drops the previous names', async () => {
+      let clock = 0;
+      const stub = providersClient({});
+      const namesCache = cache();
+      const now = () => clock;
+
+      const first = await hydrateModelNames(
+        stub.client,
+        '/tmp/a',
+        namesCache,
+        now,
+      );
+      expect(first.get('anthropic/claude-haiku')).toBe('Claude Haiku');
+
+      const fail = providersClient({ fail: true });
+      clock = 100_000; // past the TTL, so a refetch is attempted
+      const failed = await hydrateModelNames(
+        fail.client,
+        '/tmp/b',
+        namesCache,
+        now,
+      );
+      expect(fail.calls()).toBe(1);
+      expect(failed.size).toBe(0);
+      expect(failed).not.toBe(first);
+    });
+
+    test('a stalled providers fetch resolves via the fetch timeout', async () => {
+      const namesCache = cache();
+      const hung = providersClient({ hang: true });
+
+      const result = await hydrateModelNames(
+        hung.client,
+        '/tmp/a',
+        namesCache,
+        () => 0,
+        1,
+      );
+      expect(hung.calls()).toBe(1);
+      expect(result.size).toBe(0);
+      expect(namesCache.directory).toBe('/tmp/a');
+    });
+
     test('serves the empty map within the TTL without refetching', async () => {
       let clock = 0;
       const stub = providersClient({ empty: true });
@@ -3165,5 +3213,105 @@ describe('sidebar model display names', () => {
       await hydrateModelNames(stub.client, '/tmp/a', namesCache, now);
       expect(stub.calls()).toBe(2);
     });
+  });
+
+  test('names-only refresh re-renders the sidebar via the tracked signal', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-names-'));
+    const projectDir = path.join(root, 'project');
+    fs.mkdirSync(projectDir, { recursive: true });
+    const oldHome = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = path.join(root, 'data');
+    // Seed the on-disk snapshot before runtime creation so the first
+    // refresh compares equal and the name update below rides the signal
+    // alone (no snapshot/agent-state change involved).
+    recordTuiAgentModels(
+      { agentModels: { oracle: 'anthropic/claude-haiku' } },
+      projectDir,
+    );
+    let beginFetch!: () => void;
+    const started = new Promise<void>((resolve) => {
+      beginFetch = resolve;
+    });
+    let finishFetch!: (value: unknown) => void;
+    const gated = new Promise<unknown>((resolve) => {
+      finishFetch = resolve;
+    });
+    let requestRenders = 0;
+    let slotRender: (() => unknown) | undefined;
+    const disposers: Array<() => void> = [];
+    try {
+      await tuiPlugin.tui(
+        {
+          state: { path: { directory: projectDir } },
+          client: {
+            config: {
+              providers: () => {
+                beginFetch();
+                return gated;
+              },
+            },
+          },
+          route: { current: { name: 'home' }, navigate: () => {} },
+          lifecycle: {
+            onDispose: (callback: () => void) => {
+              disposers.push(callback);
+              return () => {};
+            },
+          },
+          renderer: {
+            requestRender: () => {
+              requestRenders++;
+            },
+          },
+          slots: {
+            register: (registration: {
+              slots: { sidebar_content?: () => unknown };
+            }) => {
+              slotRender = registration.slots.sidebar_content;
+              return 'slot';
+            },
+          },
+          theme: { current: rowTheme },
+        } as never,
+        {},
+        { version: 'test' } as never,
+      );
+      await started; // the refresh is now stalled inside the providers fetch
+
+      const setup = await testRender(() => slotRender?.() as never, {
+        width: 60,
+        height: 24,
+      });
+      try {
+        await setup.renderOnce();
+        const before = setup.captureCharFrame();
+        expect(before).toContain('claude-haiku');
+        expect(before).not.toContain('Claude Haiku');
+
+        finishFetch({
+          data: {
+            providers: [
+              {
+                id: 'anthropic',
+                models: { 'claude-haiku': { name: 'Claude Haiku' } },
+              },
+            ],
+          },
+        });
+        await Bun.sleep(20);
+        await setup.renderOnce();
+        expect(setup.captureCharFrame()).toContain('Claude Haiku');
+        // The update came from the signal write alone: no requestRender.
+        expect(requestRenders).toBe(0);
+      } finally {
+        setup.renderer.destroy();
+      }
+    } finally {
+      finishFetch({ data: { providers: [] } });
+      for (const dispose of disposers) dispose();
+      if (oldHome === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = oldHome;
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });

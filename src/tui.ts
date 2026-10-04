@@ -371,6 +371,8 @@ const REMOTE_RETRY_MS = 5_000;
 
 const MODEL_NAMES_TTL_MS = 60_000;
 
+const MODEL_NAMES_FETCH_TIMEOUT_MS = 2_000;
+
 export interface ModelNamesCache {
   directory?: string;
   names: ReadonlyMap<string, string>;
@@ -419,6 +421,7 @@ export async function hydrateModelNames(
   directory: string,
   cache: ModelNamesCache,
   now: () => number = Date.now,
+  timeoutMs: number = MODEL_NAMES_FETCH_TIMEOUT_MS,
 ): Promise<ReadonlyMap<string, string>> {
   const cached =
     cache.directory === directory &&
@@ -434,13 +437,26 @@ export async function hydrateModelNames(
     return cached;
   }
   try {
-    const names = await fetchModelNameMap({ client });
+    const names = await Promise.race([
+      fetchModelNameMap({ client }),
+      new Promise<never>((_, reject) =>
+        setTimeout(
+          () => reject(new Error('model names fetch timed out')),
+          timeoutMs,
+        ),
+      ),
+    ]);
     cache.directory = directory;
     cache.names = new Map(Object.entries(names));
     cache.at = now();
   } catch (err) {
-    // Keep last known names (possibly empty); rate-limit retries via TTL.
+    // Rate-limit retries via TTL. Keep last-known names only when the failed
+    // fetch is for the same directory; a directory switch must not inherit
+    // the previous project's labels.
     log('[v2][tui] model name fetch failed', String(err));
+    if (cache.directory !== directory) {
+      cache.names = new Map();
+    }
     cache.directory = directory;
     cache.at = now();
   }
@@ -1724,6 +1740,9 @@ function createSidebarRuntime(adapter: SidebarRuntimeAdapter) {
   let unregisterConfigListener = () => {};
   const remoteCache: RemoteModelCache = {};
   const modelNamesCache: ModelNamesCache = { names: new Map() };
+  const [modelNames, setModelNames] = createSignal<ReadonlyMap<string, string>>(
+    modelNamesCache.names,
+  );
   const refreshSidebar = async () => {
     if (disposed) return;
     const currentDirectory = adapter.getDirectory();
@@ -1759,13 +1778,15 @@ function createSidebarRuntime(adapter: SidebarRuntimeAdapter) {
     if (disposed) return;
     const namesBefore = modelNamesCache.names;
     await hydrateModelNames(adapter.client, currentDirectory, modelNamesCache);
-    const namesChanged = modelNamesCache.names !== namesBefore;
     if (!isRefreshCurrent(currentDirectory, adapter.getDirectory())) {
       return;
     }
+    if (modelNamesCache.names !== namesBefore) {
+      setModelNames(modelNamesCache.names);
+    }
     const snapshotChanged =
       directoryChanged || !snapshotSectionsEqual(nextSnapshot, snapshot());
-    if (!snapshotChanged && !stateChanged && !namesChanged) {
+    if (!snapshotChanged && !stateChanged) {
       return;
     }
     if (snapshotChanged) {
@@ -1832,7 +1853,7 @@ function createSidebarRuntime(adapter: SidebarRuntimeAdapter) {
         visible,
         interaction,
         adapter.getPresetRow?.(configDirectory, presetName),
-        modelNamesCache.names,
+        modelNames(),
       );
     }),
   );
