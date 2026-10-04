@@ -329,7 +329,7 @@ function showMajorUpgradeToast(
   showToast(
     ctx,
     `oh-my-opencode-slim v${version} is available.`,
-    `${runningFrom}\nIt requires OpenCode background subagents.\nRefresh the cached copy: bunx oh-my-opencode-slim@latest install`,
+    `${runningFrom}\nIt requires OpenCode background subagents.\nRefresh the cached copy: \`bunx oh-my-opencode-slim@latest install\``,
     'info',
     12_000,
   );

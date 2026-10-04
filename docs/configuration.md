@@ -431,7 +431,8 @@ automatically.
 
 Auto-update never crosses major versions. For example, a 1.x install can
 auto-update to a newer 1.x release, but it won't auto-install 2.x. When a newer
-major is available, the plugin shows a migration command instead.
+major is available, the plugin shows a migration command instead, along with the
+running version and the cached copy it resolved from.
 
 > Pinned plugin entries in `opencode.json` (for example
 > `"oh-my-opencode-slim@1.0.1"`) are the true version lock. Those stay pinned
