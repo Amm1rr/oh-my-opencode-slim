@@ -4,7 +4,7 @@ Built-in tools available to agents beyond the standard file and shell operations
 
 ## apply_patch rescue
 
-Slim only intercepts `apply_patch` before the native tool runs. It rewrites recoverable stale patches, canonizes safe tolerant matches against the real file when unicode/trim drift is the only mismatch, keeps the authored `new_lines` bytes intact, preserves the existing file EOL/final-newline state for updates, validates malformed patches strictly before helper execution, uses a conservative bounded LCS fallback, accumulates helper state when the same path appears in multiple `Update File` hunks, blocks `apply_patch` before native execution if any patch path falls outside the allowed root/worktree, and fails on ambiguity instead of guessing. It does not rewrite `edit` or `write` inputs.
+Slim only intercepts `apply_patch` before the native tool runs. It rewrites recoverable stale patches, canonizes safe tolerant matches against the real file when unicode/trim drift is the only mismatch, keeps the authored `new_lines` bytes intact, preserves the existing file EOL/final-newline state for updates, validates malformed patches strictly before helper execution, uses a conservative bounded LCS fallback, accumulates helper state when the same path appears in multiple `Update File` hunks, blocks `apply_patch` before native execution if any patch path falls outside the allowed root/worktree, and fails on ambiguity instead of guessing. It does not rewrite `edit` or `write` inputs. Disable with `disabled_hooks: ["apply-patch"]` (see [Hooks](configuration.md#hooks)).
 
 ---
 
@@ -46,7 +46,8 @@ component fail fast with an actionable error instead of an opaque "ripgrep
 execution failed" message or a silent search of the parent directory.
 Resolution uses the host process's native path flavor, preserving Windows
 drive-relative behavior; if no project directory is available, the guard
-conservatively passes the path through.
+conservatively passes the path through. Disable with
+`disabled_hooks: ["search-path-guard"]` (see [Hooks](configuration.md#hooks)).
 
 ---
 
@@ -228,6 +229,9 @@ Exempt from the entire guard: the task-control and wait tools (`task`,
 `task_status`, `task_result`, `task_cancel`, `task_message`, `task_revive`,
 `wait_for_user`, `wait_for_background_tasks`) — those legitimately re-issue
 identical calls while polling a long-running background task.
+
+Disable with `disabled_hooks: ["tool-loop-guard"]` (see
+[Hooks](configuration.md#hooks)).
 
 ---
 
