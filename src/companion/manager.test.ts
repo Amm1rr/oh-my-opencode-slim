@@ -194,6 +194,159 @@ describe('CompanionManager', () => {
     );
   });
 
+  it('does not reapply a preset after post-apply acknowledgement failure', () => {
+    const projectDir = path.join(TEST_DIR, 'preset-ack-failure');
+    const projectConfigDir = path.join(projectDir, '.opencode');
+    mkdirSync(projectConfigDir, { recursive: true });
+    const projectConfigPath = path.join(
+      projectConfigDir,
+      'oh-my-opencode-slim.jsonc',
+    );
+    writeFileSync(projectConfigPath, JSON.stringify({ preset: 'old' }));
+
+    const userConfigPath = path.join(
+      TEST_DIR,
+      'config',
+      'opencode',
+      'oh-my-opencode-slim.json',
+    );
+    writeFileSync(
+      userConfigPath,
+      JSON.stringify({
+        presets: {
+          old: { orchestrator: { model: 'old-model' } },
+          cheap: { orchestrator: { model: 'cheap-model' } },
+        },
+      }),
+    );
+
+    const m = make('preset-ack-failure-session', projectDir);
+    m.onLoad();
+    let state = readState();
+    state.preset_requests = [
+      {
+        request_id: 'req-stale-after-apply',
+        session_id: 'preset-ack-failure-session',
+        scope: 'project',
+        preset: 'cheap',
+      },
+    ];
+    writeFileSync(stateFilePath(), JSON.stringify(state));
+
+    const internal = m as unknown as {
+      acknowledgePresetRequest: (requestId: string) => boolean;
+      consumePresetRequest: () => boolean;
+    };
+    const realAcknowledge = internal.acknowledgePresetRequest.bind(m);
+    let failAcknowledgement = true;
+    internal.acknowledgePresetRequest = (requestId: string) => {
+      if (failAcknowledgement) {
+        failAcknowledgement = false;
+        return false;
+      }
+      return realAcknowledge(requestId);
+    };
+
+    internal.consumePresetRequest();
+    expect(JSON.parse(readFileSync(projectConfigPath, 'utf8')).preset).toBe(
+      'cheap',
+    );
+    state = readState();
+    expect(state.preset_requests).toHaveLength(1);
+    expect(state.sessions[0].preset.last_request_id).toBe(
+      'req-stale-after-apply',
+    );
+
+    // A later manual change must not be overwritten when the stale queue entry
+    // is observed again. The second poll only retries acknowledgement.
+    writeFileSync(projectConfigPath, JSON.stringify({ preset: 'old' }));
+    internal.consumePresetRequest();
+
+    expect(JSON.parse(readFileSync(projectConfigPath, 'utf8')).preset).toBe(
+      'old',
+    );
+    expect(readState().preset_requests).toBeUndefined();
+  });
+
+  it('restores the applied-request fence after manager restart', () => {
+    const projectDir = path.join(TEST_DIR, 'preset-restart-fence');
+    const projectConfigDir = path.join(projectDir, '.opencode');
+    mkdirSync(projectConfigDir, { recursive: true });
+    const projectConfigPath = path.join(
+      projectConfigDir,
+      'oh-my-opencode-slim.jsonc',
+    );
+    // Simulate a later manual edit after the request already applied.
+    writeFileSync(projectConfigPath, JSON.stringify({ preset: 'old' }));
+
+    const userConfigPath = path.join(
+      TEST_DIR,
+      'config',
+      'opencode',
+      'oh-my-opencode-slim.json',
+    );
+    writeFileSync(
+      userConfigPath,
+      JSON.stringify({
+        presets: {
+          old: { orchestrator: { model: 'old-model' } },
+          cheap: { orchestrator: { model: 'cheap-model' } },
+        },
+      }),
+    );
+
+    // Simulate persisted state left by a process that applied the request,
+    // published completion, then failed to remove the stale queue entry.
+    mkdirSync(path.dirname(stateFilePath()), { recursive: true });
+    writeFileSync(
+      stateFilePath(),
+      JSON.stringify({
+        version: 1,
+        sessions: [
+          {
+            session_id: 'preset-restart-session',
+            cwd: projectDir,
+            active_agents: ['intro'],
+            active_agent_details: [],
+            status: 'idle',
+            pid: process.pid,
+            preset: {
+              available: ['cheap', 'old'],
+              project_available: ['cheap', 'old'],
+              global_available: ['cheap', 'old'],
+              last_request_id: 'req-restart-stale',
+              result_ok: true,
+              last_scope: 'project',
+            },
+          },
+        ],
+        preset_requests: [
+          {
+            request_id: 'req-restart-stale',
+            session_id: 'preset-restart-session',
+            scope: 'project',
+            preset: 'cheap',
+          },
+        ],
+      }),
+    );
+
+    const replacement = make('preset-restart-session', projectDir);
+    replacement.onLoad();
+    (
+      replacement as unknown as {
+        consumePresetRequest: () => boolean;
+      }
+    ).consumePresetRequest();
+
+    // Restored last_request_id must fence the stale request: acknowledge only,
+    // without reapplying "cheap" over the later manual "old" selection.
+    expect(JSON.parse(readFileSync(projectConfigPath, 'utf8')).preset).toBe(
+      'old',
+    );
+    expect(readState().preset_requests).toBeUndefined();
+  });
+
   it('reports the v2 ancestor preset after an Inherit request', () => {
     const workspace = path.join(TEST_DIR, 'workspace');
     const worktree = path.join(workspace, 'worktrees', 'feature');
