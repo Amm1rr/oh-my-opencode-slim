@@ -19,6 +19,7 @@ import {
   findBinary,
   gracefulClosePane,
   redactViewerSecretArgs,
+  viewerNeedsPaneCwd,
 } from '../shared';
 import type { Multiplexer, PaneResult, PaneSpawnOptions } from '../types';
 
@@ -105,9 +106,9 @@ export class TmuxMultiplexer implements Multiplexer {
         this.storedLayout,
         opencodeCmd,
         viewerSecretArgs,
-        // Mini commands omit the directory, so the split pins the child
+        // v2 mini commands omit the directory, so the split pins the child
         // session's project directory itself.
-        options?.viewerSurface === 'mini' ? ['-c', directory] : [],
+        viewerNeedsPaneCwd(options) ? ['-c', directory] : [],
       );
       const paneId = result.stdout.trim();
 

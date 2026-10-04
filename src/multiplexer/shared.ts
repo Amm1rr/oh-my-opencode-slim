@@ -68,13 +68,10 @@ export type ViewerCommandOptions = Pick<
  *   inject it at pane creation through their native spawn-time environment
  *   mechanism, or through `withParentEnvPassword` where none exists.
  *
- * With `viewerSurface: 'mini'` the same matrix targets the `opencode mini`
- * interface instead: the `mini` subcommand is inserted after the binary and
- * the v1 attach form is expressed as `mini --server <url>`, mirroring the
- * flags `mini` shares with the full TUI. Mini rejects a positional
- * directory, so the directory argument is omitted; every adapter pins the
- * pane to the child session's project directory by its own means (herdr
- * `--cwd`, kitty `--cwd=`, tmux `-c`, Zellij `--cwd`, cmux-tui `cd`).
+ * `mini` uses `attach ... --mini` on v1 (OpenCode >= 1.17.10). On v2 it
+ * uses the `mini` subcommand, which rejects a positional directory; adapters
+ * pin the pane cwd instead (herdr/kitty natively, tmux `-c`, Zellij `--cwd`,
+ * cmux-tui `cd`).
  */
 export function buildViewCommand(
   sessionId: string,
@@ -84,36 +81,34 @@ export function buildViewCommand(
 ): string {
   const flavor = options.viewerFlavor ?? 'v1';
   const executable = options.executable ?? 'opencode';
-  const isMini = options.viewerSurface === 'mini';
-  const exe =
-    executable === 'opencode' ? executable : quoteShellArg(executable);
-  if (flavor === 'v1' && !isMini) {
-    return buildOpencodeAttachCommand(
+  const mini = options.viewerSurface === 'mini';
+  if (flavor === 'v1') {
+    const attach = buildOpencodeAttachCommand(
       sessionId,
       serverUrl,
       directory,
       executable,
     );
-  }
-  if (flavor === 'v1') {
-    return [
-      exe,
-      ...(isMini ? ['mini'] : []),
-      '--server',
-      quoteShellArg(serverUrl),
-      '--session',
-      quoteShellArg(sessionId),
-    ].join(' ');
+    return mini ? `${attach} --mini` : attach;
   }
   const viewDir = normalizePathForShell(directory);
   return [
-    exe,
-    ...(isMini ? ['mini'] : []),
+    executable === 'opencode' ? executable : quoteShellArg(executable),
+    ...(mini ? ['mini'] : []),
     ...(flavor === 'v2-remote' ? ['--server', quoteShellArg(serverUrl)] : []),
     '--session',
     quoteShellArg(sessionId),
-    ...(isMini ? [] : [quoteShellArg(viewDir)]),
+    ...(viewerNeedsPaneCwd(options) ? [] : [quoteShellArg(viewDir)]),
   ].join(' ');
+}
+
+/** Only v2 mini omits the directory, so its adapter must pin the pane cwd. */
+export function viewerNeedsPaneCwd(
+  options: ViewerCommandOptions = {},
+): boolean {
+  return (
+    options.viewerSurface === 'mini' && (options.viewerFlavor ?? 'v1') !== 'v1'
+  );
 }
 
 /** Shells whose `-c` argument is a POSIX script. */
@@ -130,10 +125,9 @@ export function isPosixShell(shell: string): boolean {
 }
 
 /**
- * Whether the shell parses `a && b` as a command sequence. Everything in
- * POSIX_SHELLS does, and fish has supported `&&` since 3.0; nu, cmd, and
- * PowerShell do not. Adapters that chain commands into the viewer script
- * must gate on this the same way they gate POSIX-only constructs.
+ * Whether the shell supports the POSIX `cd '...' && ...` viewer wrapper,
+ * not general `&&` support. POSIX shells and fish (since 3.0) are supported;
+ * nu, cmd, and PowerShell wrappers are not handled.
  */
 const AND_CHAIN_SHELLS = new Set([...POSIX_SHELLS, 'fish']);
 

@@ -275,7 +275,21 @@ describe('CmuxMultiplexer', () => {
     expect(mini).not.toContain('--server');
   });
 
-  test('viewer "mini" skips the cd prefix when the shell cannot parse &&', async () => {
+  test('v1 mini uses attach --mini without pinning the pane cwd', async () => {
+    const { runner, calls } = recorder();
+    await mux({ runner }).spawnPane(
+      CHILD_ID,
+      DESCRIPTION,
+      'http://127.0.0.1:7777',
+      '/repo',
+      { viewerSurface: 'mini' },
+    );
+    const command = calls.find((argv) => argv.includes('run'))?.at(-1) ?? '';
+    expect(command).toEndWith(`${ATTACH_COMMAND} --mini`);
+    expect(command).not.toContain("cd '/repo' && ");
+  });
+
+  test('viewer "mini" skips the cd prefix when the shell cannot use the POSIX wrapper', async () => {
     const originalShell = process.env.SHELL;
     process.env.SHELL = '/usr/bin/nu';
     try {

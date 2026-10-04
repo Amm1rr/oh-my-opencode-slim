@@ -326,7 +326,7 @@ describe('buildViewCommand', () => {
         viewerFlavor: 'v1',
         viewerSurface: 'mini',
       }),
-    ).toBe("opencode mini --server 'http://x' --session 'sess'");
+    ).toBe("opencode attach 'http://x' --session 'sess' --dir '/repo' --mini");
     expect(
       buildViewCommand('ses_abc', 'http://unused', '/repo', {
         viewerFlavor: 'v2-shared',
