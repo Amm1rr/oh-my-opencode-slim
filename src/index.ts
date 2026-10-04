@@ -1857,17 +1857,22 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // inference/runtime profiles for new child sessions + the sidebar.
     // Unknown to v1 hosts, consumed by src/v2/setup.ts.
     'v2.refreshProfiles': refreshProfilesFromDisk,
-    // v2's native subagent tool accepts a per-call model override. Keep a
-    // delegated child on the parent's real fallback using the child's chain
-    // (exact model, working provider, then non-exhausted provider). Explicit
-    // inheritance stays live; only the v2 bridge consumes this override.
+    // v2's native override accepts provider/model#variant. Follow the parent's
+    // real fallback using the child's chain, including its configured variant.
+    // Explicit inheritance stays live; only the v2 bridge consumes this override.
     'v2.resolveDelegatedModel': ({
       agentType,
       parentSessionID,
     }: {
       agentType: string;
       parentSessionID: string;
-    }) => resolveDelegatedModelForParent(agentType, parentSessionID)?.entry.id,
+    }) => {
+      const entry = resolveDelegatedModelForParent(
+        agentType,
+        parentSessionID,
+      )?.entry;
+      return entry?.variant ? `${entry.id}#${entry.variant}` : entry?.id;
+    },
     'v2.session.retry':
       foregroundFallback.handleV2Retry.bind(foregroundFallback),
 

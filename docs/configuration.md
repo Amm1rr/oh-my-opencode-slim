@@ -682,6 +682,9 @@ which is useful after a quota or provider outage is repaired. Set it to
 `"stick-to-fallback"` to keep those internal continuations on the confirmed
 fallback until the next external user turn.
 
+V2 forwards configured variants as `provider/model#variant`. The host rejects
+a variant unavailable for that model; Slim does not silently drop it.
+
 Model selection follows these rules:
 
 - If the same effective agent override contains both a scalar `model` and

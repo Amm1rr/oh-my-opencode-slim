@@ -3189,7 +3189,9 @@ describe('plugin config model inheritance', () => {
     const hooks = await loadConfiguredPlugin({
       agents: {
         orchestrator: { model: ['provider/primary', 'backup/parent'] },
-        operator: { model: ['backup/child', 'provider/primary'] },
+        operator: {
+          model: [{ id: 'backup/child', variant: 'max' }, 'provider/primary'],
+        },
       },
     });
     try {
@@ -3200,6 +3202,13 @@ describe('plugin config model inheritance', () => {
           parentSessionID: 'parent',
         }),
       ).toBeUndefined();
+      await selectParent(hooks, { providerID: 'backup', modelID: 'parent' });
+      expect(
+        (hooks as any)['v2.resolveDelegatedModel']({
+          agentType: 'operator',
+          parentSessionID: 'parent',
+        }),
+      ).toBe('backup/child#max');
     } finally {
       await hooks.dispose?.();
     }
