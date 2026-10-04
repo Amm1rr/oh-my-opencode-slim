@@ -3,6 +3,7 @@ import {
   beforeEach,
   describe,
   expect,
+  jest,
   mock,
   spyOn,
   test,
@@ -2932,7 +2933,7 @@ describe('plugin config model inheritance', () => {
   // Directory of the most recent loadConfiguredPlugin() call, for tests
   // that need the RuntimeConfig singleton the plugin initialized.
   let lastConfigDir: string | undefined;
-  let clock: ReturnType<typeof spyOn>;
+  let client: ReturnType<typeof createPluginClient>;
   const hostChildren = new Map<
     string,
     { parentID: string; prompted: boolean }
@@ -2951,11 +2952,9 @@ describe('plugin config model inheritance', () => {
     originalEnv = { ...process.env };
     delete process.env.OH_MY_OPENCODE_SLIM_DISABLE;
     hostChildren.clear();
-    clock = spyOn(Date, 'now').mockReturnValue(1);
   });
 
   afterEach(async () => {
-    clock.mockRestore();
     process.env = originalEnv;
     while (configDirs.length > 0) {
       const configDir = configDirs.pop();
@@ -2992,7 +2991,7 @@ describe('plugin config model inheritance', () => {
       OPENCODE_LOG_DIR: `${configDir}/logs`,
     };
 
-    const client = createPluginClient(async () => ({}));
+    client = createPluginClient(async () => ({}));
     client.session.status = async () => ({ data: {} });
     client.session.get = async ({ path }: { path: { id: string } }) => {
       const child = hostChildren.get(path.id);
@@ -3351,7 +3350,7 @@ describe('plugin config model inheritance', () => {
     },
   );
 
-  test('v1 background child claims its first prompt without a creation event, not later prompts', async () => {
+  test('v1 background child claims only its new prompt, not other parents or later prompts', async () => {
     let hooks = await loadConfiguredPlugin(delegatedFallbackConfig);
     try {
       await selectParent(hooks, fallback);
@@ -3376,12 +3375,8 @@ describe('plugin config model inheritance', () => {
         { args: { subagent_type: 'operator', background: true } } as never,
       );
       const sessionID = childOutput.message.sessionID;
-      await hooks.event?.({
-        event: {
-          type: 'session.created',
-          properties: { info: { id: sessionID, parentID: 'parent' } },
-        },
-      } as never);
+      const other = await delegateV1Child(hooks, 'other', 'other', primary);
+      expect(other.childModel).toEqual(primary);
       childOutput.message.model = primary;
       await hooks['chat.message']?.(
         { sessionID, agent: 'operator', model: primary } as never,
@@ -3389,6 +3384,32 @@ describe('plugin config model inheritance', () => {
       );
       expect(childOutput.message.model).toEqual(primary);
     } finally {
+      await hooks.dispose?.();
+    }
+  });
+
+  test('v1 child lookup aborts both host reads at the deadline', async () => {
+    const hooks = await loadConfiguredPlugin(delegatedFallbackConfig);
+    try {
+      await selectParent(hooks, fallback);
+      await hooks['tool.execute.before']?.(
+        { tool: 'task', sessionID: 'parent', callID: 'slow' } as never,
+        { args: { subagent_type: 'operator', background: true } } as never,
+      );
+      const signals: (AbortSignal | undefined)[] = [];
+      const hang = ({ signal }: { signal?: AbortSignal }) =>
+        new Promise(() => signals.push(signal));
+      client.session.get = client.session.messages = hang;
+      jest.useFakeTimers();
+      const prompt = hooks['chat.message']?.(
+        { sessionID: 'slow-child', agent: 'operator' } as never,
+        {} as never,
+      );
+      jest.advanceTimersByTime(5_000);
+      await prompt;
+      expect(signals.map((signal) => signal?.aborted)).toEqual([true, true]);
+    } finally {
+      jest.useRealTimers();
       await hooks.dispose?.();
     }
   });

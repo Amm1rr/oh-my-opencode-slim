@@ -351,6 +351,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   let instanceDisposed = false;
   // v1 task() has no model override. Prompts claim these bounded intentions
   // from host state, never from asynchronous session.created delivery.
+  const MAX_PENDING_V1_DELEGATED_INTENTS = 32;
   const v1DelegatedIntents: {
     parentID: string;
     agentName: string;
@@ -2302,7 +2303,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       // the other locations' wake state.
       if (!hasLiveInstances()) clearAllWakeSessions();
       v1InternalSelectionOverrides.clear();
-      if (hostFlavor !== 'v2') v1DelegatedIntents.length = 0;
+      v1DelegatedIntents.length = 0;
       await interviewManager.dispose();
       clearTuiActivities();
       tuiReusableProjection?.dispose();
@@ -2371,7 +2372,8 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
                 ? { childID: args.task_id }
                 : {}),
             });
-            if (v1DelegatedIntents.length > 32) v1DelegatedIntents.shift();
+            if (v1DelegatedIntents.length > MAX_PENDING_V1_DELEGATED_INTENTS)
+              v1DelegatedIntents.shift();
           }
         }
       }
@@ -2542,11 +2544,13 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
             (route) => !route.childID && route.agentName === agentName,
           )
         ) {
+          const controller = new AbortController();
           try {
             const request = {
               path: { id: input.sessionID },
               query: { directory: ctx.directory },
               throwOnError: true as const,
+              signal: controller.signal,
             };
             const [{ data: session }, { data: messages }] = await withTimeout(
               Promise.all([
@@ -2567,8 +2571,12 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
                   route.agentName === agentName,
               );
             }
-          } catch {
-            // Failed host reads cannot authorize a model rewrite.
+          } catch (error) {
+            controller.abort();
+            log('[delegation] child lookup failed', {
+              sessionID: input.sessionID,
+              error: String(error),
+            });
           }
         }
         if (childRoute)
