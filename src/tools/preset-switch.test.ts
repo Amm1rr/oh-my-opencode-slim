@@ -375,6 +375,40 @@ describe('switchPresetOnDisk', () => {
     expect(parsed.companion?.enabled).toBe(true);
   });
 
+  test('clearing project override removes every duplicate top-level preset key', () => {
+    const projectDir = path.join(tempDir, 'project-inherit-duplicates');
+    const projectConfigDir = path.join(projectDir, '.opencode');
+    fs.mkdirSync(projectConfigDir, { recursive: true });
+    const projectConfigPath = path.join(
+      projectConfigDir,
+      'oh-my-opencode-slim.jsonc',
+    );
+    fs.writeFileSync(
+      projectConfigPath,
+      `{
+        "preset": "first",
+        // preserve companion comment
+        "companion": { "enabled": true },
+        "preset": "second",
+        // preserve unrelated comment
+        "unrelated": 7,
+        "preset": "third",
+      }`,
+    );
+
+    const result = clearProjectPresetOnDisk(projectDir);
+
+    expect(result.ok).toBe(true);
+    const text = fs.readFileSync(projectConfigPath, 'utf8');
+    expect(text.match(/"preset"\s*:/g) ?? []).toHaveLength(0);
+    expect(text).toContain('// preserve companion comment');
+    expect(text).toContain('// preserve unrelated comment');
+    expect(parse(text)).toEqual({
+      companion: { enabled: true },
+      unrelated: 7,
+    });
+  });
+
   test('selection state interpolates global preset placeholders like the runtime loader', () => {
     const projectDir = path.join(tempDir, 'project-env-selection');
     fs.mkdirSync(projectDir, { recursive: true });
