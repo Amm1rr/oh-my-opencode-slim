@@ -77,6 +77,9 @@ export interface RevivedRunTracker {
     attemptStartedAt?: number;
     description: string;
   }): void;
+  /** Explicit host refusal of a registered input: drop the exact run so
+   * it no longer waits for (or fences retries on) its prompt identity. */
+  discard(taskID: string, generation: number): boolean;
   isTracked(taskID: string, generation: number): boolean;
   /** Baseline anchor for a tracked run, so transcript-evidence consumers
    * (stop gate) can attribute the trailing answer to THIS run instead of
@@ -533,6 +536,14 @@ export function createRevivedRunTracker(options: {
     runs.delete(run.taskID);
   }
 
+  function discard(taskID: string, generation: number): boolean {
+    const run = runs.get(taskID);
+    if (run?.generation !== generation) return false;
+    discardRun(run);
+    options.onSettled?.(taskID);
+    return true;
+  }
+
   const baselineFor = (
     taskID: string,
     generation: number,
@@ -800,6 +811,7 @@ export function createRevivedRunTracker(options: {
   return {
     captureBaseline,
     register,
+    discard,
     isTracked,
     baselineFor,
     promptMessageIDFor: (taskID, generation) => {

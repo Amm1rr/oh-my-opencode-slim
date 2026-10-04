@@ -286,6 +286,7 @@ export function createTaskReviveTool(
         // resume; it does not deduplicate. The v1 SDK ignores this client-side
         // hint (not part of the HTTP request); the v2 shim forwards it.
         const admissionStartedAt = Date.now();
+        const replaced = current;
         if (promptMessageID) {
           // Own this one input before sending. A late acknowledgement must
           // never reinstall the tracker after it has delivered the answer.
@@ -335,6 +336,13 @@ export function createTaskReviveTool(
             owner.settled = true;
             const apiError = responseError(response);
             if (apiError !== undefined) {
+              // An explicit refusal admitted nothing. Release the queued
+              // identity so the task neither waits for it nor fences retries.
+              if (queueContinuation && launched) {
+                revivedRunTracker.discard(launched.taskID, launched.generation);
+                options.backgroundJobBoard.abandonLaunch(launched, replaced);
+                launched = undefined;
+              }
               throw new Error(errorText(apiError));
             }
             // Retirement is not deletion. The accepted write is not resent

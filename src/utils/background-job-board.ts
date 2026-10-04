@@ -503,6 +503,20 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     return record;
   }
 
+  abandonLaunch(
+    launched: BackgroundJobRecord,
+    replaced: BackgroundJobRecord,
+  ): boolean {
+    if (
+      replaced.taskID !== launched.taskID ||
+      this.jobs.get(launched.taskID)?.generation !== launched.generation
+    ) {
+      return false;
+    }
+    this.setJob(replaced);
+    return true;
+  }
+
   adoptTerminal(
     input: BackgroundJobAdoptionInput,
   ): BackgroundJobRecord | undefined {

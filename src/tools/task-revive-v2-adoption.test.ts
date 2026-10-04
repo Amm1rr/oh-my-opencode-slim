@@ -419,3 +419,30 @@ test('late acknowledgement cannot replace a successor or deliver the predecessor
   expect(h.prompt).toHaveBeenCalledTimes(2);
   expect(h.interrupt).not.toHaveBeenCalled();
 });
+
+test('explicit host rejection releases the queued generation for a retry', async () => {
+  let refuse = true;
+  const h = harness({
+    busy: true,
+    admit: async (input) =>
+      refuse ? { error: { message: 'queue refused' } } : { id: input.id },
+  });
+  await expect(h.revive()).rejects.toThrow('queue refused');
+  const restored = h.run();
+  expect(restored.recoveredWithoutPrompt).toBe(true);
+  expect(restored.statusUncertain).toBeFalsy();
+  expect(
+    h.tracker.promptMessageIDFor(childID, restored.generation),
+  ).toBeUndefined();
+  refuse = false;
+  expect(await h.revive()).toContain('status: started');
+  expect(h.run().generation).not.toBe(restored.generation);
+  h.deliver();
+  h.append(assistant('new-answer', 'result after refusal'));
+  await h.probe();
+  await h.probe();
+  expect(h.board.get(childID)?.resultSummary).toBe('result after refusal');
+  expect(h.synthetic).toHaveBeenCalledTimes(1);
+  expect(h.prompt).toHaveBeenCalledTimes(2);
+  expect(h.interrupt).not.toHaveBeenCalled();
+});
