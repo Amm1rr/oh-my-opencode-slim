@@ -309,7 +309,9 @@ export function createSessionProfileBridge(
       const registered = options.registeredProfiles?.[resolved.agent]?.model;
       if (
         !profile.model ||
-        (registered && resolved.model && !sameModel(resolved.model, registered))
+        (options.registeredProfiles &&
+          resolved.model &&
+          !sameModel(resolved.model, registered))
       ) {
         // Nothing to switch, or the host already runs a per-call model.
         captured.set(sessionID, profile);

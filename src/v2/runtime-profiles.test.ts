@@ -183,6 +183,29 @@ describe('createSessionProfileBridge', () => {
     expect(bridge.size()).toBe(1);
   });
 
+  test('keeps an explicit model when a model-less startup profile is refreshed', async () => {
+    const model = { providerID: 'other', id: 'fallback', variant: 'max' };
+    const { bridge, switchCalls } = makeBridge({
+      registeredProfiles: PROFILES,
+      profiles: () => ({ ...PROFILES, oracle: PROFILES.explorer }),
+      get: async (input) => ({
+        parentID: 'p',
+        agent: 'oracle',
+        model:
+          (input as { sessionID: string }).sessionID === 'default'
+            ? undefined
+            : model,
+      }),
+    });
+    await bridge.ensureSessionProfile('child');
+    expect(switchCalls).toEqual([]);
+    expect(bridge.profileForSession('child')).toBe(PROFILES.explorer);
+    await bridge.ensureSessionProfile('default');
+    expect(switchCalls).toEqual([
+      { sessionID: 'default', model: PROFILES.explorer.model },
+    ]);
+  });
+
   test('leaves a modeled child uncaptured without session.switchModel', async () => {
     const { bridge } = makeBridge({ withSwitchModel: false });
 
