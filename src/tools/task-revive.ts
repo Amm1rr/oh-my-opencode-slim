@@ -39,6 +39,7 @@ export interface TaskReviveToolOptions extends TaskControlToolOptions {
   admissionTimeoutMs?: number;
   waitForIdleTimeoutMs?: number;
   isDisposed?: () => boolean;
+  registerIntent?: (parentID: string, childID: string, agent: string) => void;
 }
 
 export function createTaskReviveTool(
@@ -301,6 +302,11 @@ export function createTaskReviveTool(
           // A session-wide timeout abort could kill the preceding execution.
           // This input is observed by identity, without an automatic abort.
         }
+        options.registerIntent?.(
+          parentSessionID,
+          current.taskID,
+          current.agent,
+        );
         const request = (
           session.promptAsync as (
             args: Record<string, unknown>,

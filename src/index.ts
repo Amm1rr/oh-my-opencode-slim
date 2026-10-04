@@ -706,6 +706,23 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     });
   };
 
+  const registerV1DelegatedIntent = (
+    parentID: string,
+    childID: string | undefined,
+    agentType: string,
+  ) => {
+    const selected = resolveDelegatedModelForParent(agentType, parentID);
+    if (selected && selected.index > 0) {
+      v1DelegatedIntents.push({
+        parentID,
+        agentName: selected.agentName,
+        ...(childID ? { childID } : {}),
+      });
+      if (v1DelegatedIntents.length > MAX_PENDING_V1_DELEGATED_INTENTS)
+        v1DelegatedIntents.shift();
+    }
+  };
+
   try {
     // Directory scope (multi-instance): the host loads this plugin once per
     // location and broadcasts every event to every instance in the process.
@@ -1365,6 +1382,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       isDisposed: () => instanceDisposed,
     });
     taskReviveTools = createTaskReviveTool({
+      ...(hostFlavor !== 'v2' && { registerIntent: registerV1DelegatedIntent }),
       terminalGate,
       input: ctx,
       backgroundJobBoard: backgroundJobCoordinator,
@@ -2363,23 +2381,12 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       ) {
         const args = output.args as Record<string, unknown>;
         if (typeof args.subagent_type === 'string') {
-          const selected = resolveDelegatedModelForParent(
-            args.subagent_type,
+          // Keep the canonical specialist name for host permissions and lookup.
+          registerV1DelegatedIntent(
             input.sessionID,
+            typeof args.task_id === 'string' ? args.task_id : undefined,
+            args.subagent_type,
           );
-          // subagent_type stays canonical: the host's task permission and
-          // agent lookup see the real specialist name.
-          if (selected && selected.index > 0) {
-            v1DelegatedIntents.push({
-              parentID: input.sessionID,
-              agentName: selected.agentName,
-              ...(typeof args.task_id === 'string' && args.task_id
-                ? { childID: args.task_id }
-                : {}),
-            });
-            if (v1DelegatedIntents.length > MAX_PENDING_V1_DELEGATED_INTENTS)
-              v1DelegatedIntents.shift();
-          }
         }
       }
       // Record a call only after all rejecting before-hooks have accepted it.

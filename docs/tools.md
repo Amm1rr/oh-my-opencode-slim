@@ -114,6 +114,9 @@ its message lease after timeout; this change does not alter that quarantine.
 errored, or stopped retained session may be revived immediately once its
 retained state has been verified safe. Acknowledgement controls parent and
 job-board consumption and reusable-pool display, not same-session revival.
+On v1 it registers that child's next prompt for live parent-fallback routing,
+like a `task_id` resume. V2 retains the session model. A failed send may leave
+the v1 intention pending until claimed or evicted by the bounded FIFO.
 For existing tracked sessions, baseline capture has a 5-second deadline: expiry fails without sending a prompt
 and releases the relaunch lease. The local admission wait has a 10-second deadline;
 expiry returns `status: admission_unknown`, not a launch failure. The reported
