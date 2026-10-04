@@ -71,6 +71,8 @@ interface CompanionSession {
   active_agents: string[];
   active_agent_details?: CompanionAgentDetail[];
   status: string;
+  attention_seq?: number;
+  attention_request_id?: string;
   pid: number;
   config?: CompanionState['config'];
   preset?: CompanionPresetState;
@@ -293,6 +295,8 @@ export class CompanionManager {
   >();
   private orchestratorSessionId: string | undefined;
   private orchestratorBusy = false;
+  private attentionSeq = 0;
+  private lastAttentionRequestId: string | undefined;
   private readonly config?: CompanionConfig;
   private companionProcess: ChildProcess | null = null;
   private wasSpawner = false;
@@ -310,15 +314,38 @@ export class CompanionManager {
   private presetLastScope: CompanionPresetScope | undefined;
   private readonly appliedPresetRequestIds = new Set<string>();
 
-  constructor(sessionId: string, cwd: string, config?: CompanionConfig) {
+  constructor(
+    sessionId: string,
+    cwd: string,
+    config?: CompanionConfig,
+    private readonly hostFlavor?: string,
+  ) {
     this.id = sessionId;
     this.cwd = cwd;
     this.config = config;
   }
 
+  private restoreAttentionState(): void {
+    const previous = readState().sessions.find(
+      (session) => session.session_id === this.id,
+    );
+    const previousSeq = previous?.attention_seq;
+    if (
+      typeof previousSeq === 'number' &&
+      Number.isSafeInteger(previousSeq) &&
+      previousSeq >= 0
+    ) {
+      this.attentionSeq = Math.max(this.attentionSeq, previousSeq);
+    }
+    if (typeof previous?.attention_request_id === 'string') {
+      this.lastAttentionRequestId = previous.attention_request_id;
+    }
+  }
+
   private refreshPresetState(): boolean {
     let hardWarning = false;
     loadPluginConfig(this.cwd, {
+      hostFlavor: this.hostFlavor,
       silent: true,
       onWarning: (warning) => {
         if (HARD_PRESET_REFRESH_WARNING_KINDS.has(warning.kind)) {
@@ -328,7 +355,7 @@ export class CompanionManager {
     });
     if (hardWarning) return false;
 
-    const next = getPresetSelectionState(this.cwd);
+    const next = getPresetSelectionState(this.cwd, this.hostFlavor);
     const projectCatalogChanged =
       this.projectAvailablePresets.length !== next.projectAvailable.length ||
       this.projectAvailablePresets.some(
@@ -433,7 +460,10 @@ export class CompanionManager {
       return true;
     }
 
-    const config = loadPluginConfig(this.cwd, { silent: true });
+    const config = loadPluginConfig(this.cwd, {
+      silent: true,
+      hostFlavor: this.hostFlavor,
+    });
     const scope: CompanionPresetScope =
       request.scope === 'global'
         ? 'global'
@@ -442,9 +472,12 @@ export class CompanionManager {
           : 'effective';
     const result =
       scope === 'project' && request.inherit === true
-        ? clearProjectPresetOnDisk(this.cwd)
+        ? clearProjectPresetOnDisk(this.cwd, this.hostFlavor)
         : typeof request.preset === 'string' && request.preset.trim()
-          ? switchPresetOnDisk(this.cwd, request.preset, config, { scope })
+          ? switchPresetOnDisk(this.cwd, request.preset, config, {
+              scope,
+              hostFlavor: this.hostFlavor,
+            })
           : {
               ok: false,
               presetName: '',
@@ -482,6 +515,10 @@ export class CompanionManager {
       return;
     }
     this.restorePresetRequestFence();
+    // Re-initialization may replace a live manager for the same host session.
+    // Recover the generation/request fence before disposing the old manager so
+    // the native (session_id, attention_seq) key cannot be reused.
+    this.restoreAttentionState();
     this.registerActiveManager();
     this.refreshPresetState();
     this.flush();
@@ -607,8 +644,21 @@ export class CompanionManager {
     }
   }
 
-  onWaitingInput(): void {
+  onWaitingInput(requestId?: string): void {
     if (this.config?.enabled !== true) return;
+    // v2 permission asks are delivered raw + synthesized with the same request
+    // id. Advance only for a genuinely new request so additive bridge delivery
+    // cannot produce duplicate native notifications.
+    const isNewRequest =
+      requestId !== undefined
+        ? requestId !== this.lastAttentionRequestId
+        : this.status !== 'waiting-input';
+    if (isNewRequest) {
+      this.attentionSeq += 1;
+    }
+    if (requestId !== undefined) {
+      this.lastAttentionRequestId = requestId;
+    }
     // Waiting input is project-level UI state, not proof that the requesting
     // session is the orchestrator. Keep orchestrator identity untouched.
     this.status = 'waiting-input';
@@ -722,6 +772,8 @@ export class CompanionManager {
         active_agents: this.activeAgents(),
         active_agent_details: this.activeAgentDetails(),
         status: this.status,
+        attention_seq: this.attentionSeq,
+        attention_request_id: this.lastAttentionRequestId,
         pid: process.pid,
         config: this.config
           ? {

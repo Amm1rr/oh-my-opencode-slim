@@ -896,7 +896,7 @@ describe('openPresetManager', () => {
     });
     writeProjectConfigFile({
       presets: {
-        projectChild: { extends: 'userBase', agents: {} },
+        projectChild: { extends: 'userBase' },
       },
     });
 

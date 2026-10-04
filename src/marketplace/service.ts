@@ -41,6 +41,7 @@ export interface MarketplaceServiceOptions
   extends Omit<MarketplaceStoreOptions, 'pluginVersion'> {
   pluginVersion?: string;
   projectDir?: string;
+  hostFlavor?: string;
   registryClient?: MarketplaceRegistryDownloadClient;
   getLivePackages?: () => readonly MarketplaceLivePackage[] | undefined;
   getDesiredState?: (
@@ -122,6 +123,7 @@ export function validateMarketplaceManifest(value: unknown) {
 export class MarketplaceService {
   readonly store: MarketplaceStore;
   readonly projectDir: string;
+  private readonly hostFlavor?: string;
   readonly registryClient: MarketplaceRegistryDownloadClient;
   private readonly getLivePackages?: MarketplaceServiceOptions['getLivePackages'];
   private readonly getDesiredState?: MarketplaceServiceOptions['getDesiredState'];
@@ -131,6 +133,7 @@ export class MarketplaceService {
     const pluginVersion = options.pluginVersion ?? BUILD_VERSION;
     this.store = new MarketplaceStore({ ...options, pluginVersion });
     this.projectDir = options.projectDir ?? process.cwd();
+    this.hostFlavor = options.hostFlavor;
     this.getLivePackages = options.getLivePackages;
     this.getDesiredState = options.getDesiredState;
     this.getPresetOverride = options.getPresetOverride;
@@ -313,6 +316,7 @@ export class MarketplaceService {
       this.store,
       scope,
       this.getPresetOverride?.(),
+      this.hostFlavor,
     );
   }
 
@@ -322,6 +326,7 @@ export class MarketplaceService {
       id,
       scope,
       this.getPresetOverride?.(),
+      this.hostFlavor,
     );
   }
 

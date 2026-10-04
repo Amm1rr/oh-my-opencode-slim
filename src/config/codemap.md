@@ -31,7 +31,10 @@ The config system follows a layered architecture:
 | `AgentMcpPolicy` | Per-agent default MCP lists and wildcard/exclusion parsing | agent-mcps.ts |
 | `ProviderModelIdSchema` | Zod schema enforcing `provider/model` ID format (provider segment excludes slashes/whitespace) | model-id-schema.ts |
 | Preset resolver | Preset normalization, layered merge (`mergePresetMaps`), and depth-first named-preset resolution (`resolvePresets` atomic, `PresetResolutionError` on unresolvable refs) | presets.ts |
-| `discoverProjectLocalSkillNames` | Project-local `.opencode/skills` discovery from `SKILL.md` frontmatter names, symlink-confined to the project root | project-skills.ts |
+| `discoverProjectLocalSkillNames` | Current and ancestor `.opencode/skills` discovery from `SKILL.md` frontmatter names, symlink-confined to each location | project-skills.ts |
+| `getProjectConfigDirectories` | Shared host-aware `.opencode` walk: worktree-bounded on v1, root-bounded on v2, disabled by the host's project-config flag | loader.ts |
+| `isProjectConfigDisabled` | Shared host flag parsing for discovery and project preset actions | loader.ts |
+| `loadRawPluginConfigFromPath` | Shared layer validation for runtime and preset management, preserving editable preset syntax | loader.ts |
 | `RuntimeConfig` | Per-directory runtime config singleton with derived getters, host-config snapshot, and preset/model overrides | runtime.ts |
 
 ## Flow
@@ -41,7 +44,7 @@ The config system follows a layered architecture:
 ```
 1. Discovery Phase
    ├─ User config: $OPENCODE_CONFIG_DIR/oh-my-opencode-slim.{jsonc,json}
-   ├─ Project config: <directory>/.opencode/oh-my-opencode-slim.{jsonc,json}
+    ├─ Project configs: every ancestor's .opencode/oh-my-opencode-slim.{jsonc,json}, filesystem root to directory
    └─ Environment variable: OH_MY_OPENCODE_SLIM_PRESET (overrides preset field)
 
 2. Parsing Phase
@@ -50,7 +53,7 @@ The config system follows a layered architecture:
    └─ Zod validation with detailed error reporting
 
 3. Merging Phase
-   ├─ User config (base) + Project config (override) → deep merge
+    ├─ User config (base) + ancestor project configs (farthest to closest) → deep merge
    ├─ Preset resolution: preset → merge preset.agents with root agents
    ├─ Legacy tmux → multiplexer migration for backward compatibility
    └─ Normalization: companion defaults, ACP agent defaults
@@ -124,7 +127,7 @@ This allows consumers to import directly from `src/config` rather than individua
 
 - `loadPluginConfig(directory, options?)`: Main entry point for configuration loading and merging
 - `loadConfigFromPath(configPath, options?)`: Load and validate single config file (JSONC or JSON)
-- `findPluginConfigPaths(directory)`: Discover user and project config file paths
+- `findPluginConfigPaths(directory)`: Discover user config and ancestor project layers in merge order; retain a current-directory-only path for project writes
 - `mergePluginConfigs(base, override)`: Deep merge two PluginConfig objects
 - `deepMerge(base, override)`: Recursively merge nested configuration objects
 
@@ -133,7 +136,7 @@ This allows consumers to import directly from `src/config` rather than individua
 - `getAgentOverride(config, name)`: Get agent-specific override with alias support
 - `getCustomAgentNames(config)`: List custom agents declared in config.agents
 - `getAcpAgentNames(config)`: List ACP agent names from config.acpAgents
-- `loadAgentPrompt(agentName, preset?)`: Load custom prompt files for agents
+- `loadAgentPrompt(agentName, preset?)`: Load custom prompt files for agents, searching current and ancestor locations before global directories
 - `stripOrchestratorModel` / `applyOrchestratorModelConfig` (strip-orchestrator-model.ts): Strip the orchestrator's single model/variant when a fallback chain is configured
 
 ### Runtime State

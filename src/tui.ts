@@ -1456,9 +1456,13 @@ export interface SidebarConfigState {
   presetName?: string;
 }
 
-export function readConfigState(directory: string): SidebarConfigState {
+export function readConfigState(
+  directory: string,
+  hostFlavor?: string,
+): SidebarConfigState {
   let configInvalid = false;
   const config = loadPluginConfig(directory, {
+    hostFlavor,
     silent: true,
     onWarning: (warning) => {
       // Only genuinely broken configs (parse/load/schema failures) mark the
@@ -1607,6 +1611,7 @@ function v2ThemeView(theme: V2TuiThemeTokens): {
 }
 
 interface SidebarRuntimeAdapter {
+  hostFlavor?: string;
   version: string;
   getDirectory: () => string;
   getVisibleSession: () => string | undefined;
@@ -1630,12 +1635,12 @@ interface SidebarRuntimeAdapter {
 function createSidebarRuntime(adapter: SidebarRuntimeAdapter) {
   let configDirectory = adapter.getDirectory();
   let { configInvalid, compactSidebar, multiplexerType, presetName } =
-    readConfigState(configDirectory);
+    readConfigState(configDirectory, adapter.hostFlavor);
   adapter.onMultiplexerConfig?.(multiplexerType);
   const applyConfigState = (): boolean => {
     const next = retainLastGoodConfigState(
       { configInvalid, compactSidebar, multiplexerType, presetName },
-      readConfigState(configDirectory),
+      readConfigState(configDirectory, adapter.hostFlavor),
     );
     const changed =
       next.configInvalid !== configInvalid ||
@@ -1668,7 +1673,7 @@ function createSidebarRuntime(adapter: SidebarRuntimeAdapter) {
     if (directoryChanged) {
       configDirectory = currentDirectory;
       ({ configInvalid, compactSidebar, multiplexerType, presetName } =
-        readConfigState(configDirectory));
+        readConfigState(configDirectory, adapter.hostFlavor));
       adapter.onMultiplexerConfig?.(multiplexerType);
       // Never carry one project's last-good config state into another.
       bindConfigListener();
@@ -1887,6 +1892,7 @@ async function setup(ctx: V2TuiContext): Promise<undefined | (() => void)> {
   const version = (await readPackageVersion()) ?? 'dev';
   const runtime = createSidebarRuntime({
     version,
+    hostFlavor: 'v2',
     getDirectory: () => ctx.location?.directory ?? process.cwd(),
     getVisibleSession: () => resolveRouteSessionId(ctx.ui.router.current()),
     client: ctx.client,

@@ -114,7 +114,9 @@ export function applyPresetByName(
   config: PluginConfig,
   presetName: string,
 ): PresetSwitchResult {
-  return switchPresetOnDisk(directory, presetName, config);
+  return switchPresetOnDisk(directory, presetName, config, {
+    hostFlavor: 'v2',
+  });
 }
 
 /**
@@ -142,7 +144,10 @@ export async function runPresetFlow(
     }
   };
   try {
-    const config = loadPluginConfig(directory, { silent: true });
+    const config = loadPluginConfig(directory, {
+      silent: true,
+      hostFlavor: 'v2',
+    });
 
     const requested = presetArg?.trim();
     if (requested) {
