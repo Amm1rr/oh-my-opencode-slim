@@ -77,7 +77,9 @@ const displayNameMap = new Map<string, string>();
 // ... populate from orchestrator and all subagents ...
 injectDisplayNames(orchestrator, displayNameMap);
 
-// 5. Inject council-dispatch instructions when dynamic councillors exist
+// 5. Append the static council seat pointer when dynamic councillors exist
+//    (the full dispatch block is injected per-message by the council-inject
+//    hook on keyword-triggered turns — see src/hooks/council-inject/)
 // 6. Return agents array [orchestrator, ...allSubAgents]
 return [orchestrator, ...allSubAgents];
 ```
@@ -89,7 +91,11 @@ The council agent is a synthesis-only specialist:
 - Has NO tools - cannot read, glob, grep, or run shell commands
 - Follows mandatory Synthesis Process steps before producing output
 - Formats output with Council Response, Per-Councillor Details, and Council Summary sections
-- Uses `ensureCouncilCompactionException()` to inject compaction exception idempotently
+- `ensureCouncilSynthesisReinforcement()` re-applies the dual-track synthesis
+  reinforcement (lean pointer when the base keeps the report format; compact
+  fallback when a custom prompt override dropped it) to the final effective
+  prompt; `ensureCouncilCompactionException()` keeps the host-template
+  exception idempotently
 
 ### Model Resolution and Fallback
 

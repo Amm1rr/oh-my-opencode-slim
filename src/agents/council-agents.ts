@@ -18,6 +18,10 @@ export function buildCouncillorAgents(
 ): AgentDefinition[] {
   const council = runtime.council;
   if (!council) return [];
+  // Explicitly disabling the council agent disables the whole chain: the
+  // injected procedure dispatches seats and then delegates synthesis to
+  // the council agent, so seats without it would dangle.
+  if (disabled.has('council')) return [];
 
   const presetName = council.default_preset ?? 'default';
   const preset = council.presets[presetName];

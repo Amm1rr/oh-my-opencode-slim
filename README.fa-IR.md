@@ -349,7 +349,7 @@ ping all agents
 <h3 dir="rtl" align="right">04. Council: هم‌اندیشی ذهن‌ها</h3>
 
 > [!NOTE]
-> **چرا Orchestrator بیشتر به‌صورت خودکار Council را فراخوانی نمی‌کند؟** این رفتار عمدی است. Council چند مدل را هم‌زمان اجرا می‌کند، بنابراین delegation خودکار آن سخت‌گیرانه نگه داشته شده چون معمولاً پرهزینه‌ترین مسیر در سیستم است. در عمل Council برای استفاده دستی طراحی شده است؛ برای مثال: <code>@council compare these two architectures</code>.
+> **چرا Orchestrator بیشتر به‌صورت خودکار Council را فراخوانی نمی‌کند؟** این رفتار عمدی است. Council چند مدل را هم‌زمان اجرا می‌کند، بنابراین delegation خودکار آن سخت‌گیرانه نگه داشته شده چون معمولاً پرهزینه‌ترین مسیر در سیستم است. در عمل، ذکر واژه‌های محرک مانند `council`، `@council`، `consensus` یا `共识` در پیام شما، رویه Council Mode را به آن نوبت تزریق می‌کند و Orchestrator همه صندلی‌های councillor را به‌صورت موازی اعزام می‌کند؛ برای مثال: <code>run a council on these two architectures</code>. رویه کامل هرگز به‌صورت ایستا حمل نمی‌شود: نشست‌هایی که Council نمی‌خواهند هیچ توکنی برای آن پرداخت نمی‌کنند، و تزریق را می‌توان با <code>disabled_hooks: ["council-inject"]</code> به‌طور کامل خاموش کرد.
 
 <table>
   <tr>

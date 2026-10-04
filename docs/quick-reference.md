@@ -12,7 +12,7 @@
 
 | Doc | Contents |
 |-----|----------|
-| [Council Agent](council.md) | Multi-LLM consensus, presets, role prompts, timeouts |
+| [Council Agent](council.md) | Multi-LLM consensus, presets, role prompts, keyword-triggered injection |
 | [Background Orchestration](background-orchestration.md) | Default scheduler-first orchestrator model for native background subagents |
 | [Interview](interview.md) | `/interview` command, browser UI, dashboard mode, multi-session coordination |
 | [Multiplexer Integration](multiplexer-integration.md) | Real-time pane monitoring, layouts, troubleshooting |
@@ -26,7 +26,7 @@
 | [Skills](skills.md) | `simplify`, `codemap`, `clonedeps` - skills assignment syntax |
 | [MCPs](mcps.md) | `context7`, `gh_grep` - permissions per agent, global disable |
 | [Tools](tools.md) | Background tasks, LSP, code search (`ast_grep`), formatters |
-| [Configuration](configuration.md) | Config files, prompt overriding, JSONC, full option reference table |
+| [Configuration](configuration.md) | Config files, prompt overriding, JSONC, full option reference table, disabling hooks and slash commands |
 
 ## 💡 Author's Setup
 

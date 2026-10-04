@@ -46,7 +46,7 @@ export const COUNCIL_INJECT_METADATA_KEY = 'oh-my-opencode-slim.councilInject';
  * ASCII-only). Deliberately excluded: bare seat names in prose, vote/投票.
  */
 const COUNCIL_TRIGGER_PATTERN =
-  /\b(?:councillor|council|consensus|second opinion|roundtable|multiple opinions|multiple models|several models|multi-model)\b|议会|顾问团|圆桌|共识|第二意见|多方意见|多模型|多个模型|几个模型|别的模型|其他模型/i;
+  /\b(?:councillors?|councils?|consensus|second opinions?|roundtable|multiple opinions|multiple models|several models|multi-model)\b|议会|顾问团|圆桌|共识|第二意见|多方意见|多模型|多个模型|几个模型|别的模型|其他模型/i;
 
 const CODE_FENCE_PATTERN = /```[\s\S]*?```/g;
 const INLINE_CODE_PATTERN = /`[^`\n]*`/g;
@@ -150,14 +150,18 @@ export function createCouncilInjectHook(options: CouncilInjectOptions) {
           continue;
         }
 
-        const textPart = message.parts.find(
-          (part: MessagePart) =>
-            part.type === 'text' &&
-            typeof part.text === 'string' &&
-            part.synthetic !== true &&
-            !isInternalInitiatorPart(part),
-        );
-        if (textPart && matchesCouncilTrigger(textPart.text as string)) {
+        // Scan every eligible text part (not just the first): a trigger in
+        // any part of a multi-part message still injects.
+        if (
+          message.parts.some(
+            (part: MessagePart) =>
+              part.type === 'text' &&
+              typeof part.text === 'string' &&
+              part.synthetic !== true &&
+              !isInternalInitiatorPart(part) &&
+              matchesCouncilTrigger(part.text),
+          )
+        ) {
           appendTaggedSyntheticPart(message, {
             text: block,
             metadataKey: COUNCIL_INJECT_METADATA_KEY,

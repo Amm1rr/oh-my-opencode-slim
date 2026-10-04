@@ -19,7 +19,10 @@ import {
   type PermissionCeilings,
 } from '../v2/permissions';
 import type { V2PermissionRule } from '../v2/types';
-import { ensureCouncilCompactionException } from './council';
+import {
+  ensureCouncilCompactionException,
+  ensureCouncilSynthesisReinforcement,
+} from './council';
 import {
   applyModelInheritanceToConfig,
   createAgents,
@@ -719,9 +722,13 @@ export function buildResolvedAgentRegistry(
       if (modelOverride.variant === undefined) delete entry.variant;
     }
     if (typeof entry.prompt === 'string') {
-      // Host council prompt replaces the generated content; retain the required exception.
+      // Host council prompt replaces the generated content; retain the
+      // required exception and report structure via the idempotent
+      // dual-track reinforcement.
       if (name === 'council')
-        entry.prompt = ensureCouncilCompactionException(entry.prompt);
+        entry.prompt = ensureCouncilCompactionException(
+          ensureCouncilSynthesisReinforcement(entry.prompt),
+        );
     }
     const effectiveModel =
       typeof entry.model === 'string' ? entry.model : undefined;
@@ -930,7 +937,7 @@ export function buildResolvedAgentRegistry(
         typeof visibleConfig.prompt === 'string'
       ) {
         visibleConfig.prompt = ensureCouncilCompactionException(
-          visibleConfig.prompt,
+          ensureCouncilSynthesisReinforcement(visibleConfig.prompt),
         );
       }
       let visiblePermission = normalizePermission(visibleConfig.permission);

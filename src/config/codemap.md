@@ -26,7 +26,7 @@ The config system follows a layered architecture:
 |-------------|---------|----------|
 | `PluginConfig` | Root configuration object with agents, presets, and feature flags | schema.ts |
 | `AgentOverrideConfig` | Per-agent configuration (model, temperature, skills, MCPs) | schema.ts |
-| `CouncilConfig` | Multi-LLM council configuration with presets and execution modes | council-schema.ts |
+| `CouncilConfig` | Multi-LLM council configuration with councillor presets and a default preset | council-schema.ts |
 | `MultiplexerConfig` | Unified pane management configuration (tmux/zellij) | schema.ts |
 | `AgentMcpPolicy` | Per-agent default MCP lists and wildcard/exclusion parsing | agent-mcps.ts |
 | `ProviderModelIdSchema` | Zod schema enforcing `provider/model` ID format (provider segment excludes slashes/whitespace) | model-id-schema.ts |
@@ -162,7 +162,7 @@ This allows consumers to import directly from `src/config` rather than individua
 - `disabled_mcps`: List of MCPs to disable
 - `disabled_tools`: List of tools to disable
 - `disabled_skills`: List of skills to disable
-- `disabled_hooks`: List of hooks to disable (`phase-reminder`, `foreground-fallback`, `deepwork-guard`, `chat-headers`, `cache-monitor`, `json-error-recovery`, `tool-loop-guard`, `search-path-guard`, `absolute-path-rescue`, `apply-patch`)
+- `disabled_hooks`: List of hooks to disable (`phase-reminder`, `foreground-fallback`, `deepwork-guard`, `chat-headers`, `cache-monitor`, `json-error-recovery`, `tool-loop-guard`, `search-path-guard`, `absolute-path-rescue`, `apply-patch`, `council-inject`)
 - `disabled_commands`: List of slash commands to disable (`interview`, `deepwork`, `reflect`, `loop`)
 - Enum-backed disabled keys use whole-family replacement semantics: explicit `[]` overrides a lower layer, a mixed list replaces it with the valid subset, and a list containing only unknown names is treated as unset so the lower layer applies.
 - `multiplexer`: Unified pane management config (type, layout, sizes, viewer surface)
@@ -171,7 +171,7 @@ This allows consumers to import directly from `src/config` rather than individua
 - `backgroundJobs`: Background job configuration
 - `backgroundJobs.concurrency`: Optional default, provider, and model caps for native background task admission
 - `fallback`: Failover/retry configuration
-- `council`: Council configuration with presets and execution modes
+- `council`: Council configuration with councillor presets and a default preset
 - `companion`: Companion animation configuration
 - `acpAgents`: ACP agent configurations
 
@@ -189,7 +189,7 @@ This allows consumers to import directly from `src/config` rather than individua
 - `color`: Agent display color as a six-digit hex value or OpenCode theme color
 
 ### CouncilConfig
-- `presets`: Named council presets (map of presetName → CouncillorConfig[])
+- `presets`: Named council presets (map of councillor name → CouncillorConfig)
 - `default_preset`: Default preset name to use
 
 ### MultiplexerConfig

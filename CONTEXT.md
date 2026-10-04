@@ -14,7 +14,7 @@ A glossary of the terms used in this project's domain. Definitions describe what
 - **Fixer** — Subagent for bounded implementation and execution.
 - **Observer** — Subagent for visual/media analysis (images, PDFs, diagrams). Disabled by default.
 - **Council** — A multi-LLM agent that runs several councillors and synthesizes their views.
-- **Councillor** — A read-only LLM advisor dispatched as a subagent by the orchestrator. Each councillor is registered as `councillor-<name>` from the council preset. Not hidden; visible in the TUI as panes.
+- **Councillor** — A read-only LLM advisor dispatched as a subagent by the orchestrator. Each councillor is registered as `councillor-<name>` from the council preset. Hidden from the @-mention menu; visible as panes when dispatched.
 - **Agent mode** — SDK classification of an agent: `primary` (orchestrator) or `subagent` (specialist, including council — the synthesizer is dispatched by the orchestrator, never switched to as a primary).
 - **Protected agent** — An agent that cannot be disabled (orchestrator).
 - **Custom agent** — A user-defined agent supplied via config, distinct from the built-ins.
@@ -81,7 +81,7 @@ A glossary of the terms used in this project's domain. Definitions describe what
 - **Variant** — An optional model qualifier (e.g., a preview build) used in fallback resolution.
 - **Fallback / failover** — The mechanism that switches models when a call is rate-limited or returns empty.
 - **Disabled agents** — Agents turned off via config; `observer` is disabled by default.
-- **Disabled hooks / commands** — Config keys that disable hooks or slash commands entirely: `disabled_hooks` (`phase-reminder`, `foreground-fallback`, `deepwork-guard`, `chat-headers`, `cache-monitor`, `json-error-recovery`, `tool-loop-guard`, `search-path-guard`, `absolute-path-rescue`, `apply-patch`) and `disabled_commands` (`interview`, `deepwork`, `reflect`, `loop`).
+- **Disabled hooks / commands** — Config keys that disable hooks or slash commands entirely: `disabled_hooks` (`phase-reminder`, `foreground-fallback`, `deepwork-guard`, `chat-headers`, `cache-monitor`, `json-error-recovery`, `tool-loop-guard`, `search-path-guard`, `absolute-path-rescue`, `apply-patch`, `council-inject`) and `disabled_commands` (`interview`, `deepwork`, `reflect`, `loop`).
 
 ## Flagged
 

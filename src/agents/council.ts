@@ -24,6 +24,26 @@ const COUNCIL_SYNTHESIS_POINTER = `\n\n---\n\nYou MUST follow the Synthesis Proc
 
 const COUNCIL_SYNTHESIS_FALLBACK = `\n\n---\n\nYou MUST produce: ## Council Response (the best synthesized answer), ## Per-Councillor Details (each councillor by exact seat name, e.g. "alpha", not the model label; note failed or timed-out seats instead of omitting them), and ## Council Summary (Consensus Level: unanimous|majority|split; Agreed Points; Disagreements + resolution; Remaining Uncertainty; Recommended Action). ${COUNCIL_COMPACTION_EXCEPTION}`;
 
+/** Idempotent dual-track synthesis reinforcement. Applied to the FINAL
+ * effective council prompt (after `resolvePrompt` and the host-agent merge
+ * can replace the generated content) so a custom override cannot drop the
+ * required output structure. Lean pointer when the base still carries the
+ * format; compact fallback when an override dropped it. */
+export function ensureCouncilSynthesisReinforcement(prompt: string): string {
+  // Already reinforced (marker texts appear only in the two variants).
+  if (
+    prompt.includes(
+      'You MUST follow the Synthesis Process and Required Output Format above',
+    ) ||
+    prompt.includes('You MUST produce: ## Council Response')
+  ) {
+    return prompt;
+  }
+  return prompt.includes('## Council Response')
+    ? prompt + COUNCIL_SYNTHESIS_POINTER
+    : prompt + COUNCIL_SYNTHESIS_FALLBACK;
+}
+
 const COUNCIL_AGENT_PROMPT = `You are the Council agent - a \
 synthesizer for multi-model consensus.
 
@@ -82,18 +102,17 @@ export function createCouncilAgent(
   customPrompt?: string,
   customAppendPrompt?: string,
 ): AgentDefinition {
-  const base = resolvePrompt(
+  // Base only: the synthesis reinforcement is applied at the assembly layer
+  // (agents/index.ts + registry.ts) to the FINAL effective prompt, because
+  // `resolvePrompt` and the host-agent merge replace the factory output
+  // after this returns.
+  const prompt = resolvePrompt(
     'council',
     customPrompt,
     undefined,
     COUNCIL_AGENT_PROMPT,
     customAppendPrompt,
   );
-  // A custom prompt that dropped the report format gets it back via the
-  // fallback; the default prompt keeps the lean pointer.
-  const prompt = base.includes('## Council Response')
-    ? base + COUNCIL_SYNTHESIS_POINTER
-    : base + COUNCIL_SYNTHESIS_FALLBACK;
 
   return {
     name: 'council',

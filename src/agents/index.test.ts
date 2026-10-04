@@ -1176,6 +1176,30 @@ test('orchestrator prompt carries the council seat pointer when councillors exis
   expect(prompt).not.toContain('proceed without it');
 });
 
+test('council pointer wording tracks the council-inject hook state', () => {
+  const enabled = createAgents(runtimeFor({ council: councilConfig() }));
+  const enabledPrompt = enabled.find((a) => a.name === 'orchestrator')?.config
+    .prompt as string;
+  expect(enabledPrompt).toContain(
+    'injected per-message by the council-inject hook on council keywords',
+  );
+
+  const disabled = createAgents(
+    runtimeFor({
+      council: councilConfig(),
+      disabled_hooks: ['council-inject'],
+    }),
+  );
+  const disabledPrompt = disabled.find((a) => a.name === 'orchestrator')?.config
+    .prompt as string;
+  // Seats are still listed, but no auto-inject promise when disabled.
+  expect(disabledPrompt).toContain('Seats: councillor-alpha');
+  expect(disabledPrompt).toContain('keyword injection disabled');
+  expect(disabledPrompt).not.toContain(
+    'injected per-message by the council-inject hook',
+  );
+});
+
 test('orchestrator prompt excludes the council pointer when no councillors', () => {
   const agents = createAgents(runtimeFor());
   const orchestrator = agents.find((a) => a.name === 'orchestrator');
@@ -1184,7 +1208,7 @@ test('orchestrator prompt excludes the council pointer when no councillors', () 
   // phrase, not the generic '## Council' header (user-level prompt files
   // may legitimately contain their own Council sections).
   expect(prompt).not.toContain(
-    'full procedure auto-injected on council keywords',
+    'the full procedure is injected per-message by the council-inject hook',
   );
 });
 
@@ -1522,7 +1546,32 @@ describe('council compaction exception', () => {
     expect(prompt).toContain(
       'if the host asks you to produce a session checkpoint or compaction summary in a specific template',
     );
-    expect(prompt).not.toContain('You MUST follow the Synthesis Process');
+    // The override keeps the format marker, so the assembly layer appends
+    // the lean pointer (not the fallback) on top of it.
+    expect(prompt).toContain('You MUST follow the Synthesis Process');
+    expect(prompt).not.toContain('You MUST produce: ## Council Response');
+  });
+
+  test('council prompt override without a format marker gets the fallback in createAgents', () => {
+    const agents = createAgents(
+      runtimeFor({
+        council: councilConfig(),
+        agents: {
+          council: {
+            prompt: 'Custom council prompt with no format rules.',
+          },
+        },
+      }),
+    );
+    const prompt = agents.find((a) => a.name === 'council')?.config.prompt;
+    expect(prompt).toContain('Custom council prompt with no format rules.');
+    // The fallback reinforcement restores the required report structure the
+    // override dropped — applied to the FINAL effective prompt.
+    expect(prompt).toContain('You MUST produce: ## Council Response');
+    expect(prompt).toContain('## Council Summary');
+    expect(prompt).toContain(
+      'if the host asks you to produce a session checkpoint or compaction summary in a specific template',
+    );
   });
 });
 
@@ -2012,7 +2061,7 @@ describe('disabled_agents', () => {
     expect(names).toContain('councillor');
   });
 
-  test('disabling council disables council agent', () => {
+  test('disabling council disables the whole council chain', () => {
     const config: PluginConfig = {
       disabled_agents: ['council'],
       council: councilConfig(),
@@ -2020,8 +2069,11 @@ describe('disabled_agents', () => {
     const agents = createAgents(runtimeFor(config));
     const names = agents.map((a) => a.name);
     expect(names).not.toContain('council');
-    // councillor is protected, it stays
-    expect(names).toContain('councillor');
+    // The chain is disabled as a unit: without the council synthesizer the
+    // injected procedure would dispatch seats and then delegate synthesis
+    // to a missing agent, so councillor seats are not built either.
+    expect(names).not.toContain('councillor');
+    expect(names.filter((n) => n.startsWith('councillor-'))).toEqual([]);
   });
 
   test('agent count decreases when agents are disabled', () => {
