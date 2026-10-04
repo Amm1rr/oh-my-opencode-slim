@@ -10,7 +10,13 @@ import {
 } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { type ConfigLoadWarningKind, loadPluginConfig } from '../config/loader';
 import type { CompanionConfig } from '../config/schema';
+import {
+  clearProjectPresetOnDisk,
+  getPresetSelectionState,
+  switchPresetOnDisk,
+} from '../tools/preset-switch';
 import { log } from '../utils/logger';
 
 // Only one companion `process.on('exit')` listener should be live per process.
@@ -22,20 +28,59 @@ import { log } from '../utils/logger';
 // re-evaluated.
 let activeExitListener: (() => void) | null = null;
 const activeManagers = new Set<CompanionManager>();
+const MAX_PRESET_REQUESTS = 64;
+const PRESET_REFRESH_EVERY_TICKS = 4;
+const HARD_PRESET_REFRESH_WARNING_KINDS: ReadonlySet<ConfigLoadWarningKind> =
+  new Set(['invalid-json', 'invalid-schema', 'read-error']);
+
+interface CompanionPresetState {
+  /** Backward-compatible effective view for older Companion binaries. */
+  current?: string;
+  available: string[];
+  effective?: string;
+  project?: string;
+  global?: string;
+  project_available?: string[];
+  global_available?: string[];
+  message?: string;
+  last_request_id?: string;
+  result_ok?: boolean;
+  last_scope?: CompanionPresetScope;
+}
+
+type CompanionPresetScope = 'effective' | 'project' | 'global';
+
+interface CompanionPresetRequest {
+  request_id: string;
+  session_id: string;
+  scope?: CompanionPresetScope;
+  preset?: string;
+  inherit?: boolean;
+}
+
+interface CompanionAgentDetail {
+  session_id: string;
+  agent: string;
+  model?: string;
+  variant?: string;
+}
 
 interface CompanionSession {
   session_id: string;
   cwd: string;
   active_agents: string[];
+  active_agent_details?: CompanionAgentDetail[];
   status: string;
   pid: number;
   config?: CompanionState['config'];
+  preset?: CompanionPresetState;
 }
 
 interface CompanionState {
   version: 1;
   sessions: CompanionSession[];
   window_positions?: Record<string, { x: number; y: number }>;
+  preset_requests?: CompanionPresetRequest[];
   config?: {
     enabled: boolean;
     position: 'bottom-right' | 'bottom-left' | 'top-right' | 'top-left';
@@ -240,15 +285,148 @@ export class CompanionManager {
   private status = 'idle';
   /** sessionId → agent name, for sessions currently busy. */
   private readonly busyAgentSessions = new Map<string, string>();
+  private readonly sessionDetails = new Map<
+    string,
+    { model?: string; variant?: string }
+  >();
+  private orchestratorSessionId: string | undefined;
+  private orchestratorBusy = false;
   private readonly config?: CompanionConfig;
   private companionProcess: ChildProcess | null = null;
   private wasSpawner = false;
   private spawnedCompanionPid: number | null = null;
+  private presetPoller: NodeJS.Timeout | null = null;
+  private presetRefreshTick = 0;
+  private effectivePreset: string | undefined;
+  private projectPreset: string | undefined;
+  private globalPreset: string | undefined;
+  private projectAvailablePresets: string[] = [];
+  private globalAvailablePresets: string[] = [];
+  private presetMessage: string | undefined;
+  private presetLastRequestId: string | undefined;
+  private presetResultOk: boolean | undefined;
+  private presetLastScope: CompanionPresetScope | undefined;
 
   constructor(sessionId: string, cwd: string, config?: CompanionConfig) {
     this.id = sessionId;
     this.cwd = cwd;
     this.config = config;
+  }
+
+  private refreshPresetState(): boolean {
+    let hardWarning = false;
+    loadPluginConfig(this.cwd, {
+      silent: true,
+      onWarning: (warning) => {
+        if (HARD_PRESET_REFRESH_WARNING_KINDS.has(warning.kind)) {
+          hardWarning = true;
+        }
+      },
+    });
+    if (hardWarning) return false;
+
+    const next = getPresetSelectionState(this.cwd);
+    const projectCatalogChanged =
+      this.projectAvailablePresets.length !== next.projectAvailable.length ||
+      this.projectAvailablePresets.some(
+        (name, index) => name !== next.projectAvailable[index],
+      );
+    const globalCatalogChanged =
+      this.globalAvailablePresets.length !== next.globalAvailable.length ||
+      this.globalAvailablePresets.some(
+        (name, index) => name !== next.globalAvailable[index],
+      );
+    const changed =
+      this.effectivePreset !== next.effective ||
+      this.projectPreset !== next.project ||
+      this.globalPreset !== next.global ||
+      projectCatalogChanged ||
+      globalCatalogChanged;
+
+    if (!changed) return false;
+    this.effectivePreset = next.effective;
+    this.projectPreset = next.project;
+    this.globalPreset = next.global;
+    this.projectAvailablePresets = next.projectAvailable;
+    this.globalAvailablePresets = next.globalAvailable;
+    return true;
+  }
+
+  private pollPresetState(): void {
+    if (this.config?.enabled !== true) return;
+    if (this.consumePresetRequest()) {
+      this.presetRefreshTick = 0;
+      return;
+    }
+
+    this.presetRefreshTick += 1;
+    if (this.presetRefreshTick < PRESET_REFRESH_EVERY_TICKS) return;
+    this.presetRefreshTick = 0;
+
+    if (this.refreshPresetState()) {
+      // An external /preset or manual config edit supersedes feedback from an
+      // older Companion request.
+      this.presetMessage = undefined;
+      // Keep the last request id long enough for the native Companion to
+      // observe completion even if an external edit races this refresh.
+      this.presetResultOk = undefined;
+      this.flush();
+    }
+  }
+
+  private startPresetPoller(): void {
+    if (this.presetPoller) return;
+    this.presetPoller = setInterval(() => this.pollPresetState(), 250);
+    this.presetPoller.unref();
+  }
+
+  private consumePresetRequest(): boolean {
+    if (this.config?.enabled !== true) return false;
+    const request = readState().preset_requests?.find(
+      (candidate) => candidate.session_id === this.id,
+    );
+    if (!request) return false;
+
+    const config = loadPluginConfig(this.cwd, { silent: true });
+    const scope: CompanionPresetScope =
+      request.scope === 'global'
+        ? 'global'
+        : request.scope === 'project'
+          ? 'project'
+          : 'effective';
+    const result =
+      scope === 'project' && request.inherit === true
+        ? clearProjectPresetOnDisk(this.cwd)
+        : typeof request.preset === 'string' && request.preset.trim()
+          ? switchPresetOnDisk(this.cwd, request.preset, config, { scope })
+          : {
+              ok: false,
+              presetName: '',
+              message: 'Preset request is missing a preset name.',
+              summary: [],
+            };
+    this.refreshPresetState();
+    this.presetMessage = result.message;
+    this.presetLastRequestId = request.request_id;
+    this.presetResultOk = result.ok;
+    this.presetLastScope = scope;
+
+    writeState((state) => {
+      state.preset_requests = (state.preset_requests ?? []).filter(
+        (candidate) => candidate.request_id !== request.request_id,
+      );
+      if (state.preset_requests.length === 0) {
+        delete state.preset_requests;
+      } else if (state.preset_requests.length > MAX_PRESET_REQUESTS) {
+        // Defense-in-depth for state written by an older/custom binary. The
+        // native writer refuses to exceed this bound.
+        state.preset_requests = state.preset_requests.slice(
+          -MAX_PRESET_REQUESTS,
+        );
+      }
+    });
+    this.flush();
+    return true;
   }
 
   onLoad(): void {
@@ -267,7 +445,9 @@ export class CompanionManager {
       return;
     }
     this.registerActiveManager();
+    this.refreshPresetState();
     this.flush();
+    this.startPresetPoller();
     this.spawnIfAvailable();
   }
 
@@ -312,10 +492,13 @@ export class CompanionManager {
     if (!sessionId || (status !== 'busy' && status !== 'idle')) return;
 
     if (agent === 'orchestrator') {
-      // Orchestrator going idle does NOT clear specialists: with background
-      // orchestration it idles while dispatched agents are still running.
-      // Specialists are removed only by their own idle/deleted events.
-      this.status = status;
+      this.orchestratorSessionId = sessionId;
+      this.orchestratorBusy = status === 'busy';
+      // A pending input request is cleared only by its explicit reply/reject
+      // event, not by ordinary lifecycle noise from the same session.
+      if (this.status !== 'waiting-input') {
+        this.status = status;
+      }
       this.flush();
       return;
     }
@@ -329,31 +512,85 @@ export class CompanionManager {
       // Remove by session even when the agent name is unknown, so a
       // finished specialist can never get stuck on screen.
       this.busyAgentSessions.delete(sessionId);
+      this.sessionDetails.delete(sessionId);
     }
     this.flush();
+  }
+
+  onSessionModelChanged(input: {
+    sessionId?: string;
+    model?: string;
+    variant?: string;
+    variantObserved?: boolean;
+  }): void {
+    if (this.config?.enabled !== true) return;
+    const { sessionId, model, variant, variantObserved = false } = input;
+    if (!sessionId || (!model && !variant)) return;
+
+    const previous = this.sessionDetails.get(sessionId);
+    const nextModel = model ?? previous?.model;
+    // A model change without an observed live variant must clear the previous
+    // variant. For the same model, a model-only telemetry update preserves the
+    // exact variant captured earlier from chat.message.
+    const nextVariant = variantObserved
+      ? variant
+      : (variant ??
+        (model && previous?.model && model !== previous.model
+          ? undefined
+          : previous?.variant));
+    if (previous?.model === nextModel && previous?.variant === nextVariant) {
+      return;
+    }
+
+    this.sessionDetails.set(sessionId, {
+      ...(nextModel ? { model: nextModel } : {}),
+      ...(nextVariant ? { variant: nextVariant } : {}),
+    });
+    if (
+      this.busyAgentSessions.has(sessionId) ||
+      this.orchestratorSessionId === sessionId
+    ) {
+      this.flush();
+    }
   }
 
   onSessionDeleted(sessionId: string | undefined): void {
     if (this.config?.enabled !== true) return;
     if (!sessionId) return;
-    if (this.busyAgentSessions.delete(sessionId)) {
+    const removed = this.busyAgentSessions.delete(sessionId);
+    this.sessionDetails.delete(sessionId);
+    const wasOrchestrator = this.orchestratorSessionId === sessionId;
+    if (wasOrchestrator) {
+      this.orchestratorSessionId = undefined;
+      this.orchestratorBusy = false;
+    }
+    if (removed || wasOrchestrator) {
       this.flush();
     }
   }
 
   onWaitingInput(): void {
     if (this.config?.enabled !== true) return;
+    // Waiting input is project-level UI state, not proof that the requesting
+    // session is the orchestrator. Keep orchestrator identity untouched.
     this.status = 'waiting-input';
     this.flush();
   }
 
   onInputResolved(): void {
     if (this.config?.enabled !== true) return;
-    this.status = this.busyAgentSessions.size > 0 ? 'busy' : 'idle';
+    this.status =
+      this.busyAgentSessions.size > 0 || this.orchestratorBusy
+        ? 'busy'
+        : 'idle';
     this.flush();
   }
 
   onExit(): void {
+    if (this.presetPoller) {
+      clearInterval(this.presetPoller);
+      this.presetPoller = null;
+    }
     activeManagers.delete(this);
     if (activeManagers.size === 0 && activeExitListener) {
       try {
@@ -366,6 +603,10 @@ export class CompanionManager {
     if (this.config?.enabled !== true) return;
     writeState((state) => {
       state.sessions = state.sessions.filter((s) => s.session_id !== this.id);
+      state.preset_requests = (state.preset_requests ?? []).filter(
+        (request) => request.session_id !== this.id,
+      );
+      if (state.preset_requests.length === 0) delete state.preset_requests;
     });
     if (this.wasSpawner && this.removeOwnedPidFileIfNoSessionsRemain()) {
       if (this.companionProcess) {
@@ -402,6 +643,29 @@ export class CompanionManager {
     }
   }
 
+  private detailFor(sessionId: string, agent: string): CompanionAgentDetail {
+    const detail = this.sessionDetails.get(sessionId);
+    return {
+      session_id: sessionId,
+      agent,
+      ...(detail?.model ? { model: detail.model } : {}),
+      ...(detail?.variant ? { variant: detail.variant } : {}),
+    };
+  }
+
+  private activeAgentDetails(): CompanionAgentDetail[] {
+    const details = [...this.busyAgentSessions.entries()]
+      .slice(0, 9)
+      .map(([sessionId, agent]) => this.detailFor(sessionId, agent));
+    if (details.length > 0) return details;
+
+    if (this.status === 'busy' && this.orchestratorSessionId) {
+      return [this.detailFor(this.orchestratorSessionId, 'orchestrator')];
+    }
+
+    return [];
+  }
+
   /** One entry per running agent instance (two fixers → two cells). */
   private activeAgents(): string[] {
     const agents = Array.from(this.busyAgentSessions.values());
@@ -418,6 +682,7 @@ export class CompanionManager {
         session_id: this.id,
         cwd: this.cwd,
         active_agents: this.activeAgents(),
+        active_agent_details: this.activeAgentDetails(),
         status: this.status,
         pid: process.pid,
         config: this.config
@@ -431,6 +696,19 @@ export class CompanionManager {
               debug: this.config.debug ?? false,
             }
           : undefined,
+        preset: {
+          current: this.effectivePreset,
+          available: this.projectAvailablePresets,
+          effective: this.effectivePreset,
+          project: this.projectPreset,
+          global: this.globalPreset,
+          project_available: this.projectAvailablePresets,
+          global_available: this.globalAvailablePresets,
+          message: this.presetMessage,
+          last_request_id: this.presetLastRequestId,
+          result_ok: this.presetResultOk,
+          last_scope: this.presetLastScope,
+        },
       };
       writeState((state) => {
         const idx = state.sessions.findIndex((s) => s.session_id === this.id);
