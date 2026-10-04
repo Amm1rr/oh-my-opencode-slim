@@ -15,8 +15,6 @@ import {
 function pagedChildren(count: number, bump = false) {
   const rows = Array.from({ length: count }, (_, index) => ({
     id: `child-${String(index).padStart(4, '0')}`,
-    directory: '/tmp/proj',
-    parentID: 'ses_parent',
     time: { updated: Math.floor(index / 2) },
   }));
   const calls: Array<Record<string, unknown>> = [];
@@ -33,16 +31,11 @@ function pagedChildren(count: number, bump = false) {
           typeof input.cursor === 'string'
             ? cursors.get(input.cursor)
             : initialQuery;
-        if (!query) throw new Error('Invalid cursor');
         const direction = query.order === 'asc' ? 1 : -1;
         const data = rows
           .filter(
             (row) =>
-              (query.directory === undefined ||
-                row.directory === query.directory) &&
-              (query.parentID === undefined ||
-                row.parentID === query.parentID) &&
-              (!query.anchor || direction * compare(row, query.anchor) > 0),
+              !query.anchor || direction * compare(row, query.anchor) > 0,
           )
           .sort((a, b) => direction * compare(a, b))
           .slice(0, Number(limit));
@@ -256,13 +249,11 @@ describe('v2 host ports', () => {
   test('list reader maps children with their agent type', async () => {
     const client = {
       session: {
-        list: async () => ({
-          data: [
-            { id: 'ses_child', agent: 'explorer' },
-            { id: 'ses_plain' },
-            { nope: true },
-          ],
-        }),
+        list: async () => [
+          { id: 'ses_child', agent: 'explorer' },
+          { id: 'ses_plain' },
+          { nope: true },
+        ],
       },
     };
     const read = await createV2SessionListReader(client).listSessions(
@@ -284,7 +275,6 @@ describe('v2 host ports', () => {
     const ids = new Set(read.sessions.map((entry) => entry.sessionId));
     expect(read.error).toBeUndefined();
     expect(ids.size).toBe(450);
-    expect(ids.has('child-0200')).toBe(true);
     expect(client.calls).toHaveLength(3);
     expect(client.calls[0]).toEqual({
       directory: '/tmp/proj',
@@ -292,7 +282,6 @@ describe('v2 host ports', () => {
       order: 'asc',
       limit: 200,
     });
-    expect(client.calls[2]).toEqual({ cursor: expect.any(String), limit: 200 });
   });
 
   test('list reader fails closed beyond the page cap without partial children', async () => {

@@ -214,12 +214,9 @@ function readSessionArray(value: unknown): Array<Record<string, unknown>> {
   );
 }
 
-function readActiveIds(value: unknown): Set<string> {
+function readActiveIds(value: unknown): Set<string> | undefined {
   const record = isRecord(value) && isRecord(value.data) ? value.data : value;
-  const ids = new Set<string>();
-  if (!isRecord(record)) return ids;
-  for (const key of Object.keys(record)) ids.add(key);
-  return ids;
+  return isRecord(record) ? new Set(Object.keys(record)) : undefined;
 }
 
 function errorMessage(error: unknown): string {
@@ -299,7 +296,11 @@ export function createV2StatusReader(
           if (id === undefined) continue;
           statuses.set(id, 'idle');
         }
-        for (const id of readActiveIds(running)) statuses.set(id, 'busy');
+        const activeIds = readActiveIds(running);
+        if (activeIds === undefined) {
+          return { statuses: new Map(), error: 'invalid v2 active response' };
+        }
+        for (const id of activeIds) statuses.set(id, 'busy');
         return { statuses };
       } catch (error) {
         return { statuses: new Map(), error: errorMessage(error) };
@@ -331,7 +332,13 @@ export function createV2SessionListReader(
         const sessions: SessionListEntry[] = [];
         for (let page = 0; page < V2_LIST_MAX_PAGES; page += 1) {
           const response = await list.call(client?.session, query);
-          const entries = isRecord(response) ? response.data : response;
+          const entries = Array.isArray(response)
+            ? response
+            : isRecord(response)
+              ? response.data
+              : undefined;
+          if (!Array.isArray(entries))
+            throw new Error('invalid v2 session list response');
           for (const entry of readSessionArray(entries)) {
             const id = readString(entry.id);
             if (id === undefined) continue;
@@ -346,9 +353,7 @@ export function createV2SessionListReader(
             isRecord(response) && isRecord(response.cursor)
               ? readString(response.cursor.next)
               : undefined;
-          if (Array.isArray(entries) && entries.length < V2_LIST_PAGE) {
-            return { sessions };
-          }
+          if (entries.length < V2_LIST_PAGE) return { sessions };
           if (next === undefined)
             throw new Error('v2 session list missing next cursor');
           query = { cursor: next, limit: V2_LIST_PAGE };
