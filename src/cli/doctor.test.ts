@@ -84,6 +84,37 @@ describe('runDoctorCheck', () => {
     expect(result.presetCheck).toBeUndefined();
   });
 
+  test('checks all inherited layers and resolves presets across them', () => {
+    const workspace = path.join(tempDir, 'workspace');
+    const projectDir = path.join(workspace, 'repo');
+    const nested = path.join(projectDir, 'packages', 'backend');
+    fs.mkdirSync(nested, { recursive: true });
+    const configs = [
+      { directory: workspace, config: { presets: { shared: {} } } },
+      { directory: projectDir, config: { preset: 'shared' } },
+    ];
+    const configPaths = configs.map(({ directory, config }) => {
+      const configDir = path.join(directory, '.opencode');
+      fs.mkdirSync(configDir);
+      const filename = path.join(configDir, 'oh-my-opencode-slim.json');
+      fs.writeFileSync(filename, JSON.stringify(config));
+      return filename;
+    });
+
+    const result = runDoctorCheck(nested);
+    expect(result.ok).toBe(true);
+    expect(result.configs.slice(1).map((config) => config.path)).toEqual(
+      configPaths,
+    );
+    expect(result.presetCheck).toEqual({ preset: 'shared', ok: true });
+
+    fs.writeFileSync(configPaths[0], '{ invalid');
+    const invalid = runDoctorCheck(nested);
+    expect(invalid.ok).toBe(false);
+    expect(invalid.configs[1].error?.kind).toBe('invalid-json');
+    expect(invalid.configs[2].ok).toBe(true);
+  });
+
   test('valid project config returns ok', () => {
     const projectDir = path.join(tempDir, 'project');
     const configDir = path.join(projectDir, '.opencode');

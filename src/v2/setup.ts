@@ -2043,7 +2043,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
     // error unchanged. The success path's returned cleanup keeps its
     // own semantics.
     try {
-      const pluginConfig = loadPluginConfig(directory);
+      const pluginConfig = loadPluginConfig(directory, { hostFlavor: 'v2' });
       const interviewConfig = InterviewConfigSchema.parse(
         pluginConfig.interview ?? {},
       );
@@ -2444,7 +2444,8 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
           } else {
             const packageRoot = path.dirname(runtimePackageJson);
             const disabled = [
-              ...(loadPluginConfig(directory).disabled_skills ?? []),
+              ...(loadPluginConfig(directory, { hostFlavor: 'v2' })
+                .disabled_skills ?? []),
             ];
             const infos = buildBundledSkillInfos(packageRoot, disabled);
             if (infos.length === 0) {
