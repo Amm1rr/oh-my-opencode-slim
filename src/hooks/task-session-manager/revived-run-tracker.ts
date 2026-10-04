@@ -43,6 +43,8 @@ type RevivedRun = {
   generation: number;
   parentSessionID: string;
   baselineMessageID?: string;
+  promptMessageID?: string;
+  admissionLease?: BackgroundJobLease;
   readonly attemptStartedAt: number;
   description: string;
   /** Monotonic observation identity: incremented on every
@@ -70,14 +72,20 @@ export interface RevivedRunTracker {
     generation: number;
     parentSessionID: string;
     baselineMessageID?: string;
+    promptMessageID?: string;
+    admissionLease?: BackgroundJobLease;
     attemptStartedAt?: number;
     description: string;
   }): void;
+  /** Explicit host refusal of a registered input: drop the exact run so
+   * it no longer waits for (or fences retries on) its prompt identity. */
+  discard(taskID: string, generation: number): boolean;
   isTracked(taskID: string, generation: number): boolean;
   /** Baseline anchor for a tracked run, so transcript-evidence consumers
    * (stop gate) can attribute the trailing answer to THIS run instead of
    * a substituted attempt. Undefined for untracked/stale generations. */
   baselineFor(taskID: string, generation: number): string | undefined;
+  promptMessageIDFor(taskID: string, generation: number): string | undefined;
   attemptStartedAtFor(taskID: string, generation: number): number | undefined;
   probe(taskID: string, generation: number): Promise<boolean>;
   onTerminal(record: BackgroundJobRecord): void;
@@ -217,6 +225,12 @@ export function createRevivedRunTracker(options: {
     }
     if (record.state !== 'completed' && record.state !== 'error') {
       return;
+    }
+    // An answer attributed to our exact queued input proves admission even
+    // if its transport acknowledgement was lost. Retire only our own lease.
+    if (run.promptMessageID && run.admissionLease) {
+      options.backgroundJobBoard.releaseLease(run.admissionLease);
+      run.admissionLease = undefined;
     }
     finish(run, record);
   };
@@ -504,6 +518,8 @@ export function createRevivedRunTracker(options: {
     generation: number;
     parentSessionID: string;
     baselineMessageID?: string;
+    promptMessageID?: string;
+    admissionLease?: BackgroundJobLease;
     attemptStartedAt?: number;
     description: string;
   }): void {
@@ -518,6 +534,14 @@ export function createRevivedRunTracker(options: {
     if (runs.get(run.taskID) !== run) return;
     if (run.notification.retryTimer) clearTimeout(run.notification.retryTimer);
     runs.delete(run.taskID);
+  }
+
+  function discard(taskID: string, generation: number): boolean {
+    const run = runs.get(taskID);
+    if (run?.generation !== generation) return false;
+    discardRun(run);
+    options.onSettled?.(taskID);
+    return true;
   }
 
   const baselineFor = (
@@ -591,6 +615,8 @@ export function createRevivedRunTracker(options: {
     generation: number;
     parentSessionID: string;
     baselineMessageID?: string;
+    promptMessageID?: string;
+    admissionLease?: BackgroundJobLease;
     attemptStartedAt?: number;
     description: string;
   }): void {
@@ -785,8 +811,13 @@ export function createRevivedRunTracker(options: {
   return {
     captureBaseline,
     register,
+    discard,
     isTracked,
     baselineFor,
+    promptMessageIDFor: (taskID, generation) => {
+      const run = runs.get(taskID);
+      return run?.generation === generation ? run.promptMessageID : undefined;
+    },
     attemptStartedAtFor,
     probe,
     onTerminal,

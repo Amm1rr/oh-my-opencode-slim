@@ -77,6 +77,8 @@ export interface RetainedRecoveryRequest {
   purpose?: 'revive';
   /** The upstream v1 exact-ID path, only when no transcript exists. */
   allowExactAdoption?: boolean;
+  /** Explicit revive with host support for identity-bound queued inputs. */
+  allowQueuedContinuation?: boolean;
 }
 
 export interface SessionRecoveryOptions {
@@ -264,7 +266,15 @@ async function recoverRetainedSession(
       `Task ${sessionID} transcript could not be classified (${round.reason ?? 'unreadable'}); no prompt was sent`,
     );
   }
-  if (options.hostFlavor === 'v2' && round.verdict === 'incomplete') {
+  const queueContinuation =
+    options.hostFlavor === 'v2' &&
+    request.purpose === 'revive' &&
+    request.allowQueuedContinuation === true;
+  if (
+    options.hostFlavor === 'v2' &&
+    round.verdict === 'incomplete' &&
+    !queueContinuation
+  ) {
     return refuse(
       `Task ${sessionID} has no verified historical terminal after its latest input. The current round was not imported. No prompt was sent`,
     );
@@ -294,6 +304,26 @@ async function recoverRetainedSession(
     return refuse(
       `Task ${sessionID} agent is ${agent.agent}, not ${request.agent}. No prompt was sent`,
     );
+  }
+
+  if (queueContinuation) {
+    if (options.isDisposed?.()) return refuse('Session recovery was disposed');
+    if (ledger.deletionEpochs.get(sessionID) !== deletionEpoch) {
+      return refuse(
+        `Task ${sessionID} was deleted during recovery; no prompt was sent`,
+      );
+    }
+    // Historical terminals do not establish live idle. Return verified
+    // identity only; task_revive owns the lease and the new input generation.
+    return {
+      kind: 'adoptable',
+      taskID: sessionID,
+      agent: agent.agent,
+      description: hosted.title
+        ? `recovered: ${hosted.title}`
+        : `recovered ${agent.agent} session`,
+      deletionEpoch,
+    };
   }
 
   const alias = hidesHistory(parentTranscript)
