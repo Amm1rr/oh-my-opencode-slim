@@ -684,6 +684,10 @@ fallback until the next external user turn.
 
 V2 forwards configured variants as `provider/model#variant`. The host rejects
 a variant unavailable for that model; Slim does not silently drop it.
+The v2 runtime-profile bridge preserves a child's per-call model and variant
+when its provider or model ID differs from the agent's startup-registered model.
+Children still on that startup model receive the current profile, including
+hot-refreshed inference fields; captured profiles remain frozen for later turns.
 
 Model selection follows these rules:
 
