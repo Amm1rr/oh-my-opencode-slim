@@ -35,6 +35,7 @@ import {
 } from '../task-session-manager/continuation-model-selection';
 import { isActiveStatus } from '../task-session-manager/status-utils';
 import {
+  claimWakeSession,
   clearExpectingWakeBusy,
   clearWakeSession,
   commitWakeReservation,
@@ -44,6 +45,7 @@ import {
   noteHostProgress,
   rearmWakeProgress,
   releaseWakeEvaluation,
+  releaseWakeSessionHolder,
   retryAfterWakeEvaluation,
   rollbackWakeReservation,
   setObservedWakeModel,
@@ -797,6 +799,12 @@ export function createOrchestratorWakeScheduler(
   const reportedScheduleBlockers = new Map<string, Set<string>>();
   /** Reservations this hook owns and must release when it is disposed. */
   const localWakeOwners = new Map<string, symbol>();
+  /** This hook's token in the process-global wake gate: its disposal drops
+   * the gate state of sessions no other live hook serves. */
+  const gateHolder = Symbol('orchestrator-wake-hook');
+  function noteGateSession(sessionID: string): void {
+    claimWakeSession(sessionID, gateHolder);
+  }
   const recoveryCurrent = options.isStoppedJobRecoveryCurrent;
   /** Sessions with a stopped job awaiting a recovery wake, carrying the
    * self-contained terminal deltas of the triggering stops (see
@@ -906,6 +914,7 @@ export function createOrchestratorWakeScheduler(
   }
 
   function touchLocal(sessionID: string): LocalSessionState {
+    noteGateSession(sessionID);
     const existing = localSessions.get(sessionID);
     if (existing) return existing;
     const created: LocalSessionState = {
@@ -2046,6 +2055,7 @@ export function createOrchestratorWakeScheduler(
       parseContinuationModelSelection(inputMessage?.model, variant) ??
       parseContinuationModelSelection(outputModel, variant);
 
+    noteGateSession(sessionID);
     setObservedWakeModel(sessionID, modelSelection);
 
     const state = touchLocal(sessionID);
@@ -2078,6 +2088,7 @@ export function createOrchestratorWakeScheduler(
     ) {
       return;
     }
+    noteGateSession(sessionID);
     if (delta) {
       queue.add(sessionID, delta, dedupeKey);
     } else if (!queue.batches.has(sessionID)) {
@@ -2285,11 +2296,18 @@ export function createOrchestratorWakeScheduler(
       for (const sessionID of [...localSessions.keys()]) {
         clearLocalSession(sessionID);
       }
+      // The gate is process-global and outlives this instance. Drop the
+      // state of the sessions only this instance served (after releasing its
+      // own reservations above): a reloaded generation for this location
+      // must not inherit stopped no-progress caps or wake-busy markers while
+      // other locations keep the process alive.
+      releaseWakeSessionHolder(gateHolder);
       return;
     }
 
     const sessionID = extractSessionID(input.event);
     if (!sessionID) return;
+    noteGateSession(sessionID);
 
     if (type === 'session.updated') {
       if (canObserveSelection(sessionID)) {
