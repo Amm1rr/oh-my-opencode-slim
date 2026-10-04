@@ -1,10 +1,10 @@
 /**
  * TUI host wiring for the client-side pane lifecycle (task 3.6).
  *
- * The v1 `tui()` entry and the v2 `setup()` (through `v2-host.ts`) both call
- * `createTuiPaneWiring`; standalone and invalid v2 hosts stay off (NFR-6). This
- * module owns the client-local concerns the frozen lifecycle core cannot know
- * about:
+ * The v1 `tui()` entry and the v2 `setup()` (with options from `v2-host.ts`)
+ * both call `createTuiPaneWiring`; standalone and invalid v2 hosts stay off
+ * (NFR-6). This module owns the client-local concerns the frozen lifecycle
+ * core cannot know about:
  *
  * - admission: project config `multiplexer.type` x this client's own
  *   environment (FR-9), with exactly one process-wide diagnostic per cause;

@@ -27,7 +27,7 @@ Pure lifecycle logic with fully injected IO:
 - **Reconnect logic**: FR-7 reconciliation that backfills missing children from server session list
 
 #### `tui-wiring.ts` - `createTuiPaneWiring`
-V1 TUI host wiring that:
+TUI host wiring (v1 `tui()` and v2 `setup()`) that:
 - **Initializes plugin log**: `oh-my-opencode-slim.tui-<timestamp>.log`
 - **Loads multiplexer config**: Invalid config → `type:none` + diagnostic
 - **Detects adapter**: From client environment; applies FR-9 admission control
@@ -35,7 +35,7 @@ V1 TUI host wiring that:
 - **Embeds sentinel**: Fail-closed when host unreachable
 - **Projects raw events**: `properties.info.directory`, `properties.status.type`
 - **Runs periodic reconcile**: 30-second pass for reconnect compensation
-- **Provides disposal**: Best-effort cleanup (v2 `setup()` remains unwired)
+- **Provides disposal**: Best-effort cleanup
 
 #### `sweep.ts` - Crash Leftover Cleanup
 - **FR-8 sweep**: Closes panes whose encoded owner pid is dead **and** child session is gone
@@ -137,7 +137,7 @@ export interface PaneLifecycleConfig {
 
 ### Consumers
 
-- **TUI entry** (`src/tui.ts`): Only production wiring point for client-side pane lifecycle (v1 `tui()`; v2 `setup()` remains unwired)
+- **TUI entry** (`src/tui.ts`): Only production wiring point for client-side pane lifecycle (v1 `tui()` and v2 `setup()`)
 - **Adapters**: Instantiated by lifecycle core per operation through `factory.ts`
 - **Server boundary**: `src/index.ts` must not import `src/multiplexer/client/*` or `factory.ts` (invariant I1)
 
