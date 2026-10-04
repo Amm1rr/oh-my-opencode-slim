@@ -3133,6 +3133,36 @@ describe('plugin config model inheritance', () => {
     };
   }
 
+  test('parent primary in the child chain is not an active fallback', async () => {
+    const hooks = await loadConfiguredPlugin({
+      agents: {
+        orchestrator: { model: ['provider/primary', 'backup/parent'] },
+        operator: { model: ['backup/child', 'provider/primary'] },
+      },
+    });
+    const clock = spyOn(Date, 'now').mockReturnValue(1);
+    try {
+      await hooks.config?.({ agent: {} });
+      await hooks['chat.message']?.(
+        {
+          sessionID: 'parent',
+          agent: 'orchestrator',
+          model: { providerID: 'provider', modelID: 'primary' },
+        } as never,
+        {} as never,
+      );
+      expect(
+        (hooks as any)['v2.resolveDelegatedModel']({
+          agentType: 'operator',
+          parentSessionID: 'parent',
+        }),
+      ).toBeUndefined();
+    } finally {
+      await hooks.dispose?.();
+      clock.mockRestore();
+    }
+  });
+
   test('session inheritance removes a stale host model in the final config', async () => {
     const hooks = await loadConfiguredPlugin({
       agents: {

@@ -206,9 +206,9 @@ function modelProvider(model: string): string | undefined {
 
 /**
  * Pick the child-chain entry that best matches a parent's live fallback.
- * Exact model matches win. Once the parent has moved past its primary,
- * specialists prefer the parent's working provider, then the first child
- * entry outside the providers already exhausted by the parent.
+ * Once the parent has moved past its primary, exact model matches win,
+ * then the working provider, then the first child entry outside the
+ * providers already exhausted by the parent. Explicit inheritance stays live.
  */
 function selectDelegatedModel(input: {
   agentName: string;
@@ -234,17 +234,17 @@ function selectDelegatedModel(input: {
 
   if (!childChain?.length) return undefined;
 
-  const exact = childChain.findIndex((entry) => entry.id === parentModel);
-  if (exact >= 0) {
-    return { agentName, entry: childChain[exact], index: exact };
-  }
-
   const parentChain = input.parentChain;
   if (!parentChain) return undefined;
   const parentIndex = parentChain.findIndex(
     (entry) => entry.id === parentModel,
   );
   if (parentIndex <= 0) return undefined;
+
+  const exact = childChain.findIndex((entry) => entry.id === parentModel);
+  if (exact >= 0) {
+    return { agentName, entry: childChain[exact], index: exact };
+  }
 
   const activeProvider = modelProvider(parentModel);
   if (activeProvider) {
@@ -735,9 +735,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     const parentAgent = parentAgentRaw
       ? resolveRuntimeAgentName(runtime, parentAgentRaw)
       : undefined;
+    const inheritance = runtime.agent(agentName)?.inheritModelFrom;
     const followsParent =
-      runtime.agent(agentName)?.inheritModelFrom === 'orchestrator' ||
-      runtime.agent(agentName)?.inheritModelFrom === 'session';
+      inheritance === 'orchestrator' || inheritance === 'session';
     return selectDelegatedModel({
       agentName,
       childChain: runtime.modelArrays[agentName],
@@ -1905,9 +1905,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // Unknown to v1 hosts, consumed by src/v2/setup.ts.
     'v2.refreshProfiles': refreshProfilesFromDisk,
     // v2's native subagent tool accepts a per-call model override. Keep a
-    // delegated child on the parent's active fallback model when that model
-    // belongs to the child's own ordered chain. v1 task() has no model field,
-    // so this capability is consumed only by the v2 bridge.
+    // delegated child on the parent's real fallback using the child's chain
+    // (exact model, working provider, then non-exhausted provider). Explicit
+    // inheritance stays live; only the v2 bridge consumes this override.
     'v2.resolveDelegatedModel': ({
       agentType,
       parentSessionID,
