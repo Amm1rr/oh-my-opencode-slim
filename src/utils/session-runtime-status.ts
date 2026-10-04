@@ -43,8 +43,10 @@ export async function getRuntimeSessionStatusSnapshot(
         error: 'Previous session-status read is still open',
         retryAfter: openRead,
       };
+    const controller = new AbortController();
     const request = client.session.status({
       query: { directory: input.directory },
+      signal: controller.signal,
     });
     const release = () => {
       if (openStatusReads.get(client.session) === settled)
@@ -55,7 +57,10 @@ export async function getRuntimeSessionStatusSnapshot(
     const response = await withTimeout(
       request,
       options.timeoutMs ?? DEFAULT_RUNTIME_SESSION_STATUS_TIMEOUT_MS,
-    );
+    ).catch((error) => {
+      controller.abort();
+      throw error;
+    });
     if (
       (response.error !== undefined && response.error !== null) ||
       !isRecord(response.data)
