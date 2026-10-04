@@ -534,6 +534,48 @@ describe('preset inheritance', () => {
     const locked = merged({ read: 'allow', glob: 'allow' }, { '*': 'deny' });
     expect(locked('read')).toBe('deny');
     expect(locked('glob')).toBe('deny');
+
+    // A later wildcard tightens anything but loosens only what it names:
+    // an unmentioned base map moves after the wildcard only with the
+    // entries at least as strict as it (deny > ask > allow).
+    const guarded = { bash: { '*': 'allow', 'rm -rf /': 'deny' } };
+    const lockdown = merged(guarded, { '*': 'deny' });
+    expect(lockdown('bash')).toBe('deny');
+    expect(lockdown('bash', 'ls')).toBe('deny');
+    expect(lockdown('bash', 'rm -rf /')).toBe('deny');
+
+    const open = merged(guarded, { '*': 'allow' });
+    expect(open('bash', 'rm -rf /')).toBe('deny');
+    expect(open('bash', 'ls')).toBe('allow');
+    expect(open('bash')).toBe('allow');
+
+    expect(merged({ edit: 'allow' }, { '*': 'deny' })('edit')).toBe('deny');
+    expect(merged({ edit: 'deny' }, { '*': 'allow' })('edit')).toBe('deny');
+    expect(
+      merged({ edit: 'deny' }, { '*': 'allow', edit: 'allow' })('edit'),
+    ).toBe('allow');
+
+    // An ask-level wildcard keeps unmentioned asks and denies, not allows.
+    const asked = merged(
+      { bash: { '*': 'allow', 'git push*': 'ask', 'rm -rf /': 'deny' } },
+      { '*': 'ask' },
+    );
+    expect(asked('bash', 'ls')).toBe('ask');
+    expect(asked('bash', 'git push*')).toBe('ask');
+    expect(asked('bash', 'rm -rf /')).toBe('deny');
+
+    // Nested maps apply the same rule against their own wildcard.
+    const nested = merged(
+      { bash: { '*': 'ask', 'git status': 'allow', 'rm -rf /': 'deny' } },
+      { bash: { '*': 'deny' } },
+    );
+    expect(nested('bash', 'git status')).toBe('deny');
+    expect(nested('bash', 'rm -rf /')).toBe('deny');
+
+    // The base's own wildcard stays the fallback the layer's keys refine.
+    const refined = merged({ '*': 'deny' }, { read: 'allow' });
+    expect(refined('read')).toBe('allow');
+    expect(refined('edit')).toBe('deny');
   });
 
   test('deep-merges nested objects and replaces arrays', () => {

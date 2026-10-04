@@ -12,16 +12,10 @@ import {
 } from './schema';
 
 /** Recursively merge JSON objects; arrays and scalar values are replaced.
- * Key order is precedence for permission objects (opencode evaluates the
- * compiled rules last-match-wins), so the merge orders entries in three
- * blocks: base keys the override layer does not mention and that carry no
- * deny come first (they yield to the layer's wildcard), the layer's keys
- * follow in the order it writes them (re-defined keys land at their
- * written position), and unmentioned base entries that carry a deny —
- * including pattern entries inside nested maps — come last: a blanket
- * rule can never loosen a deny it did not name, and lifting one requires
- * naming the key. Every other merged shape is looked up by key, where
- * order is irrelevant. */
+ * The override layer's keys come first, in the order the layer writes
+ * them; base keys the layer does not mention follow. Order is irrelevant
+ * to every merged shape except `permission` objects, which merge through
+ * `mergePermission` (key order is their precedence). */
 export function deepMerge<T extends Record<string, unknown>>(
   base?: T,
   override?: T,
@@ -30,55 +24,99 @@ export function deepMerge<T extends Record<string, unknown>>(
   if (!override) return base;
 
   const result = {} as T;
-  const baseKeys = Object.keys(base) as (keyof T)[];
-  for (const key of baseKeys) {
-    if (!Object.hasOwn(override, key) && !carriesDeny(base[key])) {
-      defineOwn(result, key as string, base[key]);
-    }
-  }
   for (const key of Object.keys(override) as (keyof T)[]) {
     const baseVal = base[key];
     const overrideVal = override[key];
 
-    if (
-      typeof baseVal === 'object' &&
-      baseVal !== null &&
-      typeof overrideVal === 'object' &&
-      overrideVal !== null &&
-      !Array.isArray(baseVal) &&
-      !Array.isArray(overrideVal)
-    ) {
+    if (isRecord(baseVal) && isRecord(overrideVal)) {
       defineOwn(
         result,
         key as string,
-        deepMerge(
-          baseVal as Record<string, unknown>,
-          overrideVal as Record<string, unknown>,
-        ) as T[keyof T],
+        key === 'permission'
+          ? mergePermission(baseVal, overrideVal)
+          : deepMerge(baseVal, overrideVal),
       );
     } else {
       defineOwn(result, key as string, overrideVal);
     }
   }
-  for (const key of baseKeys) {
-    if (!Object.hasOwn(override, key) && carriesDeny(base[key])) {
+  for (const key of Object.keys(base) as (keyof T)[]) {
+    if (!Object.hasOwn(result, key)) {
       defineOwn(result, key as string, base[key]);
     }
   }
   return result;
 }
 
-/** An entry carries a deny when the entry itself — or any pattern inside
- * a nested map — resolves to "deny": unmentioned denies stay effective
- * after a later layer's keys. */
-function carriesDeny(value: unknown): boolean {
-  if (value === 'deny') return true;
-  if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
-    for (const nested of Object.values(value)) {
-      if (carriesDeny(nested)) return true;
+/** Strictness of a permission action: deny > ask > allow. */
+const STRICTNESS: Record<string, number> = { allow: 0, ask: 1, deny: 2 };
+
+/** Merge two permission maps (top-level or a nested pattern map). opencode
+ * evaluates the compiled rules last-match-wins, so key order is
+ * precedence. The rule: a later layer's wildcard (`"*"`) can tighten
+ * anything but can only loosen what the layer names explicitly.
+ *
+ * - The layer's keys keep the order it writes them; a key both layers
+ *   define lands at the layer's position (nested maps merge recursively
+ *   against the layer's own nested `"*"`).
+ * - Base keys the layer does not mention go before the layer's keys, so
+ *   its wildcard shadows them — except entries at least as strict as that
+ *   wildcard, which go after it and keep winning. For a mixed pattern map
+ *   only those strict entries move; the looser ones would lose to the
+ *   wildcard anyway. Without a layer wildcard only denies move after.
+ * - The base's own `"*"` never moves: it is the fallback the layer's
+ *   named keys refine. */
+function mergePermission(
+  base: Record<string, unknown>,
+  override: Record<string, unknown>,
+): Record<string, unknown> {
+  const wildcard = ownValue(override, '*');
+  const hasWildcard = typeof wildcard === 'string' && wildcard in STRICTNESS;
+  const threshold = STRICTNESS[hasWildcard ? wildcard : 'deny'];
+  const before: Record<string, unknown> = {};
+  const after: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(base)) {
+    if (Object.hasOwn(override, key)) continue;
+    const strict = key === '*' ? undefined : strictPart(value, threshold);
+    if (strict === undefined) defineOwn(before, key, value);
+    // Without a layer wildcard nothing shadows the looser entries, so the
+    // whole value moves to keep them.
+    else defineOwn(after, key, hasWildcard ? strict : value);
+  }
+
+  const result = before;
+  for (const [key, overrideVal] of Object.entries(override)) {
+    const baseVal = ownValue(base, key);
+    defineOwn(
+      result,
+      key,
+      isRecord(baseVal) && isRecord(overrideVal)
+        ? mergePermission(baseVal, overrideVal)
+        : overrideVal,
+    );
+  }
+  for (const [key, value] of Object.entries(after)) {
+    defineOwn(result, key, value);
+  }
+  return result;
+}
+
+/** The part of a permission entry at least as strict as `threshold`: the
+ * scalar itself, or a pattern map filtered to its strict patterns;
+ * `undefined` when nothing qualifies. */
+function strictPart(value: unknown, threshold: number): unknown {
+  if (typeof value === 'string') {
+    return (STRICTNESS[value] ?? -1) >= threshold ? value : undefined;
+  }
+  if (!isRecord(value)) return undefined;
+  const kept: Record<string, unknown> = {};
+  for (const [pattern, action] of Object.entries(value)) {
+    if (typeof action === 'string' && (STRICTNESS[action] ?? -1) >= threshold) {
+      defineOwn(kept, pattern, action);
     }
   }
-  return false;
+  return Object.keys(kept).length > 0 ? kept : undefined;
 }
 
 /**
