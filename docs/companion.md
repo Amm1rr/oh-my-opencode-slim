@@ -32,7 +32,11 @@ other open projects pick up the new global selection through the existing
 Companion refresh path.
 
 Preset changes are sent back to the plugin over the Companion state channel; the
-native binary never parses or edits OMO configuration files directly.
+native binary never parses or edits OMO configuration files directly. Request
+execution is fenced by request ID: once a request has been applied, a stale
+queue entry left by an acknowledgement write failure is only re-acknowledged,
+never re-applied. The completion ID is also recovered from shared state across a
+plugin restart when persistence succeeded.
 
 ## How to Enable in Configuration
 

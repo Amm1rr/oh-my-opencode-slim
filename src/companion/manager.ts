@@ -231,7 +231,7 @@ function readState(): CompanionState {
   return { version: 1, sessions: [] };
 }
 
-function writeState(mutator: (state: CompanionState) => void): void {
+function writeState(mutator: (state: CompanionState) => void): boolean {
   const file = stateFilePath();
   try {
     mkdirSync(path.dirname(file), { recursive: true });
@@ -242,11 +242,13 @@ function writeState(mutator: (state: CompanionState) => void): void {
       const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
       writeFileSync(tmp, JSON.stringify(state));
       renameSync(tmp, file);
+      return true;
     } finally {
       release();
     }
   } catch (err) {
     log('[companion] write failed', String(err));
+    return false;
   }
 }
 
@@ -306,6 +308,7 @@ export class CompanionManager {
   private presetLastRequestId: string | undefined;
   private presetResultOk: boolean | undefined;
   private presetLastScope: CompanionPresetScope | undefined;
+  private readonly appliedPresetRequestIds = new Set<string>();
 
   constructor(sessionId: string, cwd: string, config?: CompanionConfig) {
     this.id = sessionId;
@@ -380,12 +383,55 @@ export class CompanionManager {
     this.presetPoller.unref();
   }
 
+  private acknowledgePresetRequest(requestId: string): boolean {
+    const acknowledged = writeState((state) => {
+      state.preset_requests = (state.preset_requests ?? []).filter(
+        (candidate) => candidate.request_id !== requestId,
+      );
+      if (state.preset_requests.length === 0) {
+        delete state.preset_requests;
+      } else if (state.preset_requests.length > MAX_PRESET_REQUESTS) {
+        // Defense-in-depth for state written by an older/custom binary. The
+        // native writer refuses to exceed this bound.
+        state.preset_requests = state.preset_requests.slice(
+          -MAX_PRESET_REQUESTS,
+        );
+      }
+    });
+    if (acknowledged) {
+      this.appliedPresetRequestIds.delete(requestId);
+    }
+    return acknowledged;
+  }
+
+  private restorePresetRequestFence(): void {
+    const previous = readState().sessions.find(
+      (session) => session.session_id === this.id,
+    );
+    const requestId = previous?.preset?.last_request_id;
+    if (typeof requestId === 'string' && requestId.length > 0) {
+      this.presetLastRequestId = requestId;
+      this.appliedPresetRequestIds.add(requestId);
+    }
+  }
+
   private consumePresetRequest(): boolean {
     if (this.config?.enabled !== true) return false;
     const request = readState().preset_requests?.find(
       (candidate) => candidate.session_id === this.id,
     );
     if (!request) return false;
+
+    if (
+      this.appliedPresetRequestIds.has(request.request_id) ||
+      this.presetLastRequestId === request.request_id
+    ) {
+      // The side effect already ran. A stale queue entry can remain only
+      // because acknowledgement persistence failed; retry removal without
+      // applying the preset mutation again.
+      this.acknowledgePresetRequest(request.request_id);
+      return true;
+    }
 
     const config = loadPluginConfig(this.cwd, { silent: true });
     const scope: CompanionPresetScope =
@@ -410,21 +456,12 @@ export class CompanionManager {
     this.presetLastRequestId = request.request_id;
     this.presetResultOk = result.ok;
     this.presetLastScope = scope;
+    this.appliedPresetRequestIds.add(request.request_id);
 
-    writeState((state) => {
-      state.preset_requests = (state.preset_requests ?? []).filter(
-        (candidate) => candidate.request_id !== request.request_id,
-      );
-      if (state.preset_requests.length === 0) {
-        delete state.preset_requests;
-      } else if (state.preset_requests.length > MAX_PRESET_REQUESTS) {
-        // Defense-in-depth for state written by an older/custom binary. The
-        // native writer refuses to exceed this bound.
-        state.preset_requests = state.preset_requests.slice(
-          -MAX_PRESET_REQUESTS,
-        );
-      }
-    });
+    this.acknowledgePresetRequest(request.request_id);
+    // Even if acknowledgement removal failed, publish the completion fence.
+    // A later poll (or restart that recovered last_request_id) can then retry
+    // acknowledgement without repeating the config side effect.
     this.flush();
     return true;
   }
@@ -444,6 +481,7 @@ export class CompanionManager {
       }
       return;
     }
+    this.restorePresetRequestFence();
     this.registerActiveManager();
     this.refreshPresetState();
     this.flush();
