@@ -1773,6 +1773,57 @@ describe('task-session-manager hook', () => {
     });
   });
 
+  test('board-off does not register stopped jobs (recovery wake owns their retirement)', async () => {
+    const board = new BackgroundJobBoard();
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'map hooks',
+    });
+    board.updateStatus({
+      taskID: 'child-1',
+      state: 'stopped',
+      resultSummary: 'stopped without a terminal result',
+    });
+    expect(board.get('child-1')).toMatchObject({
+      state: 'stopped',
+      terminalUnreconciled: true,
+    });
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      boardInjection: false,
+      idleReconcileDelayMs: 0,
+    });
+
+    // A real user turn registers natively delivered terminal jobs — but a
+    // stop was never natively delivered, so it must stay unreconciled for
+    // the stopped-job recovery wake to surface (registering it would let
+    // the wake's isCurrent check drop the stop before the parent has seen
+    // it, and would clear the same-objective dispatch safeguard).
+    await transformMessages(hook, createMessages('parent-1', 'first turn'));
+    expect(board.get('child-1')).toMatchObject({
+      state: 'stopped',
+      terminalUnreconciled: true,
+    });
+
+    // The recovery flow retires it: task_revive's ack marks the run
+    // reconciled once the parent acts on the stop.
+    const acked = board.markReconciled(
+      'child-1',
+      undefined,
+      board.get('child-1')?.generation,
+      board.get('child-1')?.terminalRevision,
+    );
+    expect(acked).toBeDefined();
+    // Stopped records keep the 'stopped' state; reconciliation only clears
+    // the unreconciled flag once the parent has acted on the stop.
+    expect(board.get('child-1')).toMatchObject({
+      state: 'stopped',
+      terminalUnreconciled: false,
+    });
+  });
+
   test('retains checkpoint snapshots across fresh storage-derived message arrays', async () => {
     const board = new BackgroundJobBoard();
     board.registerLaunch({

@@ -807,6 +807,54 @@ describe('orchestrator wake scheduler', () => {
     expect(text).toContain(ORCHESTRATOR_STOPPED_JOB_WAKE_TEXT_NO_BOARD);
   });
 
+  test('board-free overflow reports evictions beyond the retained ID cap honestly', async () => {
+    const promptAsync = mock(async () => ({}));
+    let waiting = true;
+    const { scheduler } = createScheduler({
+      boardInjectionEnabled: false,
+      hasInputWait: () => waiting,
+      sessionClient: makeClient({
+        todos: [],
+        promptAsync,
+        childrenData: [{ id: 'child-2' }],
+        statusData: { 'child-2': { type: 'busy' } },
+      }),
+    });
+
+    // 32 retained entries plus 70 evictions leaves 64 retained IDs in the
+    // board-free notice and six overflowed entries honestly accounted for.
+    for (let i = 0; i < STOPPED_RECOVERY_QUEUE_CAP + 70; i++) {
+      scheduler.triggerStoppedJobRecovery(
+        'p1',
+        formatStoppedJobDelta({
+          alias: `a${i}`,
+          taskID: `ses_${i}`,
+          generation: 1,
+          state: 'stopped',
+          reason: 'stopped without a terminal result',
+        }),
+        `ses_${i}:1`,
+      );
+    }
+    waiting = false;
+    await scheduler.event({
+      event: { type: 'session.idle', properties: { sessionID: 'p1' } },
+    });
+    await clock.advance(0);
+
+    const text =
+      (
+        promptAsync.mock.calls as unknown as Array<
+          [{ body: { parts: Array<{ text: string }> } }]
+        >
+      )[0]?.[0]?.body.parts[0]?.text ?? '';
+    expect(text).toContain('<stopped-job-overflow-ids>');
+    expect(text).toContain('ses_0');
+    expect(text).toContain('ses_63');
+    expect(text).toContain('(+6 more overflowed entries were not retained)');
+    expect(text).not.toContain('ses_64');
+  });
+
   test('preserves overflow that arrives while recovery delivery is in flight', async () => {
     let releaseFirst!: () => void;
     let calls = 0;

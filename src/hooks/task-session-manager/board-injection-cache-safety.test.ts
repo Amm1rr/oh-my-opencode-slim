@@ -542,4 +542,55 @@ describe('backgroundJobs.boardInjection switch (#1314 thread)', () => {
     ]);
     expect(turn.transformBytes).toContain('Background Job Board');
   });
+
+  test('off: checkpoint strategy registers completed jobs but never stopped ones', async () => {
+    const board = new BackgroundJobBoard();
+    board.registerLaunch({
+      taskID: 'child-done',
+      parentSessionID: SESSION,
+      agent: 'explorer',
+      description: 'map hooks',
+    });
+    board.updateStatus({
+      taskID: 'child-done',
+      state: 'completed',
+      resultSummary: 'done',
+    });
+    board.registerLaunch({
+      taskID: 'child-stopped',
+      parentSessionID: SESSION,
+      agent: 'explorer',
+      description: 'map hooks',
+    });
+    board.updateStatus({
+      taskID: 'child-stopped',
+      state: 'stopped',
+      resultSummary: 'stopped without a terminal result',
+    });
+    const hook = createHook(board, false);
+
+    // First real turn: the completed job registers for consumption; the
+    // stopped job must not (the recovery wake owns its delivery).
+    await runTurn(hook, [
+      userMsg('msg_u_off_1', 'Coordinate the refactor work', BASE_TIME),
+    ]);
+    expect(board.getState('child-done')).toBe('completed');
+    expect(board.getState('child-stopped')).toBe('stopped');
+    expect(board.get('child-stopped')).toMatchObject({
+      terminalUnreconciled: true,
+    });
+
+    // Second real turn with an advanced prompt shape retires only the
+    // completed job; the stopped job stays for the recovery flow.
+    await runTurn(hook, [
+      userMsg('msg_u_off_1', 'Coordinate the refactor work', BASE_TIME),
+      assistantMsg('msg_a_off_1', 'consumed the result', BASE_TIME + 1),
+      userMsg('msg_u_off_2', 'next step', BASE_TIME + 2),
+    ]);
+    expect(board.getState('child-done')).toBe('reconciled');
+    expect(board.getState('child-stopped')).toBe('stopped');
+    expect(board.get('child-stopped')).toMatchObject({
+      terminalUnreconciled: true,
+    });
+  });
 });

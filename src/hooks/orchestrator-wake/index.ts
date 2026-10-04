@@ -241,9 +241,48 @@ export const STOPPED_RECOVERY_WAKE_CHUNK = 8;
 export const STOPPED_RECOVERY_OVERFLOW_TEXT =
   '<stopped-job-overflow>\nAdditional stopped-job recovery facts were queued beyond the inline detail limit. Consult the Background Job Board for all unreconciled stopped jobs.\n</stopped-job-overflow>';
 
-/** Board-injection-off variant: overflow facts are pulled, not displayed. */
+/** Board-injection-off variant: overflow facts are pulled, not displayed.
+ * The retained overflowed task identifiers are appended by the caller —
+ * this notice alone cannot make the stops discoverable. */
 export const STOPPED_RECOVERY_OVERFLOW_TEXT_NO_BOARD =
-  '<stopped-job-overflow>\nAdditional stopped-job recovery facts were queued beyond the inline detail limit. Check `task_status` for the task IDs reported above to see every unreconciled stopped job.\n</stopped-job-overflow>';
+  '<stopped-job-overflow>\nAdditional stopped-job recovery facts were queued beyond the inline detail limit. The retained overflowed stopped task IDs are listed below; check `task_status` for each to see its facts.\n</stopped-job-overflow>';
+
+/** Upper bound on task identifiers inlined in the board-less overflow
+ * notice: keeps the wake prompt bounded under pathological stop floods;
+ * evictions beyond the cap are reported as a count, not listed. */
+export const STOPPED_RECOVERY_OVERFLOW_ID_CAP = 64;
+
+/** Format the overflowed stopped-job keys (`taskID:generation`) as a
+ * bounded identifier block for the board-less overflow notice.
+ * `totalOverflowCount` is the batch's durable eviction count: it exceeds
+ * the retained key list once evictions outgrow the identifier cap, and
+ * the notice must report that gap honestly instead of implying full
+ * coverage. */
+function overflowedStoppedTaskIDs(
+  keys: string[],
+  totalOverflowCount: number,
+): string {
+  const ids = [
+    ...new Set(
+      keys
+        .map((key) => parseRecoveryKey(key)?.taskID)
+        .filter((taskID): taskID is string => typeof taskID === 'string'),
+    ),
+  ];
+  if (ids.length === 0) {
+    return `<stopped-job-overflow-ids>\nTask identifiers for the ${totalOverflowCount} overflowed stopped jobs were not retained.\n</stopped-job-overflow-ids>`;
+  }
+  // Retention is capped at STOPPED_RECOVERY_OVERFLOW_ID_CAP on the queue
+  // side, so ids never exceed it; the honest gap is between the durable
+  // eviction count and what was retained. (Multiple evictions can share
+  // one taskID across generations, so report entries, not IDs.)
+  const omitted = Math.max(0, totalOverflowCount - keys.length);
+  return `<stopped-job-overflow-ids>\n${ids.join('\n')}${
+    omitted > 0
+      ? `\n(+${omitted} more overflowed entries were not retained)`
+      : ''
+  }\n</stopped-job-overflow-ids>`;
+}
 
 /**
  * Children-driven mode: a child with `outcome === undefined` counts as
@@ -684,6 +723,11 @@ type DeltaBatch = {
   deltas: Map<string, string>;
   /** Number of detail entries coalesced beyond the bounded queue. */
   overflowCount: number;
+  /** Keys of entries dropped by the cap, newest-first-drop order. The
+   * board-less overflow notice inlines these task identifiers so the
+   * parent can still discover every overflowed stop (the board is not a
+   * fallback there and `task_status` needs a known id). */
+  overflowedKeys: string[];
 };
 
 type DeltaQueuePolicy = {
@@ -714,7 +758,7 @@ function makeDeltaQueue(policy: DeltaQueuePolicy): DeltaQueue {
   const add = (sessionID: string, delta: string, dedupeKey?: string): void => {
     let batch = batches.get(sessionID);
     if (!batch) {
-      batch = { deltas: new Map(), overflowCount: 0 };
+      batch = { deltas: new Map(), overflowCount: 0, overflowedKeys: [] };
       batches.set(sessionID, batch);
     }
     const key = dedupeKey ?? delta;
@@ -727,6 +771,12 @@ function makeDeltaQueue(policy: DeltaQueuePolicy): DeltaQueue {
       if (oldest === undefined) break;
       batch.deltas.delete(oldest);
       batch.overflowCount += 1;
+      // Bound the retained identifiers (see STOPPED_RECOVERY_OVERFLOW_ID_CAP):
+      // under a pathological stop flood the notice stays honest about how
+      // many overflowed without growing without limit in memory.
+      if (batch.overflowedKeys.length < STOPPED_RECOVERY_OVERFLOW_ID_CAP) {
+        batch.overflowedKeys.push(oldest);
+      }
     }
     batch.deltas.set(key, delta);
   };
@@ -1863,6 +1913,10 @@ export function createOrchestratorWakeScheduler(
         ? [...recoveryBatch.deltas.keys()].slice(0, STOPPED_RECOVERY_WAKE_CHUNK)
         : [];
       const sentOverflowCount = recoveryBatch?.overflowCount ?? 0;
+      const sentOverflowedKeyCount = Math.min(
+        recoveryBatch?.overflowedKeys.length ?? 0,
+        sentOverflowCount,
+      );
       const recoveryDelta = sentKeys
         .map((key) => recoveryBatch?.deltas.get(key))
         .filter((text): text is string => typeof text === 'string')
@@ -1871,7 +1925,14 @@ export function createOrchestratorWakeScheduler(
         recoveryBatch && recoveryBatch.overflowCount > 0
           ? boardInjectionEnabled
             ? STOPPED_RECOVERY_OVERFLOW_TEXT
-            : STOPPED_RECOVERY_OVERFLOW_TEXT_NO_BOARD
+            : // Board-less overflow has no passive display fallback and
+              // `task_status` needs a known id, so the notice carries the
+              // retained overflowed task identifiers itself instead of
+              // pointing at a channel that cannot list them.
+              `${STOPPED_RECOVERY_OVERFLOW_TEXT_NO_BOARD}\n${overflowedStoppedTaskIDs(
+                recoveryBatch.overflowedKeys,
+                recoveryBatch.overflowCount,
+              )}`
           : '';
       const inputOverflowDelta =
         sendInputDeltas && sendInputDeltas.overflowCount > 0
@@ -1943,7 +2004,17 @@ export function createOrchestratorWakeScheduler(
             0,
             remaining.overflowCount - sentOverflowCount,
           );
-          if (remaining.deltas.size === 0 && remaining.overflowCount === 0) {
+          // Retire only the overflowed identifiers this wake actually
+          // surfaced (bounded by the retained keys and by the count that
+          // entered this wake's notice).
+          if (sentOverflowedKeyCount > 0) {
+            remaining.overflowedKeys.splice(0, sentOverflowedKeyCount);
+          }
+          if (
+            remaining.deltas.size === 0 &&
+            remaining.overflowCount === 0 &&
+            remaining.overflowedKeys.length === 0
+          ) {
             pendingStoppedRecoveries.delete(sessionID);
           } else {
             rearmWakeProgress(sessionID);
@@ -1958,9 +2029,19 @@ export function createOrchestratorWakeScheduler(
             0,
             remainingInput.overflowCount - sentInputOverflowCount,
           );
+          if (sentInputOverflowCount > 0) {
+            remainingInput.overflowedKeys.splice(
+              0,
+              Math.min(
+                remainingInput.overflowedKeys.length,
+                sentInputOverflowCount,
+              ),
+            );
+          }
           if (
             remainingInput.deltas.size === 0 &&
-            remainingInput.overflowCount === 0
+            remainingInput.overflowCount === 0 &&
+            remainingInput.overflowedKeys.length === 0
           ) {
             pendingChildInputWakes.delete(sessionID);
           } else {
@@ -2115,6 +2196,7 @@ export function createOrchestratorWakeScheduler(
       queue.batches.set(sessionID, {
         deltas: new Map(),
         overflowCount: 0,
+        overflowedKeys: [],
       });
     }
     if (localSessions.get(sessionID)?.archived) {

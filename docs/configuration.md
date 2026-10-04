@@ -426,12 +426,16 @@ unaffected. Set the keys explicitly (`"boardInjection": true`,
 `"periodicWakeEnabled": true`) to restore the v1-style behavior on v2; v1
 hosts are unchanged.
 
-Two board-off caveats: the consumption bookkeeping that retires completed
-jobs registers on orchestrator turns driven by a real user message (pure
-event-wake turns are internal-initiator and do not register), so retirement
-waits for the next real user turn; and a natively delivered result lost
-host-side has no passive display fallback — check `task_status` or
-`task_result` if a completion looks missing.
+Board-off behavioral notes: the consumption bookkeeping that retires
+completed/error/cancelled jobs registers on orchestrator turns driven by a
+real user message (pure event-wake turns are internal-initiator and do not
+register), so retirement waits for the next real user turn; stopped jobs
+never register there — the stopped-job recovery wake surfaces them and
+retirement goes through the recovery flow; reopen corrections (a previously
+terminal job running again) still deliver, in a board-free wording that
+points at `task_status`; and a natively delivered result lost host-side has
+no passive display fallback — check `task_status` or `task_result` if a
+completion looks missing.
 The wall-clock supervisor is separately opt-in and remains disabled unless
 `wallClockTimeoutMs` is set:
 
