@@ -50,6 +50,7 @@ export async function fetchChildTranscript(
   sessionID: string,
   directory: string,
   limit?: number,
+  signal?: AbortSignal,
 ): Promise<unknown> {
   const session = client.session;
   const messages =
@@ -60,6 +61,7 @@ export async function fetchChildTranscript(
   const response = await messages({
     path: { id: sessionID },
     query: { directory, limit },
+    ...(signal ? { signal } : {}),
   });
   const error = responseError(response);
   if (error !== undefined) throw new Error(stringifyError(error));

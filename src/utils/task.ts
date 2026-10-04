@@ -59,6 +59,15 @@ interface TaskOutputHeader {
   state?: TaskOutputState;
 }
 
+/** The native v2 background launch sentence: host-authored, no child text. */
+const NATIVE_BACKGROUND_LAUNCH =
+  /^\s*The subagent is working in the background \(sessionID:\s*([^\s)]+)\)/i;
+
+/** True when `output` opens with the native v2 background launch sentence. */
+export function isNativeBackgroundLaunchOutput(output: string): boolean {
+  return NATIVE_BACKGROUND_LAUNCH.test(output);
+}
+
 /**
  * Tokenize an opening tag into its attributes, walking complete
  * name="value" pairs: values are consumed whole between their own quote
@@ -140,10 +149,7 @@ function parseTaskOutputHeader(output: string): TaskOutputHeader {
         ? 'error'
         : 'cancelled') as TaskOutputState,
     };
-  const working =
-    /^\s*The subagent is working in the background \(sessionID:\s*([^\s)]+)\)/i.exec(
-      output,
-    );
+  const working = NATIVE_BACKGROUND_LAUNCH.exec(output);
   if (working) return { taskID: working[1], state: 'running' };
   // Textual header: key/value lines in the header region (before
   // `<task_result>`/`<task_error>`), never inside the result body. Accepts

@@ -1423,6 +1423,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       backgroundJobBoard: backgroundJobCoordinator,
       activityTracker: taskActivityTracker,
       resolveCanonicalTaskRef: aliasAuthority.resolveCanonical,
+      isDisposed: () => instanceDisposed,
     });
     waitForUserTools = createWaitForUserTool({
       shouldManageSession: (sessionID) =>

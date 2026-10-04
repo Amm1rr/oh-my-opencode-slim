@@ -36,7 +36,7 @@ The task API and background-control tools are:
 |------|---------|
 | `task(..., background: true)` | Start a specialist in the background and immediately return a task ID |
 | hook-driven completion | OpenCode injects terminal background task results automatically |
-| `task_status` | Check the status of a tracked task |
+| `task_status` | Check the status of a tracked task (read-only fallback for owned untracked sessions after a restart) |
 | `task_result` | Retrieve a tracked task's result |
 | `task_message` | Queue a non-interrupting message and return `queued` |
 | `task_cancel` | Stop a generation while retaining its session |
@@ -85,13 +85,22 @@ This distinction uses explicit provenance, not agent names or description text.
 
 Aliases and reusable-session history are process-local and do not survive process
 restarts as a reusable board. Post-restart recovery is partial and best-effort;
-it does not guarantee restoration of those aliases or the complete history. One
-recovery channel is explicit: `task_revive` on a raw session ID verifies the
+it does not guarantee restoration of those aliases or the complete history. Two
+read-only channels work after a restart: a background launch's marker in the
+parent's history still resolves its alias when it is the final non-empty line of
+that tool result (tail-anchored only), and `task_status` reports a read-only
+observed state for an owned session the board no longer tracks — completed or
+uncertain running-or-incomplete from transcript evidence (unknown when the
+live status read fails), never claiming definite running — pointing to `task_result` for completed text; it never
+re-registers or prompts the task. One recovery channel is explicit:
+`task_revive` on a raw session ID verifies the
 session against the host (existence and parent ownership) and re-adopts an
 untracked child owned by the calling parent, then
 continues it with the new prompt.
 Recovery verifies the original agent and latest delivered round before importing
 a retained terminal row. This cache-only import does not launch or notify.
+`task_cancel` still cannot abort a run launched before the restart — the board
+has no live handle to it (tracked in #1387).
 The production board numbers a parent's children only when the host's creation
 time shows that parent session was created while the plugin instance runs: the
 board saw every numbered alias it could have. Any other parent (created before a

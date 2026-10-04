@@ -721,6 +721,15 @@ host across process and plugin restarts:
 Rehydration re-registers persisted *running* task tool parts so a plugin
 restart does not orphan in-flight background lanes — but a session deleted
 while the plugin was down would resurrect as a forever-running ghost.
+Rehydration only re-registers what the parent's persisted tool parts still
+show; it does not by itself restore aliases or terminal results. Two
+read-only paths cover the post-restart gap: a native background plaintext
+launch result whose trailing `slim-child-ref:v1` marker is the output's
+final non-empty line still pairs its alias with that session (an anchored
+tail match only — a marker inside the body text is never trusted), and
+`task_status` falls back to host-verified ownership plus transcript
+evidence for an owned session the board no longer tracks (see
+[Background Orchestration](background-orchestration.md)).
 After rehydration registers a task, the task-session-manager transform
 fires a fire-and-forget `client.session.get` probe per newly registered
 taskID:
