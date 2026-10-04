@@ -1,6 +1,7 @@
+import { randomUUID } from 'node:crypto';
 import { type ToolDefinition, tool } from '@opencode-ai/plugin';
 import type { RevivedRunTracker } from '../hooks/task-session-manager/revived-run-tracker';
-import { createSessionRecovery } from '../hooks/task-session-manager/session-recovery';
+import { pluginDisposedMessage } from '../hooks/task-session-manager/session-recovery';
 import type { BackgroundJobLease } from '../utils/background-job-board';
 import { getBackgroundJobLifecycleLedger } from '../utils/background-job-store';
 import type { BackgroundJobSupervisor } from '../utils/background-job-supervisor';
@@ -19,12 +20,7 @@ import {
   cancelTrackedExecution,
   type TaskControlToolOptions,
 } from './cancel-task';
-import {
-  currentToolCallID,
-  idParamFor,
-  readTaskRef,
-  taskRefArgs,
-} from './task-ref';
+import { idParamFor, readTaskRef, taskRefArgs } from './task-ref';
 
 const z = tool.schema;
 const DEFAULT_BASELINE_TIMEOUT_MS = 5_000;
@@ -34,6 +30,9 @@ const DEFAULT_WAIT_FOR_IDLE_TIMEOUT_MS = 5_000;
 class ReviveAdmissionDeadlineError extends Error {}
 
 export interface TaskReviveToolOptions extends TaskControlToolOptions {
+  recoverRetainedSession: NonNullable<
+    TaskControlToolOptions['recoverRetainedSession']
+  >;
   backgroundJobSupervisor?: BackgroundJobSupervisor;
   revivedRunTracker: RevivedRunTracker;
   baselineTimeoutMs?: number;
@@ -65,20 +64,11 @@ export function createTaskReviveTool(
       if (!requested) throw new Error(`task_revive requires ${idParam}`);
       if (!prompt) throw new Error('task_revive requires prompt');
       const canonical = options.resolveCanonicalTaskRef
-        ? await options.resolveCanonicalTaskRef(
-            parentSessionID,
-            requested,
-            currentToolCallID(toolContext),
-          )
+        ? await options.resolveCanonicalTaskRef(parentSessionID, requested)
         : undefined;
-      if (options.isDisposed?.()) {
-        throw new Error(
-          'The plugin instance was disposed. No action was sent.',
-        );
-      }
+      if (options.isDisposed?.()) throw new Error(pluginDisposedMessage());
       if (canonical?.kind === 'refused') throw new Error(canonical.reason);
-      const identity =
-        canonical?.kind === 'exact' ? canonical.taskID : requested;
+      const identity = canonical?.taskID ?? requested;
       let resolved = canonical
         ? options.backgroundJobBoard.get(identity)
         : options.backgroundJobBoard.resolve(parentSessionID, requested);
@@ -117,6 +107,20 @@ export function createTaskReviveTool(
         taskID: current.taskID,
         generation: current.generation,
       };
+      const queuedRun = revivedRunTracker.promptMessageIDFor?.(
+        current.taskID,
+        current.generation,
+      );
+      if (queuedRun && current.state === 'running') {
+        throw new Error(
+          `Task ${requested} already has a queued continuation; do not retry task_revive. Use task_status to inspect it.`,
+        );
+      }
+      const queueContinuation =
+        supportsQueuedContinuation(options) && (adopted || !!queuedRun);
+      const promptMessageID = queueContinuation
+        ? `msg_omos_revive_${randomUUID().replaceAll('-', '')}`
+        : undefined;
 
       // Establish a real verification mechanism before any destructive abort.
       // A historical session.get outcome is not a live-idle capability.
@@ -126,19 +130,16 @@ export function createTaskReviveTool(
         .experimental_v2?.waitForSessionIdle;
       const waitForIdle =
         !hasStatusMap && typeof channel === 'function' ? channel : undefined;
-      if (!hasStatusMap && !waitForIdle) {
+      if (!queueContinuation && !hasStatusMap && !waitForIdle) {
         throw new Error(
           'task_revive idle-verification capability unavailable: the host must expose session.status or waitForSessionIdle; no abort or prompt was sent',
         );
       }
 
       let cancelledForRevive = false;
-      // An adopted record is never aborted: its 'running' state is the
-      // registration shape, not evidence of a live run this caller owns. If
-      // the host resumed the session between the adoption gate and the
-      // send, the pre-send live re-verification below refuses with the
-      // record accurately 'running' — recovered work is never cancelled.
-      if (current.state === 'running' && !adopted) {
+      // Adoption does not grant ownership of the pre-existing execution.
+      // V2 queues behind it; V1 retains the live-state verification below.
+      if (current.state === 'running' && !adopted && !queueContinuation) {
         await cancelTrackedExecution(options, captured, 'revived');
         cancelledForRevive = true;
         current = getCurrentReviveJob(
@@ -180,12 +181,17 @@ export function createTaskReviveTool(
         const deletionEpoch = getBackgroundJobLifecycleLedger(
           options.backgroundJobBoard,
         ).deletionEpochs.get(current.taskID);
-        const baselineMessageID = await withTimeout(
-          revivedRunTracker.captureBaseline(current.taskID),
-          Math.max(1, options.baselineTimeoutMs ?? DEFAULT_BASELINE_TIMEOUT_MS),
-          'Baseline capture deadline exceeded; the revive prompt was NOT sent',
-        );
-        if (waitForIdle) {
+        const baselineMessageID = queueContinuation
+          ? undefined
+          : await withTimeout(
+              revivedRunTracker.captureBaseline(current.taskID),
+              Math.max(
+                1,
+                options.baselineTimeoutMs ?? DEFAULT_BASELINE_TIMEOUT_MS,
+              ),
+              'Baseline capture deadline exceeded; the revive prompt was NOT sent',
+            );
+        if (!queueContinuation && waitForIdle) {
           const timeoutMs = Math.max(
             1,
             options.waitForIdleTimeoutMs ?? DEFAULT_WAIT_FOR_IDLE_TIMEOUT_MS,
@@ -214,7 +220,7 @@ export function createTaskReviveTool(
               'Invalid session idle wait result; the revive prompt was NOT sent',
             );
           }
-        } else {
+        } else if (!queueContinuation) {
           const liveSnapshot = await getRuntimeSessionStatusSnapshot(
             options.input,
           );
@@ -251,13 +257,13 @@ export function createTaskReviveTool(
             options.backgroundJobBoard,
           ).deletionEpochs.get(current.taskID) !== deletionEpoch ||
           !options.backgroundJobBoard.validateLease(relaunchLease) ||
-          // The retained-state leg is blind to an adopted record's
-          // registration-shape 'running'; for adopted records the race is
-          // fenced by the busy-timestamp leg below plus the queue delivery
-          // semantics, and the status-snapshot check above already refused
-          // a genuinely busy session.
-          (!adopted && !isReviveableRetainedJob(current)) ||
-          (current.lastLiveBusyAt !== undefined &&
+          // V1 adoption still requires live quiescence. The V2 identity-bound
+          // queue path deliberately permits the existing execution to run.
+          (!queueContinuation &&
+            !adopted &&
+            !isReviveableRetainedJob(current)) ||
+          (!queueContinuation &&
+            current.lastLiveBusyAt !== undefined &&
             current.lastLiveBusyAt !== observedLiveBusyAt)
         ) {
           throw new Error(
@@ -269,6 +275,32 @@ export function createTaskReviveTool(
         // resume; it does not deduplicate. The v1 SDK ignores this client-side
         // hint (not part of the HTTP request); the v2 shim forwards it.
         const admissionStartedAt = Date.now();
+        const replaced = current;
+        if (promptMessageID) {
+          // Own this one input before sending. A late acknowledgement must
+          // never reinstall the tracker after it has delivered the answer.
+          launched = options.backgroundJobBoard.registerLaunch({
+            taskID: current.taskID,
+            parentSessionID,
+            agent: current.agent,
+            description: current.description,
+            objective: current.objective,
+            background: true,
+            relaunchLease,
+            now: admissionStartedAt,
+          });
+          revivedRunTracker.register({
+            taskID: launched.taskID,
+            generation: launched.generation,
+            parentSessionID,
+            promptMessageID,
+            admissionLease: relaunchLease,
+            attemptStartedAt: admissionStartedAt,
+            description: launched.description,
+          });
+          // A session-wide timeout abort could kill the preceding execution.
+          // This input is observed by identity, without an automatic abort.
+        }
         const request = (
           session.promptAsync as (
             args: Record<string, unknown>,
@@ -278,6 +310,7 @@ export function createTaskReviveTool(
           query: { directory: options.input.directory },
           body: {
             agent: current.agent,
+            ...(promptMessageID ? { messageID: promptMessageID } : {}),
             parts: [{ type: 'text', text: prompt }],
           },
           delivery: 'queue',
@@ -292,6 +325,13 @@ export function createTaskReviveTool(
             owner.settled = true;
             const apiError = responseError(response);
             if (apiError !== undefined) {
+              // An explicit refusal admitted nothing. Release the queued
+              // identity so the task neither waits for it nor fences retries.
+              if (queueContinuation && launched) {
+                revivedRunTracker.discard(launched.taskID, launched.generation);
+                options.backgroundJobBoard.abandonLaunch(launched, replaced);
+                launched = undefined;
+              }
               throw new Error(errorText(apiError));
             }
             // Retirement is not deletion. The accepted write is not resent
@@ -303,6 +343,19 @@ export function createTaskReviveTool(
               throw new Error(
                 'the revive write was accepted, but this plugin instance is retired and will not track it',
               );
+            }
+            if (queueContinuation) {
+              if (
+                !launched ||
+                options.backgroundJobBoard.get(captured.taskID)?.generation !==
+                  launched.generation
+              ) {
+                owner.transferred = true;
+                throw new Error(
+                  'queued admission became stale; no interrupt sent and exclusion retained',
+                );
+              }
+              return;
             }
             // Deletion wins, but it leaves this write's lease alive. Only
             // that precise case may compensate; all stale owners/generations
@@ -351,10 +404,22 @@ export function createTaskReviveTool(
               generation: launched.generation,
               parentSessionID,
               baselineMessageID,
+              promptMessageID,
               attemptStartedAt: admissionStartedAt,
               description: launched.description,
             });
             options.backgroundJobSupervisor?.onLaunch(launched);
+          })
+          .catch((error: unknown) => {
+            if (queueContinuation && !owner.settled) {
+              // A rejected transport can still have admitted the input. Keep
+              // identity and exclusion; never turn uncertainty into a retry.
+              owner.transferred = true;
+              throw new ReviveAdmissionDeadlineError(
+                `Queued admission outcome unknown: ${errorText(error)}`,
+              );
+            }
+            throw error;
           })
           .finally(() => {
             owner.settled = true;
@@ -412,7 +477,11 @@ export function createTaskReviveTool(
           // Preserve the local race outcome, regardless of later settlement.
           // A timeout error from the transport is still an admission failure.
           if (error instanceof ReviveAdmissionDeadlineError) {
-            return renderReviveOutput(idParam, current, true);
+            return renderReviveOutput(
+              idParam,
+              queueContinuation ? (launched ?? current) : current,
+              true,
+            );
           }
           throw error;
         } finally {
@@ -581,7 +650,7 @@ function isReviveableRetainedJob(
   return job.state === 'reconciled' && job.terminalState !== undefined;
 }
 
-/** Shared evidence/import owns recovery; only its explicit legacy result launches a cache row. */
+/** Shared recovery verifies ownership and agent before adopting a continuation. */
 async function resolveOrAdoptUntrackedTask(
   options: TaskReviveToolOptions,
   parentSessionID: string,
@@ -589,23 +658,12 @@ async function resolveOrAdoptUntrackedTask(
   allowExactAdoption: boolean,
 ): Promise<string | undefined> {
   const prefix = `Unknown or unowned background task: ${requested}`;
-  if (!SESSION_ID_PATTERN.test(requested) && !options.recoverRetainedSession) {
-    return `${prefix}. Aliases do not survive a host restart; retry with the task's session ID from history or notifications, or re-dispatch the work.`;
-  }
-  const recover =
-    options.recoverRetainedSession ??
-    createSessionRecovery({
-      input: options.input,
-      backgroundJobBoard: options.backgroundJobBoard,
-      hostFlavor: (options.input as { hostFlavor?: string }).hostFlavor,
-      isDisposed: options.isDisposed,
-      liveStatusTimeoutMs: options.verifyAbortMs,
-    });
-  const recovery = await recover({
+  const recovery = await options.recoverRetainedSession({
     parentSessionID,
     requested,
     purpose: 'revive',
     allowExactAdoption,
+    allowQueuedContinuation: supportsQueuedContinuation(options),
   });
   if (recovery.kind === 'refused') return recovery.reason;
   if (options.isDisposed?.()) return 'Session recovery was disposed';
@@ -628,6 +686,7 @@ async function resolveOrAdoptUntrackedTask(
     agent: recovery.agent,
     description: recovery.description,
     background: true,
+    adopted: true,
     now: Date.now(),
   });
   // Until a continuation is accepted this row still represents recovered
@@ -639,6 +698,13 @@ async function resolveOrAdoptUntrackedTask(
     agent: recovery.agent,
   });
   return undefined;
+}
+
+function supportsQueuedContinuation(options: TaskReviveToolOptions): boolean {
+  return (
+    (options.input as { experimental_v2?: ExperimentalV2 }).experimental_v2
+      ?.queuedPromptIdentity === true
+  );
 }
 
 function errorText(error: unknown): string {

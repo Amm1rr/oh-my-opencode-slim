@@ -18,12 +18,7 @@ import {
   createBackgroundJobTerminalGate,
   type ObservationToken,
 } from '../utils/background-job-terminal-gate';
-import {
-  classifyV2HistoricalRound,
-  fetchChildTranscript,
-  responseError,
-  stringifyError,
-} from '../utils/child-transcript';
+import { responseError, stringifyError } from '../utils/child-transcript';
 import { isRecord } from '../utils/guards';
 import { getClient } from '../utils/opencode-client';
 import { delay } from '../utils/polling';
@@ -38,7 +33,6 @@ import {
 } from '../utils/session-runtime-status';
 import {
   type CanonicalTaskResolver,
-  currentToolCallID,
   idParamFor,
   readTaskRef,
   taskRefArgs,
@@ -104,11 +98,7 @@ Use only for obsolete, wrong, conflicting, or user-requested cancellation. The r
       const requested = readTaskRef(args, idParam);
       if (!requested) throw new Error(`task_cancel requires ${idParam}`);
       const canonical = options.resolveCanonicalTaskRef
-        ? await options.resolveCanonicalTaskRef(
-            parentSessionID,
-            requested,
-            currentToolCallID(toolContext),
-          )
+        ? await options.resolveCanonicalTaskRef(parentSessionID, requested)
         : undefined;
       if (options.isDisposed?.()) {
         return unknownTaskOutput(idParam, requested, pluginDisposedMessage());
@@ -116,8 +106,7 @@ Use only for obsolete, wrong, conflicting, or user-requested cancellation. The r
       if (canonical?.kind === 'refused') {
         return unknownTaskOutput(idParam, requested, canonical.reason);
       }
-      const identity =
-        canonical?.kind === 'exact' ? canonical.taskID : requested;
+      const identity = canonical?.taskID ?? requested;
       const job = canonical
         ? options.backgroundJobBoard.get(identity)
         : options.backgroundJobBoard.resolve(parentSessionID, requested);
@@ -422,8 +411,8 @@ async function verifyQuiescentSession(
 
 /**
  * v2 has no session-status map. Interrupt acceptance is not settlement.
- * Prefer the host idle wait. Otherwise only a new idle timestamp or this
- * round's closing interrupted idle counts. A stored outcome does not.
+ * Prefer the host idle wait. Otherwise only a new idle timestamp counts.
+ * A stored outcome does not.
  */
 async function verifyQuiescentViaHostInfo(
   options: TaskControlToolOptions,
@@ -476,22 +465,10 @@ async function verifyQuiescentViaHostInfo(
       if (typeof idleAt === 'number' && idleAt >= abortStartedAt) {
         return freshCancellationToken(options, execution);
       }
-      const matched = await contextInterruptedAfter(
-        options,
-        execution,
-        lease,
-        abortStartedAt,
-        deadline,
-      );
-      if (Date.now() >= deadline) {
-        throw new OperationTimeoutError('Cancellation context read timed out');
-      }
-      assertStopFences(options, execution, lease);
-      if (matched) return freshCancellationToken(options, execution);
       lastDetail =
         typeof idleAt === 'number'
           ? `idle=${idleAt}`
-          : 'no fresh idle timestamp or closing interrupted idle';
+          : 'no fresh idle timestamp';
     } catch (error) {
       if (
         error instanceof LeaseOwnershipLostError ||
@@ -607,29 +584,6 @@ function deletionEpoch(
   return getBackgroundJobLifecycleLedger(
     options.backgroundJobBoard,
   ).deletionEpochs.get(taskID);
-}
-
-async function contextInterruptedAfter(
-  options: TaskControlToolOptions,
-  execution: CapturedExecution,
-  lease: BackgroundJobLease,
-  abortStartedAt: number,
-  deadline: number,
-): Promise<boolean> {
-  const remainingMs = deadline - Date.now();
-  if (remainingMs <= 0) return false;
-  const client = getClient(options.input);
-  if (typeof client.session?.messages !== 'function') return false;
-  const transcript = await withTimeout(
-    fetchChildTranscript(client, execution.taskID, options.input.directory),
-    remainingMs,
-    'Cancellation context read timed out',
-  );
-  if (Date.now() >= deadline) return false;
-  assertStopFences(options, execution, lease);
-  const round = classifyV2HistoricalRound(transcript);
-  if (round.verdict !== 'interrupted') return false;
-  return round.completedAt !== undefined && round.completedAt >= abortStartedAt;
 }
 
 async function getSessionStatus(

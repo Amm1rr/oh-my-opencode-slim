@@ -1190,6 +1190,15 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "InCerryGit",
+      "name": "InCerryGit",
+      "avatar_url": "https://avatars.githubusercontent.com/u/36690780?v=4",
+      "profile": "https://incerry.cnblogs.com/",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "commitConvention": "angular"
