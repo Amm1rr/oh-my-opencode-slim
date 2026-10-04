@@ -12,14 +12,16 @@ import {
 } from './schema';
 
 /** Recursively merge JSON objects; arrays and scalar values are replaced.
- * The override layer's keys come first, in the order the layer writes
- * them; base keys the layer does not mention follow. Key order is
- * precedence for permission objects (opencode compiles them into rules
- * and evaluates last-match-wins), so a later layer must keep its written
- * order for the keys it (re)defines — spreading the base first would pin
- * redefined keys to their base positions and let a later wildcard shadow
- * the allows written after it. Order is irrelevant to every other merged
- * shape, which is looked up by key. */
+ * Key order is precedence for permission objects (opencode evaluates the
+ * compiled rules last-match-wins), so the merge orders entries in three
+ * blocks: base keys the override layer does not mention and that carry no
+ * deny come first (they yield to the layer's wildcard), the layer's keys
+ * follow in the order it writes them (re-defined keys land at their
+ * written position), and unmentioned base entries that carry a deny —
+ * including pattern entries inside nested maps — come last: a blanket
+ * rule can never loosen a deny it did not name, and lifting one requires
+ * naming the key. Every other merged shape is looked up by key, where
+ * order is irrelevant. */
 export function deepMerge<T extends Record<string, unknown>>(
   base?: T,
   override?: T,
@@ -28,6 +30,12 @@ export function deepMerge<T extends Record<string, unknown>>(
   if (!override) return base;
 
   const result = {} as T;
+  const baseKeys = Object.keys(base) as (keyof T)[];
+  for (const key of baseKeys) {
+    if (!Object.hasOwn(override, key) && !carriesDeny(base[key])) {
+      defineOwn(result, key as string, base[key]);
+    }
+  }
   for (const key of Object.keys(override) as (keyof T)[]) {
     const baseVal = base[key];
     const overrideVal = override[key];
@@ -52,12 +60,25 @@ export function deepMerge<T extends Record<string, unknown>>(
       defineOwn(result, key as string, overrideVal);
     }
   }
-  for (const key of Object.keys(base) as (keyof T)[]) {
-    if (!Object.hasOwn(result, key)) {
+  for (const key of baseKeys) {
+    if (!Object.hasOwn(override, key) && carriesDeny(base[key])) {
       defineOwn(result, key as string, base[key]);
     }
   }
   return result;
+}
+
+/** An entry carries a deny when the entry itself — or any pattern inside
+ * a nested map — resolves to "deny": unmentioned denies stay effective
+ * after a later layer's keys. */
+function carriesDeny(value: unknown): boolean {
+  if (value === 'deny') return true;
+  if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+    for (const nested of Object.values(value)) {
+      if (carriesDeny(nested)) return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -87,9 +108,9 @@ export function mergeAgentOverrides(
   const canonicalBase = canonicalizeAgentAliases(base);
   const canonicalOverride = canonicalizeAgentAliases(override);
   const merged = deepMerge(canonicalBase, canonicalOverride) ?? canonicalBase;
-  // Alias fields are merged first, so an alias model can temporarily appear
-  // beside a canonical inheritModelFrom directive. Remember that directive
-  // from the original layer before clearing the inherited model below.
+  // Alias fields can temporarily appear beside a canonical inheritModelFrom
+  // directive. Remember that directive from the original layer before
+  // clearing the inherited model below.
   const canonicalInheritanceDirectives = new Set(
     Object.entries(override)
       .filter(([name]) => {
