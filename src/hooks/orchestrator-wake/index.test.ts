@@ -1811,6 +1811,50 @@ describe('orchestrator wake scheduler', () => {
     expect(promptAsync).toHaveBeenCalledTimes(ORCHESTRATOR_WAKE_UNCHANGED_CAP);
   });
 
+  test('reloading one location while another stays live resets only its wake state', async () => {
+    // Location A hits the two-wake no-progress cap on p1.
+    const promptA = mock(async () => ({}));
+    const { scheduler: schedulerA } = createScheduler({
+      directory: '/project-a',
+      sessionClient: makeClient({ promptAsync: promptA }),
+    });
+    await schedulerA.event({
+      event: { type: 'session.idle', properties: { sessionID: 'p1' } },
+    });
+    await clock.advance(60_000);
+    await clock.advance(60_000);
+    expect(promptA).toHaveBeenCalledTimes(ORCHESTRATOR_WAKE_UNCHANGED_CAP);
+    expect(getWakeProgress('p1').stopped).toBe(true);
+
+    // Location B stays live: its session is capped and mid-evaluation.
+    getWakeProgress('pb').stopped = true;
+    const ownerB = tryBeginWakeEvaluation('pb');
+    expect(ownerB).not.toBeNull();
+    const waiterB = mock(() => {});
+    retryAfterWakeEvaluation('pb', waiterB);
+
+    // Reload A: dispose its instance (B is still live, so no full clear).
+    await schedulerA.event({ event: { type: 'server.instance.disposed' } });
+
+    expect(getWakeProgress('p1').stopped).toBe(false);
+    expect(getWakeProgress('pb').stopped).toBe(true);
+    expect(tryBeginWakeEvaluation('pb')).toBeNull();
+    if (ownerB) releaseWakeEvaluation('pb', ownerB);
+    expect(waiterB).toHaveBeenCalledTimes(1);
+
+    // A's reloaded generation wakes p1 again instead of inheriting the cap.
+    const promptA2 = mock(async () => ({}));
+    const { scheduler: schedulerA2 } = createScheduler({
+      directory: '/project-a',
+      sessionClient: makeClient({ promptAsync: promptA2 }),
+    });
+    await schedulerA2.event({
+      event: { type: 'session.idle', properties: { sessionID: 'p1' } },
+    });
+    await clock.advance(60_000);
+    expect(promptA2).toHaveBeenCalledTimes(1);
+  });
+
   test('external busy (not wake-initiated) rearms the no-progress cap', async () => {
     const promptAsync = mock(async () => ({}));
     const { scheduler } = createScheduler({

@@ -1,9 +1,9 @@
 import { z } from 'zod';
-import { STRING_ONLY_PERMISSION_KEYS } from '../agents/permissions';
 import { MarketplacePackageIdSchema } from '../marketplace/schemas';
 import {
   AGENT_THEME_COLORS,
   DEFAULT_MAX_RETAINED_SNAPSHOTS,
+  STRING_ONLY_PERMISSION_KEYS,
 } from './constants';
 import { CouncilConfigSchema } from './council-schema';
 import { ProviderModelIdSchema } from './model-id-schema';

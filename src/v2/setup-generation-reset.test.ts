@@ -11,6 +11,10 @@ import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import { readdirSync, readFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import * as path from 'node:path';
+import {
+  hasLiveInstances,
+  resetLiveDirectoriesForTests,
+} from '../utils/event-directory-scope';
 import { flushLoggerForTesting, initLogger } from '../utils/logger';
 import {
   createSessionListShim,
@@ -79,7 +83,7 @@ describe('v2 generation warning latches', () => {
       OPENCODE_LOG_DIR: logDir,
     };
     delete process.env.OH_MY_OPENCODE_SLIM_DISABLE;
-    initLogger('gen-reset-test');
+    initLogger();
   });
 
   afterEach(async () => {
@@ -180,6 +184,54 @@ describe('v2 generation warning latches', () => {
     } finally {
       await cleanup();
     }
+  }, 20_000);
+});
+
+describe('v2 setup directory claim', () => {
+  let originalEnv: typeof process.env;
+  let fixtureRoot: string;
+
+  beforeEach(async () => {
+    originalEnv = { ...process.env };
+    fixtureRoot = await mkdtemp('/tmp/omo-v2-claim-');
+    process.env = {
+      ...originalEnv,
+      OPENCODE_CONFIG_DIR: path.join(fixtureRoot, 'config'),
+      XDG_CONFIG_HOME: path.join(fixtureRoot, 'xdg-config'),
+      XDG_DATA_HOME: path.join(fixtureRoot, 'xdg-data'),
+      XDG_CACHE_HOME: path.join(fixtureRoot, 'xdg-cache'),
+      OPENCODE_LOG_DIR: path.join(fixtureRoot, 'logs'),
+    };
+    delete process.env.OH_MY_OPENCODE_SLIM_DISABLE;
+    resetLiveDirectoriesForTests();
+  });
+
+  afterEach(async () => {
+    process.env = originalEnv;
+    resetLiveDirectoriesForTests();
+    await rm(fixtureRoot, { recursive: true, force: true });
+  });
+
+  test('setup failure after factory init releases the claim', async () => {
+    await Bun.write(
+      path.join(
+        process.env.OPENCODE_CONFIG_DIR as string,
+        'oh-my-opencode-slim.json',
+      ),
+      JSON.stringify({ companion: { enabled: false } }),
+    );
+    const ctx = makeSetupCtx(path.join(fixtureRoot, 'project'));
+    const session = ctx.session as unknown as {
+      hook: (name: string, cb: unknown) => Promise<{ dispose(): void }>;
+    };
+    const hook = session.hook;
+    session.hook = async (name, cb) => {
+      if (name === 'context') throw new Error('context hook rejected');
+      return hook(name, cb);
+    };
+
+    await expect(createV2Setup()(ctx)).rejects.toThrow('context hook rejected');
+    expect(hasLiveInstances()).toBe(false);
   }, 20_000);
 });
 

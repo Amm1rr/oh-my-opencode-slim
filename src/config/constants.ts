@@ -97,6 +97,18 @@ export const SMARTFETCH_SECONDARY_SESSION_TITLE = 'smartfetch-secondary';
 
 export type ImageRouting = 'auto' | 'direct';
 
+/** Permission keys that accept only a scalar action — never a pattern map.
+ * Mirrors opencode's v1 permission config typing; enforced by the config
+ * schema's refinement. */
+export const STRING_ONLY_PERMISSION_KEYS = [
+  'todowrite',
+  'question',
+  'webfetch',
+  'websearch',
+  'codesearch',
+  'doom_loop',
+] as const;
+
 export function resolveImageRouting(
   imageRouting: ImageRouting | undefined,
   observerEnabled: boolean,

@@ -27,7 +27,15 @@ type WakeGateStore = {
 };
 
 const STORE_KEY = 'oh-my-opencode-slim.orchestrator-wake-gate';
+const HOLDERS_KEY = 'oh-my-opencode-slim.orchestrator-wake-gate-holders';
 const MAX_TRACKED_SESSIONS = 256;
+const MAX_HOLDER_SESSIONS = 512;
+
+/** Hook instances (by token) that serve each tracked session. Separate key so
+ * a store created by an older module generation never lacks it. */
+function getHolders(): Map<string, Set<symbol>> {
+  return getGlobalStore<Map<string, Set<symbol>>>(HOLDERS_KEY, () => new Map());
+}
 
 function getStore(): WakeGateStore {
   return getGlobalStore<WakeGateStore>(STORE_KEY, () => ({
@@ -216,9 +224,48 @@ export function getObservedWakeModel(
   return getStore().progress.get(sessionID)?.observedModel;
 }
 
+/** Record that the hook identified by `holder` serves this session. */
+export function claimWakeSession(sessionID: string, holder: symbol): void {
+  const holders = getHolders();
+  const set = holders.get(sessionID) ?? new Set<symbol>();
+  set.add(holder);
+  // LRU touch, bounded on its own so claims never evict progress entries. An
+  // evicted claim only means disposal leaves that session to the gate's own
+  // eviction or the last-instance clear.
+  holders.delete(sessionID);
+  holders.set(sessionID, set);
+  while (holders.size > MAX_HOLDER_SESSIONS) {
+    const oldest = holders.keys().next().value;
+    if (oldest === undefined) break;
+    holders.delete(oldest);
+  }
+}
+
+/**
+ * One hook instance's disposal while others stay live: drop the wake state of
+ * the sessions only that hook served, so a reloaded generation for its
+ * location starts with fresh no-progress caps, while sessions another live
+ * hook still serves keep theirs. The disposing hook releases its own
+ * in-flight reservations first, so a reservation still present belongs to a
+ * live hook and is left in place together with its release waiters.
+ */
+export function releaseWakeSessionHolder(holder: symbol): void {
+  const store = getStore();
+  for (const [sessionID, set] of [...getHolders()]) {
+    if (!set.delete(holder) || set.size > 0) continue;
+    if (store.inFlight.has(sessionID)) {
+      store.progress.delete(sessionID);
+      getHolders().delete(sessionID);
+    } else {
+      clearWakeSession(sessionID);
+    }
+  }
+}
+
 /** Full session cleanup (deletion or disposal). */
 export function clearWakeSession(sessionID: string): void {
   const store = getStore();
+  getHolders().delete(sessionID);
   store.progress.delete(sessionID);
   store.inFlight.delete(sessionID);
   store.releaseWaiters.delete(sessionID);
@@ -233,6 +280,7 @@ export function clearAllWakeSessions(): void {
   store.inFlight.clear();
   store.releaseWaiters.clear();
   store.order.length = 0;
+  getHolders().clear();
 }
 
 /** Test seam. */

@@ -135,6 +135,11 @@ import {
 } from './utils/background-job-terminal-gate';
 import { isPluginDisabledByEnv } from './utils/env';
 import {
+  createEventDirectoryScope,
+  type EventDirectoryScope,
+  hasLiveInstances,
+} from './utils/event-directory-scope';
+import {
   isInternalInitiatorPart,
   isNativeBackgroundTaskNotification,
 } from './utils/internal-initiator';
@@ -305,8 +310,7 @@ export const HARD_PROFILE_REFRESH_WARNING_KINDS: ReadonlySet<ConfigLoadWarningKi
   new Set(['invalid-json', 'invalid-schema', 'read-error']);
 
 export const OhMyOpenCodeLite: Plugin = async (ctx) => {
-  const sessionId = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15);
-  initLogger(sessionId);
+  initLogger();
   log('[plugin] build info', getBuildInfo());
 
   if (isPluginDisabledByEnv()) {
@@ -314,11 +318,15 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     return {};
   }
 
+  // Directory scope (multi-instance): created inside the init try so every
+  // exit path releases its live-directory claim (see the catch below).
+  let eventDirectoryScope: EventDirectoryScope | undefined;
+
   // Observation-only prompt-cache watchdog; safe to create before config
-  // loads and must see every event, so it sits outside the try block.
-  // `disabled_hooks: ["cache-monitor"]` gates the per-event call below;
-  // creation stays here so the pre-config event path needs no undefined
-  // handling.
+  // loads and must see every event of this location, so it sits outside the
+  // try block. `disabled_hooks: ["cache-monitor"]` gates the per-event call
+  // below; creation stays here so the pre-config event path needs no
+  // undefined handling.
   const cacheMonitor = createCacheMonitorHook();
 
   // Declare variables that must survive the try/catch for the return
@@ -746,6 +754,12 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   };
 
   try {
+    // Directory scope (multi-instance): the host loads this plugin once per
+    // location and broadcasts every event to every instance in the process.
+    const directory = ctx.directory;
+    eventDirectoryScope = createEventDirectoryScope(directory);
+    log('[plugin] instance scope', { directory });
+
     // Read the host flavor marker before config load: it bounds project
     // config discovery, and v2 hosts derive leaner background-job defaults
     // (see loadPluginConfig), so the flavor must be known when the config
@@ -1463,6 +1477,10 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   } catch (err) {
     terminalGate?.dispose();
     admissionRuntimeLease?.release();
+    // The scope claim must not outlive a failed init: a leaked live-directory
+    // entry would keep other instances from ever reclaiming this location and
+    // would block the last-instance wake reset.
+    eventDirectoryScope?.release();
     // Plugin init failed: log visibly before re-throwing so the user
     // sees something actionable instead of a silent "loaded but empty".
     log('[plugin] FATAL: init failed', String(err));
@@ -2009,6 +2027,11 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         return;
       }
 
+      // Directory scope (multi-instance): process only this location's
+      // events. Unresolved events fall through (fail-open).
+      eventDirectoryScope?.note(input.event);
+      if (eventDirectoryScope?.isForeign(input.event)) return;
+
       const event = input.event as {
         type: string;
         // Raw v2 envelope: host time and payload.
@@ -2308,6 +2331,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     },
 
     dispose: async () => {
+      eventDirectoryScope?.release();
       // Synchronous: v2 setup calls this directly and does not emit the
       // public server.instance.disposed event first.
       instanceDisposed = true;
@@ -2322,12 +2346,12 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       await orchestratorWakeScheduler.event({
         event: { type: 'server.instance.disposed' },
       });
-      // The scheduler cleanup above only clears its own instance state;
-      // the wake gate is process-global (globalThis + Symbol.for) and
-      // survives module re-entry. `opencode reload` reuses this process,
-      // so generation two would otherwise inherit generation one's
-      // two-wake no-progress caps and never wake those sessions again.
-      clearAllWakeSessions();
+      // The wake gate is process-global (globalThis + Symbol.for) and survives
+      // module re-entry, so a reloaded generation would otherwise inherit the
+      // previous generation's no-progress caps. Clear it only when this was the
+      // last live instance: disposing one of several locations must not wipe
+      // the other locations' wake state.
+      if (!hasLiveInstances()) clearAllWakeSessions();
       v1InternalSelectionOverrides.clear();
       v1ChildParents.clear();
       pendingV1ChildModels.clear();
