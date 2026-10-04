@@ -64,9 +64,10 @@ function loadScopeConfig(
   directory: string,
   scope: MarketplaceActivationScope,
   filePath: string,
+  hostFlavor?: string,
 ): ConfigRecord {
   if (scope === 'project') {
-    return asRecord(loadPluginConfig(directory, { silent: true }));
+    return asRecord(loadPluginConfig(directory, { silent: true, hostFlavor }));
   }
   return readPluginConfig(filePath);
 }
@@ -75,9 +76,10 @@ export function preflightMarketplaceAgentActivation(
   directory: string,
   scope: MarketplaceActivationScope = 'project',
   presetOverride?: string,
+  hostFlavor?: string,
 ): void {
   const filePath = configWritePath(directory, scope);
-  const config = loadScopeConfig(directory, scope, filePath);
+  const config = loadScopeConfig(directory, scope, filePath, hostFlavor);
   const presetName = activePresetName(config, presetOverride);
   if (!asRecord(config.presets)[presetName]) {
     throw new MarketplaceActivationError(
@@ -200,6 +202,7 @@ function persistActivation(
   scope: MarketplaceActivationScope,
   presetOverride: string | undefined,
   store?: MarketplaceStoreReader,
+  hostFlavor?: string,
 ): void {
   const filePath = configWritePath(directory, scope);
   try {
@@ -235,7 +238,12 @@ function persistActivation(
           }
         }
       }
-      const effectiveConfig = loadScopeConfig(directory, scope, filePath);
+      const effectiveConfig = loadScopeConfig(
+        directory,
+        scope,
+        filePath,
+        hostFlavor,
+      );
       const presetName = activePresetName(effectiveConfig, presetOverride);
       if (!asRecord(effectiveConfig.presets)[presetName]) {
         throw new MarketplaceActivationError(
@@ -244,19 +252,28 @@ function persistActivation(
       }
       const presets = asRecord(persisted.presets);
       let currentPreset = { ...asRecord(presets[presetName]) };
-      const paths = findPluginConfigPaths(directory);
+      const paths = findPluginConfigPaths(directory, hostFlavor);
       const writesProjectConfig = scope === 'project';
       const userConfig =
         scope === 'project' ? readPluginConfig(paths.userConfigPath) : {};
-      const userPresets = asRecord(userConfig.presets) as Record<
+      let basePresets = asRecord(userConfig.presets) as Record<
         string,
         PresetInput
       >;
+      if (writesProjectConfig) {
+        for (const configPath of paths.projectConfigPaths) {
+          if (configPath === filePath) continue;
+          const ancestorPresets = asRecord(
+            readPluginConfig(configPath).presets,
+          ) as Record<string, PresetInput>;
+          basePresets = mergePresetMaps(basePresets, ancestorPresets) ?? {};
+        }
+      }
       const projectPresets = asRecord(
         interpolateEnvironment(persisted.presets),
       ) as Record<string, PresetInput>;
       const effectivePresets = writesProjectConfig
-        ? (mergePresetMaps(userPresets, projectPresets) ?? {})
+        ? (mergePresetMaps(basePresets, projectPresets) ?? {})
         : projectPresets;
       const effective = resolvePresetDefinition(presetName, effectivePresets);
       const active = normalizePackageIds(
@@ -326,7 +343,7 @@ function persistActivation(
         delete baselinePreset.marketplace;
       }
       const baselineDefinition = writesProjectConfig
-        ? mergePresetMaps(userPresets, {
+        ? mergePresetMaps(basePresets, {
             [presetName]: baselinePreset as PresetInput,
           })?.[presetName]
         : (baselinePreset as PresetInput);
@@ -371,7 +388,7 @@ function persistActivation(
         if (additions.includes(id)) {
           const remaining = withoutPackage(rawAdditions, additions, id);
           const lowerPreset = writesProjectConfig
-            ? (userPresets[presetName] as PresetInput | undefined)
+            ? (basePresets[presetName] as PresetInput | undefined)
             : undefined;
           if (
             remaining.length === 0 &&
@@ -420,10 +437,24 @@ export function enableMarketplaceAgent(
   store: MarketplaceStoreReader,
   scope: MarketplaceActivationScope = 'project',
   presetOverride?: string,
+  hostFlavor?: string,
 ): void {
   const id = normalizeMarketplacePackageId(packageId);
-  preflightMarketplaceAgentActivation(directory, scope, presetOverride);
-  persistActivation(directory, id, true, scope, presetOverride, store);
+  preflightMarketplaceAgentActivation(
+    directory,
+    scope,
+    presetOverride,
+    hostFlavor,
+  );
+  persistActivation(
+    directory,
+    id,
+    true,
+    scope,
+    presetOverride,
+    store,
+    hostFlavor,
+  );
 }
 
 export function disableMarketplacePackage(
@@ -431,7 +462,16 @@ export function disableMarketplacePackage(
   packageId: string,
   scope: MarketplaceActivationScope = 'project',
   presetOverride?: string,
+  hostFlavor?: string,
 ): void {
   const id = normalizeMarketplacePackageId(packageId);
-  persistActivation(directory, id, false, scope, presetOverride);
+  persistActivation(
+    directory,
+    id,
+    false,
+    scope,
+    presetOverride,
+    undefined,
+    hostFlavor,
+  );
 }

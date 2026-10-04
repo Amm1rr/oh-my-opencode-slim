@@ -165,7 +165,10 @@ export class RuntimeConfig {
   /** Cache-safety marker: never expose volatile text for prompt assembly. */
   readonly isCacheSafe = true as const;
 
-  private constructor(private readonly directory: string) {}
+  private constructor(
+    private readonly directory: string,
+    private hostFlavor?: string,
+  ) {}
 
   /**
    * Seed (or re-seed) the plugin file layer for a directory. Re-seeding
@@ -175,13 +178,15 @@ export class RuntimeConfig {
   static init(
     directory: string,
     pluginConfig: ResolvedPluginConfig,
+    hostFlavor?: string,
   ): RuntimeConfig {
     const existing = registry.get(directory);
     if (existing) {
+      existing.hostFlavor = hostFlavor;
       existing.seedPlugin(pluginConfig);
       return existing;
     }
-    const instance = new RuntimeConfig(directory);
+    const instance = new RuntimeConfig(directory, hostFlavor);
     instance.seedPlugin(pluginConfig);
     registry.set(directory, instance);
     return instance;
@@ -191,8 +196,9 @@ export class RuntimeConfig {
   static createDetached(
     directory: string,
     pluginConfig: ResolvedPluginConfig,
+    hostFlavor?: string,
   ): RuntimeConfig {
-    const instance = new RuntimeConfig(directory);
+    const instance = new RuntimeConfig(directory, hostFlavor);
     instance.seedPlugin(pluginConfig);
     return instance;
   }
@@ -626,6 +632,7 @@ export class RuntimeConfig {
     if (this.localSkillNamesCache === undefined) {
       this.localSkillNamesCache = discoverProjectLocalSkillNames(
         this.directory,
+        this.hostFlavor,
       );
     }
     return this.localSkillNamesCache;
