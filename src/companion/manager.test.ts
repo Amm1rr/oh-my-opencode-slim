@@ -835,6 +835,45 @@ describe('CompanionManager', () => {
     expect(readState().sessions[0].status).toBe('busy');
   });
 
+  it('increments attention generation once per distinct input request id', () => {
+    const m = make();
+    m.onLoad();
+
+    m.onWaitingInput('request-1');
+    expect(readState().sessions[0].attention_seq).toBe(1);
+
+    // v2 permission asks are delivered raw + synthesized with the same id.
+    // The additive bridge copy must not create a second native notification.
+    m.onWaitingInput('request-1');
+    expect(readState().sessions[0].attention_seq).toBe(1);
+
+    // A distinct request must remain distinguishable even if a native watcher
+    // never observed an intermediate resolved state.
+    m.onInputResolved();
+    m.onWaitingInput('request-2');
+    expect(readState().sessions[0].attention_seq).toBe(2);
+  });
+
+  it('preserves attention identity across manager replacement', () => {
+    const first = make();
+    first.onLoad();
+    first.onWaitingInput('request-1');
+    expect(readState().sessions[0].attention_seq).toBe(1);
+
+    const replacement = make();
+    replacement.onLoad();
+
+    // Re-delivery of the request that was already published must remain
+    // deduplicated after the replacement manager takes ownership.
+    replacement.onWaitingInput('request-1');
+    expect(readState().sessions[0].attention_seq).toBe(1);
+
+    replacement.onInputResolved();
+    replacement.onWaitingInput('request-2');
+    expect(readState().sessions[0].attention_seq).toBe(2);
+    expect(readState().sessions[0].attention_request_id).toBe('request-2');
+  });
+
   it('keeps waiting-input sticky across busy and idle lifecycle noise', () => {
     const m = make();
     m.onLoad();

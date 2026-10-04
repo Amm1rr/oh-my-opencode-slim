@@ -2224,11 +2224,25 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         },
       );
 
+      const companionProperties = event.properties;
+      const companionData = (input.event as { data?: Record<string, unknown> })
+        .data;
+      const companionRequestId =
+        typeof companionProperties?.id === 'string'
+          ? companionProperties.id
+          : typeof companionProperties?.requestID === 'string'
+            ? companionProperties.requestID
+            : typeof companionData?.id === 'string'
+              ? companionData.id
+              : typeof companionData?.requestID === 'string'
+                ? companionData.requestID
+                : undefined;
+
       if (
         event.type === 'permission.asked' ||
         event.type === 'question.asked'
       ) {
-        companionManager.onWaitingInput();
+        companionManager.onWaitingInput(companionRequestId);
       }
 
       if (
