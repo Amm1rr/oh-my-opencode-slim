@@ -63,8 +63,6 @@ export interface ConfigLoadWarning {
  * Options for loadPluginConfig.
  */
 export interface LoadPluginConfigOptions {
-  /** Unmarked hosts use v1's worktree-bounded discovery. */
-  hostFlavor?: string;
   /**
    * Called with a warning whenever config loading produces a non-fatal issue.
    * The loader still falls back to defaults and continues normally.
@@ -82,6 +80,7 @@ export interface LoadPluginConfigOptions {
    * set explicitly: on v2 the native background notifier already delivers
    * a run's first terminal publication, so board injection and periodic
    * wake evaluation default off there. Explicit config always wins.
+   * Unmarked hosts also use v1's worktree-bounded discovery.
    */
   hostFlavor?: string;
 }
