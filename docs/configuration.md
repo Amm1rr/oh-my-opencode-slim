@@ -131,26 +131,7 @@ All config files support **JSONC** (JSON with Comments):
 |--------|------|---------|-------------|
 | `preset` | string | - | Active preset name (e.g. `"openai"`, `"best"`) |
 | `stripOrchestratorModel` | boolean | `false` | Preserve a runtime `/model` selection for the orchestrator after subagent dispatch by omitting its configured model from the SDK config. A selected preset's explicit `orchestrator.model` is retained. Without a runtime selection, this opt-in delegates the initial orchestrator choice to OpenCode's session default. |
-
-### Runtime Preset Switching
-
-Presets can also be selected from the TUI with `/preset`. The selection is
-written to the user config file. On v2 hosts the write requests the live
-refresh: after the server-side watcher has re-read the config, the
-saved/applied preset's inference fields (`model`, `variant`, `temperature`,
-`options`) apply to **new child dispatches** (frozen for each child before
-its first request) and the sidebar. Every existing session and every
-non-inference preset field (`prompt`, `tools`, `permission`, `skills`,
-`mcps`, `displayName`) stays frozen until a full reload. A malformed config
-is rejected before any swap — the last-known-good profiles and sidebar are
-kept until the config is fixed. The TUI reports `Saved … Live refresh
-requested` (it cannot observe the server-side watcher); fix the config and
-reload if new dispatches still use the old fields. On v1 hosts, reload
-OpenCode for the change to take effect. See
-[Preset Switching](preset-switching.md) for details.
-
 | `presets` | object | - | Named preset configurations. New preset names are limited to letters, digits, `-`, and `_`; `__omo_*` and JavaScript reserved property names (`__proto__`, `constructor`, `prototype`) are rejected for new presets (pre-existing entries with other names stay visible and applicable) |
-|-----------|--------|---|-----------------------------|
 | `presets.<name>.extends` | string | - | Optional single parent preset. The parent is resolved before the child; multiple parents are not supported |
 | `presets.<name>.<agent>.model` | string | - | Model ID in `provider/model` format |
 | `presets.<name>.<agent>.temperature` | number | - | Optional temperature (0–2); when omitted, OpenCode chooses its default |
@@ -170,11 +151,6 @@ OpenCode for the change to take effect. See
 | `agents.<agent>.displayName` | string | - | Custom user-facing alias for the agent in the active config |
 | `agents.<agent>.color` | string | - | Agent display color as `#RRGGBB` or a theme color: `primary`, `secondary`, `accent`, `success`, `warning`, `error`, or `info` |
 | `agents.<agent>.description` | string | generated | Description shown to OpenCode and the orchestrator; defaults to `Custom subagent '<name>'` for custom agents |
-
-The plugin's `agents.<agent>.mcps` setting controls which configured plugin MCP
-servers its policy allows. It is not a host-native `agent.mcps` property and
-does not replace host permission rules: an explicit host permission denial for
-an MCP tool remains authoritative.
 | `acpAgents.<name>.command` | string | - | Command for an external ACP-compatible agent; creates a wrapper subagent named `<name>` See [ACP-connected agents](#acp-connected-agents). |
 | `acpAgents.<name>.args` | string[] | `[]` | Arguments for the ACP agent command See [ACP-connected agents](#acp-connected-agents). |
 | `acpAgents.<name>.env` | object | `{}` | Extra environment variables for the ACP subprocess See [ACP-connected agents](#acp-connected-agents). |
@@ -220,8 +196,8 @@ an MCP tool remains authoritative.
 | `disabled_mcps` | string[] | `[]` | MCP server IDs to disable globally |
 | `disabled_tools` | string[] | `[]` | Slim tool names to disable globally. Disabled Slim tools are not registered with OpenCode and cannot be used by agents; OpenCode built-in tools are not affected |
 | `disabled_skills` | string[] | `[]` | Skill names to disable globally. Disabled skills are not granted to agents, and disabled bundled skills are not registered; listing `reflect` here also disables the `/reflect` command |
-| `disabled_hooks` | string[] | `[]` | Hook names to disable globally: `"phase-reminder"` stops orchestrator phase-reminder injection; `"foreground-fallback"` disables automatic foreground model fallback, same effect as `fallback.enabled = false`; `"deepwork-guard"` turns the deepwork receipt/claim guard off (see `deepworkGuardMode`); `"chat-headers"` stops the Copilot `x-initiator` header from being stamped (v1 `chat.headers` and the v2 `model.request` bridge); `"cache-monitor"` stops the prompt-cache bust watchdog, so cache warnings are never logged; the on-demand tool guards `"json-error-recovery"`, `"tool-loop-guard"`, `"search-path-guard"`, `"absolute-path-rescue"`, and `"apply-patch"` stop intercepting tool calls entirely, so malformed output, repeated identical calls, and invalid or guessed paths surface raw to the model. Unknown values are stripped with a warning when the config loads; a value consisting only of unknown names is treated as unset, so a lower config layer's list still applies |
-| `disabled_commands` | string[] | `[]` | Slash commands to disable globally: `"interview"`, `"deepwork"`, `"reflect"`, or `"loop"`. Disabled commands are neither registered nor intercepted at execution time, so a user-defined command with the same name is left untouched. Listing `reflect` in `disabled_skills` also disables the `/reflect` command. Unknown values are stripped with a warning when the config loads; a value consisting only of unknown names is treated as unset, so a lower config layer's list still applies |
+| `disabled_hooks` | string[] | `[]` | Hook names to disable globally: `phase-reminder`, `foreground-fallback`, `deepwork-guard`, `chat-headers`, `cache-monitor`, `json-error-recovery`, `tool-loop-guard`, `search-path-guard`, `absolute-path-rescue`, `apply-patch`, `council-inject`. Unknown values are stripped with a warning when the config loads; a value consisting only of unknown names is treated as unset, so a lower config layer's list still applies. See [Hooks](#hooks) |
+| `disabled_commands` | string[] | `[]` | Slash commands to disable globally: `interview`, `deepwork`, `reflect`, `loop`. Disabled commands are neither registered nor intercepted at execution time, so a user-defined command with the same name is left untouched. Listing `reflect` in `disabled_skills` also disables the `/reflect` command. See [Slash Commands](#slash-commands) |
 | `fallback.enabled` | boolean | `true` | Enable Slim's foreground model-chain failover. It does not configure OpenCode provider/AI-SDK retries. On **v2 hosts** the replay path (abort + re-prompt) stays disabled — the v2 `switchModel` has no per-turn/atomic conditional form, so an in-flight replay could commit after a newer user turn has taken over — while the retry-hook steering path runs: host retry events are absorbed up to `fallback.maxRetries`, then the model is switched in place via the host `session.switchModel` and the host retries the current turn on the new model. The same switch disables both paths. |
 | `fallback.maxRetries` | number | `3` | Number of host retry events Slim absorbs before advancing the foreground model chain. The budget stays spent across model switches; a completed successful assistant response, an observed return to the configured primary for a fresh descent, or session deletion re-arms it. Terminal `session.error` and `message.updated` failures advance immediately without charging it. `0` advances on the first retry event. This does not configure OpenCode provider or background subagent retries. |
 | `fallback.initialRetryDelayMs` | number | `0` | Delay in milliseconds before triggering the first fallback on a failover-worthy error. Gives intercepting plugins time to recover the current model before the fallback chain advances. 0 disables. |
@@ -242,6 +218,28 @@ an MCP tool remains authoritative.
 | `companion.binaryPath` | string | - | Optional path to a custom companion binary to launch instead of the default install path See [Desktop Companion App](#desktop-companion-app). |
 | `companion.position` | string | `"bottom-right"` | The initial corner position of the companion window: `bottom-right`, `bottom-left`, `top-right`, or `top-left` See [Desktop Companion App](#desktop-companion-app). |
 | `companion.size` | string | `"medium"` | The default size preset of the companion window: `small` (80px), `medium` (120px), or `large` (160px) See [Desktop Companion App](#desktop-companion-app). |
+
+The plugin's `agents.<agent>.mcps` setting controls which configured plugin MCP
+servers its policy allows. It is not a host-native `agent.mcps` property and
+does not replace host permission rules: an explicit host permission denial for
+an MCP tool remains authoritative.
+
+### Runtime Preset Switching
+
+Presets can also be selected from the TUI with `/preset`. The selection is
+written to the user config file. On v2 hosts the write requests the live
+refresh: after the server-side watcher has re-read the config, the
+saved/applied preset's inference fields (`model`, `variant`, `temperature`,
+`options`) apply to **new child dispatches** (frozen for each child before
+its first request) and the sidebar. Every existing session and every
+non-inference preset field (`prompt`, `tools`, `permission`, `skills`,
+`mcps`, `displayName`) stays frozen until a full reload. A malformed config
+is rejected before any swap — the last-known-good profiles and sidebar are
+kept until the config is fixed. The TUI reports `Saved … Live refresh
+requested` (it cannot observe the server-side watcher); fix the config and
+reload if new dispatches still use the old fields. On v1 hosts, reload
+OpenCode for the change to take effect. See
+[Preset Switching](preset-switching.md) for details.
 
 ### Preset inheritance
 
@@ -910,6 +908,39 @@ When a user supplies `permission` and also uses the `skills` or `mcps` arrays on
 4. **User-supplied keys for standard tools** (`edit`, `bash`, `webfetch`, `task`, etc.) survive the merge untouched.
 
 Use the `skills`/`mcps` arrays for skill and MCP gating. Use `permission` for everything else (file access, bash, web, task delegation).
+
+### Hooks
+
+Disable built-in hooks via `disabled_hooks`:
+
+```json
+{ "disabled_hooks": ["phase-reminder"] }
+```
+
+Available hooks:
+
+- **Prompt injection**: `phase-reminder` (per-turn scheduler-workflow reminder on orchestrator messages), `council-inject` (keyword-triggered Council Mode procedure).
+- **Model failover**: `foreground-fallback` — same effect as `fallback.enabled = false`.
+- **Tool guards**: `json-error-recovery`, `tool-loop-guard`, `search-path-guard`, `absolute-path-rescue`, `apply-patch` — each stops intercepting tool calls entirely, so malformed output, repeated identical calls, and invalid or guessed paths surface raw to the model.
+- **Deepwork**: `deepwork-guard` turns the receipt/claim guard off (see `deepworkGuardMode`).
+- **Telemetry / headers**: `cache-monitor` (prompt-cache bust watchdog; warnings stop), `chat-headers` (Copilot `x-initiator` header on both the v1 `chat.headers` hook and the v2 `model.request` bridge).
+
+Guards such as `tool-loop-guard`, `search-path-guard`, `absolute-path-rescue`, and `apply-patch` protect against model-side loops, bad paths, and malformed patches. Disable them only when you want raw upstream behavior.
+
+Notes:
+
+- Injection surfaces that have dedicated switches are not listed here: the Background Job Board (`backgroundJobs.boardInjection`), wake prompts (`backgroundJobs.orchestratorWake.enabled`, `backgroundJobs.childInputWake`), update notifications (`autoUpdate`), and image routing (`image_routing`).
+- Invalid entries are stripped with a warning when the config loads; a value consisting only of unknown names is treated as unset, so a lower config layer's list still applies.
+
+### Slash Commands
+
+Disable built-in commands via `disabled_commands`:
+
+```json
+{ "disabled_commands": ["interview", "deepwork"] }
+```
+
+Available commands: `interview`, `deepwork`, `reflect`, `loop`. Disabled commands are neither registered nor intercepted at execution time, so a user-defined command with the same name is left untouched. Listing `reflect` in `disabled_skills` also disables the `/reflect` command.
 
 ### Multiplexer
 
