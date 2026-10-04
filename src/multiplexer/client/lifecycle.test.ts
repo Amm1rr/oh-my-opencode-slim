@@ -1125,6 +1125,39 @@ describe('rebuild and reconnect backfill (2.4)', () => {
     expect(h.adapter.spawnCalls).toHaveLength(2);
   });
 
+  test('backfill stops before the next spawn when the displayed parent changes', async () => {
+    const h = createHarness();
+    h.list.setSessionIds(CHILD, 'child-2');
+    h.reader.statuses.set(CHILD, 'busy');
+    h.reader.statuses.set('child-2', 'busy');
+    const barrier = createDeferred();
+    h.adapter.spawnBarrier = barrier.promise;
+    const reconnect = h.lifecycle.onReconnect();
+    await flushAsync();
+    h.lifecycle.setDisplayedSession('other-parent');
+    barrier.resolve();
+    await reconnect;
+    expect(h.adapter.spawnCalls.map((call) => call.sessionId)).toEqual([CHILD]);
+    expect(h.adapter.closeCalls).toHaveLength(0);
+  });
+
+  test('watched backfill stops before the next spawn when the directory changes', async () => {
+    const h = createHarness();
+    h.list.setSessionIds(CHILD, 'child-2');
+    await h.lifecycle.onReconnect(); // idle watches
+    h.reader.statuses.set(CHILD, 'busy');
+    h.reader.statuses.set('child-2', 'busy');
+    const barrier = createDeferred();
+    h.adapter.spawnBarrier = barrier.promise;
+    const reconnect = h.lifecycle.onReconnect();
+    await flushAsync();
+    h.lifecycle.setDisplayedDirectory('/other-project');
+    barrier.resolve();
+    await reconnect;
+    expect(h.adapter.spawnCalls.map((call) => call.sessionId)).toEqual([CHILD]);
+    expect(h.adapter.closeCalls).toHaveLength(0);
+  });
+
   test('a child going idle before its turn in busy backfill closes after debounce', async () => {
     const h = createHarness();
     uniquePaneIds(h);

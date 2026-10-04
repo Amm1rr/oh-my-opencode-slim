@@ -352,6 +352,7 @@ export class PaneLifecycle {
         }
         const live = statuses?.get(childSessionId);
         if (live !== 'busy' && live !== 'retry') continue;
+        if (!this.isDisplayed(parentSessionId, directory)) break;
         await this.createPane(
           childSessionId,
           watched.parentSessionId,
@@ -378,6 +379,7 @@ export class PaneLifecycle {
           );
         continue;
       }
+      if (!this.isDisplayed(parentSessionId, directory)) break;
       await this.createPane(
         childSessionId,
         parentSessionId,
