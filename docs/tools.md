@@ -169,8 +169,10 @@ is not required before that continuation.
 
 A successful native delegation result may end with a `slim-child-ref:v1`
 marker so a later restart can resolve the alias. The marker is trusted only
-on the parent's real native tool result, after the outer task closes, and
-only when it matches that result's session ID and original agent argument.
+on the parent's real native tool result, after the outer task closes — or,
+for a native background plaintext launch result with no closing tag, only
+when the marker is that output's final non-empty line —
+and only when it matches that result's session ID and original agent argument.
 A numbered alias is issued only to children of a parent created while the
 plugin instance runs (see [Background Orchestration](background-orchestration.md));
 any other new task is still created and is referred to by its exact session ID.

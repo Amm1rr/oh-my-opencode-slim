@@ -800,8 +800,14 @@ export function readAuthoritativeChildRef(
   output: string,
 ): ChildRef | undefined {
   const close = lastOuterClose(output);
-  if (!close) return undefined;
-  const tail = output.slice(close.end).trim();
+  // Tagged outputs trust the marker right after the outer close tag. A
+  // native background plaintext result has no close tag: the marker is
+  // trusted only as the output's final non-empty line, never somewhere
+  // inside the body.
+  const tail = close
+    ? output.slice(close.end).trim()
+    : lastNonEmptyLine(output);
+  if (tail === undefined) return undefined;
   const match = /^<!-- slim-child-ref:v1 (\{.*\}) -->$/.exec(tail);
   if (!match?.[1]) return undefined;
   let parsed: unknown;
@@ -814,6 +820,13 @@ export function readAuthoritativeChildRef(
   const outerID = parseTaskIdFromTaskOutput(output);
   if (!outerID || outerID !== parsed.sessionID) return undefined;
   return parsed;
+}
+
+/** The final non-empty line of `output`, trimmed; undefined when blank. */
+function lastNonEmptyLine(output: string): string | undefined {
+  const trimmed = output.trimEnd();
+  if (trimmed.length === 0) return undefined;
+  return trimmed.slice(trimmed.lastIndexOf('\n') + 1).trim();
 }
 
 function formatChildRef(ref: ChildRef): string {

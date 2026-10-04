@@ -5,7 +5,18 @@ import {
 } from '@opencode-ai/plugin';
 import { listChildInputWaits } from '../hooks/task-session-manager/child-input-wait';
 import type { BackgroundJobStore } from '../utils/background-job-store';
-import { getRuntimeSessionStatusSnapshot } from '../utils/session-runtime-status';
+import {
+  classifyTerminalEvidence,
+  classifyV2HistoricalRound,
+  fetchChildTranscript,
+} from '../utils/child-transcript';
+import { isRecord } from '../utils/guards';
+import { getClient } from '../utils/opencode-client';
+import { SESSION_ID_PATTERN } from '../utils/session';
+import {
+  getRuntimeSessionStatusSnapshot,
+  runtimeSessionStatus,
+} from '../utils/session-runtime-status';
 import type { TaskActivityTracker } from './task-activity';
 import { observationFromSnapshot, summarizeTaskStatus } from './task-policy';
 import {
@@ -16,6 +27,7 @@ import {
 } from './task-ref';
 
 const ACTIVE_STATES = new Set(['busy', 'running', 'retry']);
+const UNTRACKED_STATE = 'running-or-incomplete';
 
 export function createTaskStatusTool(options: {
   input: PluginInput;
@@ -24,11 +36,12 @@ export function createTaskStatusTool(options: {
   now?: () => number;
   statusTimeoutMs?: number;
   resolveCanonicalTaskRef?: CanonicalTaskResolver;
+  isDisposed?: () => boolean;
 }): Record<'task_status', ToolDefinition> {
   const idParam = idParamFor(options.input);
   const task_status = tool({
     description:
-      'Read the current status of a tracked child task without resuming, prompting, or changing it. Accepts its task ID or parent-scoped alias.',
+      'Read the current status of a tracked child task without resuming, prompting, or changing it. Accepts its task ID or parent-scoped alias. For a task the board no longer tracks (e.g. after a restart), verifies host ownership and reports a read-only observed state.',
     args: {
       ...taskRefArgs(idParam),
     },
@@ -46,7 +59,15 @@ export function createTaskStatusTool(options: {
         ? options.backgroundJobBoard.get(identity)
         : options.backgroundJobBoard.resolve(parentSessionID, requested);
       if (!job || job.parentSessionID !== parentSessionID) {
-        throw new Error(`Unknown task ID or alias: ${identity}`);
+        // Read-only fallback for a session the board lost (e.g. a host or
+        // plugin restart emptied the in-memory board): verify ownership
+        // like task_result's untracked path, then report observed
+        // evidence. The task is never registered, prompted, or aborted.
+        return reportUntrackedTaskStatus(options, {
+          requested,
+          identity,
+          parentSessionID,
+        });
       }
       const taskID = job.taskID;
 
@@ -122,6 +143,153 @@ export function createTaskStatusTool(options: {
   });
 
   return { task_status };
+}
+
+interface UntrackedStatusOptions {
+  input: PluginInput;
+  now?: () => number;
+  statusTimeoutMs?: number;
+  isDisposed?: () => boolean;
+}
+
+/**
+ * Read-only status for a task the board does not track. Mirrors
+ * task_result's untracked path: ownership via `client.session.get`
+ * parentID, then v2 `classifyV2HistoricalRound` / v1
+ * `classifyTerminalEvidence` over the child transcript. Never registers,
+ * prompts, or aborts anything.
+ */
+async function reportUntrackedTaskStatus(
+  options: UntrackedStatusOptions,
+  ref: {
+    requested: string;
+    identity: string;
+    parentSessionID: string;
+  },
+): Promise<string> {
+  const { identity, parentSessionID } = ref;
+  if (!SESSION_ID_PATTERN.test(identity)) {
+    throw new Error(`Unknown task ID or alias: ${identity}`);
+  }
+  if (options.isDisposed?.()) {
+    // Disposed: keep task_status's existing unknown-task contract.
+    throw new Error(`Unknown task ID or alias: ${identity}`);
+  }
+  const client = getClient(options.input);
+  if (typeof client.session?.get !== 'function') {
+    throw new Error(`Unknown task ID or alias: ${identity}`);
+  }
+  let response: Awaited<ReturnType<typeof client.session.get>>;
+  try {
+    response = await client.session.get({
+      path: { id: identity },
+      query: { directory: options.input.directory },
+    });
+  } catch {
+    // An unreadable host session cannot be verified or attributed.
+    throw new Error(`Unknown task ID or alias: ${identity}`);
+  }
+  if (options.isDisposed?.()) {
+    // Disposed: keep task_status's existing unknown-task contract.
+    throw new Error(`Unknown task ID or alias: ${identity}`);
+  }
+  // Read untyped fields (agent, time) the generated Session type omits.
+  const data: Record<string, unknown> | undefined = isRecord(response.data)
+    ? response.data
+    : undefined;
+  if (!data) {
+    // A host error payload (e.g. NotFound) verifies nothing.
+    throw new Error(`Unknown task ID or alias: ${identity}`);
+  }
+  if (typeof data.parentID !== 'string' || !data.parentID) {
+    // The host session exists but exposes no parent: ownership cannot be
+    // verified, so the caller gets the existing unknown error rather
+    // than a claim that another parent owns it.
+    throw new Error(`Unknown task ID or alias: ${identity}`);
+  }
+  if (data.parentID !== parentSessionID) {
+    throw new Error(`Task ${ref.requested} does not belong to this session`);
+  }
+  const agentRaw = data.agent;
+  const agent =
+    typeof agentRaw === 'string' && agentRaw.trim()
+      ? agentRaw.trim()
+      : undefined;
+  const time = isRecord(data.time) ? data.time : undefined;
+  const created = time?.created;
+  const lastActivityAt =
+    typeof created === 'number' && Number.isFinite(created)
+      ? created
+      : undefined;
+
+  const v2 = (options.input as { hostFlavor?: string }).hostFlavor === 'v2';
+  const details = [
+    `Task ${identity} is not tracked by the local background job board (its tracking does not survive a host or plugin restart).`,
+    'board: untracked',
+  ];
+
+  // v1's live status map is real evidence of execution; v2 has no
+  // equivalent (the shim omits `status`), so this probe is v1 only.
+  if (!v2) {
+    const snapshot = await getRuntimeSessionStatusSnapshot(options.input, {
+      timeoutMs: options.statusTimeoutMs,
+    });
+    const status = runtimeSessionStatus(snapshot, identity);
+    if (status === 'busy' || status === 'retry') {
+      details.push(`state: ${status} (live)`);
+      details.push(
+        `[guidance]: The task is still running. Work on non-overlapping tasks, or conclude your response now to await the completion event.`,
+      );
+      return details.join('\n');
+    }
+  }
+
+  let evidence: string;
+  try {
+    const transcript = await fetchChildTranscript(
+      client,
+      identity,
+      options.input.directory,
+    );
+    const round = v2
+      ? classifyV2HistoricalRound(transcript)
+      : classifyTerminalEvidence(transcript);
+    evidence = describeUntrackedEvidence(round);
+  } catch {
+    evidence = `state: ${UNTRACKED_STATE} (uncertain; transcript could not be read)`;
+  }
+  details.push(evidence);
+  if (agent) details.push(`agent: ${agent}`);
+  details.push(
+    `last_activity_at: ${new Date(
+      lastActivityAt ?? options.now?.() ?? Date.now(),
+    ).toISOString()}`,
+  );
+  details.push("next: use task_result to read a completed task's final text");
+  return details.join('\n');
+}
+
+/** Observed-state line for one transcript classification verdict. */
+function describeUntrackedEvidence(round: {
+  verdict: string;
+  reason?: string;
+}): string {
+  if (round.verdict === 'completed') {
+    return 'state: completed (verified from history)';
+  }
+  if (round.verdict === 'error') {
+    return 'state: error (verified from history)';
+  }
+  if (round.verdict === 'interrupted') {
+    return 'state: stopped (interrupted, verified from history)';
+  }
+  if (round.verdict === 'unreadable' || round.verdict === 'retry') {
+    return `state: ${UNTRACKED_STATE} (uncertain; transcript ${round.verdict}${round.reason ? `: ${round.reason}` : ''})`;
+  }
+  // incomplete / absent: no verified terminal round after the latest
+  // input. The session may be running or merely unfinished — do not
+  // claim definite running.
+  return `state: ${UNTRACKED_STATE} (uncertain; no verified terminal round)`;
 }
 
 function inputWaitGuidance(

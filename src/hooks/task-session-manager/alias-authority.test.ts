@@ -227,7 +227,9 @@ describe('alias numbering', () => {
   }
 
   // G2 after a restart: history pairs fix-1 with a live child this board does
-  // not know, so the existing parent's new child keeps its ID.
+  // not know, so the existing parent's new child keeps its ID. The harness
+  // session.get stub carries no parentID, so the untracked fallback cannot
+  // verify ownership and keeps the unknown error.
   test('a new child of an existing parent gets no number', async () => {
     const live = 'ses_livesibling';
     const history = [taskPart({ output: withRef(live, 'fix-1') })];
@@ -287,6 +289,8 @@ describe('alias numbering', () => {
         } as never);
         await hooks['chat.message']?.(ctx, {} as never);
         restored = await launchAlias(hooks, PARENT, 'ses_restoredchild');
+        // The harness session.get stub carries no parentID, so the
+        // untracked fallback keeps the unknown error.
         await expect(
           hooks.tool?.task_status?.execute({ task_id: 'fix-2' }, ctx),
         ).rejects.toThrow(`Unknown task ID or alias: ${imported}`);
