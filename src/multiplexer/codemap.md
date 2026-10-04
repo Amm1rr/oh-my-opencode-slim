@@ -58,8 +58,9 @@ multiplexer-specific command translation.
   log initialization, serverUrl reflection (`api.client.client.getConfig()
   .baseUrl` + `/session/status` probe, embedded-sentinel fail-closed), raw
   event projection (`properties.info.directory`, `properties.status.type`),
-  the periodic reconcile pass, and best-effort disposal. The v2 `setup()`
-  calls it with options from `v2-host.ts`.
+  the periodic reconcile pass, and best-effort disposal. Those are the v1
+  defaults: the v2 `setup()` calls it with options from `v2-host.ts` (base
+  URL, authenticated probe, readers and projected events) that replace them.
 - **`sweep.ts`**: FR-8 crash-leftover sweep. Closes views whose encoded owner
   pid is dead **and** whose child session is gone; candidates come from pane
   titles (tmux/zellij/herdr/kitty) or, for cmux-tui, `terminal list` +
