@@ -70,7 +70,10 @@ function assertHostReplyResult(result: unknown, operation: string): void {
  * a `task_message` text nudge does NOT unblock it. This tool performs the
  * actual reply through the host client, scoped to the calling parent's own
  * tracked children: the task must resolve under the parent session and
- * have a recorded open ask for the given request id. OpenCode v2 forms are
+ * have a recorded open ask for the given request id. A reply for an
+ * unknown request id converges benignly when the task has no open asks at
+ * all (issue #1435), while stale ids with open asks still throw. OpenCode
+ * v2 forms are
  * observable as question waits, but the pinned v2 plugin context exposes no
  * supported form-reply API, so those waits fail honestly instead of using
  * undocumented transport.
@@ -132,6 +135,19 @@ export function createTaskReplyTool(options: {
 
       const wait = getChildInputWait(job.taskID, requestID);
       if (!wait) {
+        const other = listChildInputWaits().find(
+          (entry) =>
+            entry.requestID === requestID && entry.taskID !== job.taskID,
+        );
+        if (other) {
+          const record = options.backgroundJobBoard.get(other.taskID);
+          const otherLabel = record
+            ? `${record.alias} (${other.taskID})`
+            : other.taskID;
+          throw new Error(
+            `Task ${requested} has no open request ${requestID}. Request ${requestID} is open on task ${otherLabel}; reply there.`,
+          );
+        }
         const open = listChildInputWaits(job.taskID);
         if (open.length > 0) {
           const hint = ` Open requests for this task: ${open
@@ -142,9 +158,10 @@ export function createTaskReplyTool(options: {
           );
         }
         // The task has no open asks at all: the request this wake steered
-        // toward was resolved elsewhere (external replier, host policy, or
-        // the parent's own earlier reply) while the child kept running
-        // (#1435). Converge benignly — the parent approved nothing.
+        // toward was resolved elsewhere or never existed (external replier,
+        // host policy, or the parent's own earlier reply) while the child
+        // kept running (#1435). Converge benignly — the parent approved
+        // nothing.
         return `No open request ${requestID} on ${job.alias} (${job.taskID}); it was resolved elsewhere or is no longer tracked. Nothing was replied. Run task_status if you expected an open ask.`;
       }
 
