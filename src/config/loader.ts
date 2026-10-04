@@ -702,16 +702,19 @@ function validateFinalImageRouting(
   return false;
 }
 
+/** Use the host's case-insensitive boolean flag semantics. */
+export function isProjectConfigDisabled(): boolean {
+  return ['true', '1'].includes(
+    process.env.OPENCODE_DISABLE_PROJECT_CONFIG?.toLowerCase() ?? '',
+  );
+}
+
 /** Project .opencode directories in host-specific, farthest-to-nearest order. */
 export function getProjectConfigDirectories(
   directory: string,
   hostFlavor?: string,
 ): string[] {
-  if (
-    ['true', '1'].includes(
-      process.env.OPENCODE_DISABLE_PROJECT_CONFIG?.toLowerCase() ?? '',
-    )
-  ) {
+  if (isProjectConfigDisabled()) {
     return [];
   }
   const directories: string[] = [];

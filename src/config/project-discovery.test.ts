@@ -4,7 +4,9 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { preflightMarketplaceAgentActivation } from '../marketplace/activation-config';
 import {
+  clearProjectPresetOnDisk,
   getAllConfiguredPresets,
+  getPresetSelectionState,
   switchPresetOnDisk,
 } from '../tools/preset-switch';
 import { getPluginConfigCandidates as getV2WatchCandidates } from '../v2/config-watch';
@@ -241,4 +243,110 @@ describe('host-aware project discovery', () => {
       ).preset,
     ).toBe('shared');
   });
+
+  test('disabled project actions refuse writes and clears while Global remains usable', () => {
+    const userPath = write(
+      globalDirectory,
+      'oh-my-opencode-slim.json',
+      JSON.stringify({
+        preset: 'global-a',
+        presets: {
+          'global-a': { fixer: { model: 'test/a' } },
+          'global-b': { fixer: { model: 'test/b' } },
+        },
+      }),
+    );
+    const localPath = path.join(
+      worktree,
+      '.opencode',
+      'oh-my-opencode-slim.json',
+    );
+    const original = fs.readFileSync(localPath, 'utf-8');
+    const nested = path.join(worktree, 'nested');
+    fs.mkdirSync(nested);
+    for (const flag of ['true', 'TRUE', '1']) {
+      process.env.OPENCODE_DISABLE_PROJECT_CONFIG = flag;
+      for (const hostFlavor of ['v1', 'v2']) {
+        const config = loadPluginConfig(worktree, { hostFlavor });
+        for (const directory of [worktree, nested]) {
+          const result = switchPresetOnDisk(directory, 'global-b', config, {
+            scope: 'project',
+            hostFlavor,
+          });
+          expect(result.ok).toBe(false);
+          expect(result.message).toContain('OPENCODE_DISABLE_PROJECT_CONFIG');
+          expect(clearProjectPresetOnDisk(directory, hostFlavor).ok).toBe(
+            false,
+          );
+        }
+        expect(fs.readFileSync(localPath, 'utf-8')).toBe(original);
+        expect(fs.existsSync(path.join(nested, '.opencode'))).toBe(false);
+        expect(
+          switchPresetOnDisk(worktree, 'global-b', config, {
+            scope: 'global',
+            hostFlavor,
+          }).ok,
+        ).toBe(true);
+        expect(JSON.parse(fs.readFileSync(userPath, 'utf-8')).preset).toBe(
+          'global-b',
+        );
+      }
+    }
+  });
+
+  for (const localPin of [true, false]) {
+    test(`Inherit reports an ancestor selection with local pin ${localPin}`, () => {
+      const ancestorPath = write(
+        home,
+        '.opencode/oh-my-opencode-slim.json',
+        JSON.stringify({
+          preset: 'shared',
+          presets: { shared: { fixer: { model: 'test/shared' } } },
+        }),
+      );
+      const userPath = write(
+        globalDirectory,
+        'oh-my-opencode-slim.json',
+        JSON.stringify({
+          preset: 'global',
+          presets: { global: { fixer: { model: 'test/global' } } },
+        }),
+      );
+      const localPath = path.join(
+        worktree,
+        '.opencode',
+        'oh-my-opencode-slim.json',
+      );
+      if (localPin)
+        fs.writeFileSync(
+          localPath,
+          JSON.stringify({
+            preset: 'local',
+            agents: { oracle: { variant: 'high' } },
+          }),
+        );
+      else fs.unlinkSync(localPath);
+      const ancestorBefore = fs.readFileSync(ancestorPath, 'utf-8');
+      const userBefore = fs.readFileSync(userPath, 'utf-8');
+      const result = clearProjectPresetOnDisk(worktree, 'v2');
+      expect(result.ok).toBe(true);
+      expect(result.presetName).toBe('shared');
+      expect(result.message).toContain('preset "shared"');
+      expect(result.message).toContain('ancestor');
+      expect(getPresetSelectionState(worktree, 'v2').effective).toBe('shared');
+      expect(loadPluginConfig(worktree, { hostFlavor: 'v2' }).preset).toBe(
+        'shared',
+      );
+      expect(fs.readFileSync(ancestorPath, 'utf-8')).toBe(ancestorBefore);
+      expect(fs.readFileSync(userPath, 'utf-8')).toBe(userBefore);
+      if (localPin)
+        expect(JSON.parse(fs.readFileSync(localPath, 'utf-8'))).toEqual({
+          agents: { oracle: { variant: 'high' } },
+        });
+      else expect(fs.existsSync(localPath)).toBe(false);
+      expect(clearProjectPresetOnDisk(worktree).message).toContain(
+        'global configuration',
+      );
+    });
+  }
 });

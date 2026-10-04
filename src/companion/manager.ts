@@ -405,7 +405,7 @@ export class CompanionManager {
           : 'effective';
     const result =
       scope === 'project' && request.inherit === true
-        ? clearProjectPresetOnDisk(this.cwd)
+        ? clearProjectPresetOnDisk(this.cwd, this.hostFlavor)
         : typeof request.preset === 'string' && request.preset.trim()
           ? switchPresetOnDisk(this.cwd, request.preset, config, {
               scope,

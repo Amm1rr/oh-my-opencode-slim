@@ -18,6 +18,7 @@ import { normalizePreset, PresetResolutionError } from '../config';
 import { AGENT_ALIASES } from '../config/constants';
 import {
   findPluginConfigPaths,
+  isProjectConfigDisabled,
   loadRawPluginConfigFromPath,
   mergePluginConfigs,
 } from '../config/loader';
@@ -151,6 +152,15 @@ export function switchPresetOnDisk(
   options: PresetSwitchOptions = {},
 ): PresetSwitchResult {
   const scope = options.scope ?? 'user';
+  if (scope === 'project' && isProjectConfigDisabled()) {
+    return {
+      ok: false,
+      presetName,
+      message:
+        'Cannot save a project preset: OPENCODE_DISABLE_PROJECT_CONFIG disables project configuration. Unset it or use Global scope.',
+      summary: [],
+    };
+  }
   const configuredPresets =
     scope === 'global'
       ? readUserPresets(directory)
@@ -288,10 +298,23 @@ export function getPresetSelectionState(
 
 export function clearProjectPresetOnDisk(
   directory: string,
+  hostFlavor?: string,
 ): PresetSwitchResult {
+  if (isProjectConfigDisabled()) {
+    return {
+      ok: false,
+      presetName: '',
+      message:
+        'Cannot change project preset inheritance: OPENCODE_DISABLE_PROJECT_CONFIG disables project configuration. Unset it or use Global scope.',
+      summary: [],
+    };
+  }
   let projectConfigPath: string | null;
   try {
-    projectConfigPath = findPluginConfigPaths(directory).projectConfigPath;
+    projectConfigPath = findPluginConfigPaths(
+      directory,
+      hostFlavor,
+    ).projectConfigPath;
   } catch (error) {
     return {
       ok: false,
@@ -301,17 +324,9 @@ export function clearProjectPresetOnDisk(
     };
   }
 
-  if (!projectConfigPath) {
-    return {
-      ok: true,
-      presetName: '',
-      message: 'Project already inherits the global preset.',
-      summary: [],
-    };
-  }
-
   try {
-    removeTopLevelJsonProperty(projectConfigPath, 'preset');
+    if (projectConfigPath)
+      removeTopLevelJsonProperty(projectConfigPath, 'preset');
   } catch (error) {
     return {
       ok: false,
@@ -321,11 +336,19 @@ export function clearProjectPresetOnDisk(
     };
   }
 
+  const selection = getPresetSelectionState(directory, hostFlavor);
+  const source = process.env.OH_MY_OPENCODE_SLIM_PRESET?.trim()
+    ? 'OH_MY_OPENCODE_SLIM_PRESET'
+    : selection.project
+      ? 'an ancestor project configuration'
+      : 'the global configuration';
+  const inheritance = selection.effective
+    ? `This project now inherits preset "${selection.effective}" from ${source}.`
+    : 'No inherited preset is selected.';
   return {
     ok: true,
-    presetName: '',
-    message:
-      'Project preset override removed. This project now inherits the global preset.',
+    presetName: selection.effective ?? '',
+    message: `${projectConfigPath ? 'Local project preset override cleared.' : 'No local project preset override exists.'} ${inheritance}`,
     summary: [],
   };
 }
