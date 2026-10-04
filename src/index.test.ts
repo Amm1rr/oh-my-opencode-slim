@@ -3455,6 +3455,53 @@ describe('plugin config model inheritance', () => {
     );
   });
 
+  test('v1 revive retry leaves one route for the child', async () => {
+    const hooks = await loadConfiguredPlugin(delegatedFallbackConfig);
+    try {
+      await selectParent(hooks, primary);
+      const { childOutput } = await delegateV1Child(
+        hooks,
+        'parent',
+        'retry',
+        primary,
+      );
+      const { sessionID } = childOutput.message;
+      await hooks['tool.execute.after']?.(
+        { tool: 'task', sessionID: 'parent', callID: 'retry' } as never,
+        {
+          output: `task_id: ${sessionID}\nstate: completed\nresult: done`,
+        } as never,
+      );
+      await selectParent(hooks, fallback);
+      const models: unknown[] = [];
+      const prompt = async () => {
+        childOutput.message.model = { ...primary };
+        await hooks['chat.message']?.(
+          { sessionID, agent: 'operator' } as never,
+          childOutput as never,
+        );
+        models.push(childOutput.message.model);
+      };
+      for (const refused of [true, false]) {
+        client.session.promptAsync = async ({ path }: any) => {
+          if (refused) throw new Error('host refused');
+          if (path.id === sessionID) await prompt();
+          return {};
+        };
+        await hooks.tool?.task_revive
+          .execute({ task_id: sessionID, prompt: 'continue' }, {
+            sessionID: 'parent',
+            agent: 'orchestrator',
+          } as never)
+          .catch(() => {});
+      }
+      await prompt();
+      expect(models).toEqual([fallback, primary]);
+    } finally {
+      await hooks.dispose?.();
+    }
+  });
+
   test('v1 new inherited child uses the host model without routing reads', async () => {
     const hooks = await loadConfiguredPlugin({
       agents: {

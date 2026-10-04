@@ -709,6 +709,11 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   ) => {
     const selected = resolveDelegatedModelForParent(agentType, parentID);
     if (selected?.route && (childID || !selected.inherited)) {
+      // A resume retry replaces its own unclaimed intention.
+      const stale = v1DelegatedIntents.findIndex(
+        (intent) => childID && intent.childID === childID,
+      );
+      if (stale >= 0) v1DelegatedIntents.splice(stale, 1);
       v1DelegatedIntents.push({
         parentID,
         agentName: selected.agentName,
