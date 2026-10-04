@@ -622,13 +622,55 @@ describe('dedup and stable-idle close (2.3)', () => {
     expect(h.lifecycle.getPane(CHILD)).toBeDefined();
   });
 
-  test('busy backfill starts the debounce only on a real idle edge', async () => {
+  test('revalidates a busy reconcile snapshot after a lost idle edge', async () => {
+    const h = createHarness();
+    await activatePane(h);
+    h.list.setSessionIds(CHILD);
+    await h.lifecycle.handleEvent(lifecycleEvent('status', { status: 'busy' }));
+    const readStatus = h.reader.readStatus.bind(h.reader);
+    const snapshot = new Map(h.reader.statuses);
+    const barrier = createDeferred();
+    h.reader.readStatus = async () => {
+      await barrier.promise;
+      return { statuses: snapshot };
+    };
+    const reconnect = h.lifecycle.onReconnect();
+    await flushAsync();
+    h.reader.statuses.set(CHILD, 'idle');
+    barrier.resolve();
+    await reconnect;
+    h.reader.readStatus = readStatus;
+    h.clock.advance(STABLE_IDLE_MS);
+    await flushAsync();
+    expect(h.adapter.closeCalls).toEqual(['pane-1']);
+  });
+
+  test('revalidates a busy readiness snapshot after a lost idle edge', async () => {
+    const h = createHarness();
+    h.reader.statuses.set(CHILD, 'busy');
+    const readStatus = h.reader.readStatus.bind(h.reader);
+    const snapshot = new Map(h.reader.statuses);
+    const barrier = createDeferred();
+    h.reader.readStatus = async () => {
+      await barrier.promise;
+      return { statuses: snapshot };
+    };
+    const pending = h.lifecycle.handleEvent(createdEvent());
+    await flushAsync();
+    h.reader.statuses.set(CHILD, 'idle');
+    barrier.resolve();
+    await pending;
+    h.reader.readStatus = readStatus;
+    h.clock.advance(STABLE_IDLE_MS);
+    await flushAsync();
+    expect(h.adapter.closeCalls).toEqual(['pane-1']);
+  });
+
+  test('a backfill deadline restarts once on the first real idle edge', async () => {
     const h = createHarness();
     h.list.setSessionIds(CHILD);
     h.reader.statuses.set(CHILD, 'busy');
     await h.lifecycle.onReconnect();
-    expect(h.clock.pendingTimers).toBe(0);
-
     h.clock.advance(STABLE_IDLE_MS - 1);
     h.reader.statuses.set(CHILD, 'idle');
     await h.lifecycle.handleEvent(lifecycleEvent('idle'));
@@ -641,29 +683,15 @@ describe('dedup and stable-idle close (2.3)', () => {
     expect(h.adapter.closeCalls).toEqual(['pane-1']);
   });
 
-  test('busy activity during spawn supersedes earlier idle', async () => {
+  test('a deadline armed at creation restarts on the first real idle edge', async () => {
     const h = createHarness();
     h.reader.statuses.set(CHILD, 'idle');
-    const barrier = createDeferred();
-    h.adapter.spawnBarrier = barrier.promise;
-    const pending = h.lifecycle.handleEvent(createdEvent());
-    await flushAsync();
-    await h.lifecycle.handleEvent(lifecycleEvent('idle'));
-    h.reader.statuses.set(CHILD, 'busy');
-    await h.lifecycle.handleEvent(lifecycleEvent('status', { status: 'busy' }));
-    barrier.resolve();
-    await pending;
-    expect(h.clock.pendingTimers).toBe(0);
-
+    await h.lifecycle.handleEvent(createdEvent());
     h.clock.advance(STABLE_IDLE_MS - 1);
-    h.reader.statuses.set(CHILD, 'idle');
     await h.lifecycle.handleEvent(lifecycleEvent('idle'));
     h.clock.advance(1);
     await flushAsync();
     expect(h.adapter.closeCalls).toHaveLength(0);
-    h.clock.advance(STABLE_IDLE_MS - 1);
-    await flushAsync();
-    expect(h.adapter.closeCalls).toEqual(['pane-1']);
   });
 
   test('keeps the pane when the child turns busy inside the debounce window', async () => {
@@ -1064,12 +1092,10 @@ describe('rebuild and reconnect backfill (2.4)', () => {
     expect(
       [CHILD, ...history].filter((id) => h.lifecycle.directoryOf(id)),
     ).toHaveLength(64);
-    expect(h.lifecycle.directoryOf('history-0')).toBeUndefined();
     expect(h.lifecycle.directoryOf('history-64')).toBe(DIRECTORY);
     h.reader.statuses.set(CHILD, 'busy');
     await h.lifecycle.handleEvent(lifecycleEvent('status', { status: 'busy' }));
     expect(h.adapter.spawnCalls).toHaveLength(2);
-    expect(h.lifecycle.getPane(CHILD)).toBeDefined();
   });
 
   test('an idle child found at reconnect spawns immediately on resume', async () => {

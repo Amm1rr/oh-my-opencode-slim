@@ -161,7 +161,7 @@ Shown for v1. On v2, `v2-host.ts` supplies the base URL, an authenticated
 4. Reconnect compensation (30 s reconcile): session.list by parentID is
    authoritative — missing children are backfilled (same eligibility/dedup
    guards), local panes whose child is gone are closed, already-held children
-   log backfill-skipped
+   log backfill-skipped and re-arm a provisional idle deadline, even for busy snapshots
 5. FR-8 sweep (startup / unreachable → reachable): close encoded leftovers
    with a dead owner and a gone child, best-effort
 ```
