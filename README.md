@@ -192,6 +192,15 @@ example and precedence rules.
 
 ### Preset Docs
 
+Project settings in `.opencode/oh-my-opencode-slim.json[c]` are inherited from
+ancestor directories, matching the host's discovery: v2 walks to the filesystem
+root; v1 stops at the Git worktree boundary. `OPENCODE_DISABLE_PROJECT_CONFIG`
+disables the project walk.
+Closer settings override matching fields. Prompt files and the optional
+`skills_include_local` grants also search ancestor `.opencode` directories,
+following OpenCode's directory discovery. See
+[Configuration](docs/configuration.md#config-files) for precedence and trust boundaries.
+
 Consider presets as guidelines as they are often outdated.
 
 - **[OpenAI Preset](docs/openai-preset.md)** — the default generated preset; runs all agents on OpenAI models.

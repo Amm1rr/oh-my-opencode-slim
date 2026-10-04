@@ -798,6 +798,7 @@ export function createAgents(
       const customPrompts = loadAgentPrompt(name, {
         preset: runtime.preset,
         projectDirectory: options?.projectDirectory,
+        hostFlavor: options?.hostFlavor,
       });
 
       const override = getOverrideFromAgents(mergedAgents, name);
@@ -851,6 +852,7 @@ export function createAgents(
     const customPrompts = loadAgentPrompt(name, {
       preset: runtime.preset,
       projectDirectory: options?.projectDirectory,
+      hostFlavor: options?.hostFlavor,
     });
 
     return [
@@ -959,6 +961,7 @@ export function createAgents(
   const orchestratorPrompts = loadAgentPrompt('orchestrator', {
     preset: runtime.preset,
     projectDirectory: options?.projectDirectory,
+    hostFlavor: options?.hostFlavor,
   });
   const orchestrator = createOrchestratorAgent(
     orchestratorModel,

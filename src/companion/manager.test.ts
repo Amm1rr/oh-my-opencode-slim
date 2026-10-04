@@ -194,6 +194,64 @@ describe('CompanionManager', () => {
     );
   });
 
+  it('reports the v2 ancestor preset after an Inherit request', () => {
+    const workspace = path.join(TEST_DIR, 'workspace');
+    const worktree = path.join(workspace, 'worktrees', 'feature');
+    mkdirSync(path.join(workspace, '.opencode'), { recursive: true });
+    mkdirSync(path.join(worktree, '.opencode'), { recursive: true });
+    writeFileSync(path.join(worktree, '.git'), 'gitdir: fixture');
+    const ancestorPath = path.join(
+      workspace,
+      '.opencode',
+      'oh-my-opencode-slim.json',
+    );
+    writeFileSync(
+      ancestorPath,
+      JSON.stringify({
+        preset: 'shared',
+        presets: { shared: { fixer: { model: 'test/shared' } } },
+      }),
+    );
+    writeFileSync(
+      path.join(worktree, '.opencode', 'oh-my-opencode-slim.json'),
+      JSON.stringify({ preset: 'local' }),
+    );
+    const manager = new CompanionManager(
+      'inherit-ancestor',
+      worktree,
+      { enabled: true },
+      'v2',
+    );
+    managers.push(manager);
+    manager.onLoad();
+    const state = readState();
+    state.preset_requests = [
+      {
+        request_id: 'inherit-request',
+        session_id: 'inherit-ancestor',
+        scope: 'project',
+        inherit: true,
+      },
+    ];
+    writeFileSync(stateFilePath(), JSON.stringify(state));
+    (
+      manager as unknown as { consumePresetRequest: () => boolean }
+    ).consumePresetRequest();
+    const preset = readState().sessions.find(
+      (session: { session_id: string }) =>
+        session.session_id === 'inherit-ancestor',
+    ).preset;
+    expect(preset).toMatchObject({
+      effective: 'shared',
+      project: 'shared',
+      result_ok: true,
+    });
+    expect(preset.message).toContain('ancestor');
+    expect(JSON.parse(readFileSync(ancestorPath, 'utf-8')).preset).toBe(
+      'shared',
+    );
+  });
+
   it('keeps per-project overrides isolated while global preset refreshes inheriting projects', () => {
     const projectLocal = path.join(TEST_DIR, 'project-local');
     const projectInherited = path.join(TEST_DIR, 'project-inherited');
@@ -833,6 +891,45 @@ describe('CompanionManager', () => {
     expect(readState().sessions[0].status).toBe('waiting-input');
     m.onInputResolved();
     expect(readState().sessions[0].status).toBe('busy');
+  });
+
+  it('increments attention generation once per distinct input request id', () => {
+    const m = make();
+    m.onLoad();
+
+    m.onWaitingInput('request-1');
+    expect(readState().sessions[0].attention_seq).toBe(1);
+
+    // v2 permission asks are delivered raw + synthesized with the same id.
+    // The additive bridge copy must not create a second native notification.
+    m.onWaitingInput('request-1');
+    expect(readState().sessions[0].attention_seq).toBe(1);
+
+    // A distinct request must remain distinguishable even if a native watcher
+    // never observed an intermediate resolved state.
+    m.onInputResolved();
+    m.onWaitingInput('request-2');
+    expect(readState().sessions[0].attention_seq).toBe(2);
+  });
+
+  it('preserves attention identity across manager replacement', () => {
+    const first = make();
+    first.onLoad();
+    first.onWaitingInput('request-1');
+    expect(readState().sessions[0].attention_seq).toBe(1);
+
+    const replacement = make();
+    replacement.onLoad();
+
+    // Re-delivery of the request that was already published must remain
+    // deduplicated after the replacement manager takes ownership.
+    replacement.onWaitingInput('request-1');
+    expect(readState().sessions[0].attention_seq).toBe(1);
+
+    replacement.onInputResolved();
+    replacement.onWaitingInput('request-2');
+    expect(readState().sessions[0].attention_seq).toBe(2);
+    expect(readState().sessions[0].attention_request_id).toBe('request-2');
   });
 
   it('keeps waiting-input sticky across busy and idle lifecycle noise', () => {

@@ -15,6 +15,20 @@ reply/reject path resolves it. Error attention is deliberately deferred: raw
 fallback can still recover the turn, and the Companion should not duplicate the
 fallback subsystem's terminalization state machine.
 
+When the selected session receives a new `waiting-input` request, the plugin
+increments a monotonic `attention_seq`. The native Companion requests
+informational user attention once for each `(session_id, attention_seq)` pair.
+This keeps repeated questions distinct even when a fast
+`resolved → waiting-input` transition is coalesced by the file watcher.
+The generation and last request identity are recovered from shared state when
+the plugin replaces a manager for the same session, so re-initialization cannot
+reuse a native attention key. Returning to an ordinary state resets the native
+attention request. The effect
+is delegated to the platform/window manager (for example taskbar flashing or
+Dock attention); unsupported environments may safely ignore it. Error/failure
+notifications are intentionally not emitted because the parent status PR does
+not claim canonical settled terminal evidence.
+
 Right-click the Companion to open its compact control menu. In addition to the
 existing size controls, the menu exposes scoped preset navigation. The center
 preset button shows the active edit scope: `P:` for **Project** or `G:` for
@@ -24,7 +38,14 @@ Project scope is the safe default for desktop use with multiple projects open.
 It always writes the current project's `.opencode` layer, creating the
 canonical `oh-my-opencode-slim.jsonc` file when necessary. Project navigation
 also includes **Inherit**, which removes only the local `preset` key so the
-project follows the global selection again.
+project follows the next inherited selection: an eligible ancestor pin, or the
+global selection when no ancestor pins a preset. Environment preset overrides
+still take precedence. The result message identifies the actual inherited
+selection, and shared ancestor files are never modified.
+
+When `OPENCODE_DISABLE_PROJECT_CONFIG` is enabled, Project preset writes and
+Inherit actions are rejected rather than reporting changes that reload would
+ignore. Global scope remains available.
 
 Global scope writes only the user/global config and offers only presets defined
 in that global layer. Projects with local overrides remain unchanged, while
@@ -37,6 +58,17 @@ request is pending, preset controls stay disabled until either a matching
 completion appears in any live session or the request's target session
 disappears. Target loss therefore recovers without a Companion restart and is
 not misreported as success.
+
+The same compact menu also exposes project-folder actions without an OpenCode
+host dependency: **Open** launches the exact session `cwd` in the platform file
+manager, while **Copy** places that exact path on the system clipboard. The
+file-manager launcher is waited on in a background worker so it cannot leave a
+zombie child or block the Companion UI. Open status is scoped to the selected
+session; completion never closes a subsequently opened menu. Spawn/non-zero-exit
+failures stay inside the existing compact row as a red **!Open** button with the
+detailed error on hover, including at the smallest Companion size. The
+actions use only the directory already published by session state; they do not
+guess repository roots or scan the filesystem.
 
 ## How to Enable in Configuration
 
