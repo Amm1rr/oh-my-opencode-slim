@@ -137,7 +137,9 @@ export function createTaskReplyTool(options: {
       if (!wait) {
         const other = listChildInputWaits().find(
           (entry) =>
-            entry.requestID === requestID && entry.taskID !== job.taskID,
+            entry.requestID === requestID &&
+            entry.taskID !== job.taskID &&
+            entry.parentSessionID === parentSessionID,
         );
         if (other) {
           const record = options.backgroundJobBoard.get(other.taskID);
