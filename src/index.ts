@@ -1071,7 +1071,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       input: ctx,
       board: backgroundJobBoard,
       isDisposed: () => instanceDisposed,
-      hostFlavor,
     });
     taskSessionManagerHook = createTaskSessionManagerHook(ctx, {
       terminalGate,
@@ -1108,7 +1107,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         sessionMetadata.getModel(sessionID),
       hostFlavor,
       recoverRetainedSession,
-      prepareAliasNumbering: aliasAuthority.prepareParent,
       resolveCanonicalTaskRef: aliasAuthority.resolveCanonical,
       isDisposed: () => instanceDisposed,
       shouldManageSession: (sessionID) =>
@@ -1410,7 +1408,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       backgroundJobBoard: backgroundJobCoordinator,
       activityTracker: taskActivityTracker,
       resolveCanonicalTaskRef: aliasAuthority.resolveCanonical,
-      isDisposed: () => instanceDisposed,
     });
     waitForUserTools = createWaitForUserTool({
       shouldManageSession: (sessionID) =>
@@ -2001,6 +1998,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
 
       const event = input.event as {
         type: string;
+        // Raw v2 envelope: host time and payload.
+        created?: unknown;
+        data?: { sessionID?: unknown };
         properties?: {
           info?: {
             id?: string;
@@ -2015,6 +2015,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
             };
             sessionID?: string;
             directory?: string;
+            time?: { created?: unknown; completed?: unknown };
           };
           sessionID?: string;
           id?: string;
@@ -2122,6 +2123,10 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
               isInternalAdmission(info.sessionID, info.parentID));
           if (!internalAdmission) {
             sessionMetadata.setModel(info.sessionID, model);
+            companionManager.onSessionModelChanged({
+              sessionId: info.sessionID,
+              model,
+            });
           }
           // Managed background-task sessions are identified by their session
           // ID. If the model serving one changed (fallback re-prompt, runtime
@@ -2152,6 +2157,16 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         const createdSessionParent = (
           event.properties as { info?: { parentID?: unknown } } | undefined
         )?.info?.parentID;
+        // v2 hands over the raw envelope before its mapped shapes: without
+        // `info`, take the session and the host creation time from it.
+        const info = event.properties?.info;
+        const freshID = info
+          ? info.id
+          : (event.data?.sessionID ?? event.properties?.sessionID);
+        const createdAt = info ? info.time?.created : event.created;
+        if (typeof freshID === 'string' && typeof createdAt === 'number') {
+          backgroundJobBoard.noteSessionCreated(freshID, createdAt);
+        }
         if (createdSessionId && typeof createdSessionParent === 'string') {
           if (hostFlavor !== 'v2') {
             v1ChildParents.set(createdSessionId, createdSessionParent);
@@ -2459,6 +2474,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         model?: {
           providerID: string;
           modelID: string;
+          variant?: string;
         };
         variant?: string;
         parts?: unknown[];
@@ -2689,6 +2705,17 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         const model = `${messageModel.providerID}/${messageModel.modelID}`;
         if (!internalAdmission) {
           sessionMetadata.setModel(input.sessionID, model);
+          const liveVariant =
+            routedChild?.entry.variant ??
+            input.variant ??
+            input.model?.variant ??
+            output?.message?.model?.variant;
+          companionManager.onSessionModelChanged({
+            sessionId: input.sessionID,
+            model,
+            ...(liveVariant ? { variant: liveVariant } : {}),
+            variantObserved: true,
+          });
         }
         backgroundTaskConcurrency.migrateTask(input.sessionID, model);
       }

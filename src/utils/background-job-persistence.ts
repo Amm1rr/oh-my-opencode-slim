@@ -1,7 +1,7 @@
 /**
- * Persistence for background-job lifecycle state (tombstones, deletion
- * epochs, alias high-water marks) over the optional v2 host storage
- * domain (`ctx.storage`).
+ * Persistence for background-job lifecycle state (tombstones and
+ * deletion epochs) over the optional v2 host storage domain
+ * (`ctx.storage`).
  *
  * Design invariants:
  * - **Write-through.** `recordBackgroundJobSuppression` /
@@ -33,12 +33,9 @@
  *   fire-and-forget with logged (never thrown) failures — persistence
  *   loss degrades to today's process-local behavior.
  *
- * Alias counters persist the last-seen counter per
- * `<parentSessionID>:<prefix>`; a post-restart board seeds its counters
- * from these high-water marks so a new alias never collides with a
- * historical one. The alias→taskID mapping itself is NOT restored: old
- * aliases resolve as not-found after a restart, which is the intended
- * improvement over silently reusing them for unrelated tasks.
+ * Aliases are not persisted: a production board numbers only parents
+ * created while it runs, and an old alias resolves only through its
+ * marker in the parent's history (see docs/background-orchestration.md).
  */
 
 import { log } from './logger';
@@ -58,7 +55,6 @@ export interface BackgroundJobStorageBackend {
 const KEY_ROOT = 'omo/bgj/';
 const TOMBSTONE_PREFIX = `${KEY_ROOT}tombstone/`;
 const EPOCH_PREFIX = `${KEY_ROOT}epoch/`;
-const ALIAS_PREFIX = `${KEY_ROOT}alias/`;
 
 /** Persisted tombstone entries self-cap at this many most-recent items. */
 export const MAX_PERSISTED_TOMBSTONES = 500;
@@ -84,8 +80,6 @@ export interface PersistedBackgroundJobState {
   deletionEpochs: Map<string, number>;
   /** Highest deletion epoch seen; keeps future epochs monotonic. */
   nextEpoch: number;
-  /** `<parentSessionID>:<prefix>` → last-seen alias counter. */
-  aliasHighWaterMarks: Map<string, number>;
 }
 
 function emptyState(): PersistedBackgroundJobState {
@@ -93,7 +87,6 @@ function emptyState(): PersistedBackgroundJobState {
     tombstones: new Map(),
     deletionEpochs: new Map(),
     nextEpoch: 0,
-    aliasHighWaterMarks: new Map(),
   };
 }
 
@@ -104,8 +97,6 @@ let loaded = emptyState();
 const liveTombstones = new Map<string, PersistedTombstoneEntry>();
 /** Per-key serialized write queues (no concurrent RMW on one key). */
 const writeQueues = new Map<string, Promise<void>>();
-/** In-process max of every value ever persisted per alias key. */
-const writtenAliasMax = new Map<string, number>();
 /**
  * Reconfiguration fence: incremented on every configure() call. Queued
  * writes capture the epoch at enqueue time and refuse to execute after a
@@ -160,12 +151,7 @@ export function configureBackgroundJobPersistence(
   backend = storage;
   loaded = emptyState();
   liveTombstones.clear();
-  writtenAliasMax.clear();
   writeQueues.clear();
-}
-
-function aliasKey(parent: string, prefix: string): string {
-  return `${ALIAS_PREFIX}${parent}:${prefix}`;
 }
 
 function tombstoneKey(taskID: string): string {
@@ -234,12 +220,6 @@ export async function loadInitialBackgroundJobPersistence(): Promise<PersistedBa
         const taskID = entry.key.slice(EPOCH_PREFIX.length);
         if (typeof entry.value === 'number' && Number.isFinite(entry.value)) {
           state.deletionEpochs.set(taskID, entry.value);
-        }
-      } else if (entry.key.startsWith(ALIAS_PREFIX)) {
-        const composite = entry.key.slice(ALIAS_PREFIX.length);
-        if (typeof entry.value === 'number' && Number.isFinite(entry.value)) {
-          state.aliasHighWaterMarks.set(composite, entry.value);
-          writtenAliasMax.set(composite, entry.value);
         }
       }
     }
@@ -347,42 +327,4 @@ function enforceTombstoneCap(): void {
       await backend?.remove(epochKey(record.taskID));
     });
   }
-}
-
-/** Alias counter high-water mark: the max of the backend-restored
- * snapshot and every value persisted in this process. Seeding from the
- * live max too means two concurrently-live boards sharing one
- * `<parent, prefix>` never collide even before a restart replays the
- * backend. */
-export function aliasHighWaterMark(
-  parentSessionID: string,
-  prefix: string,
-): number {
-  const composite = `${parentSessionID}:${prefix}`;
-  return Math.max(
-    loaded.aliasHighWaterMarks.get(composite) ?? 0,
-    // writtenAliasMax is keyed by the full storage key (same key the
-    // bump writes), not the bare composite.
-    writtenAliasMax.get(aliasKey(parentSessionID, prefix)) ?? 0,
-  );
-}
-
-/**
- * Persist the last-seen alias counter. Monotonic: a stale writer can
- * never regress the high-water mark. Serialized per key so concurrent
- * launches never race the same entry.
- */
-export function bumpAliasHighWaterMark(
-  parentSessionID: string,
-  prefix: string,
-  counter: number,
-): void {
-  if (!backend) return; // memory fallback: nothing to protect against
-  const key = aliasKey(parentSessionID, prefix);
-  const current = writtenAliasMax.get(key) ?? 0;
-  if (counter <= current) return;
-  writtenAliasMax.set(key, counter);
-  enqueueWrite(key, async () => {
-    await backend?.set(key, counter);
-  });
 }

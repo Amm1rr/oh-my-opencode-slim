@@ -8,12 +8,12 @@ import {
   getChildInputWait,
   listChildInputWaits,
 } from '../hooks/task-session-manager/child-input-wait';
+import { pluginDisposedMessage } from '../hooks/task-session-manager/session-recovery';
 import type { BackgroundJobStore } from '../utils/background-job-store';
 import { getClient } from '../utils/opencode-client';
 import { OperationTimeoutError, withTimeout } from '../utils/session';
 import {
   type CanonicalTaskResolver,
-  currentToolCallID,
   idParamFor,
   readTaskRef,
   taskRefArgs,
@@ -113,20 +113,11 @@ export function createTaskReplyTool(options: {
       const requestID = args.request_id.trim();
       if (!requestID) throw new Error('task_reply requires request_id');
       const canonical = options.resolveCanonicalTaskRef
-        ? await options.resolveCanonicalTaskRef(
-            parentSessionID,
-            requested,
-            currentToolCallID(toolContext),
-          )
+        ? await options.resolveCanonicalTaskRef(parentSessionID, requested)
         : undefined;
-      if (options.isDisposed?.()) {
-        throw new Error(
-          'The plugin instance was disposed. No action was sent.',
-        );
-      }
+      if (options.isDisposed?.()) throw new Error(pluginDisposedMessage());
       if (canonical?.kind === 'refused') throw new Error(canonical.reason);
-      const identity =
-        canonical?.kind === 'exact' ? canonical.taskID : requested;
+      const identity = canonical?.taskID ?? requested;
       const job = canonical
         ? options.backgroundJobBoard.get(identity)
         : options.backgroundJobBoard.resolve(parentSessionID, requested);
@@ -232,11 +223,7 @@ export function createTaskReplyTool(options: {
       async function replyPermission(
         response: 'once' | 'always' | 'reject',
       ): Promise<unknown> {
-        if (options.isDisposed?.()) {
-          throw new Error(
-            'The plugin instance was disposed. No action was sent.',
-          );
-        }
+        if (options.isDisposed?.()) throw new Error(pluginDisposedMessage());
         const permission = client.permission;
         if (typeof permission?.reply === 'function') {
           return await permission.reply({

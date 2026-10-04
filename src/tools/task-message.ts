@@ -7,6 +7,7 @@ import {
   type ContinuationModelSelection,
   parseContinuationModelSelection,
 } from '../hooks/task-session-manager/continuation-model-selection';
+import { pluginDisposedMessage } from '../hooks/task-session-manager/session-recovery';
 import type { BackgroundJobStore } from '../utils/background-job-store';
 import { isRecord } from '../utils/guards';
 import { getClient } from '../utils/opencode-client';
@@ -14,7 +15,6 @@ import { OperationTimeoutError, withTimeout } from '../utils/session';
 import { type DelegationWording, delegationWording } from '../v2/delegation';
 import {
   type CanonicalTaskResolver,
-  currentToolCallID,
   idParamFor,
   readTaskRef,
   taskRefArgs,
@@ -65,20 +65,11 @@ export function createTaskMessageTool(options: {
       const requested = readTaskRef(args, idParam);
       if (!requested) throw new Error(`task_message requires ${idParam}`);
       const canonical = options.resolveCanonicalTaskRef
-        ? await options.resolveCanonicalTaskRef(
-            parentSessionID,
-            requested,
-            currentToolCallID(toolContext),
-          )
+        ? await options.resolveCanonicalTaskRef(parentSessionID, requested)
         : undefined;
-      if (options.isDisposed?.()) {
-        throw new Error(
-          'The plugin instance was disposed. No action was sent.',
-        );
-      }
+      if (options.isDisposed?.()) throw new Error(pluginDisposedMessage());
       if (canonical?.kind === 'refused') throw new Error(canonical.reason);
-      const identity =
-        canonical?.kind === 'exact' ? canonical.taskID : requested;
+      const identity = canonical?.taskID ?? requested;
       const job = canonical
         ? options.backgroundJobBoard.get(identity)
         : options.backgroundJobBoard.resolve(parentSessionID, requested);
@@ -141,11 +132,7 @@ export function createTaskMessageTool(options: {
           } finally {
             lookupController.abort();
           }
-          if (options.isDisposed?.()) {
-            throw new Error(
-              'The plugin instance was disposed. No action was sent.',
-            );
-          }
+          if (options.isDisposed?.()) throw new Error(pluginDisposedMessage());
           if (!modelSelection) {
             throw new Error(
               `Task ${requested} has no authoritative model identity; refusing message`,
@@ -165,11 +152,8 @@ export function createTaskMessageTool(options: {
           lease,
           () => {
             assertMessageLease(options.backgroundJobBoard, lease, requested);
-            if (options.isDisposed?.()) {
-              throw new Error(
-                'The plugin instance was disposed. No action was sent.',
-              );
-            }
+            if (options.isDisposed?.())
+              throw new Error(pluginDisposedMessage());
             const currentJob = getCurrentTaskMessageJob(
               options.backgroundJobBoard,
               parentSessionID,

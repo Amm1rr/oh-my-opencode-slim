@@ -5,10 +5,7 @@ import {
   DEFAULT_READ_CONTEXT_MIN_LINES,
   formatSystemReminder,
 } from '../config/constants';
-import {
-  aliasHighWaterMark,
-  bumpAliasHighWaterMark,
-} from './background-job-persistence';
+import { escapeRegExp } from './agent-variant';
 import type { BackgroundJobStore } from './background-job-store';
 import {
   clearBackgroundJobSuppression,
@@ -126,16 +123,11 @@ export interface BackgroundJobBoardOptions {
    * v2 hosts, `task` on v1/default. Only the two retained/recovery wording
    * lines vary; the board stays v1 by default. */
   delegationTool?: string;
-  /** Alias counter high-water seed per `<parentSessionID>:<prefix>` so a
-   * post-restart board never reuses a historical alias. Defaults to the
-   * shared persistence high-water marks (0 without a storage backend —
-   * exactly the pre-persistence behavior). */
-  aliasCounterHighWater?: (parentSessionID: string, prefix: string) => number;
   /**
-   * Production boards start each parent unverified. Until a complete host
-   * history floor is applied, new records use the task ID as their alias
-   * and creation still succeeds. Default false keeps direct fixtures on
-   * the historical immediate counter.
+   * Production boards number only parents created while they run (see
+   * noteSessionCreated); other parents' new records use the task ID as
+   * their alias and creation still succeeds. Default false keeps direct
+   * fixtures on the historical immediate counter.
    */
   deferNumberedAliases?: boolean;
 }
@@ -167,6 +159,8 @@ export interface BackgroundJobLaunchInput {
   background?: boolean;
   /** Only unattributed session.created placeholders opt in. */
   provisional?: true;
+  /** An existing host child keeps its task ID; numbers are for new children. */
+  adopted?: true;
   /** Preserve the current run when this is a duplicate lifecycle observation. */
   preserveRun?: boolean;
   /** Lease proving that this is an authorized same-ID relaunch observation. */
@@ -262,7 +256,7 @@ const AGENT_PREFIX: Record<string, string> = {
 };
 
 /** Numbered-alias prefix for an agent. Unknown agents use a 3-letter fallback. */
-export function aliasPrefixForAgent(agent: string): string {
+function aliasPrefixForAgent(agent: string): string {
   return AGENT_PREFIX[agent] ?? (agent.slice(0, 3) || 'job');
 }
 
@@ -282,13 +276,10 @@ export class BackgroundJobBoard implements BackgroundJobStore {
   private readonly readContextMinLines: number;
   private readonly readContextMaxFiles: number;
   private readonly delegationTool: string;
-  private readonly aliasCounterHighWater: (
-    parentSessionID: string,
-    prefix: string,
-  ) => number;
   private readonly deferNumberedAliases: boolean;
-  /** Parents whose numbered aliases were enabled by a verified history floor. */
-  private readonly numberedAliasReady = new Set<string>();
+  private readonly startedAt = Date.now();
+  /** Sessions created after this board started: no earlier aliases. */
+  private readonly freshParents = new Set<string>();
 
   constructor(options: BackgroundJobBoardOptions = {}) {
     this.maxReusablePerAgent =
@@ -299,50 +290,21 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     this.readContextMaxFiles =
       options.readContextMaxFiles ?? DEFAULT_READ_CONTEXT_MAX_FILES;
     this.delegationTool = options.delegationTool ?? 'task';
-    this.aliasCounterHighWater =
-      options.aliasCounterHighWater ?? aliasHighWaterMark;
     this.deferNumberedAliases = options.deferNumberedAliases === true;
   }
 
-  /** False only while this production parent is still waiting for a verified floor. */
+  /** False for a production parent not created while this board runs. */
   isNumberedAliasReady(parentSessionID: string): boolean {
-    if (!this.deferNumberedAliases) return true;
-    return this.numberedAliasReady.has(parentSessionID);
+    return !this.deferNumberedAliases || this.freshParents.has(parentSessionID);
   }
 
   /**
-   * Raise in-memory counters to max(local, current backend, verified history)
-   * and enable numbering for this parent. Does not clear or rewrite the
-   * backend high-water mark. Returns false, changing nothing, if a counter
-   * cannot be incremented safely.
+   * A session created after this board started has issued no numbered
+   * alias, so its children count from 1. An older or replayed creation
+   * keeps task IDs: no cheap host read bounds numbers from before a restart.
    */
-  applyVerifiedAliasFloor(
-    parentSessionID: string,
-    maxima: Readonly<Record<string, number>>,
-  ): boolean {
-    const parent = parentSessionID.trim();
-    if (!parent) return false;
-    const prefixes = new Set<string>(Object.keys(maxima));
-    const parentKey = `${parent}:`;
-    for (const key of this.counters.keys()) {
-      if (key.startsWith(parentKey)) prefixes.add(key.slice(parentKey.length));
-    }
-    const next = new Map<string, number>();
-    for (const prefix of prefixes) {
-      if (!prefix) return false;
-      const history = maxima[prefix] ?? 0;
-      if (!isSafeAliasFloor(history)) return false;
-      const local = this.counters.get(`${parent}:${prefix}`) ?? 0;
-      const backend = this.aliasCounterHighWater(parent, prefix);
-      const floor = Math.max(local, backend, history);
-      if (!isSafeAliasFloor(floor)) return false;
-      next.set(prefix, floor);
-    }
-    for (const [prefix, floor] of next) {
-      this.counters.set(`${parent}:${prefix}`, floor);
-    }
-    if (this.deferNumberedAliases) this.numberedAliasReady.add(parent);
-    return true;
+  noteSessionCreated(sessionID: string, createdAt: number): void {
+    if (createdAt >= this.startedAt) this.freshParents.add(sessionID);
   }
 
   addTerminalStateListener(listener: TerminalStateListener): void {
@@ -523,7 +485,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     if (this.jobs.has(input.taskID)) return;
     const record: BackgroundJobRecord = {
       ...this.createLaunchRecord(
-        { ...input, background: true },
+        { ...input, background: true, adopted: true },
         input.createdAt,
         ++this.executionSequence,
       ),
@@ -569,11 +531,10 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       lastLiveBusyAt: now,
       lastUsedAt: now,
       updatedAt: now,
-      alias: this.aliasForNewRecord(
-        input.parentSessionID,
-        input.agent,
-        input.taskID,
-      ),
+      alias:
+        input.adopted || !this.isNumberedAliasReady(input.parentSessionID)
+          ? input.taskID
+          : this.nextAlias(input.parentSessionID, input.agent),
       contextFiles: [],
       totalErrors: 0,
       timeoutCount: 0,
@@ -1574,6 +1535,9 @@ export class BackgroundJobBoard implements BackgroundJobStore {
   }
 
   clearParent(parentSessionID: string): void {
+    // A deleted parent's life ends; a restored copy (export/import emits no
+    // session.created) carries numbers this board never issued.
+    this.freshParents.delete(parentSessionID);
     for (const job of this.list(parentSessionID)) {
       recordBackgroundJobSuppression(
         this,
@@ -1615,10 +1579,11 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     // Evict sessions exceeding context budget before count cap.
     // Runs regardless of the triggering job's reusability so that a
     // bloated session cleans up after itself (and its peers) on
-    // completion.
+    // completion. A leased record (a revive in flight) is never evicted.
     for (const entry of this.list(job.parentSessionID)) {
       if (
         entry.agent === job.agent &&
+        !this.liveLeases.has(entry.taskID) &&
         !entry.terminalUnreconciled &&
         (entry.terminalState ?? terminalStateOf(entry.state)) !== undefined &&
         sumContextLines(entry) > this.maxContextLines
@@ -1639,6 +1604,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       .filter(
         (candidate) =>
           candidate.agent === job.agent &&
+          !this.liveLeases.has(candidate.taskID) &&
           isReusable(candidate, this.maxContextLines),
       )
       .sort((a, b) => b.lastUsedAt - a.lastUsedAt);
@@ -1762,7 +1728,6 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     const launchedAt = finiteEvidenceTime(input.launchedAt) ?? 0;
     const completedAt = finiteEvidenceTime(input.completedAt);
     const observedAt = completedAt ?? launchedAt;
-    if (this.jobs.has(taskID) || this.liveLeases.has(taskID)) return undefined;
     const generation = ++this.executionSequence;
     const record: BackgroundJobRecord = {
       taskID,
@@ -1802,8 +1767,8 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     return record;
   }
 
-  /** Advance the existing alias high-water to a trusted historical value.
-   * Does not allocate a new counter. */
+  /** Advance the in-memory counter to a trusted historical value. Does not
+   * allocate a new counter. */
   private noteTrustedAlias(
     parentSessionID: string,
     agent: string,
@@ -1815,43 +1780,15 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     const counter = Number(match[1]);
     if (!Number.isSafeInteger(counter) || counter < 1) return;
     const key = `${parentSessionID}:${prefix}`;
-    const current = Math.max(
-      this.counters.get(key) ?? 0,
-      this.aliasCounterHighWater(parentSessionID, prefix),
-    );
-    if (counter <= current) return;
-    this.counters.set(key, counter);
-    bumpAliasHighWaterMark(parentSessionID, prefix, counter);
-  }
-
-  private aliasForNewRecord(
-    parentSessionID: string,
-    agent: string,
-    taskID: string,
-  ): string {
-    if (
-      this.deferNumberedAliases &&
-      !this.numberedAliasReady.has(parentSessionID)
-    ) {
-      return taskID;
-    }
-    return this.nextAlias(parentSessionID, agent);
+    if (counter > (this.counters.get(key) ?? 0))
+      this.counters.set(key, counter);
   }
 
   private nextAlias(parentSessionID: string, agent: string): string {
     const prefix = aliasPrefixForAgent(agent);
     const key = `${parentSessionID}:${prefix}`;
-    // Seed from the persisted high-water mark so a post-restart board
-    // never reuses a historical alias. The alias→taskID mapping is NOT
-    // restored: old aliases resolve as not-found, which is the intended
-    // improvement over silently reusing them for unrelated tasks.
-    const seeded = this.aliasCounterHighWater(parentSessionID, prefix);
-    const next = Math.max(this.counters.get(key) ?? 0, seeded) + 1;
+    const next = (this.counters.get(key) ?? 0) + 1;
     this.counters.set(key, next);
-    // Write-through: persist the last-seen counter (no-op without a
-    // storage backend).
-    bumpAliasHighWaterMark(parentSessionID, prefix, next);
-
     return `${prefix}-${next}`;
   }
 
@@ -2046,14 +1983,4 @@ function finiteEvidenceTime(value: number | undefined): number | undefined {
   return typeof value === 'number' && Number.isFinite(value)
     ? value
     : undefined;
-}
-
-function isSafeAliasFloor(value: number): boolean {
-  return (
-    Number.isSafeInteger(value) && value >= 0 && value < Number.MAX_SAFE_INTEGER
-  );
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

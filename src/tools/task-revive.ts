@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { type ToolDefinition, tool } from '@opencode-ai/plugin';
 import type { RevivedRunTracker } from '../hooks/task-session-manager/revived-run-tracker';
-import { createSessionRecovery } from '../hooks/task-session-manager/session-recovery';
+import { pluginDisposedMessage } from '../hooks/task-session-manager/session-recovery';
 import type { BackgroundJobLease } from '../utils/background-job-board';
 import { getBackgroundJobLifecycleLedger } from '../utils/background-job-store';
 import type { BackgroundJobSupervisor } from '../utils/background-job-supervisor';
@@ -20,12 +20,7 @@ import {
   cancelTrackedExecution,
   type TaskControlToolOptions,
 } from './cancel-task';
-import {
-  currentToolCallID,
-  idParamFor,
-  readTaskRef,
-  taskRefArgs,
-} from './task-ref';
+import { idParamFor, readTaskRef, taskRefArgs } from './task-ref';
 
 const z = tool.schema;
 const DEFAULT_BASELINE_TIMEOUT_MS = 5_000;
@@ -35,6 +30,9 @@ const DEFAULT_WAIT_FOR_IDLE_TIMEOUT_MS = 5_000;
 class ReviveAdmissionDeadlineError extends Error {}
 
 export interface TaskReviveToolOptions extends TaskControlToolOptions {
+  recoverRetainedSession: NonNullable<
+    TaskControlToolOptions['recoverRetainedSession']
+  >;
   backgroundJobSupervisor?: BackgroundJobSupervisor;
   revivedRunTracker: RevivedRunTracker;
   baselineTimeoutMs?: number;
@@ -66,20 +64,11 @@ export function createTaskReviveTool(
       if (!requested) throw new Error(`task_revive requires ${idParam}`);
       if (!prompt) throw new Error('task_revive requires prompt');
       const canonical = options.resolveCanonicalTaskRef
-        ? await options.resolveCanonicalTaskRef(
-            parentSessionID,
-            requested,
-            currentToolCallID(toolContext),
-          )
+        ? await options.resolveCanonicalTaskRef(parentSessionID, requested)
         : undefined;
-      if (options.isDisposed?.()) {
-        throw new Error(
-          'The plugin instance was disposed. No action was sent.',
-        );
-      }
+      if (options.isDisposed?.()) throw new Error(pluginDisposedMessage());
       if (canonical?.kind === 'refused') throw new Error(canonical.reason);
-      const identity =
-        canonical?.kind === 'exact' ? canonical.taskID : requested;
+      const identity = canonical?.taskID ?? requested;
       let resolved = canonical
         ? options.backgroundJobBoard.get(identity)
         : options.backgroundJobBoard.resolve(parentSessionID, requested);
@@ -669,19 +658,7 @@ async function resolveOrAdoptUntrackedTask(
   allowExactAdoption: boolean,
 ): Promise<string | undefined> {
   const prefix = `Unknown or unowned background task: ${requested}`;
-  if (!SESSION_ID_PATTERN.test(requested) && !options.recoverRetainedSession) {
-    return `${prefix}. Aliases do not survive a host restart; retry with the task's session ID from history or notifications, or re-dispatch the work.`;
-  }
-  const recover =
-    options.recoverRetainedSession ??
-    createSessionRecovery({
-      input: options.input,
-      backgroundJobBoard: options.backgroundJobBoard,
-      hostFlavor: (options.input as { hostFlavor?: string }).hostFlavor,
-      isDisposed: options.isDisposed,
-      liveStatusTimeoutMs: options.verifyAbortMs,
-    });
-  const recovery = await recover({
+  const recovery = await options.recoverRetainedSession({
     parentSessionID,
     requested,
     purpose: 'revive',
@@ -709,6 +686,7 @@ async function resolveOrAdoptUntrackedTask(
     agent: recovery.agent,
     description: recovery.description,
     background: true,
+    adopted: true,
     now: Date.now(),
   });
   // Until a continuation is accepted this row still represents recovered

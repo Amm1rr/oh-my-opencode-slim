@@ -4,7 +4,7 @@ Built-in tools available to agents beyond the standard file and shell operations
 
 ## apply_patch rescue
 
-Slim only intercepts `apply_patch` before the native tool runs. It rewrites recoverable stale patches, canonizes safe tolerant matches against the real file when unicode/trim drift is the only mismatch, keeps the authored `new_lines` bytes intact, preserves the existing file EOL/final-newline state for updates, validates malformed patches strictly before helper execution, uses a conservative bounded LCS fallback, accumulates helper state when the same path appears in multiple `Update File` hunks, blocks `apply_patch` before native execution if any patch path falls outside the allowed root/worktree, and fails on ambiguity instead of guessing. It does not rewrite `edit` or `write` inputs.
+Slim only intercepts `apply_patch` before the native tool runs. It rewrites recoverable stale patches, canonizes safe tolerant matches against the real file when unicode/trim drift is the only mismatch, keeps the authored `new_lines` bytes intact, preserves the existing file EOL/final-newline state for updates, validates malformed patches strictly before helper execution, uses a conservative bounded LCS fallback, accumulates helper state when the same path appears in multiple `Update File` hunks, blocks `apply_patch` before native execution if any patch path falls outside the allowed root/worktree, and fails on ambiguity instead of guessing. It does not rewrite `edit` or `write` inputs. Disable with `disabled_hooks: ["apply-patch"]` (see [Hooks](configuration.md#hooks)).
 
 ---
 
@@ -46,7 +46,8 @@ component fail fast with an actionable error instead of an opaque "ripgrep
 execution failed" message or a silent search of the parent directory.
 Resolution uses the host process's native path flavor, preserving Windows
 drive-relative behavior; if no project directory is available, the guard
-conservatively passes the path through.
+conservatively passes the path through. Disable with
+`disabled_hooks: ["search-path-guard"]` (see [Hooks](configuration.md#hooks)).
 
 ---
 
@@ -170,14 +171,16 @@ A successful native delegation result may end with a `slim-child-ref:v1`
 marker so a later restart can resolve the alias. The marker is trusted only
 on the parent's real native tool result, after the outer task closes, and
 only when it matches that result's session ID and original agent argument.
-A numbered alias is issued only after that parent's host history has been
-fully verified. Until then a new task is still created and is referred to
-by its exact session ID. `task_status`, `task_result`, `task_message`,
-`task_reply`, `task_cancel`, `task_revive`, and an explicit resume ID verify
-a non-exact alias against that history before reading or sending anything.
-Multiple saved targets, a host session that disagrees with the local cache,
-or unverifiable history produce no action: use the exact session ID or
-retry the lookup. Exact IDs do not require alias-history scans.
+A numbered alias is issued only to children of a parent created while the
+plugin instance runs (see [Background Orchestration](background-orchestration.md));
+any other new task is still created and is referred to by its exact session ID.
+`task_status`, `task_result`, `task_message`, `task_reply`, `task_cancel`,
+`task_revive`, and an explicit resume ID resolve a non-exact alias from the
+board first, else from the markers in one read of the parent's readable history,
+before reading or sending anything. On v1, the read covers the 1,000 most recent
+messages; a longer history counts as cut. Multiple saved targets, no marked
+target, or a cut or unreadable history produce no action: use the exact session
+ID. Exact IDs do not require alias-history scans.
 
 On v1, `task_revive` retains the upstream exact-ID adoption path only when
 no child transcript is available; conflicting or unreadable evidence never
@@ -241,6 +244,9 @@ Exempt from the entire guard: the task-control and wait tools (`task`,
 `task_status`, `task_result`, `task_cancel`, `task_message`, `task_revive`,
 `wait_for_user`, `wait_for_background_tasks`) — those legitimately re-issue
 identical calls while polling a long-running background task.
+
+Disable with `disabled_hooks: ["tool-loop-guard"]` (see
+[Hooks](configuration.md#hooks)).
 
 ---
 
