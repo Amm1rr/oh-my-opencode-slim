@@ -448,20 +448,22 @@ export function readUserPresets(
 }
 
 /**
- * Read the project-level config file as a parsed object. Returns null if absent.
+ * Read and merge ancestor project config files. Returns null if absent.
  */
 export function readProjectConfig(
   directory: string,
 ): Record<string, unknown> | null {
   try {
-    const { projectConfigPath } = findPluginConfigPaths(directory);
-    if (!projectConfigPath) return null;
-    const raw = fs
-      .readFileSync(projectConfigPath, 'utf-8')
-      .replace(/^\uFEFF/, '');
-    return JSON.parse(
-      interpolateConfigEnvironment(stripJsonComments(raw)),
-    ) as Record<string, unknown>;
+    const { projectConfigPaths } = findPluginConfigPaths(directory);
+    let config: Record<string, unknown> | undefined;
+    for (const configPath of projectConfigPaths) {
+      const raw = fs.readFileSync(configPath, 'utf-8').replace(/^\uFEFF/, '');
+      const layer = JSON.parse(
+        interpolateConfigEnvironment(stripJsonComments(raw)),
+      ) as Record<string, unknown>;
+      config = deepMerge(config, layer);
+    }
+    return config ?? null;
   } catch {
     return null;
   }

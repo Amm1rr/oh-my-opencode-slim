@@ -229,28 +229,24 @@ function checkPreset(
   return { preset: presetName, ok: true };
 }
 
-function getMergedConfig(
-  userConfig?: PluginConfig,
-  projectConfig?: PluginConfig,
-): PluginConfig {
-  return projectConfig
-    ? mergePluginConfigs(userConfig ?? {}, projectConfig)
-    : (userConfig ?? {});
-}
-
 export function runDoctorCheck(cwd: string): DoctorResult {
-  const { userConfigPath, projectConfigPath } = findPluginConfigPaths(cwd);
+  const { userConfigPath, projectConfigPaths } = findPluginConfigPaths(cwd);
 
   const userCheck = checkConfigFile('user', userConfigPath);
-  const projectCheck = checkConfigFile('project', projectConfigPath);
-
-  const configs = [userCheck, projectCheck];
+  const projectChecks = (
+    projectConfigPaths.length > 0 ? projectConfigPaths : [null]
+  ).map((configPath) => checkConfigFile('project', configPath));
+  const configs = [userCheck, ...projectChecks];
 
   const hasInvalidConfig = configs.some((c) => !c.ok);
 
   let presetCheckResult: DoctorResult['presetCheck'] | undefined;
   if (!hasInvalidConfig) {
-    const mergedConfig = getMergedConfig(userCheck.config, projectCheck.config);
+    const mergedConfig = configs.reduce<PluginConfig>(
+      (merged, check) =>
+        check.config ? mergePluginConfigs(merged, check.config) : merged,
+      {},
+    );
     presetCheckResult = checkPreset(mergedConfig);
   }
 

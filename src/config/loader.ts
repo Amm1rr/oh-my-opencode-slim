@@ -691,38 +691,55 @@ function validateFinalImageRouting(
   return false;
 }
 
+/** Project config bases ordered from the filesystem root to the location. */
+function getProjectConfigBases(directory: string): string[] {
+  const bases: string[] = [];
+  let current = path.resolve(directory);
+  for (;;) {
+    bases.push(path.join(current, '.opencode', 'oh-my-opencode-slim'));
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return bases.reverse();
+}
+
 /**
  * Find plugin config paths (user and project) for a given directory.
  * User config uses getConfigSearchDirs() for lookup.
- * Project config uses <directory>/.opencode/oh-my-opencode-slim.
+ * Project configs are discovered through the filesystem root, including
+ * ancestors above Git repository and worktree boundaries.
  *
  * @param directory - Project directory to search for .opencode config
- * @returns Object with userConfigPath and projectConfigPath (null if not found)
+ * @returns All project layers in merge order, plus the current directory's
+ * projectConfigPath for callers that edit local configuration. The singular
+ * path must not redirect writes to an inherited ancestor file.
  */
 export function findPluginConfigPaths(directory: string): {
   userConfigPath: string | null;
   projectConfigPath: string | null;
+  projectConfigPaths: string[];
 } {
   const userConfigPath = findConfigPathInDirs(
     getConfigSearchDirs(),
     'oh-my-opencode-slim',
   );
 
-  const projectConfigBasePath = path.join(
-    directory,
-    '.opencode',
-    'oh-my-opencode-slim',
+  const projectConfigPaths = getProjectConfigBases(directory)
+    .map(findConfigPath)
+    .filter((configPath): configPath is string => configPath !== null);
+  const projectConfigPath = findConfigPath(
+    path.resolve(directory, '.opencode', 'oh-my-opencode-slim'),
   );
 
-  const projectConfigPath = findConfigPath(projectConfigBasePath);
-
-  return { userConfigPath, projectConfigPath };
+  return { userConfigPath, projectConfigPath, projectConfigPaths };
 }
 
 /**
  * All plugin config candidate paths for a directory, independent of
  * existence: `.jsonc` then `.json` for every user config search location and
- * for `<directory>/.opencode`. The loader prefers `.jsonc` over `.json`, and
+ * for every ancestor's `.opencode`, from filesystem root to directory.
+ * The loader prefers `.jsonc` over `.json`, and
  * the v2 watcher must observe creation/deletion/rename and that precedence
  * change, so it consumes this candidate set instead of existing files only.
  */
@@ -735,14 +752,12 @@ export function getPluginConfigCandidates(directory: string): {
     const basePath = path.join(configDir, 'oh-my-opencode-slim');
     user.push(`${basePath}.jsonc`, `${basePath}.json`);
   }
-  const projectBasePath = path.join(
-    directory,
-    '.opencode',
-    'oh-my-opencode-slim',
-  );
   return {
     user,
-    project: [`${projectBasePath}.jsonc`, `${projectBasePath}.json`],
+    project: getProjectConfigBases(directory).flatMap((basePath) => [
+      `${basePath}.jsonc`,
+      `${basePath}.json`,
+    ]),
   };
 }
 
@@ -782,13 +797,15 @@ export function mergePluginConfigs(
 /**
  * Load plugin configuration from user and project config files, merging them appropriately.
  *
- * Configuration is loaded from two locations:
+ * Configuration is loaded in precedence order:
  * 1. User config: $OPENCODE_CONFIG_DIR/oh-my-opencode-slim.jsonc or .json,
  *    or ~/.config/opencode/oh-my-opencode-slim.jsonc or .json (or $XDG_CONFIG_HOME)
- * 2. Project config: <directory>/.opencode/oh-my-opencode-slim.jsonc or .json
+ * 2. Ancestor project configs: .opencode/oh-my-opencode-slim.jsonc or .json,
+ *    from the filesystem root down to directory, including directory itself
  *
  * JSONC format is preferred over JSON (allows comments and trailing commas).
- * Project config takes precedence over user config. Nested objects (agents, multiplexer) are
+ * Closer project configs take precedence over ancestors and user config.
+ * Nested objects (agents, multiplexer) are
  * deep-merged, while top-level arrays are replaced entirely by project config.
  *
  * @param directory - Project directory to search for .opencode config
@@ -799,18 +816,19 @@ export function loadPluginConfig(
   directory: string,
   options?: LoadPluginConfigOptions,
 ): ResolvedPluginConfig {
-  const { userConfigPath, projectConfigPath } =
+  const { userConfigPath, projectConfigPaths } =
     findPluginConfigPaths(directory);
+  const projectConfigPath = projectConfigPaths.at(-1) ?? null;
 
   let config: RawPluginConfig = userConfigPath
     ? (loadPluginConfigFromPath(userConfigPath, options) ?? {})
     : {};
 
-  const projectConfig = projectConfigPath
-    ? loadPluginConfigFromPath(projectConfigPath, options)
-    : null;
-  if (projectConfig) {
-    config = mergePluginConfigs(config, projectConfig);
+  for (const configPath of projectConfigPaths) {
+    const projectConfig = loadPluginConfigFromPath(configPath, options);
+    if (projectConfig) {
+      config = mergePluginConfigs(config, projectConfig);
+    }
   }
 
   if (config.webfetch) {

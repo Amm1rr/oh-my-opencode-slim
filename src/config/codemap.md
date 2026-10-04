@@ -41,7 +41,7 @@ The config system follows a layered architecture:
 ```
 1. Discovery Phase
    ├─ User config: $OPENCODE_CONFIG_DIR/oh-my-opencode-slim.{jsonc,json}
-   ├─ Project config: <directory>/.opencode/oh-my-opencode-slim.{jsonc,json}
+    ├─ Project configs: every ancestor's .opencode/oh-my-opencode-slim.{jsonc,json}, filesystem root to directory
    └─ Environment variable: OH_MY_OPENCODE_SLIM_PRESET (overrides preset field)
 
 2. Parsing Phase
@@ -50,7 +50,7 @@ The config system follows a layered architecture:
    └─ Zod validation with detailed error reporting
 
 3. Merging Phase
-   ├─ User config (base) + Project config (override) → deep merge
+    ├─ User config (base) + ancestor project configs (farthest to closest) → deep merge
    ├─ Preset resolution: preset → merge preset.agents with root agents
    ├─ Legacy tmux → multiplexer migration for backward compatibility
    └─ Normalization: companion defaults, ACP agent defaults
@@ -124,7 +124,7 @@ This allows consumers to import directly from `src/config` rather than individua
 
 - `loadPluginConfig(directory, options?)`: Main entry point for configuration loading and merging
 - `loadConfigFromPath(configPath, options?)`: Load and validate single config file (JSONC or JSON)
-- `findPluginConfigPaths(directory)`: Discover user and project config file paths
+- `findPluginConfigPaths(directory)`: Discover user config and ancestor project layers in merge order; retain a current-directory-only path for project writes
 - `mergePluginConfigs(base, override)`: Deep merge two PluginConfig objects
 - `deepMerge(base, override)`: Recursively merge nested configuration objects
 

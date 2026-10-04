@@ -8,6 +8,12 @@ This document describes how to configure and customize oh-my-opencode-slim on a 
 > Because project-local configuration files (`.opencode/oh-my-opencode-slim.jsonc`) and prompt templates (`.opencode/oh-my-opencode-slim/`) are loaded automatically when you open and work in a project directory, they can modify agent behaviors, enable/disable tools, and grant extra model access permissions.
 > **Only work in and run OpenCode within repositories you explicitly trust.**
 
+Configuration discovery also includes `.opencode/oh-my-opencode-slim.json[c]`
+in every ancestor directory through the filesystem root, even above repository
+and worktree boundaries. Review and trust those files too. This inheritance
+applies to configuration files; prompt-file and local skill discovery retain
+their existing directory-scoped lookup.
+
 ---
 
 ## Feature Comparison
@@ -35,7 +41,7 @@ When oh-my-opencode-slim loads, it resolves configuration properties and prompt 
        ↓ (overridden by)
 [User Config] (global)
        ↓ (overridden by)
-[Project Config] (local repository)
+[Ancestor Project Configs] (filesystem root to current directory)
        ↓ (overridden by)
 [Environment Preset Override] (via OH_MY_OPENCODE_SLIM_PRESET env var)
        ↓ (merged into agents)
@@ -45,6 +51,12 @@ When oh-my-opencode-slim loads, it resolves configuration properties and prompt 
 ```
 
 ### Note on Root Overrides vs Presets
+
+Each ancestor layer merges before the next closer layer. A nested project or
+worktree can override selected agent fields without duplicating the shared
+configuration above it. Within each directory, `.jsonc` takes precedence over
+`.json`; sibling directories are not searched.
+
 The root `agents.*` configuration (defined at the top level of user or project config) always takes precedence over the active preset configurations. To override a root agent choice globally, you must specify the override in the project-level root `agents.*` rather than inside a local preset configuration alone.
 
 ---

@@ -3,7 +3,12 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { ConfigLoadWarning } from './loader';
-import { loadAgentPrompt, loadPluginConfig } from './loader';
+import {
+  findPluginConfigPaths,
+  getPluginConfigCandidates,
+  loadAgentPrompt,
+  loadPluginConfig,
+} from './loader';
 
 // Test deepMerge indirectly through loadPluginConfig behavior
 // since deepMerge is not exported
@@ -49,6 +54,185 @@ describe('loadPluginConfig', () => {
 
     const config = loadPluginConfig(projectDir);
     expect(config.agents?.oracle?.model).toBe('test/model');
+  });
+
+  function writeProjectConfig(directory: string, config: unknown): string {
+    const configDir = path.join(directory, '.opencode');
+    fs.mkdirSync(configDir, { recursive: true });
+    const filename = path.join(configDir, 'oh-my-opencode-slim.json');
+    fs.writeFileSync(filename, JSON.stringify(config));
+    return filename;
+  }
+
+  test('inherits custom agents when loading from a nested Git worktree', () => {
+    const workspace = path.join(tempDir, 'workspace');
+    const repo = path.join(workspace, 'repo');
+    const worktree = path.join(repo, '.slim', 'worktrees', 'feature');
+    fs.mkdirSync(path.join(repo, '.git'), { recursive: true });
+    fs.mkdirSync(worktree, { recursive: true });
+    fs.writeFileSync(path.join(worktree, '.git'), 'gitdir: ../../../.git');
+    const configPath = writeProjectConfig(workspace, {
+      preset: 'shared',
+      presets: { shared: { fixer: { model: 'test/fixer' } } },
+      agents: {
+        'backend-fixer': {
+          model: 'test/backend',
+          prompt: 'Implement backend changes.',
+          skills: [],
+          mcps: [],
+        },
+      },
+    });
+
+    expect(loadPluginConfig(worktree)).toEqual(loadPluginConfig(workspace));
+    expect(loadPluginConfig(worktree).agents?.['backend-fixer']?.prompt).toBe(
+      'Implement backend changes.',
+    );
+    const paths = findPluginConfigPaths(worktree);
+    expect(paths.projectConfigPaths).toEqual([configPath]);
+    // Discovery for reads must not redirect project-scoped writes to parents.
+    expect(paths.projectConfigPath).toBeNull();
+  });
+
+  test('merges global and all ancestor configs from farthest to closest', () => {
+    const workspace = path.join(tempDir, 'workspace');
+    const repo = path.join(workspace, 'repo');
+    const nested = path.join(repo, 'packages', 'backend');
+    const globalDir = path.join(userConfigDir, 'opencode');
+    fs.mkdirSync(globalDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(globalDir, 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        agents: { fixer: { model: 'test/global', mcps: ['context7'] } },
+        disabled_tools: ['global-tool'],
+      }),
+    );
+    const outerPath = writeProjectConfig(workspace, {
+      preset: 'shared',
+      presets: { shared: { oracle: { model: 'test/oracle' } } },
+      agents: { fixer: { model: 'test/workspace', variant: 'high' } },
+      disabled_tools: ['workspace-tool'],
+    });
+    const repoPath = writeProjectConfig(repo, {
+      presets: { shared: { oracle: { temperature: 0.4 } } },
+      agents: { fixer: { model: 'test/repo', skills: ['simplify'] } },
+    });
+    const nestedPath = writeProjectConfig(nested, {
+      agents: { fixer: { model: 'test/nested', mcps: [] } },
+      disabled_tools: [],
+    });
+
+    const config = loadPluginConfig(nested);
+    expect(config.agents?.fixer).toMatchObject({
+      model: 'test/nested',
+      variant: 'high',
+      skills: ['simplify'],
+      mcps: [],
+    });
+    expect(config.agents?.oracle).toMatchObject({
+      model: 'test/oracle',
+      temperature: 0.4,
+    });
+    expect(config.disabled_tools).toEqual([]);
+    expect(findPluginConfigPaths(nested).projectConfigPaths).toEqual([
+      outerPath,
+      repoPath,
+      nestedPath,
+    ]);
+    expect(findPluginConfigPaths(nested).projectConfigPath).toBe(nestedPath);
+  });
+
+  test('prefers JSONC independently at each ancestor level', () => {
+    const workspace = path.join(tempDir, 'workspace');
+    const nested = path.join(workspace, 'nested');
+    const outerJson = writeProjectConfig(workspace, {
+      agents: { fixer: { model: 'test/ignored-outer-json' } },
+    });
+    const nestedJson = writeProjectConfig(nested, {
+      agents: { fixer: { model: 'test/ignored-nested-json' } },
+    });
+    fs.writeFileSync(
+      `${outerJson}c`,
+      '{ "agents": { "fixer": { "model": "test/outer-jsonc", } } }',
+    );
+    fs.writeFileSync(
+      `${nestedJson}c`,
+      '{ "agents": { "fixer": { "variant": "high", } } }',
+    );
+
+    expect(loadPluginConfig(nested).agents?.fixer).toMatchObject({
+      model: 'test/outer-jsonc',
+      variant: 'high',
+    });
+    expect(findPluginConfigPaths(nested).projectConfigPaths).toEqual([
+      `${outerJson}c`,
+      `${nestedJson}c`,
+    ]);
+  });
+
+  test('reports an invalid ancestor without discarding valid layers', () => {
+    const workspace = path.join(tempDir, 'workspace');
+    const repo = path.join(workspace, 'repo');
+    const nested = path.join(repo, 'nested');
+    writeProjectConfig(workspace, {
+      agents: { fixer: { model: 'test/inherited' } },
+    });
+    const invalidPath = writeProjectConfig(repo, {});
+    fs.writeFileSync(invalidPath, '{ invalid');
+    writeProjectConfig(nested, { agents: { fixer: { variant: 'high' } } });
+    const warnings: ConfigLoadWarning[] = [];
+
+    const config = loadPluginConfig(nested, {
+      silent: true,
+      onWarning: (warning) => warnings.push(warning),
+    });
+    expect(config.agents?.fixer).toMatchObject({
+      model: 'test/inherited',
+      variant: 'high',
+    });
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatchObject({
+      path: invalidPath,
+      kind: 'invalid-json',
+    });
+  });
+
+  test('does not inherit sibling configs and resolves relative locations', () => {
+    const workspace = path.join(tempDir, 'workspace');
+    const repo = path.join(workspace, 'repo');
+    const sibling = path.join(workspace, 'sibling');
+    fs.mkdirSync(repo, { recursive: true });
+    writeProjectConfig(workspace, {
+      agents: { fixer: { model: 'test/base' } },
+    });
+    writeProjectConfig(sibling, {
+      agents: { fixer: { model: 'test/sibling' } },
+    });
+
+    expect(loadPluginConfig(repo).agents?.fixer?.model).toBe('test/base');
+    const relative = path.relative(process.cwd(), repo);
+    expect(loadPluginConfig(relative)).toEqual(loadPluginConfig(repo));
+  });
+
+  test('enumerates absent ancestor candidates through the filesystem root', () => {
+    const nested = path.join(tempDir, 'workspace', 'repo', 'nested');
+    const { project } = getPluginConfigCandidates(nested);
+    const directories: string[] = [];
+    let current = path.resolve(nested);
+    for (;;) {
+      directories.unshift(current);
+      const parent = path.dirname(current);
+      if (parent === current) break;
+      current = parent;
+    }
+
+    expect(project).toEqual(
+      directories.flatMap((directory) => [
+        path.join(directory, '.opencode', 'oh-my-opencode-slim.jsonc'),
+        path.join(directory, '.opencode', 'oh-my-opencode-slim.json'),
+      ]),
+    );
+    expect(new Set(project).size).toBe(project.length);
   });
 
   test('loads autoUpdate flag when configured', () => {

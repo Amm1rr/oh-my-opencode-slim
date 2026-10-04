@@ -8,6 +8,7 @@ import {
   buildPresetSummary,
   deletePreset,
   findPresetDependents,
+  getAllConfiguredPresets,
   getEditablePreset,
   getPresetSource,
   removeAgentFromPreset,
@@ -65,6 +66,38 @@ afterEach(() => {
   }
 
   fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+test('lists inherited presets without writing ancestor project configs', () => {
+  const workspace = path.join(tempDir, 'workspace');
+  const project = path.join(workspace, 'repo');
+  const nested = path.join(project, 'packages', 'backend');
+  fs.mkdirSync(nested, { recursive: true });
+  const configs = [
+    {
+      directory: workspace,
+      config: { presets: { inherited: { fixer: { model: 'test/model' } } } },
+    },
+    {
+      directory: project,
+      config: { presets: { inherited: { fixer: { variant: 'high' } } } },
+    },
+  ];
+  const configPaths = configs.map(({ directory, config }) => {
+    const configDir = path.join(directory, '.opencode');
+    fs.mkdirSync(configDir);
+    const filename = path.join(configDir, 'oh-my-opencode-slim.json');
+    fs.writeFileSync(filename, JSON.stringify(config));
+    return filename;
+  });
+  const originals = configPaths.map((filename) => fs.readFileSync(filename));
+
+  expect(getAllConfiguredPresets(nested).inherited).toMatchObject({
+    fixer: { model: 'test/model', variant: 'high' },
+  });
+  expect(configPaths.map((filename) => fs.readFileSync(filename))).toEqual(
+    originals,
+  );
 });
 
 describe('switchPresetOnDisk', () => {

@@ -101,6 +101,28 @@ async function withWatch(
 }
 
 describe('getPluginConfigCandidates', () => {
+  test('includes ancestor configs above a nested worktree location', () => {
+    const nested = path.join(env.projectDir, '.slim', 'worktrees', 'feature');
+    const candidates = getPluginConfigCandidates(nested);
+    expect(candidates).toContain(
+      path.join(env.projectDir, '.opencode', 'oh-my-opencode-slim.json'),
+    );
+    expect(candidates).toContain(
+      path.join(
+        path.dirname(env.projectDir),
+        '.opencode',
+        'oh-my-opencode-slim.jsonc',
+      ),
+    );
+    expect(candidates).toContain(
+      path.join(
+        path.parse(nested).root,
+        '.opencode',
+        'oh-my-opencode-slim.json',
+      ),
+    );
+  });
+
   test('returns jsonc and json candidates for user and project, existence-independent', () => {
     const candidates = getPluginConfigCandidates(env.projectDir);
     const userJsonc = path.join(
@@ -128,6 +150,35 @@ describe('getPluginConfigCandidates', () => {
 });
 
 describe('watchPluginConfigFiles scheduling', () => {
+  test('refreshes when an inherited project config changes', async () => {
+    const configDir = path.join(env.projectDir, '.opencode');
+    fs.mkdirSync(configDir);
+    const configPath = path.join(configDir, 'oh-my-opencode-slim.json');
+    fs.writeFileSync(configPath, '{}');
+    const nested = path.join(env.projectDir, '.slim', 'worktrees', 'feature');
+    fs.mkdirSync(nested, { recursive: true });
+    const seam = makeWatchSeam();
+    let calls = 0;
+    const watcher = watchPluginConfigFiles({
+      directory: nested,
+      debounceMs: 20,
+      watchImpl: seam.watchImpl,
+      onChanged: () => {
+        calls += 1;
+      },
+      log: () => {},
+    });
+    try {
+      const listener = seamListener(seam, configDir);
+      expect(listener).toBeDefined();
+      fs.writeFileSync(configPath, '{"preset":"inherited"}');
+      listener?.('change', 'oh-my-opencode-slim.json');
+      await waitFor(() => calls === 1);
+    } finally {
+      await watcher.dispose();
+    }
+  });
+
   test('fires a debounced refresh on a real config-file write', async () => {
     fs.writeFileSync(env.userConfigPath, '{}');
     await withWatch({ debounceMs: 30, real: true }, async ({ calls }) => {

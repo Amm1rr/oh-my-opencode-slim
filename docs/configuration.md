@@ -15,6 +15,27 @@ Complete reference for all configuration files and options in oh-my-opencode-sli
 
 > **💡 JSONC recommended:** Use the `.jsonc` extension to add comments and trailing commas. If both `.jsonc` and `.json` exist, `.jsonc` takes precedence.
 
+Project configuration discovery searches the current directory and every
+ancestor through the filesystem root, including directories above a Git
+repository or worktree root. Settings merge in this order:
+
+1. User configuration.
+2. Each ancestor's `.opencode/oh-my-opencode-slim.json[c]`, from the
+   filesystem root down to the current directory.
+
+Closer configurations override matching settings while preserving unrelated
+inherited settings. JSONC preference applies independently in each directory;
+top-level arrays retain their existing replacement behavior. This keeps shared
+custom agents and presets available when a session moves into a nested worktree.
+Only ancestor configurations are inherited, not sibling configurations. Trust
+the ancestor configurations as well as the current project before running
+OpenCode. Prompt-file and project-local skill discovery are unchanged.
+
+The v2 configuration watcher observes ancestor candidates, including files
+created later, and `doctor` reports every discovered project layer. Project-scoped
+marketplace edits still write to the current directory's configuration, not an
+ancestor's file.
+
 Set `OPENCODE_CONFIG_DIR` to use a custom user config directory instead of
 `~/.config/opencode`; install and runtime config discovery both honor it.
 

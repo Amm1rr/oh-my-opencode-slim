@@ -192,6 +192,11 @@ example and precedence rules.
 
 ### Preset Docs
 
+Project settings in `.opencode/oh-my-opencode-slim.json[c]` are inherited from
+ancestor directories, including above repository and nested worktree roots.
+Closer settings override matching fields. See
+[Configuration](docs/configuration.md#config-files) for precedence and trust boundaries.
+
 Consider presets as guidelines as they are often outdated.
 
 - **[OpenAI Preset](docs/openai-preset.md)** — the default generated preset; runs all agents on OpenAI models.
