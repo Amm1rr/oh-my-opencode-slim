@@ -4,6 +4,7 @@ import {
   type BackgroundJobTerminalGate,
   createBackgroundJobTerminalGate,
 } from '../utils/background-job-terminal-gate';
+import { buildPluginInput } from '../v2/client-shim';
 import { createTaskResultTool } from './task-result';
 
 const gates: BackgroundJobTerminalGate[] = [];
@@ -290,6 +291,54 @@ test('untracked quiescent session still requires a terminal assistant segment', 
   } as never);
   await expect(h.execute()).rejects.toThrow('no terminal evidence');
 });
+test('an untracked v1 compaction round does not replace the final result', async () => {
+  const h = harness(false);
+  const { data } = await h.messages();
+  h.messages.mockResolvedValue({
+    data: [
+      ...data,
+      { info: { role: 'user' }, parts: [{ type: 'compaction', auto: false }] },
+      {
+        info: { role: 'assistant', summary: true, finish: 'stop' },
+        parts: [{ type: 'text', text: 'COMPACTION-SUMMARY' }],
+      },
+    ],
+  } as never);
+  expect(await h.execute()).toContain('final findings');
+});
+test.each([
+  ['finished', 'succeeded', 'final findings'],
+  ['still running', undefined, 'running (unconfirmed)'],
+])(
+  'untracked v2 %s child is classified from its context',
+  async (_, outcome, expected) => {
+    // The v2 shim has no session.status; the context's idle marker ends a round.
+    const context = mock(async () => [
+      { id: 'u1', type: 'user', text: 'ask', time: { created: 1 } },
+      {
+        id: 'a1',
+        type: 'assistant',
+        text: 'final findings',
+        time: { created: 2 },
+      },
+      ...(outcome
+        ? [{ id: 'i1', type: 'idle', outcome, time: { created: 3 } }]
+        : []),
+    ]);
+    const input = buildPluginInput({
+      session: { get: async () => ({ parentID: 'parent-1' }), context },
+    } as never) as never;
+    const output = await createTaskResultTool({
+      input,
+      backgroundJobBoard: new BackgroundJobBoard(),
+    }).task_result.execute({ task_id: 'ses_child1' }, {
+      sessionID: 'parent-1',
+      agent: 'orchestrator',
+    } as never);
+    expect(String(output)).toContain(expected);
+    expect(context).toHaveBeenCalledTimes(1);
+  },
+);
 test('unknown alias and empty task id are rejected', async () => {
   const h = harness();
   await expect(h.execute('exp-99')).rejects.toThrow('Unknown task ID');

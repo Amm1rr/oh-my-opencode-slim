@@ -1170,10 +1170,13 @@ export function createBackgroundJobTerminalGate(options: {
     signal: TerminalSignal = { kind: 'inspect' },
   ): Promise<GateResult> {
     const retained = board.get(run.taskID);
+    // A restored round stands in for live status only until an event makes
+    // later activity ambiguous (episode bump); then the live read decides.
     if (
       retained?.verifiedRetainedRound === true &&
       retained.generation === run.generation &&
-      retained.state !== 'running'
+      retained.state !== 'running' &&
+      observation(run)?.episode === 0
     ) {
       return Promise.resolve({ kind: 'committed', record: retained });
     }

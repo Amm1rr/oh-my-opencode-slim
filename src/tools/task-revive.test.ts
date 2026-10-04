@@ -12,6 +12,7 @@ import {
   createRevivedRunTracker,
   type RevivedRunTracker,
 } from '../hooks/task-session-manager/revived-run-tracker';
+import { createSessionRecovery } from '../hooks/task-session-manager/session-recovery';
 import { BackgroundJobBoard as ProductionBoard } from '../utils/background-job-board';
 import { BackgroundJobBoard } from '../utils/background-job-fixture';
 import { getSuppressionTombstone } from '../utils/background-job-persistence';
@@ -90,6 +91,12 @@ function createTool(overrides?: {
     abortRetryIntervalMs: 0,
     stableStoppedMs: 0,
     revivedRunTracker,
+    recoverRetainedSession: createSessionRecovery({
+      input,
+      backgroundJobBoard: board,
+      hostFlavor: overrides?.hostFlavor,
+      liveStatusTimeoutMs: 10,
+    }),
     backgroundJobSupervisor: { onLaunch } as never,
     baselineTimeoutMs: overrides?.baselineTimeoutMs,
     admissionTimeoutMs: overrides?.admissionTimeoutMs,

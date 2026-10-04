@@ -99,12 +99,24 @@ interface LooseMessage {
     outcome?: unknown;
     error?: unknown;
     finish?: unknown;
+    summary?: unknown;
     time?: { created?: unknown; completed?: unknown };
   };
   parts?: unknown[];
 }
 
 export type TranscriptMessage = LooseMessage;
+
+/** A v1 compaction round (its `compaction` trigger and the `summary: true`
+ * reply) is host maintenance, not the specialist's work. */
+function isCompactionRound(message: TranscriptMessage): boolean {
+  return (
+    message.info?.summary === true ||
+    (message.parts ?? []).some(
+      (part) => isRecord(part) && part.type === 'compaction',
+    )
+  );
+}
 
 export type TerminalEvidenceVerdict =
   | { verdict: 'completed'; text: string }
@@ -129,6 +141,38 @@ function verdictFromEvidence(
   }
 }
 
+/** Host-ordered entries of a v1-style messages response, or why they are
+ * unusable. */
+function transcriptEntries(
+  response: unknown,
+): TranscriptMessage[] | { reason: string } {
+  if (response === undefined)
+    return { reason: 'transcript source unavailable' };
+  if (responseError(response) !== undefined)
+    return { reason: 'transcript read failed' };
+  if (!isRecord(response) || !Array.isArray(response.data))
+    return { reason: 'malformed transcript response' };
+  for (const entry of response.data) {
+    if (
+      !isRecord(entry) ||
+      !isRecord(entry.info) ||
+      (!['assistant', 'user', 'system'].includes(String(entry.info.role)) &&
+        typeof entry.info.id !== 'string')
+    ) {
+      return { reason: 'malformed transcript entries' };
+    }
+    if (
+      entry.parts !== undefined &&
+      (!Array.isArray(entry.parts) ||
+        entry.parts.some(
+          (part) => !isRecord(part) || typeof part.type !== 'string',
+        ))
+    )
+      return { reason: 'malformed transcript parts' };
+  }
+  return response.data;
+}
+
 /** A valid absence is not unknown evidence. Never scan through a user prompt
  * or pending assistant placeholder to recover the previous attempt's answer. */
 export function classifyTerminalEvidence(
@@ -139,32 +183,8 @@ export function classifyTerminalEvidence(
     terminalOutcomeConfirmed?: boolean;
   } = {},
 ): TerminalEvidenceVerdict {
-  if (response === undefined)
-    return { verdict: 'retry', reason: 'transcript source unavailable' };
-  if (responseError(response) !== undefined)
-    return { verdict: 'retry', reason: 'transcript read failed' };
-  if (!isRecord(response) || !Array.isArray(response.data))
-    return { verdict: 'retry', reason: 'malformed transcript response' };
-  const all: TranscriptMessage[] = [];
-  for (const entry of response.data) {
-    if (
-      !isRecord(entry) ||
-      !isRecord(entry.info) ||
-      (!['assistant', 'user', 'system'].includes(String(entry.info.role)) &&
-        typeof entry.info.id !== 'string')
-    ) {
-      return { verdict: 'retry', reason: 'malformed transcript entries' };
-    }
-    all.push(entry);
-    if (
-      entry.parts !== undefined &&
-      (!Array.isArray(entry.parts) ||
-        entry.parts.some(
-          (part) => !isRecord(part) || typeof part.type !== 'string',
-        ))
-    )
-      return { verdict: 'retry', reason: 'malformed transcript parts' };
-  }
+  const all = transcriptEntries(response);
+  if (!Array.isArray(all)) return { verdict: 'retry', reason: all.reason };
   if (options.baselineMessageID) {
     const baseline = all.findIndex(
       (message) => message.info?.id === options.baselineMessageID,
@@ -173,9 +193,13 @@ export function classifyTerminalEvidence(
       return { verdict: 'retry', reason: 'baseline message missing' };
     const segment = all.slice(baseline + 1);
     let target = segment.length - 1;
+    // Compaction rounds are skipped in place: the anchor and indices hold.
     while (target >= 0) {
       const role = segment[target].info?.role;
-      if (typeof role !== 'string' || role === 'assistant' || role === 'user')
+      if (
+        !isCompactionRound(segment[target]) &&
+        (typeof role !== 'string' || role === 'assistant' || role === 'user')
+      )
         break;
       target -= 1;
     }
@@ -195,7 +219,11 @@ export function classifyTerminalEvidence(
     );
   }
   let target = all.length - 1;
-  while (target >= 0 && all[target].info?.role === 'system') target--;
+  while (
+    target >= 0 &&
+    (all[target].info?.role === 'system' || isCompactionRound(all[target]))
+  )
+    target--;
   const trailing = all[target];
   if (!trailing || trailing.info?.role === 'user') return { verdict: 'absent' };
   if (trailing.info?.role !== 'assistant')
@@ -295,7 +323,9 @@ export interface CurrentRoundClassification {
   completedAt?: number;
 }
 
-function transcriptOrderKey(message: TranscriptMessage): number | undefined {
+export function transcriptOrderKey(
+  message: TranscriptMessage,
+): number | undefined {
   const time = message.info?.time;
   if (!isRecord(time)) return undefined;
   if (typeof time.created === 'number' && Number.isFinite(time.created)) {
@@ -336,98 +366,6 @@ function messageParentIdentity(message: TranscriptMessage): string | undefined {
     : undefined;
 }
 
-function finiteCreated(message: TranscriptMessage): number | undefined {
-  const time = message.info?.time;
-  return isRecord(time) &&
-    typeof time.created === 'number' &&
-    Number.isFinite(time.created)
-    ? time.created
-    : undefined;
-}
-
-function exclusiveEqualCreatedLink(
-  rows: Array<{
-    message: TranscriptMessage;
-    time: number | undefined;
-    id?: string;
-  }>,
-  parent: { message: TranscriptMessage; time: number | undefined; id?: string },
-  child: { message: TranscriptMessage; id?: string; parentID?: string },
-): boolean {
-  if (
-    parent.message.info?.role !== 'user' ||
-    child.message.info?.role !== 'assistant'
-  ) {
-    return false;
-  }
-  const parentCreated = finiteCreated(parent.message);
-  const childCreated = finiteCreated(child.message);
-  if (
-    !parent.id ||
-    !child.id ||
-    child.parentID !== parent.id ||
-    parentCreated === undefined ||
-    parentCreated !== childCreated
-  ) {
-    return false;
-  }
-  const bucket = rows.filter((item) => item.time === parent.time);
-  return bucket.length === 2 && bucket.every((item) => item.id);
-}
-
-/**
- * Order a transcript without trusting array position.
- * Different timestamps sort by time. Equal timestamps use an assistant
- * parentID link or the host message id. A tie that cannot be proved is
- * unreadable; the array is not reversed as a guess.
- */
-export function orderTranscriptMessages(
-  messages: TranscriptMessage[],
-): TranscriptMessage[] | 'unreadable' {
-  const rows = messages.map((message) => ({
-    message,
-    time: transcriptOrderKey(message),
-    id: messageIdentity(message),
-    parentID: messageParentIdentity(message),
-  }));
-  if (rows.some((row) => row.time === undefined)) return 'unreadable';
-  const seen = new Set<string>();
-  for (const row of rows) {
-    if (!row.id) continue;
-    if (seen.has(row.id)) return 'unreadable';
-    seen.add(row.id);
-  }
-  for (const row of rows) {
-    if (!row.parentID) continue;
-    if (row.parentID === row.id) return 'unreadable';
-    const parent = rows.find((item) => item.id === row.parentID);
-    if (!parent || parent.time === undefined || row.time === undefined)
-      continue;
-    if (parent.time > row.time) return 'unreadable';
-    if (
-      parent.time === row.time &&
-      parent.id &&
-      row.id &&
-      parent.id > row.id &&
-      !exclusiveEqualCreatedLink(rows, parent, row)
-    ) {
-      return 'unreadable';
-    }
-  }
-  let unreadable = false;
-  const sorted = [...rows].sort((left, right) => {
-    if (left.time !== right.time) return (left.time ?? 0) - (right.time ?? 0);
-    if (left.parentID && left.parentID === right.id) return 1;
-    if (right.parentID && right.parentID === left.id) return -1;
-    if (left.id && right.id) {
-      return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
-    }
-    unreadable = true;
-    return 0;
-  });
-  return unreadable ? 'unreadable' : sorted.map((row) => row.message);
-}
-
 /**
  * Classify only the latest delivered user round.
  *
@@ -438,52 +376,15 @@ export function orderTranscriptMessages(
 export function classifyCurrentDeliveredRound(
   response: unknown,
 ): CurrentRoundClassification {
-  if (response === undefined) {
-    return {
-      verdict: 'unreadable',
-      reason: 'transcript source unavailable',
-    };
+  const entries = transcriptEntries(response);
+  if (!Array.isArray(entries)) {
+    return { verdict: 'unreadable', reason: entries.reason };
   }
-  if (responseError(response) !== undefined) {
-    return { verdict: 'unreadable', reason: 'transcript read failed' };
-  }
-  if (!isRecord(response) || !Array.isArray(response.data)) {
-    return { verdict: 'unreadable', reason: 'malformed transcript response' };
-  }
-
-  const messages: TranscriptMessage[] = [];
-  for (const entry of response.data) {
-    if (
-      !isRecord(entry) ||
-      !isRecord(entry.info) ||
-      (!['assistant', 'user', 'system'].includes(String(entry.info.role)) &&
-        typeof entry.info.id !== 'string')
-    ) {
-      return { verdict: 'unreadable', reason: 'malformed transcript entries' };
-    }
-    if (
-      entry.parts !== undefined &&
-      (!Array.isArray(entry.parts) ||
-        entry.parts.some(
-          (part) => !isRecord(part) || typeof part.type !== 'string',
-        ))
-    ) {
-      return { verdict: 'unreadable', reason: 'malformed transcript parts' };
-    }
-    messages.push(entry);
-  }
-
-  const sorted = orderTranscriptMessages(messages);
-  if (sorted === 'unreadable') {
-    return {
-      verdict: 'unreadable',
-      reason: 'transcript order is not verifiable',
-    };
-  }
+  const messages = entries.filter((message) => !isCompactionRound(message));
 
   let latestUser = -1;
-  for (let index = sorted.length - 1; index >= 0; index -= 1) {
-    if (sorted[index]?.info?.role === 'user') {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.info?.role === 'user') {
       latestUser = index;
       break;
     }
@@ -491,20 +392,24 @@ export function classifyCurrentDeliveredRound(
   if (latestUser < 0) {
     return { verdict: 'unreadable', reason: 'no delivered user round' };
   }
-  const startedAt = transcriptOrderKey(sorted[latestUser] as TranscriptMessage);
+  const startedAt = transcriptOrderKey(
+    messages[latestUser] as TranscriptMessage,
+  );
 
   let assistant = -1;
-  for (let index = sorted.length - 1; index > latestUser; index -= 1) {
-    if (sorted[index]?.info?.role === 'assistant') {
+  for (let index = messages.length - 1; index > latestUser; index -= 1) {
+    if (messages[index]?.info?.role === 'assistant') {
       assistant = index;
       break;
     }
   }
   if (assistant < 0) return { verdict: 'incomplete', startedAt };
 
-  const turn = sorted[assistant] as TranscriptMessage;
+  const turn = messages[assistant] as TranscriptMessage;
   const declaredParent = messageParentIdentity(turn);
-  const latestUserID = messageIdentity(sorted[latestUser] as TranscriptMessage);
+  const latestUserID = messageIdentity(
+    messages[latestUser] as TranscriptMessage,
+  );
   if (declaredParent && declaredParent !== latestUserID) {
     return latestUserID
       ? { verdict: 'incomplete', startedAt }
@@ -521,7 +426,7 @@ export function classifyCurrentDeliveredRound(
     };
   }
   const evidence = classifyAssistantTurnEvidence(
-    sorted,
+    messages,
     assistant,
     latestUser,
     true,
@@ -596,16 +501,9 @@ export function classifyV2HistoricalRound(
     }
     messages.push(entry);
   }
-  const sorted = orderTranscriptMessages(messages);
-  if (sorted === 'unreadable') {
-    return {
-      verdict: 'unreadable',
-      reason: 'transcript order is not verifiable',
-    };
-  }
   let boundary = -1;
-  for (let index = sorted.length - 1; index >= 0; index -= 1) {
-    const source = sourceTypeOf(sorted[index] as TranscriptMessage);
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const source = sourceTypeOf(messages[index] as TranscriptMessage);
     if (source === 'user' || source === 'synthetic') {
       boundary = index;
       break;
@@ -614,13 +512,13 @@ export function classifyV2HistoricalRound(
   if (boundary < 0) {
     return { verdict: 'unreadable', reason: 'no delivered user round' };
   }
-  const startedAt = transcriptOrderKey(sorted[boundary] as TranscriptMessage);
+  const startedAt = transcriptOrderKey(messages[boundary] as TranscriptMessage);
+  // No user or synthetic entry follows the boundary.
   let assistant = -1;
   let closingIdle = -1;
-  for (let index = boundary + 1; index < sorted.length; index += 1) {
-    const message = sorted[index] as TranscriptMessage;
+  for (let index = boundary + 1; index < messages.length; index += 1) {
+    const message = messages[index] as TranscriptMessage;
     const source = sourceTypeOf(message);
-    if (source === 'user' || source === 'synthetic') break;
     if (source === 'assistant') {
       assistant = index;
       closingIdle = -1;
@@ -629,25 +527,22 @@ export function classifyV2HistoricalRound(
     if (source === 'idle') closingIdle = index;
   }
   if (closingIdle < 0) return { verdict: 'incomplete', startedAt };
-  const idle = sorted[closingIdle] as TranscriptMessage;
+  const idle = messages[closingIdle] as TranscriptMessage;
   const idleOutcome = outcomeOf(idle);
   const completedAt =
     transcriptOrderKey(idle) ??
     (assistant >= 0
-      ? assistantCompletedAt(sorted[assistant] as TranscriptMessage)
+      ? assistantCompletedAt(messages[assistant] as TranscriptMessage)
       : undefined);
   if (idleOutcome === undefined) {
     return { verdict: 'unreadable', reason: 'idle outcome is missing' };
-  }
-  if (assistant >= 0 && closingIdle < assistant) {
-    return { verdict: 'incomplete', startedAt };
   }
   if (idleOutcome === 'interrupted') {
     return { verdict: 'interrupted', startedAt, completedAt };
   }
   if (idleOutcome === 'failed') {
     const turn =
-      assistant >= 0 ? (sorted[assistant] as TranscriptMessage) : undefined;
+      assistant >= 0 ? (messages[assistant] as TranscriptMessage) : undefined;
     return {
       verdict: 'error',
       text:
@@ -664,14 +559,14 @@ export function classifyV2HistoricalRound(
     };
   }
   if (assistant < 0) return { verdict: 'incomplete', startedAt };
-  const text = textOf(sorted[assistant] as TranscriptMessage);
+  const text = textOf(messages[assistant] as TranscriptMessage);
   if (!text) return { verdict: 'incomplete', startedAt };
   return {
     verdict: 'completed',
     text,
     startedAt,
     completedAt:
-      assistantCompletedAt(sorted[assistant] as TranscriptMessage) ??
+      assistantCompletedAt(messages[assistant] as TranscriptMessage) ??
       completedAt,
   };
 }

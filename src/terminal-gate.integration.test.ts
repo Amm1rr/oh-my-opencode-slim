@@ -289,8 +289,7 @@ async function completeWhileBusy(h: Assembly) {
   h.messages.mockImplementationOnce(() => held.promise);
   const completion = h.after('completed');
   await flush();
-  // The launch also reads parent history once before the gate's own read.
-  expect(h.messages).toHaveBeenCalledTimes(2);
+  expect(h.messages).toHaveBeenCalledTimes(1);
   expect(h.status.mock.calls.length).toBeGreaterThanOrEqual(1);
   h.setBusy(true);
   const activityAt = Date.now();
@@ -579,8 +578,7 @@ test.each(['dispose', 'event'] as const)(
     const pending = h.gate.reconcile(run);
     await flush();
     expect(held.resolve).toBeFunction();
-    // The launch also reads parent history once before the gate's own read.
-    expect(h.messages).toHaveBeenCalledTimes(2);
+    expect(h.messages).toHaveBeenCalledTimes(1);
     if (path === 'dispose') await h.hooks.dispose?.();
     else await h.event('server.instance.disposed');
     held.resolve(transcript());

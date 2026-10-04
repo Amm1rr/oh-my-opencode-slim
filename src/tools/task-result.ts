@@ -3,6 +3,7 @@ import {
   type ToolDefinition,
   tool,
 } from '@opencode-ai/plugin';
+import { pluginDisposedMessage } from '../hooks/task-session-manager/session-recovery';
 import type { BackgroundJobStore } from '../utils/background-job-store';
 import {
   type BackgroundJobTerminalGate,
@@ -11,6 +12,7 @@ import {
 } from '../utils/background-job-terminal-gate';
 import {
   classifyTerminalEvidence,
+  classifyV2HistoricalRound,
   fetchChildTranscript,
 } from '../utils/child-transcript';
 import { getClient } from '../utils/opencode-client';
@@ -22,7 +24,6 @@ import {
 } from '../utils/session-runtime-status';
 import {
   type CanonicalTaskResolver,
-  currentToolCallID,
   idParamFor,
   readTaskRef,
   taskRefArgs,
@@ -103,20 +104,11 @@ export function createTaskResultTool(
         const requested = readTaskRef(args, idParam);
         if (!requested) throw new Error(`task_result requires ${idParam}`);
         const canonical = options.resolveCanonicalTaskRef
-          ? await options.resolveCanonicalTaskRef(
-              parentSessionID,
-              requested,
-              currentToolCallID(toolContext),
-            )
+          ? await options.resolveCanonicalTaskRef(parentSessionID, requested)
           : undefined;
-        if (options.isDisposed?.()) {
-          throw new Error(
-            'The plugin instance was disposed. No action was sent.',
-          );
-        }
+        if (options.isDisposed?.()) throw new Error(pluginDisposedMessage());
         if (canonical?.kind === 'refused') throw new Error(canonical.reason);
-        const identity =
-          canonical?.kind === 'exact' ? canonical.taskID : requested;
+        const identity = canonical?.taskID ?? requested;
         const board = options.backgroundJobBoard;
         const tracked = canonical
           ? board.get(identity)
@@ -138,11 +130,8 @@ export function createTaskResultTool(
           const observation = gate.capture(tracked);
           if (observation) {
             snapshot = await getRuntimeSessionStatusSnapshot(options.input);
-            if (options.isDisposed?.()) {
-              throw new Error(
-                'The plugin instance was disposed. No action was sent.',
-              );
-            }
+            if (options.isDisposed?.())
+              throw new Error(pluginDisposedMessage());
             gate.observe(
               observation,
               runtimeObservationFromSnapshot(
@@ -153,11 +142,7 @@ export function createTaskResultTool(
             );
           }
         }
-        if (options.isDisposed?.()) {
-          throw new Error(
-            'The plugin instance was disposed. No action was sent.',
-          );
-        }
+        if (options.isDisposed?.()) throw new Error(pluginDisposedMessage());
         const result = tracked ? await gate.reconcile(tracked) : undefined;
         if (options.isDisposed?.()) {
           return readonlyTerminalResult(requested, tracked);
@@ -244,19 +229,28 @@ export function createTaskResultTool(
           return current.resultSummary;
         }
 
-        snapshot = await getRuntimeSessionStatusSnapshot(options.input);
-        const status = runtimeSessionStatus(snapshot, taskID);
-        if (status === 'busy' || status === 'retry')
-          return pending(idParam, taskID, false, status, false);
-        if (snapshot.error || snapshot.malformedSessionIDs.has(taskID))
-          return pending(idParam, taskID, true, undefined, false);
+        // v2 data: the context's idle marker ends a round, not a status map.
+        const v2 =
+          (options.input as { hostFlavor?: string }).hostFlavor === 'v2';
+        if (!v2) {
+          snapshot = await getRuntimeSessionStatusSnapshot(options.input);
+          const status = runtimeSessionStatus(snapshot, taskID);
+          if (status === 'busy' || status === 'retry')
+            return pending(idParam, taskID, false, status, false);
+          if (snapshot.error || snapshot.malformedSessionIDs.has(taskID))
+            return pending(idParam, taskID, true, undefined, false);
+        }
         const response = await fetchChildTranscript(
           client,
           taskID,
           options.input.directory,
         );
-        const evidence = classifyTerminalEvidence(response);
-        if (evidence.verdict !== 'completed')
+        const evidence = v2
+          ? classifyV2HistoricalRound(response)
+          : classifyTerminalEvidence(response);
+        if (evidence.verdict === 'incomplete')
+          return pending(idParam, taskID, true, undefined, false);
+        if (evidence.verdict !== 'completed' || !evidence.text)
           throw new Error(
             `Task ${requested} shows no terminal evidence of completion; refusing to present partial output as its final result`,
           );

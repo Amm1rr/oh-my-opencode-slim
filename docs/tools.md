@@ -157,14 +157,16 @@ A successful native delegation result may end with a `slim-child-ref:v1`
 marker so a later restart can resolve the alias. The marker is trusted only
 on the parent's real native tool result, after the outer task closes, and
 only when it matches that result's session ID and original agent argument.
-A numbered alias is issued only after that parent's host history has been
-fully verified. Until then a new task is still created and is referred to
-by its exact session ID. `task_status`, `task_result`, `task_message`,
-`task_reply`, `task_cancel`, `task_revive`, and an explicit resume ID verify
-a non-exact alias against that history before reading or sending anything.
-Multiple saved targets, a host session that disagrees with the local cache,
-or unverifiable history produce no action: use the exact session ID or
-retry the lookup. Exact IDs do not require alias-history scans.
+A numbered alias is issued only to children of a parent created while the
+plugin instance runs (see [Background Orchestration](background-orchestration.md));
+any other new task is still created and is referred to by its exact session ID.
+`task_status`, `task_result`, `task_message`, `task_reply`, `task_cancel`,
+`task_revive`, and an explicit resume ID resolve a non-exact alias from the
+board first, else from the markers in one read of the parent's readable history,
+before reading or sending anything. On v1, the read covers the 1,000 most recent
+messages; a longer history counts as cut. Multiple saved targets, no marked
+target, or a cut or unreadable history produce no action: use the exact session
+ID. Exact IDs do not require alias-history scans.
 
 On v1, `task_revive` retains the upstream exact-ID adoption path only when
 no child transcript is available; conflicting or unreadable evidence never
