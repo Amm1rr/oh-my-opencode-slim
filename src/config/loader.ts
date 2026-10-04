@@ -13,6 +13,7 @@ import {
   resolvePresetDefinition,
 } from './presets';
 import {
+  type BackgroundJobsConfig,
   BackgroundJobsConfigSchema,
   DISABLED_COMMANDS_VALUES,
   DISABLED_HOOKS_VALUES,
@@ -72,6 +73,15 @@ export interface LoadPluginConfigOptions {
    * Suppress console warnings while still invoking onWarning.
    */
   silent?: boolean;
+
+  /**
+   * Host flavor marker ('v2' on OpenCode v2 hosts; absent on v1). Selects
+   * flavor-derived defaults for background-job keys that no config layer
+   * set explicitly: on v2 the native background notifier already delivers
+   * a run's first terminal publication, so board injection and periodic
+   * wake evaluation default off there. Explicit config always wins.
+   */
+  hostFlavor?: string;
 }
 
 const PROMPTS_DIR_NAME = 'oh-my-opencode-slim';
@@ -811,6 +821,29 @@ export function loadPluginConfig(
     : null;
   if (projectConfig) {
     config = mergePluginConfigs(config, projectConfig);
+  }
+
+  // v2-derived defaults (pre-parse, on the merged explicit-only config so a
+  // key any layer configured explicitly is never overridden): the v2 native
+  // background notifier delivers each run's FIRST terminal publication to
+  // the parent, so the two channels that duplicate it — the passive job
+  // board injected per request and the periodic idle evaluation — default
+  // off on v2 hosts. Event-driven wakes (stopped-job recovery, rev>1
+  // terminal publications, child-input asks) are unaffected and keep their
+  // own config keys.
+  if (options?.hostFlavor === 'v2') {
+    const backgroundJobs = (config.backgroundJobs ??
+      {}) as BackgroundJobsConfig & Record<string, unknown>;
+    if (!Object.hasOwn(backgroundJobs, 'boardInjection')) {
+      backgroundJobs.boardInjection = false;
+    }
+    const orchestratorWake = (backgroundJobs.orchestratorWake ??
+      {}) as BackgroundJobsConfig['orchestratorWake'] & Record<string, unknown>;
+    if (!Object.hasOwn(orchestratorWake, 'periodicWakeEnabled')) {
+      orchestratorWake.periodicWakeEnabled = false;
+    }
+    backgroundJobs.orchestratorWake = orchestratorWake;
+    config.backgroundJobs = backgroundJobs;
   }
 
   if (config.webfetch) {

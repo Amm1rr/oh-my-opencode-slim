@@ -833,6 +833,7 @@ describe('onWarning callback', () => {
       enabled: false,
       intervalMs: 120_000,
       mode: 'auto',
+      periodicWakeEnabled: true,
       wakeOnTerminalPublication: true,
       publicationWakeMinIntervalMs: 30_000,
     });
@@ -868,10 +869,85 @@ describe('onWarning callback', () => {
       enabled: true,
       intervalMs: 300_000,
       mode: 'auto',
+      periodicWakeEnabled: true,
       wakeOnTerminalPublication: false,
       publicationWakeMinIntervalMs: 120_000,
     });
     expect(config.backgroundJobs?.stopConfirmationMs).toBe(15_000);
+  });
+
+  test('v2 host flavor derives lean board/wake defaults when no layer configures them', () => {
+    const projectDir = path.join(tempDir, 'project');
+    const config = loadPluginConfig(projectDir, {
+      silent: true,
+      hostFlavor: 'v2',
+    });
+
+    expect(config.backgroundJobs?.boardInjection).toBe(false);
+    expect(config.backgroundJobs?.orchestratorWake.periodicWakeEnabled).toBe(
+      false,
+    );
+    // Event-driven wakes and every other channel keep their schema defaults.
+    expect(config.backgroundJobs?.orchestratorWake.enabled).toBe(true);
+    expect(
+      config.backgroundJobs?.orchestratorWake.wakeOnTerminalPublication,
+    ).toBe(true);
+    expect(config.backgroundJobs?.childInputWake).toBe(true);
+  });
+
+  test('v2 host flavor never overrides explicitly configured board/wake keys', () => {
+    const projectDir = path.join(tempDir, 'project');
+    const projectConfigDir = path.join(projectDir, '.opencode');
+    fs.mkdirSync(projectConfigDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectConfigDir, 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        backgroundJobs: {
+          boardInjection: true,
+          orchestratorWake: { periodicWakeEnabled: true },
+        },
+      }),
+    );
+
+    const config = loadPluginConfig(projectDir, {
+      silent: true,
+      hostFlavor: 'v2',
+    });
+
+    expect(config.backgroundJobs?.boardInjection).toBe(true);
+    expect(config.backgroundJobs?.orchestratorWake.periodicWakeEnabled).toBe(
+      true,
+    );
+  });
+
+  test('explicit v2 opt-out still holds and v1 hosts keep board/wake defaults', () => {
+    const projectDir = path.join(tempDir, 'project');
+    const projectConfigDir = path.join(projectDir, '.opencode');
+    fs.mkdirSync(projectConfigDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectConfigDir, 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        backgroundJobs: {
+          boardInjection: false,
+          orchestratorWake: { periodicWakeEnabled: false },
+        },
+      }),
+    );
+
+    const v2Config = loadPluginConfig(projectDir, {
+      silent: true,
+      hostFlavor: 'v2',
+    });
+    expect(v2Config.backgroundJobs?.boardInjection).toBe(false);
+    expect(v2Config.backgroundJobs?.orchestratorWake.periodicWakeEnabled).toBe(
+      false,
+    );
+
+    const v1Config = loadPluginConfig(projectDir, { silent: true });
+    expect(v1Config.backgroundJobs?.boardInjection).toBe(false);
+    expect(v1Config.backgroundJobs?.orchestratorWake.periodicWakeEnabled).toBe(
+      false,
+    );
   });
 
   test('prefers explicit orchestratorWake.enabled over deprecated continueOnIdle', () => {

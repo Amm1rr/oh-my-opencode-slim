@@ -22,10 +22,12 @@ import {
   mapWakeChild,
   ORCHESTRATOR_CHILDREN_WAKE_TEXT,
   ORCHESTRATOR_STOPPED_JOB_WAKE_TEXT,
+  ORCHESTRATOR_STOPPED_JOB_WAKE_TEXT_NO_BOARD,
   ORCHESTRATOR_WAKE_TEXT,
   ORCHESTRATOR_WAKE_UNCHANGED_CAP,
   resolveWakeMode,
   STOPPED_RECOVERY_OVERFLOW_TEXT,
+  STOPPED_RECOVERY_OVERFLOW_TEXT_NO_BOARD,
   STOPPED_RECOVERY_QUEUE_CAP,
   STOPPED_RECOVERY_WAKE_CHUNK,
 } from './index';
@@ -141,6 +143,8 @@ function createScheduler(options?: {
   enabled?: boolean;
   intervalMs?: number;
   mode?: 'auto' | 'todo' | 'children';
+  periodicWakeEnabled?: boolean;
+  boardInjectionEnabled?: boolean;
   hostFlavor?: string;
   sessionClient?: SessionClient | null;
   shouldManageSession?: (id: string) => boolean;
@@ -170,8 +174,12 @@ function createScheduler(options?: {
       enabled: options?.enabled ?? true,
       intervalMs: options?.intervalMs ?? 60_000,
       ...(options?.mode ? { mode: options.mode } : {}),
+      ...(options?.periodicWakeEnabled !== undefined
+        ? { periodicWakeEnabled: options.periodicWakeEnabled }
+        : {}),
     },
     intervalMs: options?.intervalMs ?? 60_000,
+    boardInjectionEnabled: options?.boardInjectionEnabled,
     shouldManageSession: options?.shouldManageSession ?? (() => true),
     hasInputWait: options?.hasInputWait ?? (() => false),
     isFallbackInProgress: options?.isFallbackInProgress,
@@ -755,6 +763,50 @@ describe('orchestrator wake scheduler', () => {
     );
   });
 
+  test('overflow recovery facts use the board-free text when board injection is off', async () => {
+    const promptAsync = mock(async () => ({}));
+    let waiting = true;
+    const { scheduler } = createScheduler({
+      boardInjectionEnabled: false,
+      hasInputWait: () => waiting,
+      sessionClient: makeClient({
+        todos: [],
+        promptAsync,
+        childrenData: [{ id: 'child-2' }],
+        statusData: { 'child-2': { type: 'busy' } },
+      }),
+    });
+
+    for (let i = 0; i < STOPPED_RECOVERY_QUEUE_CAP + 1; i++) {
+      scheduler.triggerStoppedJobRecovery(
+        'p1',
+        formatStoppedJobDelta({
+          alias: `a${i}`,
+          taskID: `ses_${i}`,
+          generation: 1,
+          state: 'stopped',
+          reason: 'stopped without a terminal result',
+        }),
+        `ses_${i}:1`,
+      );
+    }
+    waiting = false;
+    await scheduler.event({
+      event: { type: 'session.idle', properties: { sessionID: 'p1' } },
+    });
+    await clock.advance(0);
+
+    const text =
+      (
+        promptAsync.mock.calls as unknown as Array<
+          [{ body: { parts: Array<{ text: string }> } }]
+        >
+      )[0]?.[0]?.body.parts[0]?.text ?? '';
+    expect(text).toContain(STOPPED_RECOVERY_OVERFLOW_TEXT_NO_BOARD);
+    expect(text).not.toContain(STOPPED_RECOVERY_OVERFLOW_TEXT);
+    expect(text).toContain(ORCHESTRATOR_STOPPED_JOB_WAKE_TEXT_NO_BOARD);
+  });
+
   test('preserves overflow that arrives while recovery delivery is in flight', async () => {
     let releaseFirst!: () => void;
     let calls = 0;
@@ -925,6 +977,93 @@ describe('orchestrator wake scheduler', () => {
     await clock.advance(120_000);
     expect(promptAsync).not.toHaveBeenCalled();
     expect(clock.pendingCount()).toBe(0);
+  });
+
+  test('periodicWakeEnabled=false silences the periodic evaluation but keeps event wakes delivering', async () => {
+    const promptAsync = mock(async () => ({}));
+    const { scheduler } = createScheduler({
+      periodicWakeEnabled: false,
+      boardInjectionEnabled: false,
+      sessionClient: makeClient({
+        todos: [{ id: 't1', status: 'pending' }],
+        promptAsync,
+      }),
+    });
+
+    // The periodic arm stays silent past the interval...
+    await scheduler.event({
+      event: { type: 'session.idle', properties: { sessionID: 'p1' } },
+    });
+    await clock.advance(180_000);
+    expect(promptAsync).not.toHaveBeenCalled();
+
+    // ...while the stopped-recovery event wake still delivers, with the
+    // board-free text variant.
+    scheduler.triggerStoppedJobRecovery(
+      'p1',
+      formatStoppedJobDelta({
+        alias: 'a1',
+        taskID: 'ses_a',
+        generation: 1,
+        state: 'stopped',
+        reason: 'stopped without a terminal result',
+      }),
+      'ses_a:1',
+    );
+    await clock.advance(0);
+    expect(promptAsync).toHaveBeenCalledTimes(1);
+    const call = (
+      promptAsync.mock.calls as unknown as Array<
+        [{ body: { parts: Array<{ text: string }> } }]
+      >
+    )[0]?.[0];
+    expect(call?.body.parts[0]?.text).toContain(
+      ORCHESTRATOR_STOPPED_JOB_WAKE_TEXT_NO_BOARD,
+    );
+    expect(call?.body.parts[0]?.text).not.toContain('Background Job Board');
+  });
+
+  test('a failed recovery delivery still retries on its own timer while periodicWakeEnabled=false', async () => {
+    let fail = true;
+    const promptAsync = mock(async () => {
+      if (fail) throw new Error('temporary refusal');
+      return {};
+    });
+    const { scheduler } = createScheduler({
+      periodicWakeEnabled: false,
+      sessionClient: makeClient({
+        todos: [],
+        promptAsync,
+        childrenData: [{ id: 'child-2' }],
+        statusData: { 'child-2': { type: 'busy' } },
+      }),
+    });
+
+    scheduler.triggerStoppedJobRecovery(
+      'p1',
+      formatStoppedJobDelta({
+        alias: 'a1',
+        taskID: 'ses_a',
+        generation: 7,
+        state: 'stopped',
+        reason: 'stopped without a terminal result',
+      }),
+      'ses_a:7',
+    );
+    await clock.advance(0);
+    expect(promptAsync).toHaveBeenCalledTimes(1);
+
+    // The SDK-error retry rides the idle timer via retryReason even though
+    // the periodic evaluation itself is gated off.
+    fail = false;
+    await clock.advance(60_000);
+    expect(promptAsync).toHaveBeenCalledTimes(2);
+    const secondCall = (
+      promptAsync.mock.calls as unknown as Array<
+        [{ body: { parts: Array<{ text: string }> } }]
+      >
+    )[1]?.[0];
+    expect(secondCall?.body.parts[0]?.text).toContain('task: ses_a');
   });
 
   test('is inactive when required session APIs are missing', async () => {

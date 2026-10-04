@@ -746,7 +746,13 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   };
 
   try {
-    config = loadPluginConfig(ctx.directory);
+    // Read the host flavor marker before config load: v2 hosts derive
+    // leaner background-job defaults (see loadPluginConfig), so the flavor
+    // must be known when the config is first resolved — and on every
+    // later in-session reload.
+    hostFlavor = (ctx as Parameters<Plugin>[0] & { hostFlavor?: string })
+      .hostFlavor;
+    config = loadPluginConfig(ctx.directory, { hostFlavor });
     // Seed the per-directory runtime registry with the raw plugin file
     // config. The runtime preset reapplication below mutates `config` for
     // legacy consumers; RuntimeConfig keeps the pre-mutation snapshot and
@@ -784,11 +790,8 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       activePresetName,
     );
     rewriteDisplayNameMentions = createDisplayNameMentionRewriter(runtime);
-    // Host flavor marker ('v2' on OpenCode v2 hosts, set by the v2 client
-    // shim; absent on v1). Threads the native delegation vocabulary into
-    // prompt assembly so v2 prompts say subagent(...)/agent directly.
-    hostFlavor = (ctx as Parameters<Plugin>[0] & { hostFlavor?: string })
-      .hostFlavor;
+    // Native delegation vocabulary: the flavor read moved above the config
+    // load; `delegation` derives from it as before.
     const delegation = delegationWording(hostFlavor);
     agentDefs = createAgents(runtime, {
       projectDirectory: ctx.directory,
@@ -1137,6 +1140,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
 
     orchestratorWakeScheduler = createOrchestratorWakeScheduler(ctx, {
       config: runtime.backgroundJobs.orchestratorWake,
+      boardInjectionEnabled: runtime.backgroundJobs.boardInjection,
       shouldManageSession: (sessionID) =>
         sessionMetadata.getAgent(sessionID) === 'orchestrator',
       hasInputWait: (sessionID) =>
@@ -1251,8 +1255,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       // native notifier and remain the plugin's to deliver (v1 behaves
       // the same: the native task tool arms notifyBackgroundResult per
       // background call). Edge: if a native delivery is ever lost
-      // host-side, the job falls back to board injection on the parent's
-      // next activity (pre-branch parity).
+      // host-side, the job falls back to the passive display channel on
+      // the parent's next activity — board injection when enabled, or
+      // nothing until the next task_status/task_result pull otherwise.
       if (record.terminalRevision === 1) {
         log('[orchestrator-wake] terminal publication wake skipped', {
           sessionID: record.parentSessionID,
@@ -1566,7 +1571,10 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     },
     getPresetOverride: () => runtime.getRuntimePreset() ?? undefined,
     getDesiredState: (packageInspection) => {
-      const freshConfig = loadPluginConfig(ctx.directory, { silent: true });
+      const freshConfig = loadPluginConfig(ctx.directory, {
+        silent: true,
+        hostFlavor,
+      });
       const runtimePreset = runtime.resolveRuntimePreset(freshConfig);
       const desiredPackageIds = resolveDesiredMarketplacePackageIds(
         freshConfig,
@@ -1782,6 +1790,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       const hardWarnings: string[] = [];
       const freshConfig = loadPluginConfig(ctx.directory, {
         silent: true,
+        hostFlavor,
         onWarning: (warning) => {
           if (HARD_PROFILE_REFRESH_WARNING_KINDS.has(warning.kind)) {
             hardWarnings.push(
@@ -2743,6 +2752,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
                   true,
                   true,
                   hostFlavor,
+                  runtime.backgroundJobs.boardInjection,
                 );
         // Dedup by the EFFECTIVE prompt, not by default-prompt markers:
         // a custom replacement without `<Role>` previously slipped past

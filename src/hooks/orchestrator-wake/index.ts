@@ -56,6 +56,11 @@ export const ORCHESTRATOR_WAKE_TEXT =
 export const ORCHESTRATOR_STOPPED_JOB_WAKE_TEXT =
   '<system-reminder>\nA background job stopped without a terminal result. Consult the Background Job Board, recover or reroute the work as needed, and do not wait for that job as if it were still running. Do not respond to this reminder.\n</system-reminder>';
 
+/** Board-injection-off variant: the board never appears in prompts, so the
+ * wake points at the pull channel that carries the same facts. */
+export const ORCHESTRATOR_STOPPED_JOB_WAKE_TEXT_NO_BOARD =
+  '<system-reminder>\nA background job stopped without a terminal result. Check `task_status` for the stopped task, recover or reroute the work as needed, and do not wait for that job as if it were still running. Do not respond to this reminder.\n</system-reminder>';
+
 /**
  * True only for a genuine external operator message. Plugin-injected nudges
  * must never rearm the no-progress cap or clear wait state:
@@ -236,6 +241,10 @@ export const STOPPED_RECOVERY_WAKE_CHUNK = 8;
 export const STOPPED_RECOVERY_OVERFLOW_TEXT =
   '<stopped-job-overflow>\nAdditional stopped-job recovery facts were queued beyond the inline detail limit. Consult the Background Job Board for all unreconciled stopped jobs.\n</stopped-job-overflow>';
 
+/** Board-injection-off variant: overflow facts are pulled, not displayed. */
+export const STOPPED_RECOVERY_OVERFLOW_TEXT_NO_BOARD =
+  '<stopped-job-overflow>\nAdditional stopped-job recovery facts were queued beyond the inline detail limit. Check `task_status` for the task IDs reported above to see every unreconciled stopped job.\n</stopped-job-overflow>';
+
 /**
  * Children-driven mode: a child with `outcome === undefined` counts as
  * inactive once its newest update evidence (host `time.updated` or a
@@ -306,6 +315,12 @@ export type OrchestratorWakeConfig = {
    * when the terminal gate publishes a completed/error outcome. Optional
    * for callers built before the field existed — absent means enabled. */
   wakeOnTerminalPublication?: boolean;
+  /** Gate for the PERIODIC idle evaluation only. Event-driven wakes
+   * (stopped-job recovery, rev>1 terminal publications, child-input asks)
+   * are unaffected, and their SDK-error retry path keeps riding the timer
+   * via `retryReason`. Optional for callers built before the field
+   * existed — absent means enabled. */
+  periodicWakeEnabled?: boolean;
   /** Per-parent minimum spacing between terminal-publication wakes
    * (1,000–2,147,483,647ms; 0 is invalid at the config layer, so the
    * throttle cannot be disabled via config — 0 exists only as a
@@ -341,6 +356,11 @@ export type OrchestratorWakeOptions = {
   hasPendingDelegatedWork?: (sessionID: string) => boolean;
   /** Test seam: override interval without changing config validation. */
   intervalMs?: number;
+  /** Whether the Background Job Board is injected into orchestrator
+   * prompts. Stopped-recovery and overflow wake texts reference the board
+   * only when it is actually visible to the model; otherwise they point at
+   * `task_status` instead. Absent means enabled (v1 parity). */
+  boardInjectionEnabled?: boolean;
 };
 
 /**
@@ -770,6 +790,8 @@ export function createOrchestratorWakeScheduler(
 ) {
   const intervalMs = options.intervalMs ?? options.config.intervalMs;
   const enabled = options.config.enabled === true;
+  const periodicWakeEnabled = options.config.periodicWakeEnabled ?? true;
+  const boardInjectionEnabled = options.boardInjectionEnabled ?? true;
   const wakeOnTerminalPublication =
     options.config.wakeOnTerminalPublication ?? true;
   const publicationWakeMinIntervalMs =
@@ -1085,7 +1107,12 @@ export function createOrchestratorWakeScheduler(
     const timer = setTimeout(() => {
       state.timer = undefined;
       if (state.generation !== generation) return;
-      void evaluate(sessionID, generation, state.retryReason ?? 'periodic');
+      const reason = state.retryReason ?? 'periodic';
+      // Periodic-arm gate only: recovery/publication wakes that failed on
+      // an SDK error ride this same timer through `retryReason` and must
+      // still deliver while the periodic evaluation is disabled.
+      if (reason === 'periodic' && !periodicWakeEnabled) return;
+      void evaluate(sessionID, generation, reason);
     }, intervalMs);
     timer.unref?.();
     state.timer = timer;
@@ -1823,7 +1850,9 @@ export function createOrchestratorWakeScheduler(
         sendInputKeys.length > 0 && !recoveryBatch
           ? ORCHESTRATOR_CHILD_INPUT_WAKE_TEXT
           : recoveryWake
-            ? ORCHESTRATOR_STOPPED_JOB_WAKE_TEXT
+            ? boardInjectionEnabled
+              ? ORCHESTRATOR_STOPPED_JOB_WAKE_TEXT
+              : ORCHESTRATOR_STOPPED_JOB_WAKE_TEXT_NO_BOARD
             : wakeMode === 'children'
               ? ORCHESTRATOR_CHILDREN_WAKE_TEXT
               : ORCHESTRATOR_WAKE_TEXT;
@@ -1840,7 +1869,9 @@ export function createOrchestratorWakeScheduler(
         .join('\n');
       const overflowDelta =
         recoveryBatch && recoveryBatch.overflowCount > 0
-          ? STOPPED_RECOVERY_OVERFLOW_TEXT
+          ? boardInjectionEnabled
+            ? STOPPED_RECOVERY_OVERFLOW_TEXT
+            : STOPPED_RECOVERY_OVERFLOW_TEXT_NO_BOARD
           : '';
       const inputOverflowDelta =
         sendInputDeltas && sendInputDeltas.overflowCount > 0

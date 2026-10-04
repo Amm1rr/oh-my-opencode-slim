@@ -1399,6 +1399,7 @@
             "enabled": true,
             "intervalMs": 300000,
             "mode": "auto",
+            "periodicWakeEnabled": true,
             "wakeOnTerminalPublication": true,
             "publicationWakeMinIntervalMs": 30000
           },
@@ -1426,6 +1427,11 @@
                 "todo",
                 "children"
               ]
+            },
+            "periodicWakeEnabled": {
+              "default": true,
+              "description": "When false, the periodic idle evaluation never runs; only event-driven wakes (stopped-job recovery, terminal-publication rev>1, child-input) still deliver. Failed event wakes keep their timer-based retry path. Default enabled; v2 hosts derive a disabled default when the key is not explicitly configured.",
+              "type": "boolean"
             },
             "wakeOnTerminalPublication": {
               "default": true,
@@ -1536,7 +1542,7 @@
         },
         "boardInjection": {
           "default": true,
-          "description": "When false, the Background Job Board reminder is never injected into prompts. Background task tracking, wake, and task_status all keep working; the orchestrator simply no longer passively sees the board. Default enabled.",
+          "description": "When false, the Background Job Board reminder is never injected into prompts. Background task tracking, wake, and task_status all keep working; the orchestrator simply no longer passively sees the board. Default enabled; v2 hosts derive a disabled default when the key is not explicitly configured.",
           "type": "boolean"
         },
         "childInputWake": {

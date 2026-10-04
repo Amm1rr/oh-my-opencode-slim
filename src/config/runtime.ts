@@ -87,6 +87,7 @@ const DEFAULT_BACKGROUND_JOBS: BackgroundJobsConfig = {
     enabled: true,
     intervalMs: 300_000,
     mode: 'auto',
+    periodicWakeEnabled: true,
     wakeOnTerminalPublication: true,
     publicationWakeMinIntervalMs: 30_000,
   },

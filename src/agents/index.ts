@@ -969,6 +969,7 @@ export function createAgents(
     !runtime.disabledTools.includes('wait_for_user'),
     runtime.backgroundJobs.orchestratorWake.enabled,
     options?.hostFlavor,
+    runtime.backgroundJobs.boardInjection,
   );
 
   const inlineOrchestratorPrompt = orchestratorOverride?.prompt;
