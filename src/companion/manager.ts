@@ -71,6 +71,8 @@ interface CompanionSession {
   active_agents: string[];
   active_agent_details?: CompanionAgentDetail[];
   status: string;
+  attention_seq?: number;
+  attention_request_id?: string;
   pid: number;
   config?: CompanionState['config'];
   preset?: CompanionPresetState;
@@ -291,6 +293,8 @@ export class CompanionManager {
   >();
   private orchestratorSessionId: string | undefined;
   private orchestratorBusy = false;
+  private attentionSeq = 0;
+  private lastAttentionRequestId: string | undefined;
   private readonly config?: CompanionConfig;
   private companionProcess: ChildProcess | null = null;
   private wasSpawner = false;
@@ -311,6 +315,23 @@ export class CompanionManager {
     this.id = sessionId;
     this.cwd = cwd;
     this.config = config;
+  }
+
+  private restoreAttentionState(): void {
+    const previous = readState().sessions.find(
+      (session) => session.session_id === this.id,
+    );
+    const previousSeq = previous?.attention_seq;
+    if (
+      typeof previousSeq === 'number' &&
+      Number.isSafeInteger(previousSeq) &&
+      previousSeq >= 0
+    ) {
+      this.attentionSeq = Math.max(this.attentionSeq, previousSeq);
+    }
+    if (typeof previous?.attention_request_id === 'string') {
+      this.lastAttentionRequestId = previous.attention_request_id;
+    }
   }
 
   private refreshPresetState(): boolean {
@@ -444,6 +465,10 @@ export class CompanionManager {
       }
       return;
     }
+    // Re-initialization may replace a live manager for the same host session.
+    // Recover the generation/request fence before disposing the old manager so
+    // the native (session_id, attention_seq) key cannot be reused.
+    this.restoreAttentionState();
     this.registerActiveManager();
     this.refreshPresetState();
     this.flush();
@@ -569,8 +594,21 @@ export class CompanionManager {
     }
   }
 
-  onWaitingInput(): void {
+  onWaitingInput(requestId?: string): void {
     if (this.config?.enabled !== true) return;
+    // v2 permission asks are delivered raw + synthesized with the same request
+    // id. Advance only for a genuinely new request so additive bridge delivery
+    // cannot produce duplicate native notifications.
+    const isNewRequest =
+      requestId !== undefined
+        ? requestId !== this.lastAttentionRequestId
+        : this.status !== 'waiting-input';
+    if (isNewRequest) {
+      this.attentionSeq += 1;
+    }
+    if (requestId !== undefined) {
+      this.lastAttentionRequestId = requestId;
+    }
     // Waiting input is project-level UI state, not proof that the requesting
     // session is the orchestrator. Keep orchestrator identity untouched.
     this.status = 'waiting-input';
@@ -684,6 +722,8 @@ export class CompanionManager {
         active_agents: this.activeAgents(),
         active_agent_details: this.activeAgentDetails(),
         status: this.status,
+        attention_seq: this.attentionSeq,
+        attention_request_id: this.lastAttentionRequestId,
         pid: process.pid,
         config: this.config
           ? {
