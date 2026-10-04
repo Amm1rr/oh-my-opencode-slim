@@ -37,6 +37,7 @@ import {
   runtimeSessionStatus,
 } from '../../utils/session-runtime-status';
 import {
+  isNativeBackgroundLaunchOutput,
   parseTaskIdFromTaskOutput,
   parseTaskStatusOutput,
 } from '../../utils/task';
@@ -801,12 +802,14 @@ export function readAuthoritativeChildRef(
 ): ChildRef | undefined {
   const close = lastOuterClose(output);
   // Tagged outputs trust the marker right after the outer close tag. A
-  // native background plaintext result has no close tag: the marker is
-  // trusted only as the output's final non-empty line, never somewhere
-  // inside the body.
+  // native background launch has no close tag: the marker is trusted only
+  // as its final non-empty line. Other untagged outputs (e.g. `Subagent
+  // failed (...)`) can end in child-reported text, so they carry none.
   const tail = close
     ? output.slice(close.end).trim()
-    : lastNonEmptyLine(output);
+    : isNativeBackgroundLaunchOutput(output)
+      ? lastNonEmptyLine(output)
+      : undefined;
   if (tail === undefined) return undefined;
   const match = /^<!-- slim-child-ref:v1 (\{.*\}) -->$/.exec(tail);
   if (!match?.[1]) return undefined;
