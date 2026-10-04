@@ -830,10 +830,28 @@ export function loadPluginConfig(
     ? (loadPluginConfigFromPath(userConfigPath, options) ?? {})
     : {};
 
+  const presetPaths = new Map<string, string>();
+  const presetInheritancePaths = new Map<string, string>();
+  let selectedPresetPath = '';
+  const recordPresetPaths = (
+    layer: RawPluginConfig,
+    configPath: string,
+  ): void => {
+    if (layer.preset !== undefined) selectedPresetPath = configPath;
+    for (const [name, definition] of Object.entries(layer.presets ?? {})) {
+      presetPaths.set(name, configPath);
+      if (normalizePreset(definition).extends !== undefined) {
+        presetInheritancePaths.set(name, configPath);
+      }
+    }
+  };
+  if (userConfigPath) recordPresetPaths(config, userConfigPath);
+
   for (const configPath of projectConfigPaths) {
     const projectConfig = loadPluginConfigFromPath(configPath, options);
     if (projectConfig) {
       config = mergePluginConfigs(config, projectConfig);
+      recordPresetPaths(projectConfig, configPath);
     }
   }
 
@@ -885,8 +903,17 @@ export function loadPluginConfig(
           error instanceof PresetResolutionError
             ? error.message
             : `Unable to resolve preset inheritance: ${String(error)}`;
+        const brokenParent =
+          error instanceof PresetResolutionError
+            ? error.chain.at(-2)
+            : undefined;
         options?.onWarning?.({
-          path: projectConfigPath ?? userConfigPath ?? '',
+          path:
+            (brokenParent
+              ? presetInheritancePaths.get(brokenParent)
+              : undefined) ??
+            presetPaths.get(name) ??
+            '',
           kind: 'invalid-schema',
           message,
         });
@@ -931,7 +958,7 @@ export function loadPluginConfig(
         : 'none';
       const message = `Preset "${runtimeConfig.preset}" not found (from ${presetSource}). Available presets: ${availablePresets}`;
       options?.onWarning?.({
-        path: projectConfigPath ?? userConfigPath ?? '',
+        path: envPreset ? '' : selectedPresetPath,
         kind: 'missing-preset',
         message,
       });

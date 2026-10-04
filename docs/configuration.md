@@ -27,6 +27,10 @@ Closer configurations override matching settings while preserving unrelated
 inherited settings. JSONC preference applies independently in each directory;
 top-level arrays retain their existing replacement behavior. This keeps shared
 custom agents and presets available when a session moves into a nested worktree.
+An unreadable or invalid configuration layer is skipped without discarding the
+other layers. Preset lookup uses the same agent-aware merge rules as runtime
+loading, and preset warnings identify the file supplying the broken inheritance
+directive or selected preset.
 Only ancestor configurations are inherited, not sibling configurations. Trust
 the ancestor configurations as well as the current project before running
 OpenCode. Prompt files and `skills_include_local` also search ancestor

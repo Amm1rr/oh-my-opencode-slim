@@ -7,11 +7,12 @@ import type {
   Preset,
   PresetDefinition,
   PresetInput,
+  RawPluginConfig,
 } from '../config';
-import { deepMerge, normalizePreset, PresetResolutionError } from '../config';
+import { normalizePreset, PresetResolutionError } from '../config';
 import { AGENT_ALIASES } from '../config/constants';
-import { findPluginConfigPaths } from '../config/loader';
-import { resolvePresetDefinition } from '../config/presets';
+import { findPluginConfigPaths, mergePluginConfigs } from '../config/loader';
+import { mergePresetMaps, resolvePresetDefinition } from '../config/presets';
 import {
   isPrototypeSensitiveName,
   ownPresetValue,
@@ -453,20 +454,24 @@ export function readUserPresets(
 export function readProjectConfig(
   directory: string,
 ): Record<string, unknown> | null {
-  try {
-    const { projectConfigPaths } = findPluginConfigPaths(directory);
-    let config: Record<string, unknown> | undefined;
-    for (const configPath of projectConfigPaths) {
+  const { projectConfigPaths } = findPluginConfigPaths(directory);
+  let config: RawPluginConfig | undefined;
+  for (const configPath of projectConfigPaths) {
+    try {
       const raw = fs.readFileSync(configPath, 'utf-8').replace(/^\uFEFF/, '');
       const layer = JSON.parse(
         interpolateConfigEnvironment(stripJsonComments(raw)),
-      ) as Record<string, unknown>;
-      config = deepMerge(config, layer);
+      ) as RawPluginConfig;
+      if (typeof layer !== 'object' || layer === null || Array.isArray(layer)) {
+        continue;
+      }
+      config = mergePluginConfigs(config ?? {}, layer);
+    } catch {
+      // Match the runtime loader: a bad layer must not hide valid ancestors
+      // or closer configuration, including an inherited preset pin.
     }
-    return config ?? null;
-  } catch {
-    return null;
   }
+  return config ?? null;
 }
 
 /**
@@ -486,10 +491,7 @@ export function getAllConfiguredPresets(
     !Array.isArray(projectConfig.presets)
       ? (projectConfig.presets as Record<string, PresetInput>)
       : {};
-  const merged = (deepMerge(userPresets, projectPresets) ?? {}) as Record<
-    string,
-    PresetInput
-  >;
+  const merged = mergePresetMaps(userPresets, projectPresets) ?? {};
   const safe: Record<string, PresetInput> = {};
   for (const name of Object.keys(merged)) {
     const value = ownPresetValue(merged, name);

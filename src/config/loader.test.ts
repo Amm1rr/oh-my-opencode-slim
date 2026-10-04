@@ -197,6 +197,53 @@ describe('loadPluginConfig', () => {
     });
   });
 
+  test('attributes inherited preset errors to the layer defining the broken parent', () => {
+    const workspace = path.join(tempDir, 'workspace');
+    const nested = path.join(workspace, 'repo', 'worktree');
+    const ancestorPath = writeProjectConfig(workspace, {
+      presets: {
+        broken: { extends: 'missing', fixer: { model: 'test/model' } },
+      },
+    });
+    writeProjectConfig(nested, {
+      presets: {
+        broken: { fixer: { variant: 'high' } },
+        child: { extends: 'broken', fixer: { temperature: 0.3 } },
+      },
+    });
+    const warnings: ConfigLoadWarning[] = [];
+    loadPluginConfig(nested, {
+      silent: true,
+      onWarning: (warning) => warnings.push(warning),
+    });
+    expect(warnings).toHaveLength(2);
+    expect(warnings.every((warning) => warning.path === ancestorPath)).toBe(
+      true,
+    );
+    expect(
+      warnings.every((warning) =>
+        warning.message.includes('extends missing preset'),
+      ),
+    ).toBe(true);
+  });
+
+  test('attributes missing selected presets to the ancestor pin rather than a closer file', () => {
+    const workspace = path.join(tempDir, 'workspace');
+    const nested = path.join(workspace, 'repo', 'worktree');
+    const ancestorPath = writeProjectConfig(workspace, { preset: 'missing' });
+    writeProjectConfig(nested, { agents: { fixer: { model: 'test/model' } } });
+    const warnings: ConfigLoadWarning[] = [];
+    loadPluginConfig(nested, {
+      silent: true,
+      onWarning: (warning) => warnings.push(warning),
+    });
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatchObject({
+      path: ancestorPath,
+      kind: 'missing-preset',
+    });
+  });
+
   test('does not inherit sibling configs and resolves relative locations', () => {
     const workspace = path.join(tempDir, 'workspace');
     const repo = path.join(workspace, 'repo');
