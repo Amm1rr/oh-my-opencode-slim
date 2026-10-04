@@ -186,6 +186,53 @@ describe('config-io', () => {
     expect(readFileSync(`${path}.bak`, 'utf-8')).toContain('"preset": "local"');
   });
 
+  test('removeTopLevelJsonProperty removes duplicate keys without losing unrelated JSONC comments', () => {
+    const path = join(tmpDir, 'remove-duplicate-properties.jsonc');
+    writeFileSync(
+      path,
+      `{
+  "preset": "first",
+  // keep companion comment
+  "companion": { "enabled": true },
+  "preset": "second",
+  // keep unrelated comment
+  "unrelated": 42,
+  "preset": "third",
+}
+`,
+    );
+
+    removeTopLevelJsonProperty(path, 'preset');
+
+    const savedText = readFileSync(path, 'utf-8');
+    expect(savedText.match(/"preset"\s*:/g) ?? []).toHaveLength(0);
+    expect(savedText).toContain('// keep companion comment');
+    expect(savedText).toContain('// keep unrelated comment');
+    expect(JSON.parse(stripJsonComments(savedText))).toEqual({
+      companion: { enabled: true },
+      unrelated: 42,
+    });
+    expect(readFileSync(`${path}.bak`, 'utf-8')).toContain('"preset": "third"');
+  });
+
+  test('removeTopLevelJsonProperty handles adjacent duplicate-only keys with trailing comma', () => {
+    const path = join(tmpDir, 'remove-adjacent-duplicate-properties.jsonc');
+    writeFileSync(
+      path,
+      `{
+  "preset": "first",
+  "preset": "second",
+}
+`,
+    );
+
+    removeTopLevelJsonProperty(path, 'preset');
+
+    const savedText = readFileSync(path, 'utf-8');
+    expect(savedText.match(/"preset"\s*:/g) ?? []).toHaveLength(0);
+    expect(JSON.parse(stripJsonComments(savedText))).toEqual({});
+  });
+
   test('mutateJsonFile preserves JSONC comments and unrelated keys', () => {
     const path = join(tmpDir, 'settings.jsonc');
     writeFileSync(

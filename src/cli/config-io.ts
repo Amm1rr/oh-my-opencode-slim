@@ -804,7 +804,7 @@ function findCommaToken(
 }
 
 /**
- * Remove one top-level JSON/JSONC property while preserving comments belonging
+ * Remove all matching top-level JSON/JSONC properties while preserving comments belonging
  * to neighboring properties. Token scanning distinguishes real separators from
  * commas inside comments/strings.
  */
@@ -817,68 +817,80 @@ export function removeTopLevelJsonProperty(
 
     const currentText = readFileSync(configPath, 'utf-8');
     const hasBom = currentText.startsWith('\uFEFF');
-    const source = hasBom ? currentText.slice(1) : currentText;
-    const errors: Parameters<typeof parseTree>[1] = [];
-    const root = parseTree(source, errors, { allowTrailingComma: true });
-    if (errors.length > 0 || root?.type !== 'object') {
-      throw new Error('Invalid JSONC config');
-    }
+    let updated = hasBom ? currentText.slice(1) : currentText;
+    let removedAny = false;
 
-    const properties = (root.children ?? []).filter(
-      (node) => node.type === 'property',
-    );
-    const index = properties.findIndex(
-      (property) => property.children?.[0]?.value === propertyName,
-    );
-    if (index < 0) return;
+    // JSON permits duplicate object keys even though the parsed value only
+    // exposes the last one. Re-parse after each token-preserving removal so a
+    // successful call guarantees that no matching top-level override remains.
+    while (true) {
+      const errors: Parameters<typeof parseTree>[1] = [];
+      const root = parseTree(updated, errors, { allowTrailingComma: true });
+      if (errors.length > 0 || root?.type !== 'object') {
+        throw new Error('Invalid JSONC config');
+      }
 
-    const property = properties[index];
-    const propertyEnd = property.offset + property.length;
-    const removals: Array<{ start: number; end: number }> = [
-      { start: property.offset, end: propertyEnd },
-    ];
+      const properties = (root.children ?? []).filter(
+        (node) => node.type === 'property',
+      );
+      const index = properties.findIndex(
+        (property) => property.children?.[0]?.value === propertyName,
+      );
+      if (index < 0) break;
 
-    if (index < properties.length - 1) {
-      const next = properties[index + 1];
-      const comma = findCommaToken(source, propertyEnd, next.offset);
-      if (!comma) throw new Error('Could not locate JSONC property separator');
-      removals.push({
-        start: comma.offset,
-        end: comma.offset + comma.length,
-      });
-    } else {
-      if (properties.length > 1) {
-        const previous = properties[index - 1];
-        const comma = findCommaToken(
-          source,
-          previous.offset + previous.length,
-          property.offset,
-          true,
-        );
-        if (!comma)
+      const property = properties[index];
+      const propertyEnd = property.offset + property.length;
+      const removals: Array<{ start: number; end: number }> = [
+        { start: property.offset, end: propertyEnd },
+      ];
+
+      if (index < properties.length - 1) {
+        const next = properties[index + 1];
+        const comma = findCommaToken(updated, propertyEnd, next.offset);
+        if (!comma) {
           throw new Error('Could not locate JSONC property separator');
+        }
         removals.push({
           start: comma.offset,
           end: comma.offset + comma.length,
         });
+      } else {
+        if (properties.length > 1) {
+          const previous = properties[index - 1];
+          const comma = findCommaToken(
+            updated,
+            previous.offset + previous.length,
+            property.offset,
+            true,
+          );
+          if (!comma) {
+            throw new Error('Could not locate JSONC property separator');
+          }
+          removals.push({
+            start: comma.offset,
+            end: comma.offset + comma.length,
+          });
+        }
+
+        // JSONC permits a trailing comma after the last property. Remove that
+        // token too, but preserve all whitespace/comments around it.
+        const rootEnd = root.offset + root.length;
+        const trailingComma = findCommaToken(updated, propertyEnd, rootEnd);
+        if (trailingComma) {
+          removals.push({
+            start: trailingComma.offset,
+            end: trailingComma.offset + trailingComma.length,
+          });
+        }
       }
 
-      // JSONC permits a trailing comma after the last property. Remove that
-      // token too, but preserve all whitespace/comments around it.
-      const rootEnd = root.offset + root.length;
-      const trailingComma = findCommaToken(source, propertyEnd, rootEnd);
-      if (trailingComma) {
-        removals.push({
-          start: trailingComma.offset,
-          end: trailingComma.offset + trailingComma.length,
-        });
+      for (const removal of removals.sort((a, b) => b.start - a.start)) {
+        updated = updated.slice(0, removal.start) + updated.slice(removal.end);
       }
+      removedAny = true;
     }
 
-    let updated = source;
-    for (const removal of removals.sort((a, b) => b.start - a.start)) {
-      updated = updated.slice(0, removal.start) + updated.slice(removal.end);
-    }
+    if (!removedAny) return;
     parseJsonConfigText(updated);
     writeBackupAtomic(`${configPath}.bak`, currentText);
     writeAtomic(configPath, `${hasBom ? '\uFEFF' : ''}${updated}`);
