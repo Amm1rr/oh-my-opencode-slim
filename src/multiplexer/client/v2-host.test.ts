@@ -316,11 +316,11 @@ describe('v2 host ports', () => {
       session: {
         get: async ({ sessionID }: { sessionID: string }) => {
           if (sessionID === 'ses_gone') {
-            const error = new Error('NotFoundError') as Error & {
-              status?: number;
-            };
-            error.status = 404;
-            throw error;
+            throw Object.assign(new Error('Session not found'), {
+              name: 'SessionNotFoundError',
+              _tag: 'SessionNotFoundError',
+              sessionID,
+            });
           }
           return { id: sessionID };
         },

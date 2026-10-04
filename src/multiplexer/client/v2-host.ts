@@ -390,6 +390,8 @@ function isNotFoundError(error: unknown): boolean {
   if (isRecord(error)) {
     if (error.status === 404) return true;
     if (error.name === 'NotFoundError') return true;
+    if (error.name === 'SessionNotFoundError') return true;
+    if (error._tag === 'SessionNotFoundError') return true;
     if (error.cause !== undefined && error.cause !== error) {
       return isNotFoundError(error.cause);
     }
