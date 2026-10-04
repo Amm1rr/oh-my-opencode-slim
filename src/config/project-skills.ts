@@ -1,18 +1,33 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { parseFrontmatter } from '../utils/frontmatter';
+import { getProjectConfigDirectories } from './loader';
 
 /**
- * Discover valid OpenCode skills that belong to the current project.
+ * Discover valid skills in the current and ancestor project directories.
  *
- * This intentionally mirrors only the project-local `.opencode/skills`
+ * This intentionally mirrors only the ancestor-local `.opencode/skills`
  * portion of OpenCode's broader skill discovery. Global skills, external
  * compatibility directories, configured extra paths, and URL sources are
  * outside this helper's scope.
  */
 export function discoverProjectLocalSkillNames(
   projectDirectory: string,
+  hostFlavor?: string,
 ): string[] {
+  const names = new Set<string>();
+  for (const configDirectory of getProjectConfigDirectories(
+    projectDirectory,
+    hostFlavor,
+  )) {
+    for (const name of discoverLocalSkills(path.dirname(configDirectory))) {
+      names.add(name);
+    }
+  }
+  return [...names].sort((left, right) => left.localeCompare(right));
+}
+
+function discoverLocalSkills(projectDirectory: string): string[] {
   const configuredRoot = path.join(projectDirectory, '.opencode', 'skills');
   let root: string;
 

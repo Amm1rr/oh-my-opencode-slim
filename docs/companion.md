@@ -38,7 +38,14 @@ Project scope is the safe default for desktop use with multiple projects open.
 It always writes the current project's `.opencode` layer, creating the
 canonical `oh-my-opencode-slim.jsonc` file when necessary. Project navigation
 also includes **Inherit**, which removes only the local `preset` key so the
-project follows the global selection again.
+project follows the next inherited selection: an eligible ancestor pin, or the
+global selection when no ancestor pins a preset. Environment preset overrides
+still take precedence. The result message identifies the actual inherited
+selection, and shared ancestor files are never modified.
+
+When `OPENCODE_DISABLE_PROJECT_CONFIG` is enabled, Project preset writes and
+Inherit actions are rejected rather than reporting changes that reload would
+ignore. Global scope remains available.
 
 Global scope writes only the user/global config and offers only presets defined
 in that global layer. Projects with local overrides remain unchanged, while
