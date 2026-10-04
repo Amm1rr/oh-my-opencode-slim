@@ -664,15 +664,17 @@ starting on a stale primary and waiting for an avoidable provider failure.
 Their own configured model array remains the ordered fallback chain after the
 inherited active model.
 
-Array-configured specialists also avoid a provider the orchestrator has
-already fallen past. When the parent's active fallback is present in the
-child's chain, that exact entry is used. Otherwise Slim prefers the child's
-first entry on the working parent provider, then the first entry outside the
-providers exhausted by the parent. OpenCode v2 uses the native per-call
-subagent model override. OpenCode v1's `task` tool has no model argument, so
-Slim sets the selected model on the child's first prompt before the host saves
-it. In both cases the delegation keeps the canonical specialist name, so
-`task` permission rules and the task tool's agent list are unchanged. On v1,
+Independent specialist chains follow the parent only after it leaves its primary.
+A shared primary is not an active fallback. When the parent's active fallback is
+in the child's chain, that exact entry is used. Otherwise Slim prefers the first
+entry on the working parent provider, then the first outside exhausted providers.
+OpenCode v2 uses the native per-call subagent model override. On v1, the child's
+first prompt claims a delegation intention using the host's parent link and empty
+transcript; a `task_id` resume instead targets that child's next prompt. Slim
+recalculates the live parent selection before the host saves the prompt, without
+depending on `session.created` delivery or `tool.execute.after`. Unrelated later
+prompts cannot claim creation intentions. The specialist name stays canonical, so
+`task` permissions and the task tool's agent list are unchanged. On v1,
 `fallback.continuationPolicy` controls what happens when an unpinned native
 background-completion or lifecycle turn follows a confirmed fallback. The
 default, `"retry-primary"`, lets the host try the configured primary again,
