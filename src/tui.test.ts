@@ -6,6 +6,7 @@ import * as path from 'node:path';
 import { RGBA } from '@opentui/core';
 import { testRender } from '@opentui/solid';
 import sidebarFrameGolden from './sidebar-frame-golden.json';
+import type { ModelNamesCache } from './tui';
 import {
   applyRemoteAgentModels,
   compareAliasNumeric,
@@ -18,10 +19,12 @@ import {
   getSidebarAgentNames,
   getSidebarAgentTargets,
   getSidebarReusableTargets,
+  hydrateModelNames,
   isRefreshCurrent,
   makeRouteNavigator,
   paneWiringOptions,
   readConfigState,
+  renderSidebar,
   resolveHoverBackground,
   resolveSidebarSlotOrder,
   resolveTuiPaneDirectory,
@@ -2915,5 +2918,252 @@ describe('status glyph', () => {
   test('uses the exact small bullet glyph U+2022', () => {
     expect(STATUS_DOT_GLYPH).toBe('\u2022');
     expect(STATUS_DOT_GLYPH.charCodeAt(0)).toBe(0x2022);
+  });
+});
+
+describe('sidebar model display names', () => {
+  const rowTheme = {
+    accent: '#22c55e',
+    background: '#111111',
+    borderActive: '#555555',
+    text: '#ffffff',
+    textMuted: '#aaaaaa',
+  };
+
+  async function renderSidebarFrame(render: () => unknown): Promise<string[]> {
+    const setup = await testRender(() => render() as never, {
+      width: 60,
+      height: 24,
+    });
+    try {
+      await setup.renderOnce();
+      return setup.captureCharFrame().split('\n');
+    } finally {
+      setup.renderer.destroy();
+    }
+  }
+
+  function providersClient(options: { empty?: boolean; fail?: boolean }): {
+    calls: () => number;
+    client: unknown;
+  } {
+    let calls = 0;
+    return {
+      calls: () => calls,
+      client: {
+        config: {
+          providers: async () => {
+            calls++;
+            if (options.fail) throw new Error('providers unavailable');
+            return {
+              data: {
+                providers: options.empty
+                  ? []
+                  : [
+                      {
+                        id: 'anthropic',
+                        models: {
+                          'claude-haiku': { name: 'Claude Haiku' },
+                        },
+                      },
+                    ],
+              },
+            };
+          },
+        },
+      },
+    };
+  }
+
+  test('compact rows render display names, raw post-slash id otherwise', async () => {
+    const snapshot = createSnapshot({
+      agentModels: {
+        explorer: 'anthropic/claude-haiku',
+        fixer: 'openai/gpt-9',
+      },
+    });
+    const names = new Map([['anthropic/claude-haiku', 'Claude Haiku']]);
+    const lines = await renderSidebarFrame(() =>
+      renderSidebar(
+        snapshot,
+        'test',
+        rowTheme,
+        false,
+        true,
+        () => 0,
+        undefined,
+        undefined,
+        undefined,
+        names,
+      ),
+    );
+
+    const explorerLine = lines.find((line) => line.includes('explorer')) ?? '';
+    expect(explorerLine).toMatch(/explorer\s+Claude Haiku/);
+    const fixerLine = lines.find((line) => line.includes('fixer')) ?? '';
+    expect(fixerLine).toMatch(/fixer\s+gpt-9/);
+  });
+
+  test('expanded rows add a name detail row only when it differs', async () => {
+    const snapshot = createSnapshot({
+      agentModels: {
+        explorer: 'anthropic/claude-haiku',
+        fixer: 'openai/gpt-9',
+      },
+    });
+    const names = new Map([['anthropic/claude-haiku', 'Claude Haiku']]);
+    const lines = await renderSidebarFrame(() =>
+      renderSidebar(
+        snapshot,
+        'test',
+        rowTheme,
+        false,
+        false,
+        () => 0,
+        undefined,
+        undefined,
+        undefined,
+        names,
+      ),
+    );
+
+    const explorerIdx = lines.findIndex((line) => line.includes('explorer'));
+    const explorerBlock = lines.slice(explorerIdx, explorerIdx + 4).join('\n');
+    expect(explorerBlock).toContain('provider');
+    expect(explorerBlock).toContain('anthropic');
+    expect(explorerBlock).toContain('name');
+    expect(explorerBlock).toContain('Claude Haiku');
+
+    const fixerIdx = lines.findIndex((line) => line.includes('fixer'));
+    const fixerBlock = lines.slice(fixerIdx, fixerIdx + 4).join('\n');
+    expect(fixerBlock).toContain('model');
+    expect(fixerBlock).not.toContain('name');
+  });
+
+  test('model ids without a provider render as-is with no name row', async () => {
+    const snapshot = createSnapshot({ agentModels: { oracle: 'default' } });
+    const lines = await renderSidebarFrame(() =>
+      renderSidebar(
+        snapshot,
+        'test',
+        rowTheme,
+        false,
+        false,
+        () => 0,
+        undefined,
+        undefined,
+        undefined,
+        new Map([['openai/gpt-6', 'GPT-6']]),
+      ),
+    );
+
+    expect(lines.join('\n')).toContain('default');
+    const oracleIdx = lines.findIndex((line) => line.includes('oracle'));
+    const block = lines.slice(oracleIdx, oracleIdx + 4).join('\n');
+    expect(block).not.toContain('provider');
+    expect(block).not.toContain('name');
+  });
+
+  describe('hydrateModelNames', () => {
+    function cache(): ModelNamesCache {
+      return { names: new Map() };
+    }
+
+    test('serves TTL hits and refetches when the directory changes', async () => {
+      let clock = 0;
+      const stub = providersClient({});
+      const namesCache = cache();
+      const now = () => clock;
+
+      const first = await hydrateModelNames(
+        stub.client,
+        '/tmp/a',
+        namesCache,
+        now,
+      );
+      expect(stub.calls()).toBe(1);
+      expect(first.get('anthropic/claude-haiku')).toBe('Claude Haiku');
+
+      clock = 1_000;
+      const second = await hydrateModelNames(
+        stub.client,
+        '/tmp/a',
+        namesCache,
+        now,
+      );
+      expect(stub.calls()).toBe(1);
+      expect(second).toBe(first);
+
+      clock = 2_000; // still within the TTL, but the directory changed
+      await hydrateModelNames(stub.client, '/tmp/b', namesCache, now);
+      expect(stub.calls()).toBe(2);
+    });
+
+    test('falls back silently to the previous map on fetch failure', async () => {
+      let clock = 0;
+      const stub = providersClient({});
+      const namesCache = cache();
+      const now = () => clock;
+
+      const first = await hydrateModelNames(
+        stub.client,
+        '/tmp/a',
+        namesCache,
+        now,
+      );
+      expect(first.get('anthropic/claude-haiku')).toBe('Claude Haiku');
+
+      const fail = providersClient({ fail: true });
+      clock = 100_000; // past the TTL, so a refetch is attempted
+      const failed = await hydrateModelNames(
+        fail.client,
+        '/tmp/a',
+        namesCache,
+        now,
+      );
+      expect(fail.calls()).toBe(1);
+      expect(failed).toBe(first);
+      expect(failed.get('anthropic/claude-haiku')).toBe('Claude Haiku');
+
+      clock = 100_001; // the failure reset the retry clock: still suppressed
+      const again = await hydrateModelNames(
+        fail.client,
+        '/tmp/a',
+        namesCache,
+        now,
+      );
+      expect(fail.calls()).toBe(1);
+      expect(again).toBe(failed);
+    });
+
+    test('serves the empty map within the TTL without refetching', async () => {
+      let clock = 0;
+      const stub = providersClient({ empty: true });
+      const namesCache = cache();
+      const now = () => clock;
+
+      const first = await hydrateModelNames(
+        stub.client,
+        '/tmp/a',
+        namesCache,
+        now,
+      );
+      expect(stub.calls()).toBe(1);
+      expect(first.size).toBe(0);
+
+      clock = 1_000; // still within the TTL: no refetch despite the empty map
+      const second = await hydrateModelNames(
+        stub.client,
+        '/tmp/a',
+        namesCache,
+        now,
+      );
+      expect(stub.calls()).toBe(1);
+      expect(second).toBe(first);
+
+      clock = 61_000; // past the TTL, so a refetch is attempted
+      await hydrateModelNames(stub.client, '/tmp/a', namesCache, now);
+      expect(stub.calls()).toBe(2);
+    });
   });
 });
