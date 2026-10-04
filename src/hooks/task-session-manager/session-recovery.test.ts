@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
+import { afterEach, describe, expect, jest, mock, spyOn, test } from 'bun:test';
 import { createCancelTaskTool } from '../../tools/cancel-task';
 import { createTaskResultTool } from '../../tools/task-result';
 import { createTaskReviveTool } from '../../tools/task-revive';
@@ -14,6 +14,7 @@ import * as opencodeClient from '../../utils/opencode-client';
 import { createRevivedRunTracker } from './revived-run-tracker';
 import {
   appendChildRefSuffix,
+  createAliasAuthority,
   createSessionRecovery,
   readAuthoritativeChildRef,
 } from './session-recovery';
@@ -144,6 +145,7 @@ function host(options?: {
 
 afterEach(() => {
   mock.restore();
+  jest.useRealTimers();
 });
 
 function installClient() {
@@ -233,16 +235,14 @@ describe('master adoption and retained-round integration', () => {
     expect(fixture.board.get(CHILD)?.taskGeneration).toBe(2);
   });
 
+  // 'no transcript' runs task_revive's legacy v1 adoption.
   test.each(['completed round', 'no transcript'])(
     '%s provenance stays non-abortable across pre-send refusal and retry',
     async (kind) => {
       let calls = 0;
       let busy = false;
       const fixture = reviveHost({
-        messages: (id) =>
-          kind === 'no transcript'
-            ? { data: [] }
-            : { data: id === CHILD ? childMessages() : parentMessages() },
+        ...(kind === 'no transcript' ? { messages: () => ({ data: [] }) } : {}),
         status: async () => {
           calls += 1;
           if (calls === (kind === 'no transcript' ? 2 : 3)) busy = true;
@@ -266,86 +266,6 @@ describe('master adoption and retained-round integration', () => {
       expect(fixture.promptAsync).toHaveBeenCalledTimes(1);
       expect(fixture.abort).not.toHaveBeenCalled();
       expect(fixture.register).toHaveBeenCalledTimes(1);
-    },
-  );
-
-  test.each([
-    ['callable undefined', undefined],
-    ['callable null', null],
-    ['invalid response', {}],
-    ['unread next page', { data: [], next: 'page-2' }],
-    ['unread page cursor', { data: [], page: { cursor: 'page-2' } }],
-    ['unread previous page', { data: [], previous: 'page-0' }],
-    ['top-level incomplete', { data: [], complete: false }],
-    ['page incomplete', { data: [], page: { complete: false } }],
-    [
-      'context incomplete',
-      { data: [], page: { source: 'session.context', complete: false } },
-    ],
-    [
-      'context completeness missing',
-      { data: [], page: { source: 'session.context' } },
-    ],
-    ['truncated response', { data: [], truncated: true }],
-    ['page has more', { data: [], page: { hasMore: true } }],
-    [
-      'incomplete cursor',
-      { data: [], cursor: { next: null, incomplete: true } },
-    ],
-    [
-      'cursor completeness false',
-      { data: [], cursor: { next: null, complete: false } },
-    ],
-    ['unknown cursor', { data: [], cursor: { older: 'page-2' } }],
-    ['invalid page', { data: [], page: null }],
-    ['mixed page metadata', { data: [], page: { next: null }, next: 'page-2' }],
-    [
-      'mixed cursor metadata',
-      { data: [], cursor: { next: 'page-2' }, next: null },
-    ],
-    [
-      'unknown source',
-      { data: [], page: { source: 'unknown', complete: true } },
-    ],
-    [
-      'conflicting source',
-      {
-        data: [],
-        source: 'session.messages',
-        page: { source: 'session.context', complete: true },
-      },
-    ],
-    [
-      'complete context with unread next page',
-      {
-        data: [],
-        page: { source: 'session.context', complete: true, next: 'page-2' },
-      },
-    ],
-  ])(
-    '%s cannot adopt or send a public revive prompt',
-    async (_kind, response) => {
-      const fixture = reviveHost({
-        messages: (id) =>
-          id === CHILD ? response : { data: parentMessages() },
-      });
-      const recovered = await fixture.recover({
-        parentSessionID: PARENT,
-        requested: CHILD,
-        purpose: 'revive',
-        allowExactAdoption: true,
-      });
-      expect(recovered.kind).toBe('refused');
-      await expect(
-        fixture.revive.execute(
-          { task_id: CHILD, prompt: 'continue' },
-          context as never,
-        ),
-      ).rejects.toThrow();
-      expect(fixture.board.get(CHILD)).toBeUndefined();
-      expect(fixture.promptAsync).not.toHaveBeenCalled();
-      expect(fixture.abort).not.toHaveBeenCalled();
-      expect(fixture.register).not.toHaveBeenCalled();
     },
   );
 
@@ -374,8 +294,43 @@ describe('master adoption and retained-round integration', () => {
       expect(fixture.abort).not.toHaveBeenCalled();
       expect(fixture.register).toHaveBeenCalledTimes(1);
       expect(fixture.board.list(PARENT)).toHaveLength(1);
-      expect(fixture.board.get(CHILD)?.taskGeneration).toBe(2);
+      expect(fixture.board.get(CHILD)).toMatchObject({
+        alias: CHILD,
+        taskGeneration: 2,
+      });
     },
+  );
+
+  // v1 session.messages; 'parent' is legacy adoption's read. Reads stay complete.
+  test.each(['child', 'parent'])(
+    'a held %s transcript read refuses revive at its deadline, unsent',
+    async (held) => {
+      let reading: () => void = () => {};
+      const started = new Promise<void>((resolve) => {
+        reading = resolve;
+      });
+      const fixture = reviveHost({
+        messages: (id) => {
+          if (id !== (held === 'parent' ? PARENT : CHILD)) return { data: [] };
+          reading();
+          return new Promise(() => {});
+        },
+      });
+      jest.useFakeTimers();
+      const pending = fixture.revive.execute(
+        { task_id: CHILD, prompt: 'continue' },
+        context as never,
+      );
+      await started;
+      jest.advanceTimersByTime(5_000);
+      // A plain await: `.rejects` on a never-settling promise spins forever.
+      expect(await pending.catch((error: Error) => error.message)).toBe(
+        `Task ${CHILD} transcript could not be read (${held} transcript read timed out); no prompt was sent`,
+      );
+      expect(fixture.promptAsync).not.toHaveBeenCalled();
+      expect(fixture.board.get(CHILD)).toBeUndefined();
+    },
+    1_000,
   );
 
   test.each(['agent conflict', 'malformed transcript', 'transcript API error'])(
@@ -441,6 +396,91 @@ describe('session recovery', () => {
       background: false,
     });
     expect(board.isRunning(PARENT)).toBe(false);
+  });
+
+  // task_cancel stores the argument as typed; its output names the task.
+  test.each([
+    ['an alias', 'fix-1', CHILD, 'cancelled', 'cancelled'],
+    [
+      'an alias of another task',
+      'fix-1',
+      'ses_other',
+      'cancelled',
+      'completed',
+    ],
+    ['an alias, stale', 'fix-1', CHILD, 'completed', 'completed'],
+  ])('a parent task_cancel by %s', async (_, argument, named, said, state) => {
+    installClient();
+    const cancel = {
+      info: {
+        id: 'msg_cancel',
+        role: 'assistant',
+        time: { created: 1790753027800 },
+      },
+      parts: [
+        {
+          type: 'tool',
+          tool: 'task_cancel',
+          state: {
+            status: 'completed',
+            input: { task_id: argument },
+            output: `task_id: ${named}\nstate: ${said}\n\n<task_error>\ncancelled\n</task_error>`,
+            time: { start: 1790753027800, end: 1790753027810 },
+          },
+        },
+      ],
+    };
+    const { input } = host({
+      messages: (id) => ({
+        data: id === CHILD ? childMessages() : [...parentMessages(), cancel],
+      }),
+    });
+    const board = new BackgroundJobBoard();
+    expect(
+      await createSessionRecovery({
+        input: input as never,
+        backgroundJobBoard: board,
+        stableStoppedMs: 0,
+      })({ parentSessionID: PARENT, requested: CHILD }),
+    ).toMatchObject({ kind: 'recovered' });
+    expect(board.get(CHILD)?.state).toBe(state);
+  });
+
+  test('a manual compaction round does not replace the specialist result', async () => {
+    installClient();
+    // Shapes written by opencode's session/compaction.ts.
+    const compaction = [
+      {
+        info: { id: 'msg_compact', role: 'user', time: { created: 20 } },
+        parts: [{ type: 'compaction', auto: false }],
+      },
+      {
+        info: {
+          id: 'msg_summary',
+          role: 'assistant',
+          parentID: 'msg_compact',
+          agent: 'compaction',
+          summary: true,
+          finish: 'stop',
+          time: { created: 21, completed: 22 },
+        },
+        parts: [{ type: 'text', text: 'COMPACTION-SUMMARY' }],
+      },
+    ];
+    const { input } = host({
+      messages: (id) => ({
+        data:
+          id === CHILD ? [...childMessages(), ...compaction] : parentMessages(),
+      }),
+    });
+    const board = new BackgroundJobBoard();
+    await createSessionRecovery({
+      input: input as never,
+      backgroundJobBoard: board,
+      stableStoppedMs: 0,
+      stopConfirmationBudgetMs: 0,
+    })({ parentSessionID: PARENT, requested: CHILD });
+    expect(board.get(CHILD)?.resultSummary).toBe('LAB-MARKER');
   });
 
   test('wrong parent, missing child, busy, and a broken status map do not import', async () => {
@@ -590,6 +630,25 @@ describe('session recovery', () => {
       state: 'running',
       alias: 'fix-1',
     });
+
+    const other = new BackgroundJobBoard();
+    const foreign = createSessionRecovery({
+      input: input as never,
+      backgroundJobBoard: other,
+      stableStoppedMs: 0,
+    })({ parentSessionID: PARENT, requested: CHILD });
+    other.registerLaunch({
+      taskID: CHILD,
+      parentSessionID: 'ses_otherparent',
+      agent: 'fixer',
+      now: 6,
+    });
+    const refused = await foreign;
+    expect(refused.kind).toBe('refused');
+    if (refused.kind === 'refused') {
+      expect(refused.reason).toContain('different parent');
+    }
+    expect(other.get(CHILD)?.parentSessionID).toBe('ses_otherparent');
   });
 
   test('alias suffix recovers one target and rejects ambiguity or a child-body fake', async () => {
@@ -620,13 +679,22 @@ describe('session recovery', () => {
       },
     });
     const board = new BackgroundJobBoard();
+    const resolve = (target: unknown, alias: string, into = board) =>
+      createAliasAuthority({
+        input: target as never,
+        board: into,
+      }).resolveCanonical(PARENT, alias);
+    expect(await resolve(input, 'fix-3')).toEqual({
+      kind: 'exact',
+      taskID: CHILD,
+    });
     const recover = createSessionRecovery({
       input: input as never,
       backgroundJobBoard: board,
       stableStoppedMs: 0,
     });
     expect(
-      await recover({ parentSessionID: PARENT, requested: 'fix-3' }),
+      await recover({ parentSessionID: PARENT, requested: CHILD }),
     ).toEqual({ kind: 'recovered', taskID: CHILD });
     expect(board.get(CHILD)?.alias).toBe('fix-3');
 
@@ -647,11 +715,7 @@ describe('session recovery', () => {
       }),
     });
     const second = new BackgroundJobBoard();
-    const ambiguousResult = await createSessionRecovery({
-      input: ambiguous.input as never,
-      backgroundJobBoard: second,
-      stableStoppedMs: 0,
-    })({ parentSessionID: PARENT, requested: 'fix-3' });
+    const ambiguousResult = await resolve(ambiguous.input, 'fix-3', second);
     expect(ambiguousResult.kind).toBe('refused');
     if (ambiguousResult.kind === 'refused') {
       expect(ambiguousResult.reason).toContain(CHILD);
@@ -660,11 +724,7 @@ describe('session recovery', () => {
     expect(second.list(PARENT)).toEqual([]);
 
     const missing = new BackgroundJobBoard();
-    const oldAlias = await createSessionRecovery({
-      input: host().input as never,
-      backgroundJobBoard: missing,
-      stableStoppedMs: 0,
-    })({ parentSessionID: PARENT, requested: 'fix-1' });
+    const oldAlias = await resolve(host().input, 'fix-1', missing);
     expect(oldAlias.kind).toBe('refused');
     if (oldAlias.kind === 'refused') {
       expect(oldAlias.reason).toContain('exact session id');

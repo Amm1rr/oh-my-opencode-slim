@@ -157,14 +157,9 @@ export async function handleToolExecuteBefore(
       requested: string;
       agent?: string;
     }) => Promise<RetainedRecoveryResult>;
-    prepareAliasNumbering?: (
-      parentSessionID: string,
-      excludeCallID?: string,
-    ) => Promise<{ enabled: boolean; stopped?: boolean }>;
     resolveCanonicalTaskRef?: (
       parentSessionID: string,
       requested: string,
-      excludeCallID?: string,
     ) => Promise<CanonicalTaskReference>;
     isDisposed?: () => boolean;
     adoptRequested?: (
@@ -216,11 +211,7 @@ export async function handleToolExecuteBefore(
   const agentType = args.subagent_type.trim();
   if (typeof args.task_id === 'string' && args.task_id.trim() !== '') {
     const canonical = deps.resolveCanonicalTaskRef
-      ? await deps.resolveCanonicalTaskRef(
-          input.sessionID,
-          args.task_id.trim(),
-          input.callID,
-        )
+      ? await deps.resolveCanonicalTaskRef(input.sessionID, args.task_id.trim())
       : undefined;
     if (deps.isDisposed?.() || canonical?.kind === 'refused') {
       refuseExplicitTaskId(
@@ -232,14 +223,6 @@ export async function handleToolExecuteBefore(
       );
     }
     if (canonical?.kind === 'exact') args.task_id = canonical.taskID;
-  } else if (deps.prepareAliasNumbering) {
-    const prepared = await deps.prepareAliasNumbering(
-      input.sessionID,
-      input.callID,
-    );
-    if (prepared.stopped || deps.isDisposed?.()) {
-      throw new Error(`${pluginDisposedMessage()} No session was created.`);
-    }
   }
   let background = args.background === true;
   if (background) {

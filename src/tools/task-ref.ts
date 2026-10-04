@@ -60,19 +60,4 @@ export function readTaskRef(
 export type CanonicalTaskResolver = (
   parentSessionID: string,
   requested: string,
-  excludeCallID?: string,
 ) => Promise<CanonicalTaskReference>;
-
-export function currentToolCallID(
-  toolContext:
-    | {
-        callID?: string;
-        messageID?: string;
-      }
-    | undefined,
-): string | undefined {
-  const callID = toolContext?.callID;
-  return typeof callID === 'string' && callID.trim().length > 0
-    ? callID.trim()
-    : undefined;
-}

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
+import { afterEach, describe, expect, jest, mock, spyOn, test } from 'bun:test';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,14 +10,16 @@ import { createTaskResultTool } from '../../tools/task-result';
 import { createTaskReviveTool } from '../../tools/task-revive';
 import { createTaskStatusTool } from '../../tools/task-status';
 import { BackgroundJobBoard } from '../../utils/background-job-board';
-import * as persistence from '../../utils/background-job-persistence';
 import * as opencodeClient from '../../utils/opencode-client';
-import { buildPluginInput } from '../../v2/client-shim';
+import { mapV2EventToV1 } from '../../v2/event-adapter';
 import {
+  aliasUnverifiedMessage,
   appendChildRefSuffix,
   createAliasAuthority,
   createSessionRecovery,
   noteExactSessionAlias,
+  pluginDisposedMessage,
+  readAuthoritativeChildRef,
 } from './session-recovery';
 import { handleToolExecuteBefore } from './tool-execute-hooks';
 
@@ -29,6 +31,7 @@ const context = { sessionID: PARENT, agent: 'orchestrator' };
 
 afterEach(() => {
   mock.restore();
+  jest.useRealTimers();
 });
 
 function closed(sessionID: string, body = 'ok'): string {
@@ -121,8 +124,8 @@ function deferredBoard() {
   return new BackgroundJobBoard({ deferNumberedAliases: true });
 }
 
-describe('alias numbering preparation', () => {
-  test('an unprepared parent keeps the task id, including early register paths', () => {
+describe('alias numbering', () => {
+  test('an existing parent keeps the task id, including early register paths', () => {
     const board = deferredBoard();
     expect(board.isNumberedAliasReady(PARENT)).toBe(false);
     const early = board.registerLaunch({
@@ -153,298 +156,170 @@ describe('alias numbering preparation', () => {
     ).toBe('ses_other');
   });
 
-  test('a complete empty history enables monotonic numbering without rewriting the backend floor', () => {
-    const bump = spyOn(persistence, 'bumpAliasHighWaterMark');
-    const board = new BackgroundJobBoard({
-      deferNumberedAliases: true,
-      aliasCounterHighWater: (parent, prefix) =>
-        parent === PARENT && prefix === 'fix' ? 4 : 0,
-    });
-    expect(board.applyVerifiedAliasFloor(PARENT, { fix: 2 })).toBe(true);
-    expect(bump).not.toHaveBeenCalled();
-    expect(board.isNumberedAliasReady(PARENT)).toBe(true);
-    expect(
-      board.registerLaunch({
-        taskID: 'ses_next',
-        parentSessionID: PARENT,
-        agent: 'fixer',
-      }).alias,
-    ).toBe('fix-5');
-    expect(
-      board.registerLaunch({
-        taskID: 'ses_other_parent',
-        parentSessionID: OTHER,
-        agent: 'fixer',
-      }).alias,
-    ).toBe('ses_other_parent');
-  });
+  type PluginHooks = Awaited<ReturnType<typeof OhMyOpenCodeLite>>;
 
-  test('verified history floors every prefix, including a custom agent, per parent', async () => {
-    const { input, messages } = clientFor([
-      taskPart({ output: withRef(HOST, 'fix-2'), agent: 'fixer' }),
-      taskPart({
-        output: withRef('ses_oracle', 'ora-4', 'oracle'),
-        agent: 'oracle',
-        callID: 'call_oracle',
-      }),
-      taskPart({
-        output: withRef('ses_review', 'rev-3', 'reviewer'),
-        agent: 'reviewer',
-        callID: 'call_review',
-      }),
-    ]);
-    const board = deferredBoard();
-    const authority = createAliasAuthority({
-      input: input as never,
-      board,
-      hostFlavor: 'v1',
+  /** One background fixer launch through the production hooks; returns its
+   * model-visible alias. */
+  async function launchAlias(
+    hooks: PluginHooks,
+    parent: string,
+    child: string,
+  ) {
+    const call = { tool: 'task', sessionID: parent, callID: `call_${child}` };
+    await hooks['tool.execute.before']?.(call, {
+      args: { subagent_type: 'fixer', description: child, background: true },
     });
-    expect(await authority.prepareParent(PARENT)).toEqual({ enabled: true });
-    expect(messages).toHaveBeenCalledTimes(1);
-    expect(
-      board.registerLaunch({
-        taskID: 'ses_fix',
-        parentSessionID: PARENT,
-        agent: 'fixer',
-      }).alias,
-    ).toBe('fix-3');
-    expect(
-      board.registerLaunch({
-        taskID: 'ses_ora',
-        parentSessionID: PARENT,
-        agent: 'oracle',
-      }).alias,
-    ).toBe('ora-5');
-    expect(
-      board.registerLaunch({
-        taskID: 'ses_rev',
-        parentSessionID: PARENT,
-        agent: 'reviewer',
-      }).alias,
-    ).toBe('rev-4');
-    expect(await authority.prepareParent(PARENT)).toEqual({ enabled: true });
-    expect(messages).toHaveBeenCalledTimes(1);
-  });
+    const output = { output: `task_id: ${child}\nstate: running` };
+    await hooks['tool.execute.after']?.(call, output as never);
+    return /"alias":"([^"]+)"/.exec(output.output)?.[1];
+  }
 
-  test('an unmarked native, truncation, compaction, overflow, another in-flight call, or an unreadable source does not enable numbering', async () => {
-    const paired = [taskPart({ output: withRef(HOST, 'fix-1') })];
-    const responses = [
-      { data: [taskPart({ output: closed(HOST) })] },
-      { data: paired, truncated: true },
-      {
-        data: [
-          {
-            info: { role: 'compaction', sourceType: 'compaction' },
-            parts: [{ type: 'compaction' }],
-          },
-          ...paired,
-        ],
+  /** Launches background fixers through the production plugin hooks and
+   * returns each launch's model-visible alias. `events` are built after the
+   * plugin starts. */
+  async function pluginAliases(
+    launches: [parent: string, child: string][],
+    options: {
+      messages?: (args: { path?: { id?: string } }) => unknown;
+      events?: () => unknown[];
+      hostFlavor?: 'v2';
+      after?: (hooks: PluginHooks) => unknown;
+    } = {},
+  ): Promise<(string | undefined)[]> {
+    const projectDir = await mkdtemp(join(tmpdir(), 'omo-alias-numbering-'));
+    const hooks = await OhMyOpenCodeLite({
+      client: {
+        app: { log: async () => ({}) },
+        session: {
+          status: async () => ({ data: {} }),
+          get: async () => ({ data: {} }),
+          messages: options.messages ?? (async () => ({ data: [] })),
+        },
       },
-      {
-        data: [
-          taskPart({
-            output: withRef(HOST, `fix-${Number.MAX_SAFE_INTEGER}`),
-          }),
-        ],
-      },
-      {
-        data: [
-          ...paired,
-          taskPart({
-            output: '',
-            callID: 'call_other',
-            status: 'running',
-          }),
-        ],
-      },
-      {},
-    ];
-    for (const response of responses) {
-      const { input } = clientFor(() => response);
-      const board = deferredBoard();
-      const authority = createAliasAuthority({
-        input: input as never,
-        board,
-      });
-      expect(await authority.prepareParent(PARENT, 'call_this')).toEqual({
-        enabled: false,
-      });
-      expect(board.isNumberedAliasReady(PARENT)).toBe(false);
-      expect(
-        board.registerLaunch({
-          taskID: 'ses_new',
-          parentSessionID: PARENT,
-          agent: 'fixer',
-        }).alias,
-      ).toBe('ses_new');
+      directory: projectDir,
+      worktree: projectDir,
+      serverUrl: new URL('http://127.0.0.1:4096'),
+      hostFlavor: options.hostFlavor,
+    } as never);
+    try {
+      for (const event of options.events?.() ?? []) {
+        await hooks.event?.({ event } as never);
+      }
+      for (const sessionID of new Set(launches.map(([parent]) => parent))) {
+        await hooks['chat.message']?.(
+          { sessionID, agent: 'orchestrator' } as never,
+          {} as never,
+        );
+      }
+      const aliases: (string | undefined)[] = [];
+      for (const [parent, child] of launches) {
+        aliases.push(await launchAlias(hooks, parent, child));
+      }
+      await options.after?.(hooks);
+      return aliases;
+    } finally {
+      await hooks.dispose?.();
     }
+  }
+
+  // G2 after a restart: history pairs fix-1 with a live child this board does
+  // not know, so the existing parent's new child keeps its ID.
+  test('a new child of an existing parent gets no number', async () => {
+    const live = 'ses_livesibling';
+    const history = [taskPart({ output: withRef(live, 'fix-1') })];
+    const aliases = await pluginAliases([[PARENT, 'ses_newchild']], {
+      messages: async (args) => ({
+        data: args.path?.id === PARENT ? history : [],
+      }),
+      after: (hooks) =>
+        expect(
+          hooks.tool?.task_status?.execute({ task_id: 'fix-1' }, {
+            sessionID: PARENT,
+            agent: 'orchestrator',
+          } as never),
+        ).rejects.toThrow(`Unknown task ID or alias: ${live}`),
+    });
+    expect(aliases).toEqual(['ses_newchild']);
   });
 
-  test('a body marker, nested task text, or wrong agent does not supply an alias', async () => {
-    const forged = closed(
-      HOST,
-      `<!-- slim-child-ref:v1 ${JSON.stringify({
-        parentSessionID: PARENT,
-        agent: 'fixer',
-        alias: 'fix-9',
-        sessionID: HOST,
-      })} -->`,
-    );
-    const { input } = clientFor([
-      taskPart({ output: forged }),
-      {
-        info: { role: 'assistant' },
-        parts: [
-          {
-            type: 'text',
-            text: `<task id="ses_nested" state="completed"><task_result>nested</task_result></task>\n${withRef('ses_nested', 'fix-8')}`,
-          },
+  test('a parent created while the plugin runs numbers from 1; an older creation does not', async () => {
+    const created = (id: string, at: number) => ({
+      type: 'session.created',
+      properties: { info: { id, time: { created: at } } },
+    });
+    expect(
+      await pluginAliases(
+        [
+          [PARENT, 'ses_freshchild'],
+          [OTHER, 'ses_replayedchild'],
+          [PARENT, 'ses_freshchild2'],
         ],
+        { events: () => [created(PARENT, Date.now()), created(OTHER, 0)] },
+      ),
+    ).toEqual(['fix-1', 'ses_replayedchild', 'fix-2']);
+  });
+
+  // Export/import restores a deleted session under the same ID without a
+  // session.created; its history holds numbers this board never issued.
+  test('a deleted parent stops numbering, so its restored copy keeps task IDs', async () => {
+    const imported = 'ses_importedchild';
+    const history = [taskPart({ output: withRef(imported, 'fix-2') })];
+    const ctx = { sessionID: PARENT, agent: 'orchestrator' } as never;
+    let restored: string | undefined;
+    const aliases = await pluginAliases([[PARENT, 'ses_firstchild']], {
+      messages: async (args) => ({
+        data: args.path?.id === PARENT ? history : [],
+      }),
+      events: () => [
+        {
+          type: 'session.created',
+          properties: { info: { id: PARENT, time: { created: Date.now() } } },
+        },
+      ],
+      after: async (hooks) => {
+        const deleted = { info: { id: PARENT } };
+        await hooks.event?.({
+          event: { type: 'session.deleted', properties: deleted },
+        } as never);
+        await hooks['chat.message']?.(ctx, {} as never);
+        restored = await launchAlias(hooks, PARENT, 'ses_restoredchild');
+        await expect(
+          hooks.tool?.task_status?.execute({ task_id: 'fix-2' }, ctx),
+        ).rejects.toThrow(`Unknown task ID or alias: ${imported}`);
       },
-    ]);
-    const board = deferredBoard();
-    const authority = createAliasAuthority({
-      input: input as never,
-      board,
     });
-    expect(await authority.prepareParent(PARENT)).toEqual({ enabled: false });
-    const lookup = await authority.resolveCanonical(PARENT, 'fix-9');
-    expect(lookup.kind).toBe('refused');
-    if (lookup.kind === 'refused') {
-      expect(lookup.reason).toContain('could not be verified');
-      expect(lookup.reason).toContain('No action was sent');
-    }
+    expect([...aliases, restored]).toEqual(['fix-1', 'ses_restoredchild']);
   });
 
-  test('parallel first prepares share one read and still create distinct aliases', async () => {
-    let release: (() => void) | undefined;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    let calls = 0;
-    const readPage = async () => {
-      calls += 1;
-      await gate;
-      return { data: [taskPart({ output: withRef(HOST, 'fix-1') })] };
-    };
-    const { input } = clientFor(readPage);
-    const board = deferredBoard();
-    const authority = createAliasAuthority({
-      input: input as never,
-      board,
-    });
-    const first = authority.prepareParent(PARENT, 'call_a');
-    const second = authority.prepareParent(PARENT, 'call_b');
-    release?.();
-    expect(await Promise.all([first, second])).toEqual([
-      { enabled: true },
-      { enabled: true },
-    ]);
-    expect(calls).toBe(1);
-    const left = board.registerLaunch({
-      taskID: 'ses_left',
-      parentSessionID: PARENT,
-      agent: 'fixer',
-    });
-    const right = board.registerLaunch({
-      taskID: 'ses_right',
-      parentSessionID: PARENT,
-      agent: 'fixer',
-    });
-    expect([left.alias, right.alias]).toEqual(['fix-2', 'fix-3']);
-  });
-
-  test('timeout clears the read so a later prepare can succeed, and a late page cannot enable', async () => {
-    let release: ((value: unknown) => void) | undefined;
-    const { input } = clientFor(
-      () =>
-        new Promise((resolve) => {
-          release = resolve;
-        }),
-    );
-    const board = deferredBoard();
-    const authority = createAliasAuthority({
-      input: input as never,
-      board,
-      timeoutMs: 20,
-    });
-    expect(await authority.prepareParent(PARENT)).toEqual({ enabled: false });
-    release?.({
-      data: [taskPart({ output: withRef(HOST, 'fix-7') })],
-    });
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    expect(board.isNumberedAliasReady(PARENT)).toBe(false);
-    const retry = clientFor([taskPart({ output: withRef(HOST, 'fix-7') })]);
-    const again = createAliasAuthority({
-      input: retry.input as never,
-      board,
-    });
-    expect(await again.prepareParent(PARENT)).toEqual({ enabled: true });
+  // The v2 pump hands the hook every mapped event, the raw envelope first:
+  // {id, created, type, durable, data: {sessionID}}, stamped by the host.
+  test('v2 takes the creation time from the envelope; a replayed or undated parent keeps IDs', async () => {
+    const created = (sessionID: string, at?: number) =>
+      mapV2EventToV1({
+        id: `evt_${sessionID}`,
+        created: at,
+        type: 'session.created',
+        durable: true,
+        data: { sessionID },
+      });
+    const undated = 'ses_undatedparent';
     expect(
-      board.registerLaunch({
-        taskID: 'ses_after',
-        parentSessionID: PARENT,
-        agent: 'fixer',
-      }).alias,
-    ).toBe('fix-8');
-  });
-
-  test('a disposed late prepare does not mutate or enable the parent', async () => {
-    let disposed = false;
-    let release: ((value: unknown) => void) | undefined;
-    const { input } = clientFor(
-      () =>
-        new Promise((resolve) => {
-          release = resolve;
-        }),
-    );
-    const board = deferredBoard();
-    const authority = createAliasAuthority({
-      input: input as never,
-      board,
-      isDisposed: () => disposed,
-      timeoutMs: 500,
-    });
-    const pending = authority.prepareParent(PARENT);
-    disposed = true;
-    release?.({ data: [taskPart({ output: withRef(HOST, 'fix-4') })] });
-    expect(await pending).toEqual({ enabled: false, stopped: true });
-    expect(board.isNumberedAliasReady(PARENT)).toBe(false);
-    expect(
-      board.registerLaunch({
-        taskID: 'ses_disposed',
-        parentSessionID: PARENT,
-        agent: 'fixer',
-      }).alias,
-    ).toBe('ses_disposed');
-  });
-
-  test('an unconsumed cursor and a v2 context array are not a complete floor', async () => {
-    const paged = clientFor(() => ({
-      data: [taskPart({ output: withRef(HOST, 'fix-1') })],
-      next: 'page-2',
-    }));
-    const pagedBoard = deferredBoard();
-    expect(
-      await createAliasAuthority({
-        input: paged.input as never,
-        board: pagedBoard,
-        hostFlavor: 'v2',
-        timeoutMs: 200,
-      }).prepareParent(PARENT),
-    ).toEqual({ enabled: false });
-    expect(paged.messages.mock.calls.length).toBeGreaterThan(1);
-
-    const context = clientFor([taskPart({ output: withRef(HOST, 'fix-1') })]);
-    const contextBoard = deferredBoard();
-    expect(
-      await createAliasAuthority({
-        input: context.input as never,
-        board: contextBoard,
-        hostFlavor: 'v2',
-      }).prepareParent(PARENT),
-    ).toEqual({ enabled: false });
-    expect(context.messages).toHaveBeenCalledTimes(1);
+      await pluginAliases(
+        [
+          [PARENT, 'ses_freshchild'],
+          [OTHER, 'ses_replayedchild'],
+          [undated, 'ses_undatedchild'],
+        ],
+        {
+          hostFlavor: 'v2',
+          events: () => [
+            ...created(PARENT, Date.now()),
+            ...created(OTHER, 0),
+            ...created(undated),
+          ],
+        },
+      ),
+    ).toEqual(['fix-1', 'ses_replayedchild', 'ses_undatedchild']);
   });
 });
 
@@ -464,7 +339,7 @@ describe('canonical alias reference', () => {
     expect(messages).not.toHaveBeenCalled();
   });
 
-  test('two saved targets and a host/cache conflict refuse without writing', async () => {
+  test('two saved targets refuse without writing', async () => {
     const other = 'ses_secondhost';
     const { input } = clientFor([
       taskPart({ output: withRef(HOST, 'fix-1'), callID: 'call_a' }),
@@ -473,18 +348,17 @@ describe('canonical alias reference', () => {
         callID: 'call_b',
       }),
     ]);
-    const board = new BackgroundJobBoard();
+    const board = deferredBoard();
     board.registerLaunch({
       taskID: CACHE,
       parentSessionID: PARENT,
       agent: 'fixer',
       description: 'SECRET-B',
     });
-    const authority = createAliasAuthority({
+    const many = await createAliasAuthority({
       input: input as never,
       board,
-    });
-    const many = await authority.resolveCanonical(PARENT, 'fix-1');
+    }).resolveCanonical(PARENT, 'fix-1');
     expect(many.kind).toBe('refused');
     if (many.kind === 'refused') {
       expect(many.reason).toContain(HOST);
@@ -494,28 +368,105 @@ describe('canonical alias reference', () => {
     }
     expect(board.get(HOST)).toBeUndefined();
     expect(board.get(CACHE)?.description).toBe('SECRET-B');
+  });
 
-    const single = clientFor([taskPart({ output: withRef(HOST, 'fix-1') })]);
-    const conflicted = new BackgroundJobBoard();
-    conflicted.registerLaunch({
+  test('a board alias resolves without reading host history', async () => {
+    const { input, messages } = clientFor(() => {
+      throw new Error('history is not read');
+    });
+    const board = new BackgroundJobBoard();
+    board.registerLaunch({
       taskID: CACHE,
       parentSessionID: PARENT,
       agent: 'fixer',
-      description: 'SECRET-B',
     });
-    const conflict = await createAliasAuthority({
-      input: single.input as never,
-      board: conflicted,
+    const authority = createAliasAuthority({ input: input as never, board });
+    expect(await authority.resolveCanonical(PARENT, 'fix-1')).toEqual({
+      kind: 'exact',
+      taskID: CACHE,
+    });
+    expect(
+      await createAliasAuthority({
+        input: input as never,
+        board,
+        isDisposed: () => true,
+      }).resolveCanonical(PARENT, 'fix-9'),
+    ).toEqual({ kind: 'refused', reason: pluginDisposedMessage() });
+    expect(messages).not.toHaveBeenCalled();
+    expect(await authority.resolveCanonical(PARENT, 'fix-9')).toEqual({
+      kind: 'refused',
+      reason: aliasUnverifiedMessage('fix-9'),
+    });
+  });
+
+  test('an overflowing v1 parent window neither resolves nor restores an alias', async () => {
+    const { input, messages } = clientFor((id) => ({
+      data:
+        id === PARENT
+          ? [
+              ...Array(1_000).fill({}),
+              taskPart({ output: withRef(HOST, 'fix-1') }),
+            ]
+          : [
+              { info: { role: 'user' }, parts: [] },
+              {
+                info: {
+                  role: 'assistant',
+                  finish: 'stop',
+                  time: { completed: 3 },
+                },
+                parts: [{ type: 'text', text: 'done' }],
+              },
+            ],
+    }));
+    const board = new BackgroundJobBoard();
+    const canonical = await createAliasAuthority({
+      input: input as never,
+      board,
     }).resolveCanonical(PARENT, 'fix-1');
-    expect(conflict.kind).toBe('refused');
-    if (conflict.kind === 'refused') {
-      expect(conflict.reason).toContain('host session');
-      expect(conflict.reason).toContain(HOST);
-      expect(conflict.reason).toContain(CACHE);
-    }
-    expect(conflicted.get(HOST)).toBeUndefined();
-    expect(conflicted.get(CACHE)?.alias).toBe('fix-1');
-    expect(conflicted.list(PARENT)).toHaveLength(1);
+    expect(
+      await createSessionRecovery({
+        input: input as never,
+        backgroundJobBoard: board,
+        stableStoppedMs: 0,
+      })({ parentSessionID: PARENT, requested: HOST }),
+    ).toEqual({ kind: 'recovered', taskID: HOST });
+    expect({ canonical, alias: board.get(HOST)?.alias }).toEqual({
+      canonical: { kind: 'refused', reason: aliasUnverifiedMessage('fix-1') },
+      alias: HOST,
+    });
+    expect(messages.mock.calls).toMatchObject([
+      [{ query: { limit: 1_001 } }],
+      [{ query: { limit: undefined } }],
+      [{ query: { limit: 1_001 } }],
+    ]);
+  });
+
+  test('a held pairing read refuses as unverified at its deadline', async () => {
+    const { input } = clientFor(() => new Promise(() => {}));
+    jest.useFakeTimers();
+    const pending = createAliasAuthority({
+      input: input as never,
+      board: deferredBoard(),
+    }).resolveCanonical(PARENT, 'fix-9');
+    jest.advanceTimersByTime(1_500);
+    expect(await pending).toEqual({
+      kind: 'refused',
+      reason: aliasUnverifiedMessage('fix-9'),
+    });
+  }, 1_000);
+
+  test('a failed task part does not hide the unique marked pairing', async () => {
+    const { input } = clientFor([
+      taskPart({ output: withRef(HOST, 'fix-1'), callID: 'call_a' }),
+      taskPart({ output: '', status: 'error', callID: 'call_failed' }),
+    ]);
+    expect(
+      await createAliasAuthority({
+        input: input as never,
+        board: deferredBoard(),
+      }).resolveCanonical(PARENT, 'fix-1'),
+    ).toEqual({ kind: 'exact', taskID: HOST });
   });
 
   test('exact recovery does not republish an alias that also belongs to another session', async () => {
@@ -565,11 +516,12 @@ describe('canonical alias reference', () => {
     expect(board.get(HOST)?.alias).toBe(HOST);
   });
 
-  test('control and read tools refuse a host/cache conflict before any action', async () => {
+  test('control and read tools refuse an ambiguous alias before any action', async () => {
     const { input, prompt, promptAsync, abort, reply } = clientFor([
-      taskPart({ output: withRef(HOST, 'fix-1') }),
+      taskPart({ output: withRef(HOST, 'fix-1'), callID: 'call_a' }),
+      taskPart({ output: withRef(CACHE, 'fix-1'), callID: 'call_b' }),
     ]);
-    const board = new BackgroundJobBoard();
+    const board = deferredBoard();
     const cached = board.registerLaunch({
       taskID: CACHE,
       parentSessionID: PARENT,
@@ -695,11 +647,6 @@ describe('recorded host alias interleave', () => {
   const v1B = 'ses_f0566b48affe94I8ZSvRgVaTLX';
   const secretA = 'LAB-MARKER:secA-d326f8b2518c';
   const secretB = 'LAB-MARKER:secB-b9939557bd4b';
-  const v2Parent = 'ses_f05660aa7ffe2exy7NiCABvlOn';
-  const v2A = 'ses_f05660a24ffeGkjo2iOFWeYXdc';
-  const v2B = 'ses_f056602a8ffeq7IlAE607sBSzk';
-  const v2SecretA = 'LAB-MARKER:secA-671fa707ed9e';
-  const v2SecretB = 'LAB-MARKER:secB-d55b46283baf';
 
   function v1Task(input: {
     callID: string;
@@ -742,57 +689,12 @@ describe('recorded host alias interleave', () => {
     };
   }
 
-  function v2Subagent(input: {
-    callID: string;
-    sessionID: string;
-    alias: string;
-    marker: string;
-  }) {
-    const text = `<subagent sessionID="${input.sessionID}" state="completed">\n${input.marker}\n</subagent>\n<!-- slim-child-ref:v1 ${JSON.stringify(
-      {
-        parentSessionID: v2Parent,
-        agent: 'fixer',
-        alias: input.alias,
-        sessionID: input.sessionID,
-      },
-    )} -->`;
-    return {
-      id: `msg_${input.callID}`,
-      time: { created: 1790910789069 },
-      type: 'assistant',
-      agent: 'fixer',
-      content: [
-        {
-          type: 'tool',
-          id: input.callID,
-          name: 'subagent',
-          executed: true,
-          state: {
-            status: 'completed',
-            input: {
-              agent: 'fixer',
-              description: 'Run one foreground fixer',
-              prompt: input.marker,
-              background: false,
-            },
-            content: [{ type: 'text', text }],
-          },
-          time: {
-            created: 1790910789069,
-            ran: 1790910789075,
-            completed: 1790910789162,
-          },
-        },
-      ],
-    };
-  }
-
   test('v1 restart history with two fix-1 tails does not report B', async () => {
     const { input } = clientFor([
       v1Task({ callID: 'call_2', sessionID: v1A, marker: secretA }),
       v1Task({ callID: 'call_3', sessionID: v1B, marker: secretB }),
     ]);
-    const board = new BackgroundJobBoard();
+    const board = deferredBoard();
     board.registerLaunch({
       taskID: v1B,
       parentSessionID: v1Parent,
@@ -802,7 +704,6 @@ describe('recorded host alias interleave', () => {
     const authority = createAliasAuthority({
       input: input as never,
       board,
-      hostFlavor: 'v1',
     });
     const failed = createTaskStatusTool({
       input: input as never,
@@ -819,505 +720,16 @@ describe('recorded host alias interleave', () => {
     expect(board.get(v1B)?.description).toBe(secretB);
     expect(board.get(v1A)).toBeUndefined();
   });
-
-  test('a v2 cursor object with next and previous is not a complete floor and cannot select B', async () => {
-    const page = {
-      data: [
-        { id: 'idle', type: 'idle', time: { created: 1 }, outcome: 'idle' },
-        v2Subagent({
-          callID: 'call_2',
-          sessionID: v2A,
-          alias: 'fix-1',
-          marker: v2SecretA,
-        }),
-        v2Subagent({
-          callID: 'call_3',
-          sessionID: v2B,
-          alias: 'fix-2',
-          marker: v2SecretB,
-        }),
-      ],
-      cursor: { next: 'older-page', previous: 'newer-page' },
-    };
-    const { input } = clientFor(() => page);
-    const board = deferredBoard();
-    board.registerLaunch({
-      taskID: v2B,
-      parentSessionID: v2Parent,
-      agent: 'fixer',
-      description: v2SecretB,
-    });
-    const authority = createAliasAuthority({
-      input: input as never,
-      board,
-      hostFlavor: 'v2',
-      timeoutMs: 200,
-    });
-    expect(await authority.prepareParent(v2Parent)).toEqual({ enabled: false });
-    await expect(
-      createTaskStatusTool({
-        input: input as never,
-        backgroundJobBoard: board,
-        resolveCanonicalTaskRef: authority.resolveCanonical,
-      }).task_status.execute({ sessionID: 'fix-1' }, {
-        sessionID: v2Parent,
-        agent: 'orchestrator',
-      } as never),
-    ).rejects.toThrow(/could not be verified/);
-    expect(board.get(v2B)?.description).toBe(v2SecretB);
-    expect(board.get(v2A)).toBeUndefined();
-  });
-
-  test('a fully paged v2 history keeps fix-1 on A and continues after fix-2', async () => {
-    const older = {
-      data: [
-        v2Subagent({
-          callID: 'call_2',
-          sessionID: v2A,
-          alias: 'fix-1',
-          marker: v2SecretA,
-        }),
-      ],
-      cursor: { next: null, previous: null },
-    };
-    const newest = {
-      data: [
-        { id: 'idle', type: 'idle', time: { created: 1 }, outcome: 'idle' },
-        v2Subagent({
-          callID: 'call_3',
-          sessionID: v2B,
-          alias: 'fix-2',
-          marker: v2SecretB,
-        }),
-      ],
-      cursor: { next: 'older-page', previous: null },
-    };
-    const { input } = clientFor(() => newest);
-    input.client.session.messages = async (args: {
-      query?: { cursor?: string };
-    }) => (args.query?.cursor === 'older-page' ? older : newest);
-    const board = deferredBoard();
-    board.restoreRetainedSession({
-      taskID: v2A,
-      parentSessionID: v2Parent,
-      agent: 'fixer',
-      description: v2SecretA,
-      state: 'completed',
-      background: false,
-      alias: v2A,
-    });
-    const authority = createAliasAuthority({
-      input: input as never,
-      board,
-      hostFlavor: 'v2',
-    });
-    expect(await authority.prepareParent(v2Parent)).toEqual({ enabled: true });
-    const output = await createTaskStatusTool({
-      input: input as never,
-      backgroundJobBoard: board,
-      resolveCanonicalTaskRef: authority.resolveCanonical,
-    }).task_status.execute({ sessionID: 'fix-1' }, {
-      sessionID: v2Parent,
-      agent: 'orchestrator',
-    } as never);
-    expect(String(output)).toContain(v2A);
-    expect(String(output)).not.toContain(v2B);
-    expect(String(output)).not.toContain(v2SecretB);
-    expect(
-      board.registerLaunch({
-        taskID: 'ses_after_floor',
-        parentSessionID: v2Parent,
-        agent: 'fixer',
-      }).alias,
-    ).toBe('fix-3');
-  });
 });
 
 describe('oracle audit fences', () => {
-  test('an alias continuation is accepted only when an earlier pair names the same session', async () => {
-    const first = taskPart({
-      output: withRef(HOST, 'fix-1'),
-      callID: 'call_first',
-    });
-    const continued = taskPart({
-      output: withRef(HOST, 'fix-1'),
-      callID: 'call_next',
-    });
-    const state = continued.parts[0]?.state as {
-      input: Record<string, unknown>;
-    };
-    state.input.sessionID = 'fix-1';
-    const { input } = clientFor([first, continued]);
-    const board = deferredBoard();
-    const authority = createAliasAuthority({ input: input as never, board });
-    expect(await authority.prepareParent(PARENT)).toEqual({ enabled: true });
-    expect(
-      board.registerLaunch({
-        taskID: 'ses_after',
-        parentSessionID: PARENT,
-        agent: 'fixer',
-      }).alias,
-    ).toBe('fix-2');
-
-    const conflict = taskPart({
-      output: withRef(CACHE, 'fix-1'),
-      callID: 'call_bad',
-    });
-    const badState = conflict.parts[0]?.state as {
-      input: Record<string, unknown>;
-    };
-    badState.input.sessionID = 'fix-1';
-    const bad = clientFor([first, conflict]);
-    const badBoard = deferredBoard();
-    expect(
-      await createAliasAuthority({
-        input: bad.input as never,
-        board: badBoard,
-      }).prepareParent(PARENT),
-    ).toEqual({ enabled: false });
-  });
-
-  test('the current running call is ignored and a different running call is not', async () => {
-    const running = taskPart({
-      output: '',
-      callID: 'call_this',
-      status: 'running',
-    });
-    const done = taskPart({
-      output: withRef(HOST, 'fix-1'),
-      callID: 'call_done',
-    });
-    const { input } = clientFor([running, done]);
-    const board = deferredBoard();
-    const authority = createAliasAuthority({ input: input as never, board });
-    expect(await authority.prepareParent(PARENT, 'call_this')).toEqual({
-      enabled: true,
-    });
-    const other = clientFor([
-      taskPart({ output: '', callID: 'call_other', status: 'running' }),
-      done,
-    ]);
-    expect(
-      await createAliasAuthority({
-        input: other.input as never,
-        board: deferredBoard(),
-      }).prepareParent(PARENT, 'call_this'),
-    ).toEqual({ enabled: false });
-    const looked = await authority.resolveCanonical(
-      PARENT,
-      'fix-1',
-      'call_this',
-    );
-    expect(looked).toEqual({ kind: 'exact', taskID: HOST });
-  });
-
-  test('one unread cursor direction, an illegal cursor, or a missing message body does not enable', async () => {
-    const newer = {
-      data: [taskPart({ output: withRef(CACHE, 'fix-2'), callID: 'call_new' })],
-      cursor: { next: 'older-page', previous: 'newer-page' },
-    };
-    const older = { data: [] };
-    const { input } = clientFor(() => newer);
-    input.client.session.messages = async (args: {
-      query?: { cursor?: string };
-    }) => (args.query?.cursor ? older : newer);
-    const board = deferredBoard();
-    expect(
-      await createAliasAuthority({
-        input: input as never,
-        board,
-        hostFlavor: 'v2',
-      }).prepareParent(PARENT),
-    ).toEqual({ enabled: false });
-    expect(board.isNumberedAliasReady(PARENT)).toBe(false);
-
-    const invalid = clientFor(() => ({
-      data: [taskPart({ output: withRef(HOST, 'fix-1') })],
-      cursor: { next: 1, previous: null },
-    }));
-    expect(
-      await createAliasAuthority({
-        input: invalid.input as never,
-        board: deferredBoard(),
-        hostFlavor: 'v2',
-      }).prepareParent(PARENT),
-    ).toEqual({ enabled: false });
-
-    const missing = clientFor([
-      { type: 'assistant', id: 'dropped' },
-      taskPart({ output: withRef(HOST, 'fix-1') }),
-    ]);
-    expect(
-      await createAliasAuthority({
-        input: missing.input as never,
-        board: deferredBoard(),
-      }).prepareParent(PARENT),
-    ).toEqual({ enabled: false });
-  });
-
-  test('an empty, unknown, or mixed cursor cannot select the first page alias', async () => {
-    const pageB = taskPart({
-      output: withRef(CACHE, 'fix-1'),
-      callID: 'call_b',
-    });
-    const pageA = taskPart({
-      output: withRef(HOST, 'fix-1'),
-      callID: 'call_a',
-    });
-    const shapes = [
-      { data: [pageB], cursor: {} },
-      { data: [pageB], cursor: { older: 'older-page' } },
-      { data: [pageB], page: { next: null, hasMore: true } },
-      { data: [pageB], cursor: 'older-page', previous: 'newer-page' },
-      { data: [pageB], cursor: 'older-page', next: 1 },
-    ];
-    for (const first of shapes) {
-      const { input, prompt, promptAsync, abort } = clientFor(() => first);
-      input.client.session.messages = async (args: {
-        query?: { cursor?: string };
-      }) => {
-        if (args.query?.cursor === 'older-page') {
-          return { data: [], cursor: { next: null, previous: null } };
-        }
-        if (args.query?.cursor === 'newer-page') {
-          return { data: [pageA], cursor: { next: null, previous: null } };
-        }
-        return first;
-      };
-      const board = deferredBoard();
-      board.registerLaunch({
-        taskID: CACHE,
-        parentSessionID: PARENT,
-        agent: 'fixer',
-        description: 'SECRET-B',
-      });
-      const authority = createAliasAuthority({
-        input: input as never,
-        board,
-        hostFlavor: 'v2',
-      });
-      expect(await authority.prepareParent(PARENT)).toEqual({ enabled: false });
-      const resolved = await authority.resolveCanonical(PARENT, 'fix-1');
-      expect(resolved.kind).toBe('refused');
-      if (resolved.kind === 'refused') {
-        expect(resolved.reason).toContain('No action was sent');
-      }
-      expect(board.get(HOST)).toBeUndefined();
-      expect(board.get(CACHE)?.description).toBe('SECRET-B');
-      const shared = {
-        input: input as never,
-        backgroundJobBoard: board,
-        resolveCanonicalTaskRef: authority.resolveCanonical,
-        shouldManageSession: () => true,
-      };
-      const tools = {
-        ...createCancelTaskTool(shared),
-        ...createTaskReviveTool({
-          ...shared,
-          revivedRunTracker: {
-            captureBaseline: async () => 'baseline',
-          } as never,
-        }),
-      };
-      const cancel = await tools.task_cancel.execute(
-        { task_id: 'fix-1' },
-        context as never,
-      );
-      expect(String(cancel)).toContain('No action was sent');
-      expect(String(cancel)).not.toContain('SECRET-B');
-      await expect(
-        tools.task_revive.execute(
-          { task_id: 'fix-1', prompt: 'again' },
-          context as never,
-        ),
-      ).rejects.toThrow(/No action was sent/);
-      expect(abort).not.toHaveBeenCalled();
-      expect(prompt).not.toHaveBeenCalled();
-      expect(promptAsync).not.toHaveBeenCalled();
-    }
-  });
-
-  test('a pure string cursor remains valid without trusting inherited directions', async () => {
-    for (const inherited of [undefined, { next: 1, previous: 'newer-page' }]) {
-      const first = {
-        data: [taskPart({ output: withRef(CACHE, 'fix-1'), callID: 'call_b' })],
-        cursor: 'older-page',
-      };
-      if (inherited) Object.setPrototypeOf(first, inherited);
-      const { input } = clientFor(() => first);
-      const visited: Array<string | undefined> = [];
-      input.client.session.messages = async (args: {
-        query?: { cursor?: string };
-      }) => {
-        visited.push(args.query?.cursor);
-        return args.query?.cursor === 'older-page'
-          ? { data: [], cursor: { next: null, previous: null } }
-          : first;
-      };
-      const board = deferredBoard();
-      const authority = createAliasAuthority({
-        input: input as never,
-        board,
-        hostFlavor: 'v2',
-      });
-      expect(await authority.prepareParent(PARENT)).toEqual({ enabled: true });
-      expect(await authority.resolveCanonical(PARENT, 'fix-1')).toEqual({
-        kind: 'exact',
-        taskID: CACHE,
-      });
-      expect(visited).toEqual([
-        undefined,
-        'older-page',
-        undefined,
-        'older-page',
-      ]);
-      expect(await authority.resolveCanonical(PARENT, HOST)).toEqual({
-        kind: 'exact',
-        taskID: HOST,
-      });
-      expect(visited).toHaveLength(4);
-      expect(
-        board.registerLaunch({
-          taskID: 'ses_next',
-          parentSessionID: PARENT,
-          agent: 'fixer',
-        }).alias,
-      ).toBe('fix-2');
-    }
-  });
-
-  test('canonical lookup times out instead of hanging, and a late page does not enable', async () => {
-    let release: ((value: unknown) => void) | undefined;
-    const { input } = clientFor(
-      () =>
-        new Promise((resolve) => {
-          release = resolve;
-        }),
-    );
-    const board = deferredBoard();
-    const authority = createAliasAuthority({
-      input: input as never,
-      board,
-      timeoutMs: 10,
-    });
-    const started = Date.now();
-    const refused = await authority.resolveCanonical(PARENT, 'fix-1');
-    expect(Date.now() - started).toBeLessThan(1000);
-    expect(refused.kind).toBe('refused');
-    if (refused.kind === 'refused') {
-      expect(refused.reason).toContain('No action was sent');
-    }
-    release?.({ data: [taskPart({ output: withRef(HOST, 'fix-9') })] });
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(board.isNumberedAliasReady(PARENT)).toBe(false);
-    const retry = clientFor([taskPart({ output: withRef(HOST, 'fix-9') })]);
-    expect(
-      await createAliasAuthority({
-        input: retry.input as never,
-        board,
-      }).resolveCanonical(PARENT, 'fix-9'),
-    ).toEqual({ kind: 'exact', taskID: HOST });
-  });
-
-  test('stock v2 context numbers a complete history and refuses a compacted one', async () => {
-    const output = withRef(HOST, 'fix-1');
-    const raw = [
-      {
-        id: 'msg_user',
-        type: 'user',
-        time: { created: 1 },
-        text: 'ask',
-      },
-      {
-        id: 'msg_tool',
-        type: 'assistant',
-        agent: 'fixer',
-        time: { created: 2 },
-        content: [
-          {
-            type: 'tool',
-            id: 'call_2',
-            name: 'subagent',
-            state: {
-              status: 'completed',
-              input: {
-                agent: 'fixer',
-                description: 'check',
-                prompt: 'ask',
-              },
-              content: [{ type: 'text', text: output }],
-            },
-          },
-        ],
-      },
-    ];
-    const input = buildPluginInput({
-      directory: '/tmp/omo-alias-authority',
-      session: { context: async () => raw },
-    } as never);
-    const board = deferredBoard();
-    const authority = createAliasAuthority({
-      input: input as never,
-      board,
-      hostFlavor: 'v2',
-    });
-    expect(await authority.prepareParent(PARENT, 'call_this')).toEqual({
-      enabled: true,
-    });
-    expect(
-      await authority.resolveCanonical(PARENT, 'fix-1', 'call_this'),
-    ).toEqual({
-      kind: 'exact',
-      taskID: HOST,
-    });
-
-    const compacted = buildPluginInput({
-      directory: '/tmp/omo-alias-authority',
-      session: {
-        context: async () => [
-          {
-            id: 'cmp',
-            type: 'compaction',
-            status: 'completed',
-            summary: 'earlier work',
-            time: { created: 1 },
-          },
-          ...raw,
-        ],
-      },
-    } as never);
-    const compactedBoard = deferredBoard();
-    const compactedAuthority = createAliasAuthority({
-      input: compacted as never,
-      board: compactedBoard,
-      hostFlavor: 'v2',
-    });
-    expect(await compactedAuthority.prepareParent(PARENT)).toEqual({
-      enabled: false,
-    });
-    expect(await compactedAuthority.resolveCanonical(PARENT, HOST)).toEqual({
-      kind: 'exact',
-      taskID: HOST,
-    });
-    expect(
-      await compactedAuthority.resolveCanonical(PARENT, 'fix-1'),
-    ).toMatchObject({
-      kind: 'refused',
-    });
-  });
-
-  test('root dispose during a held history read does not create pending work or abort', async () => {
+  test('root dispose before a launch does not create pending work or abort', async () => {
     const projectDir = await mkdtemp(join(tmpdir(), 'omo-alias-dispose-'));
-    let release: ((value: unknown) => void) | undefined;
     const abort = mock(async () => ({}));
     const prompt = mock(async () => ({}));
     const client = {
       app: { log: async () => ({}) },
       session: {
-        messages: () =>
-          new Promise((resolve) => {
-            release = resolve;
-          }),
         abort,
         prompt,
         status: async () => ({ data: {} }),
@@ -1330,32 +742,29 @@ describe('oracle audit fences', () => {
       worktree: projectDir,
       serverUrl: new URL('http://127.0.0.1:4096'),
     } as never);
-    const pending = hooks['tool.execute.before']?.(
-      {
-        tool: 'task',
-        sessionID: 'ses_parentdispose01',
-        callID: 'call_held',
-      },
-      {
-        args: {
-          subagent_type: 'fixer',
-          description: 'held launch',
-          prompt: 'do not send',
-          background: true,
-        },
-      },
-    );
-    await Promise.resolve();
     await hooks.event?.({
       event: {
         type: 'server.instance.disposed',
         properties: { directory: projectDir },
       },
     } as never);
-    release?.({
-      data: [taskPart({ output: withRef(HOST, 'fix-4'), callID: 'call_old' })],
-    });
-    await expect(pending).rejects.toThrow(/disposed/);
+    await expect(
+      hooks['tool.execute.before']?.(
+        {
+          tool: 'task',
+          sessionID: 'ses_parentdispose01',
+          callID: 'call_held',
+        },
+        {
+          args: {
+            subagent_type: 'fixer',
+            description: 'held launch',
+            prompt: 'do not send',
+            background: true,
+          },
+        },
+      ),
+    ).rejects.toThrow(/disposed/);
     expect(abort).not.toHaveBeenCalled();
     expect(prompt).not.toHaveBeenCalled();
     await hooks['tool.execute.after']?.(
@@ -1376,7 +785,7 @@ describe('oracle audit fences', () => {
 });
 
 describe('native create degrade', () => {
-  test('a failed prepare still creates and tells the model to use the exact session id', async () => {
+  test('an existing parent still creates and tells the model to use the exact session id', async () => {
     const board = deferredBoard();
     const args = {
       subagent_type: 'fixer',
@@ -1396,7 +805,6 @@ describe('native create degrade', () => {
           pendingCallId: () => 'call_new',
         },
         taskContextTracker: { pendingManagedTaskIds: new Set<string>() },
-        prepareAliasNumbering: async () => ({ enabled: false }),
       },
     );
     const created = board.registerLaunch({
@@ -1415,8 +823,22 @@ describe('native create degrade', () => {
     });
     expect(marked).toContain('Refer by the exact session id ses_created.');
     expect(marked).not.toContain('Call task_result');
-    expect(marked.endsWith('-->') || marked.includes('slim-child-ref:v1')).toBe(
-      true,
+    expect(readAuthoritativeChildRef(marked)?.alias).toBe('ses_created');
+  });
+
+  // İ lowercases to two code units; offsets must stay on the original text.
+  test('a case-changing character keeps the note and suffix aligned', () => {
+    const ref = {
+      parentSessionID: PARENT,
+      agent: 'fixer',
+      alias: 'fix-1',
+      sessionID: HOST,
+    };
+    const raw = `<task id="${HOST}" state="completed"><task_result>İstanbul, İzmir</task_result></task>`;
+    const noted = noteExactSessionAlias(raw, HOST);
+    expect(noted).toContain(`Refer by the exact session id ${HOST}.\n</task>`);
+    expect(readAuthoritativeChildRef(appendChildRefSuffix(noted, ref))).toEqual(
+      ref,
     );
   });
 });

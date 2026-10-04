@@ -10,7 +10,6 @@ import type { TaskActivityTracker } from './task-activity';
 import { observationFromSnapshot, summarizeTaskStatus } from './task-policy';
 import {
   type CanonicalTaskResolver,
-  currentToolCallID,
   idParamFor,
   readTaskRef,
   taskRefArgs,
@@ -25,7 +24,6 @@ export function createTaskStatusTool(options: {
   now?: () => number;
   statusTimeoutMs?: number;
   resolveCanonicalTaskRef?: CanonicalTaskResolver;
-  isDisposed?: () => boolean;
 }): Record<'task_status', ToolDefinition> {
   const idParam = idParamFor(options.input);
   const task_status = tool({
@@ -40,15 +38,10 @@ export function createTaskStatusTool(options: {
       const requested = readTaskRef(args, idParam);
       if (!requested) throw new Error(`task_status requires ${idParam}`);
       const canonical = options.resolveCanonicalTaskRef
-        ? await options.resolveCanonicalTaskRef(
-            parentSessionID,
-            requested,
-            currentToolCallID(toolContext),
-          )
+        ? await options.resolveCanonicalTaskRef(parentSessionID, requested)
         : undefined;
       if (canonical?.kind === 'refused') throw new Error(canonical.reason);
-      const identity =
-        canonical?.kind === 'exact' ? canonical.taskID : requested;
+      const identity = canonical?.taskID ?? requested;
       const job = canonical
         ? options.backgroundJobBoard.get(identity)
         : options.backgroundJobBoard.resolve(parentSessionID, requested);

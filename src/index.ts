@@ -1063,7 +1063,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       input: ctx,
       board: backgroundJobBoard,
       isDisposed: () => instanceDisposed,
-      hostFlavor,
     });
     taskSessionManagerHook = createTaskSessionManagerHook(ctx, {
       terminalGate,
@@ -1100,7 +1099,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         sessionMetadata.getModel(sessionID),
       hostFlavor,
       recoverRetainedSession,
-      prepareAliasNumbering: aliasAuthority.prepareParent,
       resolveCanonicalTaskRef: aliasAuthority.resolveCanonical,
       isDisposed: () => instanceDisposed,
       shouldManageSession: (sessionID) =>
@@ -1402,7 +1400,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       backgroundJobBoard: backgroundJobCoordinator,
       activityTracker: taskActivityTracker,
       resolveCanonicalTaskRef: aliasAuthority.resolveCanonical,
-      isDisposed: () => instanceDisposed,
     });
     waitForUserTools = createWaitForUserTool({
       shouldManageSession: (sessionID) =>
@@ -1993,6 +1990,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
 
       const event = input.event as {
         type: string;
+        // Raw v2 envelope: host time and payload.
+        created?: unknown;
+        data?: { sessionID?: unknown };
         properties?: {
           info?: {
             id?: string;
@@ -2007,6 +2007,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
             };
             sessionID?: string;
             directory?: string;
+            time?: { created?: unknown; completed?: unknown };
           };
           sessionID?: string;
           id?: string;
@@ -2148,6 +2149,16 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         const createdSessionParent = (
           event.properties as { info?: { parentID?: unknown } } | undefined
         )?.info?.parentID;
+        // v2 hands over the raw envelope before its mapped shapes: without
+        // `info`, take the session and the host creation time from it.
+        const info = event.properties?.info;
+        const freshID = info
+          ? info.id
+          : (event.data?.sessionID ?? event.properties?.sessionID);
+        const createdAt = info ? info.time?.created : event.created;
+        if (typeof freshID === 'string' && typeof createdAt === 'number') {
+          backgroundJobBoard.noteSessionCreated(freshID, createdAt);
+        }
         if (createdSessionId && typeof createdSessionParent === 'string') {
           if (hostFlavor !== 'v2') {
             v1ChildParents.set(createdSessionId, createdSessionParent);
