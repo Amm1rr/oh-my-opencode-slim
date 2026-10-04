@@ -522,6 +522,45 @@ the children-only fingerprint keeps the two-wake no-progress cap bounding
 cost. v2's native subagent completion nudges still cover the happy path; this
 watchdog covers stuck children and unreconciled jobs.
 
+#### v2 lean defaults
+
+On OpenCode v2 hosts the host's native background notifier already delivers
+each run's first terminal result (completed, error, or cancelled) to the
+parent: an idle parent gets a new turn, a busy parent gets a steer. Two plugin
+channels would duplicate that delivery, so on v2 they default **off** unless a
+config layer sets them explicitly:
+
+- `backgroundJobs.boardInjection` — the passive Background Job Board is not
+  injected into orchestrator prompts.
+- `backgroundJobs.orchestratorWake.periodicWakeEnabled` — the periodic idle
+  evaluation described above never runs.
+
+Event-driven wakes keep working: stopped-job recovery, later terminal
+publications of the same run (for example a child that self-continued), and
+child-input asks still wake an idle parent, and their SDK-error retries still
+use the idle timer. v1 hosts are unchanged. To restore the previous behavior
+on v2, set the keys explicitly:
+
+```jsonc
+{
+  "backgroundJobs": {
+    "boardInjection": true,
+    "orchestratorWake": { "periodicWakeEnabled": true }
+  }
+}
+```
+
+With the board off, the plugin still retires natively delivered results: on
+the parent's next real user turn they are registered, and once the prompt
+advances they are reconciled. Stopped jobs are **not** retired that way,
+because a stop has no native notification. They stay stopped and
+unreconciled, so the stopped-job recovery wake still reports them, and
+`task_revive` acknowledges them when the parent resumes the work. The
+recovery wake and overflow notices point at `task_status` instead of the
+board. Reopen corrections are still delivered with the board off, in a
+board-free variant that points at `task_status`: if a reconciled job reopens
+to running, the parent is told once not to rely on its earlier result.
+
 For external manual work, the orchestrator first gives the user concrete steps,
 then calls `wait_for_user` as its final tool action. This explicit signal covers
 text-only HITL turns without attempting to infer intent from assistant prose. The
@@ -595,7 +634,10 @@ or cancellation.
 Stopped-job recovery facts are checked again by task ID and run generation
 before a queued recovery wake is delivered. The inline detail queue is bounded;
 when it overflows, the wake carries an explicit overflow signal directing the
-orchestrator to inspect all unreconciled stopped jobs on the board.
+orchestrator to inspect all unreconciled stopped jobs on the board. With board
+injection off, the overflow signal instead lists the overflowed task IDs that
+are still stopped (up to 64 per parent, with a note for any beyond that) so
+the orchestrator can check each with `task_status`.
 
 Malformed status entries and failed status requests are surfaced as `status
 uncertain`; they never prove that a job stopped or completed and do not confirm
