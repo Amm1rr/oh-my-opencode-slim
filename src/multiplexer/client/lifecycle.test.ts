@@ -1050,6 +1050,28 @@ describe('rebuild and reconnect backfill (2.4)', () => {
     expect(h.clock.pendingTimers).toBe(0);
   });
 
+  test('historical backfill preserves a real idle-close watch at the 64-child bound', async () => {
+    const h = createHarness();
+    const history = Array.from({ length: 65 }, (_, i) => `history-${i}`);
+    h.list.setSessionIds(CHILD, ...history);
+    await activatePane(h);
+    h.reader.statuses.set(CHILD, 'idle');
+    await h.lifecycle.handleEvent(lifecycleEvent('idle'));
+    h.clock.advance(STABLE_IDLE_MS);
+    await flushAsync();
+    await h.lifecycle.onReconnect();
+
+    expect(
+      [CHILD, ...history].filter((id) => h.lifecycle.directoryOf(id)),
+    ).toHaveLength(64);
+    expect(h.lifecycle.directoryOf('history-0')).toBeUndefined();
+    expect(h.lifecycle.directoryOf('history-64')).toBe(DIRECTORY);
+    h.reader.statuses.set(CHILD, 'busy');
+    await h.lifecycle.handleEvent(lifecycleEvent('status', { status: 'busy' }));
+    expect(h.adapter.spawnCalls).toHaveLength(2);
+    expect(h.lifecycle.getPane(CHILD)).toBeDefined();
+  });
+
   test('an idle child found at reconnect spawns immediately on resume', async () => {
     const tracked: Array<{ sessionId: string; directory: string }> = [];
     const h = createHarness({

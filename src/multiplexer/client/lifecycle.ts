@@ -97,7 +97,12 @@ export class PaneLifecycle {
    */
   private readonly closedWatch = new Map<
     string,
-    { parentSessionId: string; directory: string; subagentType?: string }
+    {
+      parentSessionId: string;
+      directory: string;
+      subagentType?: string;
+      historical: boolean;
+    }
   >();
   /**
    * Activity epoch per child, bumped by every held-pane event. A close
@@ -358,7 +363,7 @@ export class PaneLifecycle {
     // Backfill children the server has but this client does not track.
     for (const childSessionId of serverChildIds) {
       if (this.panes.has(childSessionId)) continue;
-      if (this.closedWatch.has(childSessionId)) continue;
+      if (this.closedWatch.get(childSessionId)?.historical === false) continue;
       const live = statuses?.get(childSessionId);
       if (live !== 'busy' && live !== 'retry') {
         if (statuses)
@@ -367,6 +372,7 @@ export class PaneLifecycle {
             parentSessionId,
             directory,
             serverAgents.get(childSessionId),
+            true,
           );
         continue;
       }
@@ -863,17 +869,20 @@ export class PaneLifecycle {
     parentSessionId: string,
     directory: string,
     subagentType?: string,
+    historical = false,
   ): void {
     this.closedWatch.delete(childSessionId);
-    this.closedWatch.set(
-      childSessionId,
-      subagentType === undefined
-        ? { parentSessionId, directory }
-        : { parentSessionId, directory, subagentType },
-    );
+    this.closedWatch.set(childSessionId, {
+      parentSessionId,
+      directory,
+      subagentType,
+      historical,
+    });
     this.ports.onChildTracked?.(childSessionId, directory);
     if (this.closedWatch.size <= MAX_REMEMBERED_CLOSED) return;
-    const oldest = this.closedWatch.keys().next().value;
+    const oldest =
+      [...this.closedWatch].find(([, watch]) => watch.historical)?.[0] ??
+      this.closedWatch.keys().next().value;
     if (oldest !== undefined) this.closedWatch.delete(oldest);
   }
 }
