@@ -17,11 +17,11 @@ function showOutputToUser(context: unknown, output: string): void {
 
 export const ast_grep_search: ToolDefinition = tool({
   description:
-    'Search code patterns across filesystem using AST-aware matching. Supports 25 languages. ' +
+    'Search code patterns across filesystem using AST-aware matching. ' +
     'Use meta-variables: $VAR (single node), $$$ (multiple nodes). ' +
-    'IMPORTANT: Patterns must be complete AST nodes (valid code). ' +
-    "For functions, include params and body: 'export async function $NAME($$$) { $$$ }' not 'export async function $NAME'. " +
-    "Examples: 'console.log($MSG)', 'def $FUNC($$$):', 'async function $NAME($$$)'",
+    'IMPORTANT: Patterns must be complete AST nodes (valid code) — ' +
+    "for functions, include params and body: 'export async function $NAME($$$) { $$$ }', not 'export async function $NAME'. " +
+    "More examples: 'console.log($MSG)', 'def $FUNC($$$):'",
   args: {
     pattern: tool.schema
       .string()

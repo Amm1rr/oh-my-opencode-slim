@@ -327,6 +327,33 @@ describe('buildViewCommand', () => {
     expect(cmd).not.toContain('OPENCODE_PASSWORD');
   });
 
+  test('viewer "mini" targets the mini interface for every flavor', async () => {
+    const { buildViewCommand } = await importShared();
+    expect(
+      buildViewCommand('v1', 'sess', 'http://x', '/repo', {
+        viewerSurface: 'mini',
+      }),
+    ).toBe("opencode mini --server 'http://x' --session 'sess'");
+    expect(
+      buildViewCommand('v2-shared', 'ses_abc', 'http://unused', '/repo', {
+        viewerSurface: 'mini',
+      }),
+    ).toBe("opencode mini --session 'ses_abc'");
+    expect(
+      buildViewCommand(
+        'v2-remote',
+        'ses_abc',
+        'http://192.168.5.212:8192',
+        '/repo',
+        {
+          viewerSurface: 'mini',
+        },
+      ),
+    ).toBe(
+      "opencode mini --server 'http://192.168.5.212:8192' --session 'ses_abc'",
+    );
+  });
+
   test('v2 flavors quote directories, session ids and executables', async () => {
     const { buildViewCommand } = await importShared();
     expect(

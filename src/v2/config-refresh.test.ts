@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { OhMyOpenCodeLite } from '../index';
+import { MarketplaceStore } from '../marketplace/store';
 import { readTuiSnapshot } from '../tui-state';
 import { makeTestEnv, type TestEnv } from './test-fixtures';
 
@@ -325,5 +328,58 @@ describe('v2 profile refresh hook', () => {
       // was ignored — both are warnings, not malformed config.
       expect(refreshed.ok).toBe(true);
     });
+  });
+
+  test('refresh preserves marketplace agents in the sidebar roster', async () => {
+    // Isolate the marketplace store for this test (test-isolation also sets
+    // XDG_DATA_HOME, but a per-test root avoids cross-test package leakage).
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-v2cr-data-'));
+    const priorDataHome = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = dataDir;
+    try {
+      new MarketplaceStore({ pluginVersion: '3.0.2' }).install({
+        manifest: {
+          schemaVersion: 2,
+          id: 'team/market',
+          version: '1.0.0',
+          displayName: 'market-agent',
+          description: 'Marketplace agent for refresh regression',
+          agentName: 'market-agent',
+          prompt: 'Marketplace prompt',
+          skills: [],
+          mcps: [],
+          tools: ['read'],
+          author: { name: 'Test author' },
+          tags: [],
+          license: 'MIT',
+          compatibility: { plugin: '>=1.0.0' },
+          model: { source: 'explicit', candidates: ['provider/package'] },
+          routing: {
+            description: 'Marketplace lane',
+            when: 'Marketplace task',
+            keywords: ['marketplace'],
+          },
+        },
+      } as never);
+      env.writeUserConfig({
+        preset: 'market',
+        presets: { market: { marketplace: { agents: ['team/market'] } } },
+      });
+
+      await withFactory(async ({ refresh }) => {
+        // Registry path wrote the full roster (core + marketplace).
+        expect(sidebarModels()['market-agent']).toBeDefined();
+
+        const refreshed = await refresh();
+        expect(refreshed.ok).toBe(true);
+
+        // The refresh must not clobber the marketplace roster entry.
+        expect(sidebarModels()['market-agent']).toBeDefined();
+      });
+    } finally {
+      if (priorDataHome === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = priorDataHome;
+      fs.rmSync(dataDir, { recursive: true, force: true });
+    }
   });
 });

@@ -125,7 +125,10 @@ while the first caller awaits its probe, the first call rejects with
 launch; use `task_status` to inspect the current generation.
 
 V2 untracked adoption uses a different result boundary: it queues a caller-ID
-input after verifying parent ownership, without requiring status/idle APIs.
+input after verifying parent ownership, agent evidence, and readable history,
+without requiring status/idle APIs. Host-proven aliases retain the upstream
+ambiguity and ownership checks. Only explicit queued revival may continue an
+incomplete historical round; ordinary recovery keeps its terminal requirement.
 The new generation is registered before the write and is not replaced by late
 acknowledgement. Only that input's completed answer is delivered to the parent;
 old execution outcomes are ignored. Transport uncertainty retains exclusion and
@@ -153,7 +156,35 @@ purged, so future queued execution remains uncertain even after lease release.
 
 The delegation tool (`task()` on v1, `subagent()` on v2) refuses an explicit
 resume id (`task_id` on v1, `sessionID` on v2) it cannot resume instead of
-dropping it and spawning another session.
+dropping it and spawning another session. On v1, an id the local board does
+not know is not a cue to omit `task_id` and start another session. Call
+`task_revive` with that same id directly. On v2, a completed session
+continues with `subagent(sessionID)` even when it is not listed; an unknown
+id is read from the host and imported before that native call. Cancelled,
+errored, and stopped sessions still use `task_revive`. A failed lookup keeps
+the id and does not start another child. It verifies the original host
+session and continues there. `task_result` only reads a finished result; it
+is not required before that continuation.
+
+A successful native delegation result may end with a `slim-child-ref:v1`
+marker so a later restart can resolve the alias. The marker is trusted only
+on the parent's real native tool result, after the outer task closes, and
+only when it matches that result's session ID and original agent argument.
+A numbered alias is issued only after that parent's host history has been
+fully verified. Until then a new task is still created and is referred to
+by its exact session ID. `task_status`, `task_result`, `task_message`,
+`task_reply`, `task_cancel`, `task_revive`, and an explicit resume ID verify
+a non-exact alias against that history before reading or sending anything.
+Multiple saved targets, a host session that disagrees with the local cache,
+or unverifiable history produce no action: use the exact session ID or
+retry the lookup. Exact IDs do not require alias-history scans.
+
+On v1, `task_revive` retains the upstream exact-ID adoption path only when
+no child transcript is available; conflicting or unreadable evidence never
+falls back to it. Busy/retry host work is refused, not aborted. An evicted
+persisted terminal result is returned on the first revive attempt without
+sending a prompt; its suppression tombstone is cleared, not its deletion
+epoch. A later attempt can continue that same child.
 
 Revive checks for an idle-verification mechanism before aborting an active child:
 the live status map on v1, or the host's idle wait on v2. Missing capability fails

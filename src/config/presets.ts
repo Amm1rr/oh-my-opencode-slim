@@ -11,7 +11,15 @@ import {
   PresetAgentsSchema,
 } from './schema';
 
-/** Recursively merge JSON objects; arrays and scalar values are replaced. */
+/** Recursively merge JSON objects; arrays and scalar values are replaced.
+ * The override layer's keys come first, in the order the layer writes
+ * them; base keys the layer does not mention follow. Key order is
+ * precedence for permission objects (opencode compiles them into rules
+ * and evaluates last-match-wins), so a later layer must keep its written
+ * order for the keys it (re)defines — spreading the base first would pin
+ * redefined keys to their base positions and let a later wildcard shadow
+ * the allows written after it. Order is irrelevant to every other merged
+ * shape, which is looked up by key. */
 export function deepMerge<T extends Record<string, unknown>>(
   base?: T,
   override?: T,
@@ -19,7 +27,7 @@ export function deepMerge<T extends Record<string, unknown>>(
   if (!base) return override;
   if (!override) return base;
 
-  const result = { ...base } as T;
+  const result = {} as T;
   for (const key of Object.keys(override) as (keyof T)[]) {
     const baseVal = base[key];
     const overrideVal = override[key];
@@ -42,6 +50,11 @@ export function deepMerge<T extends Record<string, unknown>>(
       );
     } else {
       defineOwn(result, key as string, overrideVal);
+    }
+  }
+  for (const key of Object.keys(base) as (keyof T)[]) {
+    if (!Object.hasOwn(result, key)) {
+      defineOwn(result, key as string, base[key]);
     }
   }
   return result;

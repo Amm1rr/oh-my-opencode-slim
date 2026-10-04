@@ -115,6 +115,7 @@ function createHarness(
     run,
     tracker,
     gate,
+    messages: session.messages,
     prompt: session.promptAsync,
     settled,
     pruned,
@@ -161,6 +162,20 @@ afterEach(() => {
 });
 
 describe('revived run tracker', () => {
+  test('captures only the newest message for the baseline even when the host ignores limit', async () => {
+    const harness = createHarness(() => ({
+      data: [{ info: { id: 'older' } }, { info: { id: 'latest' } }],
+    }));
+
+    await expect(harness.tracker.captureBaseline('ses_child')).resolves.toBe(
+      'latest',
+    );
+    expect(harness.messages.mock.calls[0]?.[0]).toEqual({
+      path: { id: 'ses_child' },
+      query: { directory: '/test', limit: 1 },
+    });
+  });
+
   test('publishes a newer completed assistant turn and notifies the parent', async () => {
     let probe = false;
     const harness = createHarness(

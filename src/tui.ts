@@ -1497,14 +1497,6 @@ export function retainLastGoodConfigState(
     : { ...next, configInvalid: false };
 }
 
-export function readConfigInvalid(directory: string): boolean {
-  return readConfigState(directory).configInvalid;
-}
-
-export function readCompactSidebar(directory: string): boolean {
-  return readConfigState(directory).compactSidebar;
-}
-
 const DEFAULT_SIDEBAR_SLOT_ORDER = 900;
 
 /** Extract the spec string from a plugin-list entry: `"spec"` or `[spec, options]`. */

@@ -17,7 +17,7 @@ export function createWaitForUserTool(
   const wait_for_user = tool({
     description: `Pause automatic continuation while waiting for external human action.
 
-Use this only as the final tool action after you have already given the user concrete manual steps. The next distinct external user message resumes normal continuation. For an immediate answer, choice, clarification, or pasted output, use the question tool instead. Background tasks are not external manual work — do not use this tool to await them; the system resumes automatically via the Background Job Board and orchestrator wake scheduler.`,
+Final tool action only, after giving the user concrete manual steps; the next distinct external user message resumes continuation. For an immediate answer or choice, use the question tool instead. Not for awaiting background tasks — the system resumes automatically via the Background Job Board and wake scheduler.`,
     args: {
       reason: z
         .string()

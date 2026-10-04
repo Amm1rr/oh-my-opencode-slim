@@ -20,12 +20,39 @@ import {
   type RuntimeSessionStatusSnapshot,
   runtimeSessionStatus,
 } from '../utils/session-runtime-status';
-import { idParamFor, readTaskRef, taskRefArgs } from './task-ref';
+import {
+  type CanonicalTaskResolver,
+  currentToolCallID,
+  idParamFor,
+  readTaskRef,
+  taskRefArgs,
+} from './task-ref';
 
 interface TaskResultToolOptions {
   input: PluginInput;
   backgroundJobBoard: BackgroundJobStore;
   terminalGate?: BackgroundJobTerminalGate;
+  resolveCanonicalTaskRef?: CanonicalTaskResolver;
+  isDisposed?: () => boolean;
+}
+
+function readonlyTerminalResult(
+  requested: string,
+  record:
+    | {
+        state?: string;
+        terminalState?: string;
+        resultSummary?: string;
+      }
+    | undefined,
+): string {
+  const state =
+    record?.state === 'reconciled' ? record.terminalState : record?.state;
+  const summary = record?.resultSummary?.trim();
+  if (state === 'completed' && summary) return summary;
+  throw new Error(
+    `Task ${requested} result was not consumed. No action was sent.`,
+  );
 }
 
 function pending(
@@ -66,9 +93,7 @@ export function createTaskResultTool(
   const idParam = idParamFor(options.input);
   return {
     task_result: tool({
-      description: `Retrieve the final text already produced by a specialist task, or inspect its active state without resuming or re-running it.
-
-Use this when the user asks to see a prior task's full result, or before retrying work whose completed output may already answer the request. If the task is still running, this returns a status message; only a completed task returns its final text. Accepts either the native ${idParam} or the parent-scoped alias shown in the Background Job Board. This tool is read-only and never sends a new prompt to the specialist.`,
+      description: `Read-only: return a completed specialist task's final text, or a status line while it is still running. Never re-runs or re-prompts the specialist. Use this when the user asks to see a prior task's full result, or before retrying work whose completed output may already answer the request. Accepts the native ${idParam} or the parent-scoped alias from the Background Job Board.`,
       args: {
         ...taskRefArgs(idParam),
       },
@@ -77,9 +102,29 @@ Use this when the user asks to see a prior task's full result, or before retryin
         if (!parentSessionID) throw new Error('task_result requires sessionID');
         const requested = readTaskRef(args, idParam);
         if (!requested) throw new Error(`task_result requires ${idParam}`);
+        const canonical = options.resolveCanonicalTaskRef
+          ? await options.resolveCanonicalTaskRef(
+              parentSessionID,
+              requested,
+              currentToolCallID(toolContext),
+            )
+          : undefined;
+        if (options.isDisposed?.()) {
+          throw new Error(
+            'The plugin instance was disposed. No action was sent.',
+          );
+        }
+        if (canonical?.kind === 'refused') throw new Error(canonical.reason);
+        const identity =
+          canonical?.kind === 'exact' ? canonical.taskID : requested;
         const board = options.backgroundJobBoard;
-        const tracked = board.resolve(parentSessionID, requested);
-        const taskID = tracked?.taskID ?? requested;
+        const tracked = canonical
+          ? board.get(identity)
+          : board.resolve(parentSessionID, requested);
+        if (tracked && tracked.parentSessionID !== parentSessionID) {
+          throw new Error(`Task ${identity} does not belong to this session`);
+        }
+        const taskID = tracked?.taskID ?? identity;
         if (!SESSION_ID_PATTERN.test(taskID))
           throw new Error(`Unknown task ID or alias: ${requested}`);
 
@@ -93,6 +138,11 @@ Use this when the user asks to see a prior task's full result, or before retryin
           const observation = gate.capture(tracked);
           if (observation) {
             snapshot = await getRuntimeSessionStatusSnapshot(options.input);
+            if (options.isDisposed?.()) {
+              throw new Error(
+                'The plugin instance was disposed. No action was sent.',
+              );
+            }
             gate.observe(
               observation,
               runtimeObservationFromSnapshot(
@@ -103,8 +153,21 @@ Use this when the user asks to see a prior task's full result, or before retryin
             );
           }
         }
+        if (options.isDisposed?.()) {
+          throw new Error(
+            'The plugin instance was disposed. No action was sent.',
+          );
+        }
         const result = tracked ? await gate.reconcile(tracked) : undefined;
-        const current = board.resolve(parentSessionID, requested);
+        if (options.isDisposed?.()) {
+          return readonlyTerminalResult(requested, tracked);
+        }
+        const current = canonical
+          ? board.get(taskID)
+          : board.resolve(parentSessionID, requested);
+        if (current && current.parentSessionID !== parentSessionID) {
+          throw new Error(`Task ${identity} does not belong to this session`);
+        }
         if (
           tracked &&
           (!current ||
@@ -142,6 +205,12 @@ Use this when the user asks to see a prior task's full result, or before retryin
         if (current) {
           const latest = board.get(taskID);
           const after = gate.capture(current);
+          if (
+            options.isDisposed?.() ||
+            (token === undefined && after === undefined)
+          ) {
+            return readonlyTerminalResult(requested, current);
+          }
           if (
             latest?.generation !== current.generation ||
             latest.terminalRevision !== current.terminalRevision ||

@@ -2008,7 +2008,7 @@ describe('createV2Setup e2e', () => {
       const resumeHook = calls.toolBeforeCb;
       if (!resumeHook) throw new Error('tool:execute.before not captured');
       await expect(resumeHook(resumeEvent)).rejects.toThrow(
-        /cannot resolve this sessionID/,
+        /could not be verified from host history/,
       );
       expect(resumeEvent.input.sessionID).toBe('resume_me');
 
@@ -2305,6 +2305,38 @@ describe('createV2Setup e2e', () => {
     expect(logText).not.toContain('[v2] v1 dispose failed');
   }, 20_000);
 
+  test('disabled_hooks chat-headers skips the model.request bridge registration', async () => {
+    await Bun.write(
+      path.join(projectDir, '.opencode', 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        companion: { enabled: false },
+        disabled_hooks: ['chat-headers'],
+      }),
+    );
+    const { ctx, calls } = makeMockV2Context(projectDir);
+    const cleanup = await createV2Setup()(ctx);
+
+    // The v1 chat.headers key is absent, so the v2 bridge skips both the
+    // marker observer and the model.request registration; the rest of the
+    // session hooks still register.
+    expect(calls.hooks).not.toContain('session:model.request');
+    expect(calls.hooks).toContain('session:context');
+    expect(calls.hooks).toContain('session:prompt');
+
+    await cleanup();
+
+    // Control: the default config registers the model.request bridge, so
+    // the absence above is the gate and not a dead registration path.
+    await Bun.write(
+      path.join(projectDir, '.opencode', 'oh-my-opencode-slim.json'),
+      JSON.stringify({ companion: { enabled: false } }),
+    );
+    const control = makeMockV2Context(projectDir);
+    const controlCleanup = await createV2Setup()(control.ctx);
+    expect(control.calls.hooks).toContain('session:model.request');
+    await controlCleanup();
+  }, 20_000);
+
   test('host rejecting the model.request hook name fails setup loudly', async () => {
     // Hook-name rejection is a host contract
     // violation, not a degrade path — the error propagates out of setup
@@ -2348,5 +2380,68 @@ describe('createV2Setup e2e', () => {
     const logText = readPluginLog();
     expect(logText).not.toContain('chat.headers not bridged');
     expect(logText).toContain('[v2] v1 dispose hook invoked (abort path)');
+  }, 20_000);
+
+  test('root dispose during a paused v2 revive read does not send or import', async () => {
+    const { ctx, calls } = makeMockV2Context(projectDir);
+    let releaseRead: (value: Record<string, unknown>) => void = () => {};
+    let started: () => void = () => {};
+    const seen = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const prompts: unknown[] = [];
+    const session = ctx.session as Record<string, unknown>;
+    session.get = async (args: { sessionID?: string }) => {
+      if (args.sessionID !== 'ses_child') {
+        return { error: { message: 'NotFound' } };
+      }
+      started();
+      return new Promise((resolve) => {
+        releaseRead = resolve;
+      });
+    };
+    session.context = async () => [];
+    session.prompt = async (args: unknown) => {
+      prompts.push(args);
+      return {};
+    };
+    const cleanup = await createV2Setup()(ctx);
+    try {
+      await calls.promptHookCb?.({
+        sessionID: 'ses_parent',
+        messageID: 'msg_parent',
+        prompt: { text: 'hello' },
+      });
+      await calls.contextHookCb?.({
+        sessionID: 'ses_parent',
+        agent: 'orchestrator',
+        messages: [
+          {
+            info: { id: 'msg_parent', role: 'user' },
+            parts: [{ type: 'text', text: 'hello' }],
+          },
+        ],
+      });
+      const revive = calls.toolAdds.find((tool) => tool.name === 'task_revive');
+      expect(revive).toBeDefined();
+      const pending = revive?.execute(
+        { task_id: 'ses_child', prompt: 'continue' },
+        { sessionID: 'ses_parent' },
+      );
+      await seen;
+      await cleanup();
+      releaseRead({
+        id: 'ses_child',
+        parentID: 'ses_parent',
+        agent: 'fixer',
+        time: { created: 9 },
+      });
+      await expect(pending).rejects.toThrow(
+        /disposed|retired|could not|not found/i,
+      );
+      expect(prompts).toHaveLength(0);
+    } finally {
+      await cleanup();
+    }
   }, 20_000);
 });

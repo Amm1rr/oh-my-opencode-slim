@@ -88,10 +88,10 @@ Add a council model and at least one council preset to your plugin config:
 }
 ```
 
-Then use it directly:
+Then ask for it in your message — mentioning `council`, `@council`, `consensus`, or `共识` triggers the Council Mode procedure for that turn:
 
 ```text
-@council What is the safest migration strategy for this schema change?
+Run a council: what is the safest migration strategy for this schema change?
 ```
 
 ---
@@ -308,12 +308,18 @@ The councillor sees:
 
 ### Invocation
 
+Ask for consensus in your message — `council`, `@council`, `consensus`, or
+`共识` all work. The keyword injects the Council Mode procedure into that
+turn, and the orchestrator dispatches every councillor seat in parallel:
+
 ```text
-@council Should we use a job queue or an outbox pattern here?
+Should we use a job queue or an outbox pattern here? Get a council's opinion.
 ```
 
-The orchestrator may also delegate to `@council` for high-stakes or
-ambiguous decisions.
+The orchestrator may also run a council on its own for high-stakes or
+ambiguous decisions. The injection is keyword-triggered, so sessions that
+never ask pay zero tokens for the procedure; disable it entirely with
+`disabled_hooks: ["council-inject"]`.
 
 ### What you see
 

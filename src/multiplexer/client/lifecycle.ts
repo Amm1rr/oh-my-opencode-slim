@@ -10,7 +10,7 @@
  */
 
 import type { MultiplexerLayout } from '../../config/schema';
-import type { ViewerFlavor } from '../shared';
+import type { ViewerFlavor, ViewerSurface } from '../shared';
 import type { Multiplexer, PaneResult } from '../types';
 import {
   type DiagnosticLogger,
@@ -54,10 +54,17 @@ export interface PaneLifecycleConfig {
   stableIdleMs: number;
   readiness: ReadinessPolicy;
   /**
-   * Viewer command flavor (FR-2 matrix) and, for `v2-remote`, the password
-   * forwarded into the viewer command. Absent means the v1 attach form.
+   * Viewer command flavor (FR-2 matrix), the TUI surface the viewer opens,
+   * and, for `v2-remote`, the password forwarded into the viewer command.
+   * The wiring always supplies this object; absent fields fall back at the
+   * adapter layer (`flavor` to the v1 attach form, `surface` to the full
+   * `tui`).
    */
-  viewer?: { flavor: ViewerFlavor; password?: string };
+  viewer?: {
+    flavor?: ViewerFlavor;
+    password?: string;
+    surface?: ViewerSurface;
+  };
 }
 
 /** Anchor recorded when the wiring cannot resolve a native anchor. */
@@ -631,10 +638,15 @@ export class PaneLifecycle {
           ...(this.config.viewer === undefined
             ? {}
             : {
-                viewerFlavor: this.config.viewer.flavor,
+                ...(this.config.viewer.flavor === undefined
+                  ? {}
+                  : { viewerFlavor: this.config.viewer.flavor }),
                 ...(this.config.viewer.password === undefined
                   ? {}
                   : { viewerPassword: this.config.viewer.password }),
+                ...(this.config.viewer.surface === undefined
+                  ? {}
+                  : { viewerSurface: this.config.viewer.surface }),
               }),
         },
       );

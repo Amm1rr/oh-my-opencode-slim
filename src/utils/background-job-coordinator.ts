@@ -8,6 +8,7 @@ import type {
   BackgroundJobStatusInput,
   BackgroundJobTerminalInput,
   ContextFile,
+  RestoreRetainedSessionInput,
   WallClockTimeoutClaimInput,
 } from './background-job-board';
 import type { BackgroundJobStore } from './background-job-store';
@@ -187,6 +188,21 @@ export class BackgroundJobCoordinator implements BackgroundJobStore {
 
   registerLaunch(input: BackgroundJobLaunchInput): BackgroundJobRecord {
     const record = this.board.registerLaunch(input);
+    this.notifyLaunchIdentity({
+      kind: 'registered',
+      taskID: record.taskID,
+      parentSessionID: record.parentSessionID,
+      agent: record.agent,
+      alias: record.alias,
+    });
+    return record;
+  }
+
+  restoreRetainedSession(
+    input: RestoreRetainedSessionInput,
+  ): BackgroundJobRecord | undefined {
+    const record = this.board.restoreRetainedSession(input);
+    if (!record) return undefined;
     this.notifyLaunchIdentity({
       kind: 'registered',
       taskID: record.taskID,

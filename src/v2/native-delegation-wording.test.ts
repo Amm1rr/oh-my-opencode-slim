@@ -117,8 +117,12 @@ describe('buildOrchestratorPrompt delegation vocabulary', () => {
     expect(prompt).toContain('any resume starts new model work');
     expect(prompt).toContain('Prefer `task(..., background: true)`');
     expect(prompt).toContain('cannot receive another `task` call');
-    expect(prompt).toContain("in the task tool's `task_id` argument");
-    expect(prompt).toContain('call task with `subagent_type: "fixer"`');
+    expect(prompt).toContain(
+      '`task_revive(task_id: "<task-id>", prompt: "...")`',
+    );
+    expect(prompt).toContain(
+      'even when that session is not listed under Reusable Sessions',
+    );
     expect(prompt).not.toContain('optional `model` argument');
   });
 
@@ -137,83 +141,53 @@ describe('buildOrchestratorPrompt delegation vocabulary', () => {
  * subagent tool supports the optional `model` parameter. */
 const MODEL_PARAM_SENTENCE = ` The subagent tool also accepts an optional \`model\` argument ("providerID/modelID"). Only set it when the user explicitly asks for a specific model or variant; never guess the ID — look it up with the models tool first, filtering to your own provider.`;
 
-describe('createAgents council dispatch vocabulary', () => {
-  test('v2 hostFlavor emits subagent(agent=...) dispatch instructions', () => {
+describe('createAgents council seat pointer vocabulary', () => {
+  test('v2 hostFlavor emits a subagent() seat pointer, not the full procedure', () => {
     const prompt = orchestratorPromptFor('v2');
 
-    expect(prompt).toContain('## Council Mode');
-    expect(prompt).toContain("subagent(agent='councillor-alpha'");
-    expect(prompt).toContain('in PARALLEL via subagent():');
-    expect(prompt).toContain("subagent(agent='council'");
+    // Static pointer: seat IDs + native vocabulary only. The full Council
+    // Mode dispatch procedure is appended per-message by the council-inject
+    // hook when a council trigger is detected — never carried statically.
+    expect(prompt).toContain('## Council');
+    expect(prompt).toContain('Seats: councillor-alpha');
+    expect(prompt).toContain('dispatch via subagent()');
+    expect(prompt).not.toContain('## Council Mode');
+    expect(prompt).not.toContain('in PARALLEL');
+    // The model-param guidance survives only in the orchestrator base
+    // prompt now that the block no longer restates it.
     expect(prompt).toContain(MODEL_PARAM_SENTENCE);
     expect(prompt).not.toContain('subagent_type');
     expect(prompt).not.toContain('task(');
   });
 
-  test('v1 (no hostFlavor) keeps the exact v1 council dispatch sentence', () => {
+  test('v1 (no hostFlavor) keeps the task() seat pointer', () => {
     const prompt = orchestratorPromptFor();
 
-    expect(prompt).toContain('## Council Mode');
-    expect(prompt).toContain("task(subagent_type='councillor-alpha'");
-    expect(prompt).toContain('in PARALLEL via task():');
-    expect(prompt).toContain("task(subagent_type='council'");
+    expect(prompt).toContain('## Council');
+    expect(prompt).toContain('Seats: councillor-alpha');
+    expect(prompt).toContain('dispatch via task()');
+    expect(prompt).not.toContain('## Council Mode');
+    expect(prompt).not.toContain('subagent(');
     expect(prompt).not.toContain(MODEL_PARAM_SENTENCE);
   });
 
-  test('v2 and v1 prompts differ only by delegation vocabulary', () => {
-    const v1 = orchestratorPromptFor();
+  test('v2 keeps native resume guidance and does not adopt the v1 task_revive-first rule', () => {
     const v2 = orchestratorPromptFor('v2');
 
     expect(v2).toContain(
       'Never use `subagent(..., sessionID: ...)` to fetch output',
     );
-
-    // v2 additionally carries the model-param guidance sentence at the
-    // two vocab.tool sites; with it stripped, only vocabulary differs.
-    const v2Stripped = v2.replaceAll(MODEL_PARAM_SENTENCE, '');
-    expect(normalizeV2WordingToV1(v2Stripped)).toBe(v1);
+    expect(v2).toContain(
+      'A completed session continues with `subagent(agent: "<agent>", sessionID: "<task-id>", prompt: "...")` even when it is not listed under Reusable Sessions.',
+    );
+    expect(v2).toContain(
+      'Cancelled, errored, and stopped sessions continue with task_revive.',
+    );
+    expect(v2).not.toContain(
+      'Only sessions listed under Reusable Sessions may be resumed with `subagent()`.',
+    );
+    expect(v2).not.toContain('task_revive(task_id:');
+    expect(v2).not.toContain('task_id');
+    expect(v2).not.toContain('task(');
   });
 });
-
-/** Reverse v2-native delegation wording back to v1 so both generated
- * prompts can be compared directly.
- *
- * Every substitution is an EXACT generated delegation fragment — notably
- * never a bare `sessionID` token. Any `task_id`/`sessionID` drift outside
- * those fragments (e.g. a control-tool reference) stays visible instead of
- * being normalized away. */
-function normalizeV2WordingToV1(text: string): string {
-  return (
-    text
-      .replaceAll('(..., sessionID: ...)', '(..., task_id: ...)')
-      .replaceAll(
-        'agent: "<agent>", sessionID: "<task-id>"',
-        'subagent_type: "<agent>", task_id: "<task-id>"',
-      )
-      .replaceAll(
-        '`subagent` call, even with its `sessionID`',
-        '`task` call, even with its `task_id`',
-      )
-      .replaceAll(
-        "in the subagent tool's `sessionID` argument",
-        "in the task tool's `task_id` argument",
-      )
-      .replaceAll(
-        'call subagent with `agent: "fixer"` and `sessionID: "fix-1"` or `sessionID: "ses_abc"`',
-        'call task with `subagent_type: "fixer"` and `task_id: "fix-1"` or `task_id: "ses_abc"`',
-      )
-      .replaceAll(
-        'Do not leave `sessionID` empty',
-        'Do not leave `task_id` empty',
-      )
-      .replaceAll('empty `sessionID` creates', 'empty `task_id` creates')
-      .replaceAll(
-        'explicit `sessionID` is refused',
-        'explicit `task_id` is refused',
-      )
-      // Delegation tool name only: `task_*` control tools carry `_` (or nothing)
-      // after `task`, never `(`, so this replacement cannot touch them.
-      .replaceAll('subagent(', 'task(')
-      .replaceAll("agent='", "subagent_type='")
-  );
-}

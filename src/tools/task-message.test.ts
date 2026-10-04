@@ -395,7 +395,7 @@ describe('task_message', () => {
         { task_id: 'ses_child1', message: 'Do not send.' },
         { sessionID: 'parent-1' } as any,
       ),
-    ).rejects.toThrow('task_result');
+    ).rejects.toThrow('task_revive');
     expect(prompt).not.toHaveBeenCalled();
 
     const job = board.get('ses_child1');
@@ -606,15 +606,13 @@ describe('task_message', () => {
         { task_id: 'ses_child1', message: 'Too late' },
         { sessionID: 'parent-1' } as any,
       ),
-    ).rejects.toThrow('task_result');
+    ).rejects.toThrow('task_revive');
     await expect(
       createTool(terminalBoard).execute(
         { task_id: 'ses_child1', message: 'Too late' },
         { sessionID: 'parent-1' } as any,
       ),
-    ).rejects.toThrow(
-      'resume it with task by passing task_id: "ses_child1", its existing fixer specialist, a new prompt, and background: true',
-    );
+    ).rejects.toThrow('task_revive and task_id: "ses_child1"');
     expect(terminalPrompt).not.toHaveBeenCalled();
 
     const cancellingBoard = new BackgroundJobBoard();
@@ -642,7 +640,7 @@ describe('task_message', () => {
         { task_id: 'ses_child1', message: 'Too late' },
         { sessionID: 'parent-1' } as any,
       ),
-    ).rejects.toThrow('resume it with task by passing task_id: "ses_child1"');
+    ).rejects.toThrow('task_revive and task_id: "ses_child1"');
 
     const v2Board = new BackgroundJobBoard();
     registerRunningChild(v2Board);
@@ -657,11 +655,8 @@ describe('task_message', () => {
     } catch (error) {
       message = (error as Error).message;
     }
-    expect(message).toContain(
-      'resume it with subagent by passing sessionID: "ses_child1"',
-    );
-    // The control tool `task_result` on the same sentence is unaffected.
-    expect(message).toContain('Call task_result first');
+    expect(message).toContain('task_revive and sessionID: "ses_child1"');
+    expect(message).not.toContain('task_result');
     expect(message).not.toContain('task(');
     expect(message).not.toContain('task_id');
   });

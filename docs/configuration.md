@@ -192,6 +192,7 @@ an MCP tool remains authoritative.
 | `multiplexer.layout` | string | `"main-vertical"` | Layout preset: `main-vertical`, `main-horizontal`, `tiled`, `even-horizontal`, `even-vertical`. Each adapter maps it to its nearest native expression (tmux full layouts; split directions for Zellij/Herdr; built-in layouts for kitty); cmux-tui has no layout expression and ignores it. See [Multiplexer Integration](multiplexer-integration.md#layouts). |
 | `multiplexer.main_pane_size` | number | `60` | Main pane size as percentage (20–80) for tmux main layouts; ignored by Zellij, Herdr, kitty, and cmux-tui See [Multiplexer Integration](multiplexer-integration.md#layouts). |
 | `multiplexer.cmux_tui_binary` | string | omitted | Explicit path to the cmux-tui binary. When omitted, the client resolves `cmux-tui` first, then `cmux`, on `PATH` See [Multiplexer Integration](multiplexer-integration.md). |
+| `multiplexer.viewer` | string | `"mini"` | Which opencode TUI surface subagent panes open: `"mini"` (the lightweight `opencode mini`, which requires an opencode build with the `mini` subcommand) or `"tui"` (the full interface). Changes take effect on the next opencode start See [Multiplexer Integration](multiplexer-integration.md). |
 | `multiplexer.zellij_pane_mode` | string | — | **Deprecated and ignored.** Zellij panes always open in the tab containing the parent OpenCode pane; a once-per-process warning is logged and pane management keeps working See [Behavior Changes and Removals](multiplexer-integration.md#behavior-changes-and-removals). |
 | `tmux.enabled` | boolean | — | **Deprecated and ignored** (legacy key); use `multiplexer.type = "tmux"` See [Multiplexer Integration](multiplexer-integration.md#legacy-tmux-config). |
 | `tmux.layout` | string | — | **Deprecated and ignored** (legacy key); use `multiplexer.layout` See [Multiplexer Integration](multiplexer-integration.md#legacy-tmux-config). |
@@ -219,9 +220,9 @@ an MCP tool remains authoritative.
 | `disabled_mcps` | string[] | `[]` | MCP server IDs to disable globally |
 | `disabled_tools` | string[] | `[]` | Slim tool names to disable globally. Disabled Slim tools are not registered with OpenCode and cannot be used by agents; OpenCode built-in tools are not affected |
 | `disabled_skills` | string[] | `[]` | Skill names to disable globally. Disabled skills are not granted to agents, and disabled bundled skills are not registered; listing `reflect` here also disables the `/reflect` command |
-| `disabled_hooks` | string[] | `[]` | Hook names to disable globally: `"phase-reminder"` stops orchestrator phase-reminder injection; `"foreground-fallback"` disables automatic foreground model fallback, same effect as `fallback.enabled = false`. Unknown values are stripped with a warning when the config loads; a value consisting only of unknown names is treated as unset, so a lower config layer's list still applies |
+| `disabled_hooks` | string[] | `[]` | Hook names to disable globally: `"phase-reminder"` stops orchestrator phase-reminder injection; `"foreground-fallback"` disables automatic foreground model fallback, same effect as `fallback.enabled = false`; `"deepwork-guard"` turns the deepwork receipt/claim guard off (see `deepworkGuardMode`); `"chat-headers"` stops the Copilot `x-initiator` header from being stamped (v1 `chat.headers` and the v2 `model.request` bridge); `"cache-monitor"` stops the prompt-cache bust watchdog, so cache warnings are never logged; the on-demand tool guards `"json-error-recovery"`, `"tool-loop-guard"`, `"search-path-guard"`, `"absolute-path-rescue"`, and `"apply-patch"` stop intercepting tool calls entirely, so malformed output, repeated identical calls, and invalid or guessed paths surface raw to the model. Unknown values are stripped with a warning when the config loads; a value consisting only of unknown names is treated as unset, so a lower config layer's list still applies |
 | `disabled_commands` | string[] | `[]` | Slash commands to disable globally: `"interview"`, `"deepwork"`, `"reflect"`, or `"loop"`. Disabled commands are neither registered nor intercepted at execution time, so a user-defined command with the same name is left untouched. Listing `reflect` in `disabled_skills` also disables the `/reflect` command. Unknown values are stripped with a warning when the config loads; a value consisting only of unknown names is treated as unset, so a lower config layer's list still applies |
-| `fallback.enabled` | boolean | `true` | Enable Slim's foreground model-chain failover. It does not configure OpenCode provider/AI-SDK retries. On **v2 hosts** Slim's automatic foreground fallback is disabled regardless (temporary compatibility limitation: the v2 `switchModel` has no per-turn/atomic conditional form, so an in-flight switch could commit after a newer user turn has taken over). Host-native retries still run, but the configured chain is not executed automatically. Re-enable only once a host atomic conditional-switch capability is confirmed — not merely because a `switchModel` method exists. |
+| `fallback.enabled` | boolean | `true` | Enable Slim's foreground model-chain failover. It does not configure OpenCode provider/AI-SDK retries. On **v2 hosts** the replay path (abort + re-prompt) stays disabled — the v2 `switchModel` has no per-turn/atomic conditional form, so an in-flight replay could commit after a newer user turn has taken over — while the retry-hook steering path runs: host retry events are absorbed up to `fallback.maxRetries`, then the model is switched in place via the host `session.switchModel` and the host retries the current turn on the new model. The same switch disables both paths. |
 | `fallback.maxRetries` | number | `3` | Number of host retry events Slim absorbs before advancing the foreground model chain. The budget stays spent across model switches; a completed successful assistant response, an observed return to the configured primary for a fresh descent, or session deletion re-arms it. Terminal `session.error` and `message.updated` failures advance immediately without charging it. `0` advances on the first retry event. This does not configure OpenCode provider or background subagent retries. |
 | `fallback.initialRetryDelayMs` | number | `0` | Delay in milliseconds before triggering the first fallback on a failover-worthy error. Gives intercepting plugins time to recover the current model before the fallback chain advances. 0 disables. |
 | `fallback.retryDelayMs` | number | `500` | Delay in milliseconds between consecutive fallback attempts after the initial trigger. 0 disables. |
@@ -526,15 +527,24 @@ OpenCode's provider retry policy. A value of `0` allows no host retry events
 before foreground failover; it does not prevent OpenCode from retrying a
 provider request in a child session.
 
-On v2 hosts, Slim's automatic foreground fallback is disabled entirely
-(temporary compatibility limitation): the v2 `switchModel` has no per-turn /
-atomic conditional form, so `session.error`, `message.updated` and
-`session.status` retry cannot keep host and manager state consistent — an
-in-flight switch could commit on the host after a newer user turn has taken
-over. Host-native retries and their decisions are left untouched, but the
-configured fallback chain is not executed automatically. This must only be
-re-enabled once a host atomic conditional-switch capability is confirmed, not
-merely because a `switchModel` method exists.
+On v2 hosts, the two fallback paths are gated separately. The replay path
+(abort + re-prompt driven by `session.error`, `message.updated` and
+`session.status` retry) stays disabled: the v2 `switchModel` has no
+per-turn/atomic conditional form, so an in-flight replay could commit on the
+host after a newer user turn has taken over. The retry-hook steering path
+runs instead: the host invokes the session `retry` hook at its own retry
+decision points, Slim absorbs host retries up to `fallback.maxRetries`, then
+switches the model in place via `session.switchModel` and mutates the retry
+decision so the host retries the current turn on the new model — no
+transcript replay, so the per-turn race cannot occur. Descent bookkeeping
+stays live on v2 (turn detection, agent/model tracking, and the resets on a
+successful response or a new user turn), so a later episode in the same
+session starts a fresh descent instead of inheriting the previous one.
+`fallback.initialRetryDelayMs` has no effect on the steering path (there is
+no replay to delay; the host's own retry backoff is the recovery window) —
+a one-time log line notes the divergence. Both paths share the same user
+switches: `fallback.enabled` and `disabled_hooks: ["foreground-fallback"]`
+disable steering too.
 
 ### Agent Display Names
 
@@ -812,6 +822,10 @@ The field accepts either:
 1. **Shorthand string** — `"ask"`, `"allow"`, or `"deny"` applied to all tools
 2. **Object** — keys are tool names, values are `"ask" | "allow" | "deny"` or (for rule keys) a pattern-to-action map
 
+**Key order is precedence.** Entries compile into ordered `{action, resource, effect}` rules that opencode evaluates last-match-wins (the host parses `permission` with `propertyOrder: "original"`, and the plugin preserves your key order verbatim). Put the wildcard base first and specific rules after it: `{"*": "deny", "read": "allow"}` denies everything except `read`; the reverse order denies `read` too. The same applies inside a pattern map (`bash: {"*": "ask", "git status*": "allow"}`) and across preset inheritance: a later layer's entries keep the order the layer writes them, and base keys the layer does not mention follow — so `{"*": "deny", "read": "allow"}` merged onto any base always yields the wildcard first and `read` after it, while the base's unmentioned keys lose to the layer's wildcard.
+
+**Built-in read-only roles ship an enforced matrix.** `explorer`, `librarian`, `oracle`, and `observer` carry a read-only permission matrix (wildcard deny + inspection and web-research allows) built into their definitions, so the read-only boundary holds with zero configuration. An explicit `agents.<name>.permission` replaces the matrix wholesale — opting out or extending it is one entry, never a merge.
+
 **Example: read-only `planner` agent:**
 
 ```jsonc
@@ -823,7 +837,12 @@ The field accepts either:
       "skills": [],
       "mcps": ["context7", "gh_grep"],
       "permission": {
-        "edit": "deny",
+        // Order is precedence: the wildcard base must come first.
+        "*": "deny",
+        "read": "allow",
+        "glob": "allow",
+        "grep": "allow",
+        "list": "allow",
         "bash": {
           "*": "ask",
           "git status*": "allow",

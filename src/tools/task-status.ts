@@ -8,7 +8,13 @@ import type { BackgroundJobStore } from '../utils/background-job-store';
 import { getRuntimeSessionStatusSnapshot } from '../utils/session-runtime-status';
 import type { TaskActivityTracker } from './task-activity';
 import { observationFromSnapshot, summarizeTaskStatus } from './task-policy';
-import { idParamFor, readTaskRef, taskRefArgs } from './task-ref';
+import {
+  type CanonicalTaskResolver,
+  currentToolCallID,
+  idParamFor,
+  readTaskRef,
+  taskRefArgs,
+} from './task-ref';
 
 const ACTIVE_STATES = new Set(['busy', 'running', 'retry']);
 
@@ -18,6 +24,8 @@ export function createTaskStatusTool(options: {
   activityTracker?: TaskActivityTracker;
   now?: () => number;
   statusTimeoutMs?: number;
+  resolveCanonicalTaskRef?: CanonicalTaskResolver;
+  isDisposed?: () => boolean;
 }): Record<'task_status', ToolDefinition> {
   const idParam = idParamFor(options.input);
   const task_status = tool({
@@ -31,12 +39,23 @@ export function createTaskStatusTool(options: {
       if (!parentSessionID) throw new Error('task_status requires sessionID');
       const requested = readTaskRef(args, idParam);
       if (!requested) throw new Error(`task_status requires ${idParam}`);
-
-      const job = options.backgroundJobBoard.resolve(
-        parentSessionID,
-        requested,
-      );
-      if (!job) throw new Error(`Unknown task ID or alias: ${requested}`);
+      const canonical = options.resolveCanonicalTaskRef
+        ? await options.resolveCanonicalTaskRef(
+            parentSessionID,
+            requested,
+            currentToolCallID(toolContext),
+          )
+        : undefined;
+      if (canonical?.kind === 'refused') throw new Error(canonical.reason);
+      const identity =
+        canonical?.kind === 'exact' ? canonical.taskID : requested;
+      const job = canonical
+        ? options.backgroundJobBoard.get(identity)
+        : options.backgroundJobBoard.resolve(parentSessionID, requested);
+      if (!job || job.parentSessionID !== parentSessionID) {
+        throw new Error(`Unknown task ID or alias: ${identity}`);
+      }
+      const taskID = job.taskID;
 
       // Bounded live read: a failed, malformed, or timed-out host status
       // response surfaces as explicit uncertainty instead of a confident
@@ -44,23 +63,35 @@ export function createTaskStatusTool(options: {
       const snapshot = await getRuntimeSessionStatusSnapshot(options.input, {
         timeoutMs: options.statusTimeoutMs,
       });
-      const observation = observationFromSnapshot(snapshot, job.taskID);
+      const current = options.backgroundJobBoard.get(taskID) ?? job;
+      if (
+        current.parentSessionID !== parentSessionID ||
+        current.taskID !== taskID
+      ) {
+        throw new Error(`Unknown task ID or alias: ${taskID}`);
+      }
+      const observation = observationFromSnapshot(snapshot, taskID);
       const now = options.now?.() ?? Date.now();
       const lastActivityAt =
-        options.activityTracker?.lastActivityAt(job.taskID) ??
-        job.lastLiveBusyAt ??
-        job.runStartedAt;
-      const report = summarizeTaskStatus(job, observation, lastActivityAt, now);
+        options.activityTracker?.lastActivityAt(taskID) ??
+        current.lastLiveBusyAt ??
+        current.runStartedAt;
+      const report = summarizeTaskStatus(
+        current,
+        observation,
+        lastActivityAt,
+        now,
+      );
 
       const details = [
-        `Task ${job.alias} (${job.taskID})`,
+        `Task ${current.alias} (${current.taskID})`,
         `state: ${report.state}${report.uncertain ? ' (unconfirmed)' : ''}`,
-        `agent: ${job.agent}`,
+        `agent: ${current.agent}`,
         `last_activity_at: ${new Date(lastActivityAt).toISOString()}`,
         `idle_for_seconds: ${report.idleSeconds}`,
         `possibly_stuck: ${report.possiblyStuck}`,
       ];
-      const waits = listChildInputWaits(job.taskID);
+      const waits = listChildInputWaits(taskID);
       const hostFlavor = (options.input as { hostFlavor?: unknown }).hostFlavor;
       // A child parked on an open question/permission moves no tokens and
       // never finishes on its own: surface the block explicitly so the

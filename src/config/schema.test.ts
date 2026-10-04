@@ -15,6 +15,7 @@ import {
   MarketplaceActivationSchema,
   MultiplexerConfigSchema,
   MultiplexerConfigStrictSchema,
+  PermissionConfigSchema,
   PluginConfigSchema,
   PresetSchema,
   ProviderModelIdSchema,
@@ -51,6 +52,48 @@ describe('ProviderModelIdSchema', () => {
     ]) {
       expect(ProviderModelIdSchema.safeParse(id).success).toBe(false);
     }
+  });
+});
+
+describe('PermissionConfigSchema', () => {
+  it('preserves the author key order — order is precedence', () => {
+    // opencode compiles the entries into rules and evaluates them
+    // last-match-wins, so the wildcard base must stay first. A shaped
+    // z.object() parse used to emit declared keys first and catchall keys
+    // after, inverting the order.
+    const parsed = PermissionConfigSchema.parse({
+      '*': 'deny',
+      read: 'allow',
+      glob: 'allow',
+      edit: 'deny',
+    });
+    expect(Object.keys(parsed)).toEqual(['*', 'read', 'glob', 'edit']);
+  });
+
+  it('keeps string-only keys string-only', () => {
+    expect(PermissionConfigSchema.safeParse({ question: 'deny' }).success).toBe(
+      true,
+    );
+    expect(
+      PermissionConfigSchema.safeParse({ webfetch: { 'https://*': 'allow' } })
+        .success,
+    ).toBe(false);
+    // Rule keys still accept pattern maps.
+    expect(
+      PermissionConfigSchema.safeParse({
+        bash: { 'git status*': 'allow', '*': 'ask' },
+      }).success,
+    ).toBe(true);
+  });
+
+  it('preserves nested pattern-map order — order is precedence there too', () => {
+    // A pattern map's entry order is also precedence: opencode compiles
+    // each pair into a {action, resource, effect} rule and evaluates
+    // last-match-wins, so the broad pattern must precede the narrow one.
+    const parsed = PermissionConfigSchema.parse({
+      bash: { '*': 'ask', 'git status*': 'allow' },
+    }) as { bash: Record<string, string> };
+    expect(Object.keys(parsed.bash)).toEqual(['*', 'git status*']);
   });
 });
 
@@ -265,6 +308,14 @@ describe('PluginConfigSchema disabled_hooks and disabled_commands', () => {
       'phase-reminder',
       'foreground-fallback',
       'deepwork-guard',
+      'chat-headers',
+      'cache-monitor',
+      'json-error-recovery',
+      'tool-loop-guard',
+      'search-path-guard',
+      'absolute-path-rescue',
+      'apply-patch',
+      'council-inject',
     ]);
     expect(DISABLED_COMMANDS_VALUES).toEqual([
       'interview',
@@ -337,6 +388,7 @@ describe('MultiplexerConfigSchema', () => {
       type: 'none',
       layout: 'main-vertical',
       main_pane_size: 60,
+      viewer: 'mini',
     });
   });
 
@@ -401,6 +453,33 @@ describe('MultiplexerConfigSchema', () => {
     expect(warnSpy).not.toHaveBeenCalled();
   });
 
+  it('accepts viewer "tui" and defaults viewer to "mini" when unset', () => {
+    const tui = MultiplexerConfigSchema.parse({
+      type: 'herdr',
+      viewer: 'tui',
+    });
+    const unset = MultiplexerConfigSchema.parse({ type: 'herdr' });
+
+    expect(tui.viewer).toBe('tui');
+    expect(unset.viewer).toBe('mini');
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('disables pane management for an invalid viewer value', () => {
+    const result = PluginConfigSchema.safeParse({
+      multiplexer: { type: 'herdr', viewer: 'nano' },
+    });
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.multiplexer?.type).toBe('none');
+    }
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    const message = warnSpy.mock.calls[0]?.[0] as string;
+    expect(message).toContain('Invalid multiplexer config value');
+    expect(message).toContain('viewer');
+  });
+
   it('strips the removed zellij_pane_mode key with exactly one deprecation warning', () => {
     // Two parses stand in for the user + project config layers: the rest of
     // the config must load and the warning must fire only once per process.
@@ -424,6 +503,7 @@ describe('MultiplexerConfigSchema', () => {
         type: 'tmux',
         layout: 'tiled',
         main_pane_size: 40,
+        viewer: 'mini',
       });
       expect(first.data.agents?.oracle?.model).toBe('valid/model');
     }

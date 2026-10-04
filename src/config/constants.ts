@@ -50,13 +50,6 @@ export const DEFAULT_MODELS: Record<AgentName, string | undefined> = {
   councillor: undefined,
 };
 
-// Polling configuration
-export const POLL_INTERVAL_MS = 500;
-export const POLL_INTERVAL_BACKGROUND_MS = 2000;
-
-// Timeouts
-export const MAX_POLL_TIME_MS = 5 * 60 * 1000; // 5 minutes
-
 // Workflow reminders
 export const PHASE_REMINDER_TEXT = `!IMPORTANT! Scheduler workflow: pick the lightest workflow that fits. Direct work: execute and verify proportionately. Otherwise: plan lanes → dispatch background specialists → track task IDs → await hook-driven completion → reconcile terminal results → verify. !END!`;
 
@@ -73,19 +66,10 @@ export const WRITABLE_FILE_OPERATIONS_RULES = `**File Operations Rules**:
 - Before destructive or broad shell operations, verify the target set and quote paths. Prefer a dry-run/listing first when practical.
 - Do not use cat/head/tail/sed/awk only to read code into context; use read/grep unless a shell pipeline is genuinely the better diagnostic.`;
 
-export const READONLY_FILE_OPERATIONS_RULES = `**File Operations Rules**:
-- READ-ONLY: inspect and report; do not modify files.
-- Prefer dedicated file tools for codebase inspection: glob/grep/ast_grep_search for discovery and read for file contents.
-- Bash is allowed for non-mutating diagnostics and shell-native inspection when it is the clearest tool, but not for modifying files.
-- Do not use cat/head/tail/sed/awk only to read code into context; use read/grep unless a shell pipeline is genuinely the better diagnostic.`;
-
 export const NO_SHELL_READONLY_FILE_OPERATIONS_RULES = `**File Operations Rules**:
 - READ-ONLY: inspect and report; do not modify files.
 - Use glob/grep/ast_grep_search for discovery and read for file contents.
 - Do not use bash or shell commands.`;
-
-// Polling stability
-export const STABLE_POLLS_THRESHOLD = 3;
 
 // Toast duration (ms) used by all OMOS toasts
 export const TOAST_DURATION_MS = 10_000;

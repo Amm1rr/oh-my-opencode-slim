@@ -33,11 +33,13 @@ import { RuntimeConfig } from './config/runtime';
 import { getBuildInfo } from './generated/build-info';
 import { HEALTH_CHECK, minimumExpectedToolCount } from './health-check';
 import {
+  COUNCIL_INJECT_METADATA_KEY,
   createAbsolutePathRescueHook,
   createApplyPatchHook,
   createAutoUpdateCheckerHook,
   createCacheMonitorHook,
   createChatHeadersHook,
+  createCouncilInjectHook,
   createDeepworkCommandHook,
   createDeepworkGuardHook,
   createJsonErrorRecoveryHook,
@@ -67,6 +69,10 @@ import {
 } from './hooks/task-session-manager/child-input-wait';
 import { createBackgroundFallbackHandoff } from './hooks/task-session-manager/fallback-observation-transfer';
 import { createRevivedRunTracker } from './hooks/task-session-manager/revived-run-tracker';
+import {
+  createAliasAuthority,
+  createSessionRecovery,
+} from './hooks/task-session-manager/session-recovery';
 import type { ToolLoopGuardHook } from './hooks/tool-loop-guard/hook';
 import {
   findLatestUserMessage,
@@ -310,6 +316,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
 
   // Observation-only prompt-cache watchdog; safe to create before config
   // loads and must see every event, so it sits outside the try block.
+  // `disabled_hooks: ["cache-monitor"]` gates the per-event call below;
+  // creation stays here so the pre-config event path needs no undefined
+  // handling.
   const cacheMonitor = createCacheMonitorHook();
 
   // Declare variables that must survive the try/catch for the return
@@ -329,6 +338,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   // Host flavor ('v2' on OpenCode v2 hosts via the client shim, undefined on
   // v1). Survives the try block so prompt-assembly hooks can use it.
   let hostFlavor: string | undefined;
+  let instanceDisposed = false;
   // v1 task() cannot select a model per call. The task before-hook records
   // the fallback chosen for a delegation; the child's first chat.message
   // rewrites its model before the host persists it (the host loop reads the
@@ -577,7 +587,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   clearTuiAgentActivities(ctx.directory);
   let sessionLifecycle: SessionLifecycle;
 
-  let chatHeadersHook: ReturnType<typeof createChatHeadersHook>;
+  let chatHeadersHook: ReturnType<typeof createChatHeadersHook> | undefined;
   let foregroundFallback: ForegroundFallbackManager;
   let foregroundFallbackChains: Record<string, ForegroundFallbackModel[]> = {};
   let selectedMarketplacePackageIds: readonly string[] = [];
@@ -587,6 +597,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   let loopCommandHook: ReturnType<typeof createLoopCommandHook>;
   let taskSessionManagerHook: ReturnType<typeof createTaskSessionManagerHook>;
   let phaseReminder: ReturnType<typeof createPhaseReminderHook> | undefined;
+  let councilInject: ReturnType<typeof createCouncilInjectHook> | undefined;
   let applyPatch: ReturnType<typeof createApplyPatchHook>;
   let searchPathGuard: ReturnType<typeof createSearchPathGuardHook>;
   let absolutePathRescue: ReturnType<typeof createAbsolutePathRescueHook>;
@@ -824,6 +835,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       readContextMinLines: runtime.backgroundJobs.readContextMinLines,
       readContextMaxFiles: runtime.backgroundJobs.readContextMaxFiles,
       delegationTool: delegation.tool,
+      deferNumberedAliases: true,
     });
     admissionRuntimeLease = acquireAdmissionRuntime(
       ctx.directory,
@@ -975,7 +987,12 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       companion: runtime.companion,
     });
 
-    chatHeadersHook = createChatHeadersHook(ctx);
+    // disabled_hooks: "chat-headers" keeps the hook unregistered on both
+    // hosts — the v2 bridge reads v1Hooks['chat.headers'] and skips the
+    // model.request registration when the key is absent.
+    if (!runtime.disabledHooks.has('chat-headers')) {
+      chatHeadersHook = createChatHeadersHook(ctx);
+    }
 
     // Initialize foreground fallback manager for runtime model switching.
     // Agents without a chain (e.g. councillor, owned by CouncilManager) are
@@ -989,20 +1006,25 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       backgroundJobBoard: backgroundJobCoordinator,
       revivedRunTracker,
     });
-    // The current v2 host interface has no per-turn/atomic conditional switch,
-    // so an in-flight switch can commit on the host after a newer user turn has
-    // taken over. Disable the manager's automatic intervention entirely on v2
-    // (unregistering only the retry hook is not enough: session.error,
-    // message.updated and session.status retry all reach the replay path).
+    // The current v2 host interface has no per-turn/atomic conditional
+    // switch, so an in-flight REPLAY (abort + re-prompt) can commit on the
+    // host after a newer user turn has taken over — the replay path stays
+    // disabled on v2 (a3ac0bee). The retry-hook steering path performs no
+    // replay: it mutates the host's in-flight retry decision and switches
+    // the model in place via session.switchModel, so the a3ac0bee race
+    // cannot occur. Steering is host-agnostic (only v2 hosts invoke the
+    // hook) and follows the same user switches as the replay path
+    // (fallback.enabled / disabled_hooks).
     const fallbackUserEnabled =
       runtime.fallback.enabled !== false &&
       !runtime.disabledHooks.has('foreground-fallback');
     const fallbackEnabled = fallbackUserEnabled && hostFlavor !== 'v2';
+    const v2RetryEnabled = fallbackUserEnabled;
     if (fallbackUserEnabled && hostFlavor === 'v2') {
       // Deterministic notice: no timestamps or per-call ids. Do not log when
       // the user explicitly disabled fallback, including via disabled_hooks.
       log(
-        '[foreground-fallback] automatic fallback disabled on v2 hosts (no atomic per-turn model switch)',
+        '[foreground-fallback] v2 replay fallback disabled (no atomic per-turn model switch); retry-hook steering active',
       );
     }
     foregroundFallbackChains = runtime.modelArrays;
@@ -1033,11 +1055,24 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           : undefined;
       },
       (sessionID) => backgroundJobCoordinator.hasRunning(sessionID),
+      v2RetryEnabled,
     );
 
     deepworkCommandHook = createDeepworkCommandHook();
     reflectCommandHook = createReflectCommandHook();
     loopCommandHook = createLoopCommandHook();
+    const recoverRetainedSession = createSessionRecovery({
+      input: ctx,
+      backgroundJobBoard: backgroundJobCoordinator,
+      isDisposed: () => instanceDisposed,
+      hostFlavor,
+    });
+    const aliasAuthority = createAliasAuthority({
+      input: ctx,
+      board: backgroundJobBoard,
+      isDisposed: () => instanceDisposed,
+      hostFlavor,
+    });
     taskSessionManagerHook = createTaskSessionManagerHook(ctx, {
       terminalGate,
       strategy: runtime.backgroundJobs.strategy,
@@ -1072,6 +1107,10 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         foregroundFallback.getActiveFallbackModel(sessionID) ??
         sessionMetadata.getModel(sessionID),
       hostFlavor,
+      recoverRetainedSession,
+      prepareAliasNumbering: aliasAuthority.prepareParent,
+      resolveCanonicalTaskRef: aliasAuthority.resolveCanonical,
+      isDisposed: () => instanceDisposed,
       shouldManageSession: (sessionID) =>
         sessionMetadata.getAgent(sessionID) === 'orchestrator' ||
         sessionMetadata.isTaskManaged(sessionID),
@@ -1281,6 +1320,22 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       });
     }
 
+    // Keyword-triggered Council Mode injection: same gate pattern as the
+    // phase reminder, scoped to sessions with configured councillor seats.
+    // The seat list comes from the same agentDefs the orchestrator prompt's
+    // seat pointer uses, so the two can never disagree.
+    if (!runtime.disabledHooks.has('council-inject')) {
+      const councilSeats = agentDefs
+        .filter((a) => a.name.startsWith('councillor-'))
+        .map((a) => a.name);
+      if (councilSeats.length > 0) {
+        councilInject = createCouncilInjectHook({
+          seats: councilSeats,
+          wording: delegation,
+        });
+      }
+    }
+
     applyPatch = createApplyPatchHook(ctx);
 
     searchPathGuard = createSearchPathGuardHook(ctx);
@@ -1314,19 +1369,28 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       shouldManageSession: (sessionID) =>
         sessionMetadata.getAgent(sessionID) === 'orchestrator' ||
         sessionMetadata.isTaskManaged(sessionID),
+      recoverRetainedSession,
+      resolveCanonicalTaskRef: aliasAuthority.resolveCanonical,
+      isDisposed: () => instanceDisposed,
     });
     taskMessageTools = createTaskMessageTool({
       input: ctx,
       backgroundJobBoard: backgroundJobCoordinator,
+      resolveCanonicalTaskRef: aliasAuthority.resolveCanonical,
+      isDisposed: () => instanceDisposed,
     });
     taskReplyTools = createTaskReplyTool({
       input: ctx,
       backgroundJobBoard: backgroundJobCoordinator,
+      resolveCanonicalTaskRef: aliasAuthority.resolveCanonical,
+      isDisposed: () => instanceDisposed,
     });
     taskResultTools = createTaskResultTool({
       input: ctx,
       backgroundJobBoard: backgroundJobCoordinator,
       terminalGate,
+      resolveCanonicalTaskRef: aliasAuthority.resolveCanonical,
+      isDisposed: () => instanceDisposed,
     });
     taskReviveTools = createTaskReviveTool({
       terminalGate,
@@ -1337,11 +1401,16 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         sessionMetadata.isTaskManaged(sessionID),
       backgroundJobSupervisor,
       revivedRunTracker,
+      recoverRetainedSession,
+      isDisposed: () => instanceDisposed,
+      resolveCanonicalTaskRef: aliasAuthority.resolveCanonical,
     });
     taskStatusTools = createTaskStatusTool({
       input: ctx,
       backgroundJobBoard: backgroundJobCoordinator,
       activityTracker: taskActivityTracker,
+      resolveCanonicalTaskRef: aliasAuthority.resolveCanonical,
+      isDisposed: () => instanceDisposed,
     });
     waitForUserTools = createWaitForUserTool({
       shouldManageSession: (sessionID) =>
@@ -1767,10 +1836,24 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       });
       // Sidebar projection must land before the profiles are reported as
       // refreshed (the caller swaps only on an ok result).
+      //
+      // The refresh resolves inference fields for the core agent set only:
+      // `createAgents()` is marketplace-unaware, while the finalized registry
+      // is the authoritative roster and already includes marketplace agents.
+      // Union the fresh projection over the registry projection so a startup
+      // or watcher refresh cannot shrink the roster and drop marketplace
+      // agents from the sidebar; fresh core models still win.
+      const registry = resolvedAgentRegistry;
       recordTuiAgentModels(
         {
-          agentModels: projection.agentModels,
-          agentVariants: projection.agentVariants,
+          agentModels: {
+            ...(registry?.tuiAgentModels ?? {}),
+            ...projection.agentModels,
+          },
+          agentVariants: {
+            ...(registry?.tuiAgentVariants ?? {}),
+            ...projection.agentVariants,
+          },
         },
         ctx.directory,
       );
@@ -1899,8 +1982,10 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     },
 
     event: async (input) => {
-      if (input.event.type === 'server.instance.disposed')
+      if (input.event.type === 'server.instance.disposed') {
+        instanceDisposed = true;
         terminalGate?.dispose();
+      }
       // Token-stream deltas fire on every reasoning/text chunk. Slim has no
       // work for them; skip the rest of the fan-out. v2 names:
       // session.next.{text,reasoning}.delta.
@@ -1954,7 +2039,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         if (event.type !== 'session.deleted') return;
         internalSessionIds.delete(eventSessionID);
       }
-      await cacheMonitor.event(input);
+      if (!runtime.disabledHooks.has('cache-monitor')) {
+        await cacheMonitor.event(input);
+      }
       const rawStatus = event.properties?.status;
       const statusType =
         typeof rawStatus === 'string'
@@ -2179,6 +2266,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     },
 
     dispose: async () => {
+      // Synchronous: v2 setup calls this directly and does not emit the
+      // public server.instance.disposed event first.
+      instanceDisposed = true;
       registryBridge.retire();
       terminalGate?.dispose();
       // Cancel pending initial-delay fallback timers so a reloaded
@@ -2216,18 +2306,27 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     },
 
     'tool.execute.before': async (input, output) => {
-      await applyPatch['tool.execute.before'](input as never, output as never);
+      if (!runtime.disabledHooks.has('apply-patch')) {
+        await applyPatch['tool.execute.before'](
+          input as never,
+          output as never,
+        );
+      }
       // Rewrite guessed non-existing absolute paths BEFORE the search
       // guard: the guard blocks grep/glob on missing paths, so running
       // the rescue after it would never see a rescuable path (#1143).
-      await absolutePathRescue['tool.execute.before'](
-        input as never,
-        output as never,
-      );
-      await searchPathGuard['tool.execute.before'](
-        input as never,
-        output as never,
-      );
+      if (!runtime.disabledHooks.has('absolute-path-rescue')) {
+        await absolutePathRescue['tool.execute.before'](
+          input as never,
+          output as never,
+        );
+      }
+      if (!runtime.disabledHooks.has('search-path-guard')) {
+        await searchPathGuard['tool.execute.before'](
+          input as never,
+          output as never,
+        );
+      }
       await deepworkGuardHook['tool.execute.before'](
         input as never,
         output as never,
@@ -2278,10 +2377,12 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       // In particular, search-path-guard can reject grep/glob before the host
       // emits tool.execute.after; running the loop guard first would leave a
       // pending call-key entry with no completion to consume it.
-      await toolLoopGuard['tool.execute.before'](
-        input as never,
-        output as never,
-      );
+      if (!runtime.disabledHooks.has('tool-loop-guard')) {
+        await toolLoopGuard['tool.execute.before'](
+          input as never,
+          output as never,
+        );
+      }
     },
 
     'command.execute.before': async (input, output) => {
@@ -2339,7 +2440,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       }
     },
 
-    'chat.headers': chatHeadersHook['chat.headers'],
+    ...(chatHeadersHook
+      ? { 'chat.headers': chatHeadersHook['chat.headers'] }
+      : {}),
 
     // v1 compaction requests use the same message transform as normal turns.
     // v2 handles compaction in its separate session.compaction bridge.
@@ -2754,9 +2857,16 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           typedOutput as never,
         );
       }
+      if (councilInject) {
+        await councilInject['experimental.chat.messages.transform'](
+          input as never,
+          typedOutput as never,
+        );
+      }
       await taskSessionManagerHook.injectBackgroundJobBoard(input, typedOutput);
       if (compacting) {
         stripTaggedContent(typedOutput.messages, PHASE_REMINDER_METADATA_KEY);
+        stripTaggedContent(typedOutput.messages, COUNCIL_INJECT_METADATA_KEY);
       }
     },
 
@@ -2768,11 +2878,15 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       if (input.tool.toLowerCase() === 'task' && input.callID) {
         dropPendingV1ChildModelsForCall(input.callID);
       }
-      await jsonErrorRecoveryAfter(input, output);
-      await toolLoopGuard['tool.execute.after'](
-        input as never,
-        output as never,
-      );
+      if (!runtime.disabledHooks.has('json-error-recovery')) {
+        await jsonErrorRecoveryAfter(input, output);
+      }
+      if (!runtime.disabledHooks.has('tool-loop-guard')) {
+        await toolLoopGuard['tool.execute.after'](
+          input as never,
+          output as never,
+        );
+      }
       await taskSessionManagerAfter(input, output);
     },
   } as Hooks & {

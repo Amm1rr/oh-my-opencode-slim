@@ -7,7 +7,7 @@ import {
   spyOn,
   test,
 } from 'bun:test';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import path from 'node:path';
 import type { RegistryFactoryBridge } from './agents/registry-bridge';
@@ -15,12 +15,14 @@ import { stateFilePath } from './companion/manager';
 import { RuntimeConfig } from './config/runtime';
 import * as wakeHooks from './hooks';
 import { isTaggedPart, stripTaggedContent } from './hooks/cache-safe-injection';
+import { JSON_ERROR_REMINDER } from './hooks/json-error-recovery/hook';
 import {
   getWakeProgress,
   resetOrchestratorWakeGateForTests,
 } from './hooks/orchestrator-wake/wake-gate';
 import { PHASE_REMINDER_METADATA_KEY } from './hooks/phase-reminder';
 import { BACKGROUND_JOB_BOARD_METADATA_KEY } from './hooks/task-session-manager';
+import { LOOP_GUARD_WARNING } from './hooks/tool-loop-guard/hook';
 import type { MessageWithParts } from './hooks/types';
 import pluginModuleDefault, { OhMyOpenCodeLite as plugin } from './index';
 import { MarketplaceStore } from './marketplace/store';
@@ -1133,6 +1135,54 @@ describe('plugin reload generation cleanup', () => {
     return output;
   };
 
+  const readPluginLog = (): string => {
+    try {
+      return readdirSync(`${projectDir}/logs`)
+        .filter(
+          (f) => f.startsWith('oh-my-opencode-slim.') && f.endsWith('.log'),
+        )
+        .map((f) => readFileSync(`${projectDir}/logs/${f}`, 'utf8'))
+        .join('');
+    } catch {
+      return '';
+    }
+  };
+
+  /** Three-request sequence whose third entry is the field signature of a
+   * mid-session prompt-cache bust: a previously cache-hitting session
+   * reports zero cached tokens on a sizeable request. */
+  const feedCacheBustSequence = async (
+    hooks: Awaited<ReturnType<typeof plugin>>,
+    sessionID: string,
+  ) => {
+    const bustEvent = (
+      messageID: string,
+      input: number,
+      cacheRead: number,
+    ) => ({
+      event: {
+        type: 'message.updated',
+        properties: {
+          info: {
+            role: 'assistant',
+            sessionID,
+            id: messageID,
+            time: { completed: 1_700_000_000 },
+            tokens: {
+              input,
+              output: 100,
+              reasoning: 0,
+              cache: { read: cacheRead, write: 0 },
+            },
+          },
+        },
+      },
+    });
+    await hooks.event?.(bustEvent('m1', 8000, 0) as never);
+    await hooks.event?.(bustEvent('m2', 500, 9000) as never);
+    await hooks.event?.(bustEvent('m3', 12000, 0) as never);
+  };
+
   const taggedParts = (messages: MessageWithParts[], key: string) =>
     messages.flatMap((message) =>
       message.parts.filter((part) => isTaggedPart(part, key)),
@@ -1273,6 +1323,221 @@ describe('plugin reload generation cleanup', () => {
       await registerOrchestrator(hooks, sessionID);
       const output = await transform(hooks, reminderFixture(sessionID));
       expect(reminderParts(output.messages)).toHaveLength(0);
+    } finally {
+      await hooks.dispose?.();
+    }
+  });
+
+  test('disabled_hooks chat-headers keeps the hook unregistered', async () => {
+    await Bun.write(
+      `${projectDir}/oh-my-opencode-slim.json`,
+      JSON.stringify({
+        companion: { enabled: false },
+        disabled_hooks: ['chat-headers'],
+      }),
+    );
+    const disabled = await createHooks();
+    try {
+      expect(disabled['chat.headers']).toBeUndefined();
+    } finally {
+      await disabled.dispose?.();
+    }
+
+    // Control: the default config still registers the hook, so the
+    // absence above is the gate and not a dead registration path.
+    await Bun.write(
+      `${projectDir}/oh-my-opencode-slim.json`,
+      JSON.stringify({ companion: { enabled: false } }),
+    );
+    const enabled = await createHooks();
+    try {
+      expect(typeof enabled['chat.headers']).toBe('function');
+    } finally {
+      await enabled.dispose?.();
+    }
+  });
+
+  test('cache-monitor logs a bust warning on the default config', async () => {
+    const hooks = await createHooks();
+    try {
+      await feedCacheBustSequence(hooks, 'control');
+      await loggerModule.flushLoggerForTesting();
+      expect(readPluginLog()).toContain('prompt-cache bust');
+    } finally {
+      await hooks.dispose?.();
+    }
+  });
+
+  test('disabled_hooks cache-monitor stops the cache-bust watchdog', async () => {
+    await Bun.write(
+      `${projectDir}/oh-my-opencode-slim.json`,
+      JSON.stringify({
+        companion: { enabled: false },
+        disabled_hooks: ['cache-monitor'],
+      }),
+    );
+    const hooks = await createHooks();
+    try {
+      await feedCacheBustSequence(hooks, 'gated');
+      await loggerModule.flushLoggerForTesting();
+      expect(readPluginLog()).not.toContain('prompt-cache bust');
+    } finally {
+      await hooks.dispose?.();
+    }
+  });
+
+  test('disabled_hooks tool guards stop intercepting tool calls entirely', async () => {
+    await Bun.write(
+      `${projectDir}/oh-my-opencode-slim.json`,
+      JSON.stringify({
+        companion: { enabled: false },
+        disabled_hooks: [
+          'json-error-recovery',
+          'tool-loop-guard',
+          'search-path-guard',
+          'absolute-path-rescue',
+          'apply-patch',
+        ],
+      }),
+    );
+    await Bun.write(`${projectDir}/sample.txt`, 'alpha\nbeta\ngamma\n');
+    await mkdir(`${projectDir}/src`, { recursive: true });
+    await Bun.write(`${projectDir}/src/app.ts`, 'export {};\n');
+    const hooks = await createHooks();
+    try {
+      // apply-patch: the unrecoverable patch passes through untouched.
+      const patchText =
+        '*** Begin Patch\n*** Update File: sample.txt\n@@\n-missing\n+omega\n*** End Patch';
+      const patchOutput = { args: { patchText } };
+      await hooks['tool.execute.before']?.(
+        {
+          tool: 'apply_patch',
+          sessionID: 'guards-off',
+          callID: 'g-1',
+        } as never,
+        patchOutput as never,
+      );
+      expect(patchOutput.args.patchText).toBe(patchText);
+
+      // absolute-path-rescue: the guessed path is left as written.
+      const guessed = `/${path.basename(projectDir)}/src/app.ts`;
+      const rescueOutput = { args: { filePath: guessed } };
+      await hooks['tool.execute.before']?.(
+        { tool: 'read', sessionID: 'guards-off', callID: 'g-2' } as never,
+        rescueOutput as never,
+      );
+      expect(rescueOutput.args.filePath).toBe(guessed);
+
+      // search-path-guard: grep on a missing path resolves instead of
+      // rejecting.
+      await expect(
+        hooks['tool.execute.before']?.(
+          { tool: 'grep', sessionID: 'guards-off', callID: 'g-3' } as never,
+          {
+            args: { path: `${projectDir}/does-not-exist/missing.txt` },
+          } as never,
+        ),
+      ).resolves.toBeUndefined();
+
+      // tool-loop-guard: three identical calls never append the warning.
+      for (const callID of ['g-4', 'g-5', 'g-6']) {
+        await hooks['tool.execute.before']?.(
+          { tool: 'read', sessionID: 'loop-off', callID } as never,
+          { args: { filePath: 'a.ts' } } as never,
+        );
+        const output = { output: '...file contents...', metadata: {} };
+        await hooks['tool.execute.after']?.(
+          { tool: 'read', sessionID: 'loop-off', callID } as never,
+          output as never,
+        );
+        expect(output.output).toBe('...file contents...');
+      }
+
+      // json-error-recovery: the malformed output surfaces raw.
+      const jsonOutput = {
+        title: 'Tool Error',
+        output: "JSON parse error: expected '}' in JSON body",
+        metadata: {},
+      };
+      await hooks['tool.execute.after']?.(
+        { tool: 'Edit', sessionID: 'guards-off', callID: 'g-7' } as never,
+        jsonOutput as never,
+      );
+      expect(jsonOutput.output).toBe(
+        "JSON parse error: expected '}' in JSON body",
+      );
+    } finally {
+      await hooks.dispose?.();
+    }
+  });
+
+  test('tool guards act on the default config (positive control)', async () => {
+    await Bun.write(`${projectDir}/sample.txt`, 'alpha\nbeta\ngamma\n');
+    await mkdir(`${projectDir}/src`, { recursive: true });
+    await Bun.write(`${projectDir}/src/app.ts`, 'export {};\n');
+    const hooks = await createHooks();
+    try {
+      // apply-patch rejects the unrecoverable patch.
+      const patchText =
+        '*** Begin Patch\n*** Update File: sample.txt\n@@\n-missing\n+omega\n*** End Patch';
+      await expect(
+        hooks['tool.execute.before']?.(
+          {
+            tool: 'apply_patch',
+            sessionID: 'guards-on',
+            callID: 'c-1',
+          } as never,
+          { args: { patchText } } as never,
+        ),
+      ).rejects.toThrow('apply_patch verification failed');
+
+      // absolute-path-rescue rewrites the guessed path to the existing
+      // suffix.
+      const rescueOutput = {
+        args: { filePath: `/${path.basename(projectDir)}/src/app.ts` },
+      };
+      await hooks['tool.execute.before']?.(
+        { tool: 'read', sessionID: 'guards-on', callID: 'c-2' } as never,
+        rescueOutput as never,
+      );
+      expect(rescueOutput.args.filePath).toBe(`${projectDir}/src/app.ts`);
+
+      // search-path-guard rejects grep on a missing path.
+      await expect(
+        hooks['tool.execute.before']?.(
+          { tool: 'grep', sessionID: 'guards-on', callID: 'c-3' } as never,
+          {
+            args: { path: `${projectDir}/does-not-exist/missing.txt` },
+          } as never,
+        ),
+      ).rejects.toThrow('Search path does not exist');
+
+      // tool-loop-guard warns on the third identical call.
+      let thirdOutput: { output: unknown } | undefined;
+      for (const callID of ['c-4', 'c-5', 'c-6']) {
+        await hooks['tool.execute.before']?.(
+          { tool: 'read', sessionID: 'loop-on', callID } as never,
+          { args: { filePath: 'a.ts' } } as never,
+        );
+        thirdOutput = { output: '...file contents...', metadata: {} };
+        await hooks['tool.execute.after']?.(
+          { tool: 'read', sessionID: 'loop-on', callID } as never,
+          thirdOutput as never,
+        );
+      }
+      expect(String(thirdOutput?.output)).toContain(LOOP_GUARD_WARNING);
+
+      // json-error-recovery appends the reminder.
+      const jsonOutput = {
+        title: 'Tool Error',
+        output: "JSON parse error: expected '}' in JSON body",
+        metadata: {},
+      };
+      await hooks['tool.execute.after']?.(
+        { tool: 'Edit', sessionID: 'guards-on', callID: 'c-7' } as never,
+        jsonOutput as never,
+      );
+      expect(String(jsonOutput.output)).toContain(JSON_ERROR_REMINDER);
     } finally {
       await hooks.dispose?.();
     }
@@ -2168,8 +2433,8 @@ describe('plugin TUI agent activity', () => {
 
     const snapshot = readTuiSnapshot(projectDir);
     expect(snapshot.sessionParents['child-launch-first']).toBe('parent-1');
-    expect(snapshot.sessionDetails['child-launch-first']?.alias).toMatch(
-      /^ora-\d+$/,
+    expect(snapshot.sessionDetails['child-launch-first']?.alias).toBe(
+      'child-launch-first',
     );
     expect(snapshot.activeSessions['child-launch-first']).toBe('oracle');
   });
@@ -2192,8 +2457,8 @@ describe('plugin TUI agent activity', () => {
 
     const snapshot = readTuiSnapshot(projectDir);
     expect(snapshot.sessionParents['child-busy-first']).toBe('parent-2');
-    expect(snapshot.sessionDetails['child-busy-first']?.alias).toMatch(
-      /^ora-\d+$/,
+    expect(snapshot.sessionDetails['child-busy-first']?.alias).toBe(
+      'child-busy-first',
     );
   });
 
@@ -3922,7 +4187,7 @@ describe('plugin foreground fallback host gating', () => {
   let projectDir: string;
 
   const V2_NOTICE =
-    '[foreground-fallback] automatic fallback disabled on v2 hosts (no atomic per-turn model switch)';
+    '[foreground-fallback] v2 replay fallback disabled (no atomic per-turn model switch); retry-hook steering active';
 
   const createFallbackClient = () => {
     const noop = async () => ({});
@@ -3981,7 +4246,7 @@ describe('plugin foreground fallback host gating', () => {
     await rm(projectDir, { recursive: true, force: true });
   });
 
-  test('v2 host: the manager is disabled and performs no automatic intervention', async () => {
+  test('v2 host: the replay path stays disabled', async () => {
     const captured: string[] = [];
     const capture = spyOn(loggerModule, 'log').mockImplementation(
       (message: string) => {
@@ -4004,22 +4269,6 @@ describe('plugin foreground fallback host gating', () => {
       );
 
       const switchModel = mock(async () => ({}));
-      const decision = { retry: true, delay: 2_000 };
-      const retryEvent = {
-        sessionID: 'sess-v2-gate',
-        agent: 'orchestrator',
-        model: { providerID: 'openai', id: 'gpt-b' },
-        error: { message: 'Rate limit exceeded' },
-        decision,
-      };
-      await hooks['v2.session.retry']?.(
-        retryEvent as never,
-        switchModel as never,
-      );
-      expect(switchModel).not.toHaveBeenCalled();
-      // Host-native retry decision is left untouched.
-      expect(retryEvent.decision).toBe(decision);
-
       await hooks.event?.({
         event: {
           type: 'session.error',
@@ -4059,6 +4308,8 @@ describe('plugin foreground fallback host gating', () => {
         },
       } as never);
 
+      // No replay intervention on v2: the host has no atomic per-turn
+      // conditional switch, so abort + re-prompt stays off there.
       expect(switchModel).not.toHaveBeenCalled();
       expect(abort).not.toHaveBeenCalled();
       expect(promptAsync).not.toHaveBeenCalled();
@@ -4066,6 +4317,47 @@ describe('plugin foreground fallback host gating', () => {
       await hooks.dispose?.();
     } finally {
       capture.mockRestore();
+    }
+  });
+
+  test('v2 host: retry-hook steering advances the chain in place', async () => {
+    const { client, abort, promptAsync } = createFallbackClient();
+    const hooks = await plugin({
+      client,
+      directory: projectDir,
+      worktree: projectDir,
+      serverUrl: new URL('http://127.0.0.1:4096'),
+      hostFlavor: 'v2',
+    } as never);
+
+    try {
+      // The beforeEach fixture configures maxRetries: 0, so the first
+      // failover retry event switches immediately — no host retries
+      // absorbed, no replay.
+      const switchModel = mock(async () => ({}));
+      const retryEvent = {
+        sessionID: 'sess-v2-steer',
+        agent: 'orchestrator',
+        model: { providerID: 'openai', id: 'gpt-b' },
+        error: { message: 'Rate limit exceeded' },
+        decision: { retry: true, delay: 2_000 },
+      };
+      await hooks['v2.session.retry']?.(
+        retryEvent as never,
+        switchModel as never,
+      );
+      expect(switchModel).toHaveBeenCalledTimes(1);
+      expect(switchModel).toHaveBeenCalledWith('sess-v2-steer', {
+        providerID: 'openai',
+        id: 'gpt-c',
+      });
+      // The host is told to retry the current turn on the new model.
+      expect(retryEvent.decision).toEqual({ retry: true, delay: 500 });
+      // Steering never replays: the replay transport stays untouched.
+      expect(abort).not.toHaveBeenCalled();
+      expect(promptAsync).not.toHaveBeenCalled();
+    } finally {
+      await hooks.dispose?.();
     }
   });
 
@@ -4116,6 +4408,23 @@ describe('plugin foreground fallback host gating', () => {
         },
       } as never);
 
+      // The v2 retry-hook steering follows the same switch: disabled_hooks
+      // must leave the host decision untouched even with a configured
+      // chain and maxRetries: 0.
+      const switchModel = mock(async () => ({}));
+      const retryEvent = {
+        sessionID: 'session-disabled-hook',
+        agent: 'orchestrator',
+        model: { providerID: 'openai', id: 'gpt-b' },
+        error: { message: 'rate limit' },
+        decision: { retry: true, delay: 2_000 },
+      };
+      await hooks['v2.session.retry']?.(
+        retryEvent as never,
+        switchModel as never,
+      );
+      expect(switchModel).not.toHaveBeenCalled();
+      expect(retryEvent.decision).toEqual({ retry: true, delay: 2_000 });
       expect(abort).not.toHaveBeenCalled();
       expect(promptAsync).not.toHaveBeenCalled();
     } finally {
@@ -4197,12 +4506,15 @@ describe('plugin foreground fallback host gating', () => {
     }
   });
 
-  test('v2 host with fallback explicitly disabled: no startup notice', async () => {
+  test('v2 host with fallback explicitly disabled: no notice, no steering', async () => {
     await Bun.write(
       `${projectDir}/oh-my-opencode-slim.json`,
       JSON.stringify({
         companion: { enabled: false },
         fallback: { enabled: false },
+        agents: {
+          orchestrator: { model: ['openai/gpt-b', 'openai/gpt-c'] },
+        },
       }),
     );
     const captured: string[] = [];
@@ -4216,19 +4528,38 @@ describe('plugin foreground fallback host gating', () => {
       expect(captured.filter((message) => message === V2_NOTICE)).toHaveLength(
         0,
       );
+      // Steering follows the same user switch: a configured chain must not
+      // make the retry hook act when fallback is disabled.
+      const switchModel = mock(async () => ({}));
+      const retryEvent = {
+        sessionID: 'sess-v2-off',
+        agent: 'orchestrator',
+        model: { providerID: 'openai', id: 'gpt-b' },
+        error: { message: 'Rate limit exceeded' },
+        decision: { retry: true, delay: 2_000 },
+      };
+      await hooks['v2.session.retry']?.(
+        retryEvent as never,
+        switchModel as never,
+      );
+      expect(switchModel).not.toHaveBeenCalled();
+      expect(retryEvent.decision).toEqual({ retry: true, delay: 2_000 });
       await hooks.dispose?.();
     } finally {
       capture.mockRestore();
     }
   });
 
-  test('v2 host with foreground-fallback hook disabled: no startup notice', async () => {
+  test('v2 host with foreground-fallback hook disabled: no notice, no steering', async () => {
     await Bun.write(
       `${projectDir}/oh-my-opencode-slim.json`,
       JSON.stringify({
         companion: { enabled: false },
         disabled_hooks: ['foreground-fallback'],
         fallback: { enabled: true },
+        agents: {
+          orchestrator: { model: ['openai/gpt-b', 'openai/gpt-c'] },
+        },
       }),
     );
     const captured: string[] = [];
@@ -4242,6 +4573,21 @@ describe('plugin foreground fallback host gating', () => {
       expect(captured.filter((message) => message === V2_NOTICE)).toHaveLength(
         0,
       );
+      // disabled_hooks gates steering identically to fallback.enabled.
+      const switchModel = mock(async () => ({}));
+      const retryEvent = {
+        sessionID: 'sess-v2-hook-off',
+        agent: 'orchestrator',
+        model: { providerID: 'openai', id: 'gpt-b' },
+        error: { message: 'Rate limit exceeded' },
+        decision: { retry: true, delay: 2_000 },
+      };
+      await hooks['v2.session.retry']?.(
+        retryEvent as never,
+        switchModel as never,
+      );
+      expect(switchModel).not.toHaveBeenCalled();
+      expect(retryEvent.decision).toEqual({ retry: true, delay: 2_000 });
       await hooks.dispose?.();
     } finally {
       capture.mockRestore();

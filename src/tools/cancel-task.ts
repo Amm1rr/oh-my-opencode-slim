@@ -3,14 +3,27 @@ import {
   type ToolDefinition,
   tool,
 } from '@opencode-ai/plugin';
+import type {
+  RetainedRecoveryRequest,
+  RetainedRecoveryResult,
+} from '../hooks/task-session-manager/session-recovery';
+import { pluginDisposedMessage } from '../hooks/task-session-manager/session-recovery';
 import type { BackgroundJobLease } from '../utils/background-job-board';
-import type { BackgroundJobStore } from '../utils/background-job-store';
+import {
+  type BackgroundJobStore,
+  getBackgroundJobLifecycleLedger,
+} from '../utils/background-job-store';
 import {
   type BackgroundJobTerminalGate,
   createBackgroundJobTerminalGate,
   type ObservationToken,
 } from '../utils/background-job-terminal-gate';
-import { responseError, stringifyError } from '../utils/child-transcript';
+import {
+  classifyV2HistoricalRound,
+  fetchChildTranscript,
+  responseError,
+  stringifyError,
+} from '../utils/child-transcript';
 import { isRecord } from '../utils/guards';
 import { getClient } from '../utils/opencode-client';
 import { delay } from '../utils/polling';
@@ -23,8 +36,13 @@ import {
   getRuntimeSessionStatusSnapshot,
   runtimeSessionStatus,
 } from '../utils/session-runtime-status';
-import { isHostTerminalOutcome } from '../utils/task';
-import { idParamFor, readTaskRef, taskRefArgs } from './task-ref';
+import {
+  type CanonicalTaskResolver,
+  currentToolCallID,
+  idParamFor,
+  readTaskRef,
+  taskRefArgs,
+} from './task-ref';
 
 const z = tool.schema;
 
@@ -37,6 +55,13 @@ export interface TaskControlToolOptions {
   verifyAbortMs?: number;
   abortRetryIntervalMs?: number;
   stableStoppedMs?: number;
+  /** Read-only host recovery for a reference the board does not know. */
+  recoverRetainedSession?: (
+    request: RetainedRecoveryRequest,
+  ) => Promise<RetainedRecoveryResult>;
+  /** Shared read-only alias gate. Exact session ids do not read parent history. */
+  resolveCanonicalTaskRef?: CanonicalTaskResolver;
+  isDisposed?: () => boolean;
 }
 
 interface CapturedExecution {
@@ -78,12 +103,65 @@ Use only for obsolete, wrong, conflicting, or user-requested cancellation. The r
       );
       const requested = readTaskRef(args, idParam);
       if (!requested) throw new Error(`task_cancel requires ${idParam}`);
-
-      const job = options.backgroundJobBoard.resolve(
-        parentSessionID,
-        requested,
-      );
+      const canonical = options.resolveCanonicalTaskRef
+        ? await options.resolveCanonicalTaskRef(
+            parentSessionID,
+            requested,
+            currentToolCallID(toolContext),
+          )
+        : undefined;
+      if (options.isDisposed?.()) {
+        return unknownTaskOutput(idParam, requested, pluginDisposedMessage());
+      }
+      if (canonical?.kind === 'refused') {
+        return unknownTaskOutput(idParam, requested, canonical.reason);
+      }
+      const identity =
+        canonical?.kind === 'exact' ? canonical.taskID : requested;
+      const job = canonical
+        ? options.backgroundJobBoard.get(identity)
+        : options.backgroundJobBoard.resolve(parentSessionID, requested);
+      if (job && job.parentSessionID !== parentSessionID) {
+        return unknownTaskOutput(
+          idParam,
+          identity,
+          `Task ${identity} belongs to a different parent session. No action was sent.`,
+        );
+      }
       if (!job) {
+        if (options.recoverRetainedSession) {
+          const recovery = await options.recoverRetainedSession({
+            parentSessionID,
+            requested: identity,
+          });
+          const restored = canonical
+            ? options.backgroundJobBoard.get(identity)
+            : options.backgroundJobBoard.resolve(parentSessionID, requested);
+          if (restored) {
+            if (restored.state === 'running' || restored.statusUncertain) {
+              return unknownTaskOutput(
+                idParam,
+                restored.taskID,
+                'The host session is still executing. task_cancel did not take over an untracked busy session, and no abort was sent.',
+              );
+            }
+            const state =
+              restored.state === 'reconciled'
+                ? (restored.terminalState ?? restored.state)
+                : restored.state;
+            return [
+              `${idParam}: ${restored.taskID}`,
+              `state: ${state}`,
+              '',
+              '<task_error>',
+              `Task is ${state}, not running. No abort was sent.`,
+              '</task_error>',
+            ].join('\n');
+          }
+          if (recovery.kind === 'refused') {
+            return unknownTaskOutput(idParam, requested, recovery.reason);
+          }
+        }
         return unknownTaskOutput(
           idParam,
           requested,
@@ -145,6 +223,9 @@ export async function cancelTrackedExecution(
   execution: CapturedExecution,
   reason?: string,
 ): Promise<void> {
+  if (options.isDisposed?.()) {
+    throw new Error(pluginDisposedMessage());
+  }
   const lease = options.backgroundJobBoard.acquireCancellationLease(
     execution.taskID,
     execution.generation,
@@ -225,6 +306,9 @@ async function abortAndVerifySession(
         // may have changed since the check above; never send a stale abort.
         assertLease(options.backgroundJobBoard, lease, execution);
         assertCapturedExecution(options.backgroundJobBoard, execution);
+        if (options.isDisposed?.()) {
+          throw new LeaseOwnershipLostError(pluginDisposedMessage());
+        }
         if (options.backgroundJobBoard.getState(taskID) !== 'running') {
           throw new LeaseOwnershipLostError(
             `stale/uncertain cancellation: ${taskID} is no longer running`,
@@ -337,9 +421,9 @@ async function verifyQuiescentSession(
 }
 
 /**
- * v2 verification fallback: the host publishes the terminal outcome and an
- * idle timestamp on Session.Info. Quiescence is confirmed by either a
- * terminal outcome or an idle timestamp at/after the abort began.
+ * v2 has no session-status map. Interrupt acceptance is not settlement.
+ * Prefer the host idle wait. Otherwise only a new idle timestamp or this
+ * round's closing interrupted idle counts. A stored outcome does not.
  */
 async function verifyQuiescentViaHostInfo(
   options: TaskControlToolOptions,
@@ -348,25 +432,30 @@ async function verifyQuiescentViaHostInfo(
   abortStartedAt: number,
   deadline: number,
 ): Promise<ObservationToken> {
+  rememberStopEpoch(options, lease, execution.taskID);
+  const wait = sessionIdleWait(options.input);
+  if (wait) {
+    return confirmCancelAfterIdleWait(
+      options,
+      execution,
+      lease,
+      deadline,
+      wait,
+    );
+  }
   const retryIntervalMs = options.abortRetryIntervalMs ?? 150;
-  let lastDetail = 'no host session info';
+  let lastDetail = 'no fresh idle evidence';
   while (Date.now() <= deadline) {
-    assertLease(options.backgroundJobBoard, lease, execution);
+    assertStopFences(options, execution, lease);
     const client = getClient(options.input);
     if (typeof client.session.get !== 'function') {
-      // No status map AND no session info — nothing to verify against.
       throw new SessionStillRunningError(
         `Session abort returned but quiescence cannot be verified on this host: ${execution.taskID}`,
       );
     }
     try {
-      const token = options.terminalGate?.capture(execution);
-      if (!token)
-        throw new LeaseOwnershipLostError('Cancellation execution changed');
       const remainingMs = deadline - Date.now();
       if (remainingMs <= 0) break;
-      // Abort has settled: this read cannot affect a reused session. Bound it
-      // without quarantining the lease or consuming evidence after timeout.
       const response = (await withTimeout(
         client.session.get({
           path: { id: execution.taskID },
@@ -375,34 +464,42 @@ async function verifyQuiescentViaHostInfo(
         remainingMs,
         `Session info lookup timed out after ${remainingMs}ms`,
       )) as {
-        data?: { outcome?: unknown; time?: { idle?: unknown } };
-        outcome?: unknown;
+        data?: { time?: { idle?: unknown } };
         time?: { idle?: unknown };
       };
-      // A blocked event loop may deliver the response before an overdue timer.
-      // Check the clock before accessing any of its evidence.
       if (Date.now() >= deadline) {
         throw new OperationTimeoutError('Session info lookup timed out');
       }
+      assertStopFences(options, execution, lease);
       const info = response?.data ?? response;
-      const outcome = info?.outcome;
-      // Whitelist the known terminal values: a malformed or future
-      // nonterminal outcome string must NOT confirm quiescence on its own —
-      // it falls through to the idle-timestamp evidence below.
-      if (typeof outcome === 'string' && isHostTerminalOutcome(outcome)) {
-        return token;
-      }
       const idleAt = info?.time?.idle;
       if (typeof idleAt === 'number' && idleAt >= abortStartedAt) {
-        return token;
+        return freshCancellationToken(options, execution);
       }
+      const matched = await contextInterruptedAfter(
+        options,
+        execution,
+        lease,
+        abortStartedAt,
+        deadline,
+      );
+      if (Date.now() >= deadline) {
+        throw new OperationTimeoutError('Cancellation context read timed out');
+      }
+      assertStopFences(options, execution, lease);
+      if (matched) return freshCancellationToken(options, execution);
       lastDetail =
-        typeof outcome === 'string'
-          ? `outcome=${outcome}`
-          : typeof idleAt === 'number'
-            ? `idle=${idleAt}`
-            : 'no outcome or idle timestamp';
+        typeof idleAt === 'number'
+          ? `idle=${idleAt}`
+          : 'no fresh idle timestamp or closing interrupted idle';
     } catch (error) {
+      if (
+        error instanceof LeaseOwnershipLostError ||
+        (error instanceof Error &&
+          error.message.startsWith('stale/uncertain cancellation:'))
+      ) {
+        throw error;
+      }
       lastDetail = error instanceof Error ? error.message : String(error);
       if (error instanceof OperationTimeoutError) break;
     }
@@ -413,6 +510,126 @@ async function verifyQuiescentViaHostInfo(
   throw new SessionStillRunningError(
     `Session abort returned but task did not stay stopped: ${execution.taskID} (host-info: ${lastDetail})`,
   );
+}
+
+async function confirmCancelAfterIdleWait(
+  options: TaskControlToolOptions,
+  execution: CapturedExecution,
+  lease: BackgroundJobLease,
+  deadline: number,
+  wait: (sessionID: string) => Promise<unknown>,
+): Promise<ObservationToken> {
+  assertStopFences(options, execution, lease);
+  const remainingMs = deadline - Date.now();
+  if (remainingMs <= 0) {
+    throw new SessionStillRunningError(
+      `Session abort returned but idle wait was not settled before the deadline: ${execution.taskID}`,
+    );
+  }
+  const waiting = wait(execution.taskID);
+  if (!waiting || typeof waiting.then !== 'function') {
+    throw new SessionStillRunningError(
+      `Session abort returned but waitForSessionIdle did not settle: ${execution.taskID}`,
+    );
+  }
+  try {
+    await withTimeout(
+      waiting,
+      remainingMs,
+      `Session idle wait timed out after ${remainingMs}ms`,
+    );
+  } catch (error) {
+    throw new SessionStillRunningError(
+      `Session abort returned but idle wait was not settled: ${execution.taskID} (${error instanceof Error ? error.message : String(error)})`,
+    );
+  }
+  if (Date.now() >= deadline) {
+    throw new SessionStillRunningError(
+      `Session abort returned but idle wait was not settled before the deadline: ${execution.taskID}`,
+    );
+  }
+  assertStopFences(options, execution, lease);
+  return freshCancellationToken(options, execution);
+}
+
+function sessionIdleWait(
+  input: PluginInput,
+): ((sessionID: string) => Promise<unknown>) | undefined {
+  const channel = (
+    input as {
+      experimental_v2?: { waitForSessionIdle?: unknown };
+    }
+  ).experimental_v2?.waitForSessionIdle;
+  return typeof channel === 'function'
+    ? (channel as (sessionID: string) => Promise<unknown>)
+    : undefined;
+}
+
+function freshCancellationToken(
+  options: TaskControlToolOptions,
+  execution: CapturedExecution,
+): ObservationToken {
+  const token = options.terminalGate?.capture(execution);
+  if (!token)
+    throw new LeaseOwnershipLostError('Cancellation execution changed');
+  return token;
+}
+
+function assertStopFences(
+  options: TaskControlToolOptions,
+  execution: CapturedExecution,
+  lease: BackgroundJobLease,
+): void {
+  assertLease(options.backgroundJobBoard, lease, execution);
+  assertCapturedExecution(options.backgroundJobBoard, execution);
+  const current = deletionEpoch(options, execution.taskID);
+  if (stopEpochs.get(lease) !== current) {
+    throw new Error(
+      `stale/uncertain cancellation: ${execution.taskID} was deleted`,
+    );
+  }
+}
+
+const stopEpochs = new WeakMap<BackgroundJobLease, number | undefined>();
+
+function rememberStopEpoch(
+  options: TaskControlToolOptions,
+  lease: BackgroundJobLease,
+  taskID: string,
+): void {
+  stopEpochs.set(lease, deletionEpoch(options, taskID));
+}
+
+function deletionEpoch(
+  options: TaskControlToolOptions,
+  taskID: string,
+): number | undefined {
+  return getBackgroundJobLifecycleLedger(
+    options.backgroundJobBoard,
+  ).deletionEpochs.get(taskID);
+}
+
+async function contextInterruptedAfter(
+  options: TaskControlToolOptions,
+  execution: CapturedExecution,
+  lease: BackgroundJobLease,
+  abortStartedAt: number,
+  deadline: number,
+): Promise<boolean> {
+  const remainingMs = deadline - Date.now();
+  if (remainingMs <= 0) return false;
+  const client = getClient(options.input);
+  if (typeof client.session?.messages !== 'function') return false;
+  const transcript = await withTimeout(
+    fetchChildTranscript(client, execution.taskID, options.input.directory),
+    remainingMs,
+    'Cancellation context read timed out',
+  );
+  if (Date.now() >= deadline) return false;
+  assertStopFences(options, execution, lease);
+  const round = classifyV2HistoricalRound(transcript);
+  if (round.verdict !== 'interrupted') return false;
+  return round.completedAt !== undefined && round.completedAt >= abortStartedAt;
 }
 
 async function getSessionStatus(

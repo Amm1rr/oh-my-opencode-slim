@@ -4,6 +4,11 @@ import {
   createRevivedRunTracker,
   type RevivedRunTracker,
 } from '../hooks/task-session-manager/revived-run-tracker';
+import {
+  appendChildRefSuffix,
+  createAliasAuthority,
+  createSessionRecovery,
+} from '../hooks/task-session-manager/session-recovery';
 import { BackgroundJobBoard } from '../utils/background-job-fixture';
 import { createBackgroundJobTerminalGate } from '../utils/background-job-terminal-gate';
 import * as opencodeClient from '../utils/opencode-client';
@@ -34,6 +39,7 @@ function harness(
   options: {
     busy?: boolean;
     foreign?: boolean;
+    parentTranscript?: unknown[];
     admit?: (prompt: Prompt) => Promise<unknown>;
   } = {},
 ) {
@@ -41,7 +47,7 @@ function harness(
     (input) => input.client,
   );
   let transcript: unknown[] = [
-    { id: 'old-user', type: 'user' },
+    { id: 'old-user', type: 'user', time: { created: 1 } },
     ...(options.busy ? [] : [assistant('old-answer', 'old result')]),
   ];
   const wait = mock(async () => {});
@@ -68,7 +74,8 @@ function harness(
         outcome: 'completed',
         time: { idle: Date.now() },
       }),
-      context: async () => transcript,
+      context: async ({ sessionID }: { sessionID: string }) =>
+        sessionID === parentID ? (options.parentTranscript ?? []) : transcript,
       wait,
       prompt,
       interrupt,
@@ -77,6 +84,12 @@ function harness(
     location: { directory: '/test/project' },
   } as unknown as V2Context) as unknown as PluginInput;
   const board = new BackgroundJobBoard();
+  const recover = createSessionRecovery({
+    input,
+    backgroundJobBoard: board,
+    hostFlavor: 'v2',
+  });
+  const authority = createAliasAuthority({ input, board, hostFlavor: 'v2' });
   let tracker: RevivedRunTracker;
   const gate = createBackgroundJobTerminalGate({
     input,
@@ -102,17 +115,19 @@ function harness(
     backgroundJobBoard: board,
     shouldManageSession: () => true,
     revivedRunTracker: tracker,
+    recoverRetainedSession: recover,
+    resolveCanonicalTaskRef: authority.resolveCanonical,
     admissionTimeoutMs: 10,
   });
   disposals.push(() => {
     tracker.dispose();
     gate.dispose();
   });
-  const revive = () =>
-    task_revive.execute(
-      { sessionID: childID, prompt: 'Continue retained work' },
-      { sessionID: parentID, agent: 'orchestrator' } as never,
-    );
+  const revive = (sessionID = childID) =>
+    task_revive.execute({ sessionID, prompt: 'Continue retained work' }, {
+      sessionID: parentID,
+      agent: 'orchestrator',
+    } as never);
   const run = () => {
     const record = board.get(childID);
     if (!record) throw new Error('Expected a tracked continuation');
@@ -132,6 +147,7 @@ function harness(
     interrupt,
     wait,
     revive,
+    recover,
     probe,
     run,
     append: (...messages: unknown[]) => transcript.push(...messages),
@@ -203,6 +219,98 @@ test('foreign ownership refuses adoption without an admission or interrupt', asy
   expect(h.board.get(childID)).toBeUndefined();
   expect(h.prompt).not.toHaveBeenCalled();
   expect(h.interrupt).not.toHaveBeenCalled();
+});
+
+test('ordinary v2 recovery still refuses an incomplete round without importing it', async () => {
+  const h = harness({ busy: true });
+  const result = await h.recover({
+    parentSessionID: parentID,
+    requested: childID,
+  });
+  expect(result.kind).toBe('refused');
+  expect(h.board.get(childID)).toBeUndefined();
+  expect(h.prompt).not.toHaveBeenCalled();
+});
+
+test('ordinary v2 recovery imports a historical terminal without prompting', async () => {
+  const h = harness();
+  h.append({
+    id: 'old-idle',
+    type: 'idle',
+    outcome: 'succeeded',
+    time: { created: Date.now() + 1 },
+  });
+  const result = await h.recover({
+    parentSessionID: parentID,
+    requested: childID,
+  });
+  expect(result.kind).toBe('recovered');
+  expect(h.run().resultSummary).toBe('old result');
+  expect(h.prompt).not.toHaveBeenCalled();
+  expect(h.synthetic).not.toHaveBeenCalled();
+});
+
+test('queued recovery refuses conflicting agent evidence before admission', async () => {
+  const h = harness({ busy: true });
+  h.replace([
+    { id: 'old-user', type: 'user', agent: 'fixer', time: { created: 1 } },
+  ]);
+  await expect(h.revive()).rejects.toThrow('agent evidence conflicts');
+  expect(h.board.get(childID)).toBeUndefined();
+  expect(h.prompt).not.toHaveBeenCalled();
+});
+
+test('queued recovery refuses unreadable history before admission', async () => {
+  const h = harness({ busy: true });
+  h.replace([{ id: 'old-user', type: 'user' }]);
+  await expect(h.revive()).rejects.toThrow(
+    'transcript order is not verifiable',
+  );
+  expect(h.board.get(childID)).toBeUndefined();
+  expect(h.prompt).not.toHaveBeenCalled();
+});
+
+test('a host-proven alias queues into its original busy child', async () => {
+  const output = appendChildRefSuffix(
+    `<task id="${childID}" state="completed">\n<task_result>old result</task_result>\n</task>`,
+    {
+      parentSessionID: parentID,
+      sessionID: childID,
+      agent: 'explorer',
+      alias: 'exp-1',
+    },
+  );
+  const h = harness({
+    busy: true,
+    parentTranscript: [
+      {
+        id: 'parent-answer',
+        type: 'assistant',
+        time: { created: 1 },
+        content: [
+          {
+            type: 'tool',
+            name: 'subagent',
+            state: {
+              status: 'completed',
+              input: { agent: 'explorer' },
+              content: [{ type: 'text', text: output }],
+            },
+          },
+        ],
+      },
+    ],
+  });
+  expect(await h.revive('exp-1')).toContain('status: started');
+  expect(h.prompt).toHaveBeenCalledTimes(1);
+  expect(h.wait).not.toHaveBeenCalled();
+  expect(h.interrupt).not.toHaveBeenCalled();
+});
+
+test('an unproven alias cannot queue a continuation', async () => {
+  const h = harness({ busy: true });
+  await expect(h.revive('exp-1')).rejects.toThrow('no saved host pairing');
+  expect(h.prompt).not.toHaveBeenCalled();
 });
 
 test('concurrent adoption and late admission never duplicate the prompt or result', async () => {

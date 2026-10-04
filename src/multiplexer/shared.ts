@@ -7,6 +7,7 @@
 
 import { existsSync } from 'node:fs';
 import { basename, isAbsolute } from 'node:path';
+import type { MultiplexerViewer } from '../config/schema';
 import { crossSpawn } from '../utils/compat';
 import { log } from '../utils/logger';
 
@@ -47,9 +48,18 @@ export function buildOpencodeAttachCommand(
  */
 export type ViewerFlavor = 'v1' | 'v2-shared' | 'v2-remote';
 
+/**
+ * Which opencode TUI surface a viewer command opens: the full `tui`
+ * (default) or the lightweight `mini` interface. Derived from the config
+ * schema so the user-facing enum has one source of truth.
+ */
+export type ViewerSurface = MultiplexerViewer;
+
 export interface ViewerCommandOptions {
   /** Absolute host binary; defaults to the bare `opencode` name. */
   executable?: string;
+  /** TUI surface to open; defaults to the full `tui`. */
+  viewerSurface?: ViewerSurface;
 }
 
 /**
@@ -63,6 +73,14 @@ export interface ViewerCommandOptions {
  *   `OPENCODE_PASSWORD` secret is never part of the command text; adapters
  *   inject it at pane creation through their native spawn-time environment
  *   mechanism, or through `withParentEnvPassword` where none exists.
+ *
+ * With `viewerSurface: 'mini'` the same matrix targets the `opencode mini`
+ * interface instead: the `mini` subcommand is inserted after the binary and
+ * the v1 attach form is expressed as `mini --server <url>`, mirroring the
+ * flags `mini` shares with the full TUI. Mini rejects a positional
+ * directory, so the directory argument is omitted; every adapter pins the
+ * pane to the child session's project directory by its own means (herdr
+ * `--cwd`, kitty `--cwd=`, tmux `-c`, Zellij `--cwd`, cmux-tui `cd`).
  */
 export function buildViewCommand(
   flavor: ViewerFlavor,
@@ -72,7 +90,10 @@ export function buildViewCommand(
   options: ViewerCommandOptions = {},
 ): string {
   const executable = options.executable ?? 'opencode';
-  if (flavor === 'v1') {
+  const isMini = options.viewerSurface === 'mini';
+  const exe =
+    executable === 'opencode' ? executable : quoteShellArg(executable);
+  if (flavor === 'v1' && !isMini) {
     return buildOpencodeAttachCommand(
       sessionId,
       serverUrl,
@@ -80,24 +101,35 @@ export function buildViewCommand(
       executable,
     );
   }
+  if (flavor === 'v1') {
+    return [
+      exe,
+      ...(isMini ? ['mini'] : []),
+      '--server',
+      quoteShellArg(serverUrl),
+      '--session',
+      quoteShellArg(sessionId),
+    ].join(' ');
+  }
   const viewDir = normalizePathForShell(directory);
-  const exe =
-    executable === 'opencode' ? executable : quoteShellArg(executable);
+  const dirArgs = isMini ? [] : [quoteShellArg(viewDir)];
   if (flavor === 'v2-shared') {
     return [
       exe,
+      ...(isMini ? ['mini'] : []),
       '--session',
       quoteShellArg(sessionId),
-      quoteShellArg(viewDir),
+      ...dirArgs,
     ].join(' ');
   }
   return [
     exe,
+    ...(isMini ? ['mini'] : []),
     '--server',
     quoteShellArg(serverUrl),
     '--session',
     quoteShellArg(sessionId),
-    quoteShellArg(viewDir),
+    ...dirArgs,
   ].join(' ');
 }
 
@@ -112,6 +144,18 @@ const POSIX_SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh']);
  */
 export function isPosixShell(shell: string): boolean {
   return POSIX_SHELLS.has(shellName(shell));
+}
+
+/**
+ * Whether the shell parses `a && b` as a command sequence. Everything in
+ * POSIX_SHELLS does, and fish has supported `&&` since 3.0; nu, cmd, and
+ * PowerShell do not. Adapters that chain commands into the viewer script
+ * must gate on this the same way they gate POSIX-only constructs.
+ */
+const AND_CHAIN_SHELLS = new Set([...POSIX_SHELLS, 'fish']);
+
+export function shellSupportsAndChain(shell = process.env.SHELL): boolean {
+  return AND_CHAIN_SHELLS.has(shellName(shell ?? '/bin/sh'));
 }
 
 /**

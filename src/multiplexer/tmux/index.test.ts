@@ -193,6 +193,28 @@ describe('TmuxMultiplexer', () => {
     expect(sharedSplit).not.toContain('OPENCODE_PASSWORD');
   });
 
+  test('viewer "mini" runs opencode mini and pins the split directory', async () => {
+    const { TmuxMultiplexer } = await importFreshTmux();
+    const tmux = new TmuxMultiplexer('main-vertical', 60);
+
+    await tmux.spawnPane(
+      'session-mini',
+      'Mini worker',
+      'http://localhost:4096',
+      '/repo',
+      { viewerFlavor: 'v2-shared', viewerSurface: 'mini' },
+    );
+
+    const split = commandContaining('split-window');
+    // Mini commands omit the directory, so the split pins it with `-c`.
+    const cwdIndex = split?.indexOf('-c') ?? -1;
+    expect(cwdIndex).toBeGreaterThan(-1);
+    expect(split?.[cwdIndex + 1]).toBe('/repo');
+    const cmd = split?.at(-1) ?? '';
+    expect(cmd).toContain("opencode mini --session 'session-mini'");
+    expect(cmd).not.toContain('/repo');
+  });
+
   test('spawnPane re-resolves the anchor from the environment at spawn time', async () => {
     const { TmuxMultiplexer } = await importFreshTmux();
     // Construction-time TMUX_PANE is %1; the spawn-time value must win.

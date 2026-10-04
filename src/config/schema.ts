@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { STRING_ONLY_PERMISSION_KEYS } from '../agents/permissions';
 import { MarketplacePackageIdSchema } from '../marketplace/schemas';
 import {
   AGENT_THEME_COLORS,
@@ -20,29 +21,27 @@ const PermissionRuleSchema = z.union([
   z.record(z.string(), PermissionActionSchema),
 ]);
 
-// Known keys are typed for typo protection; .catchall() types the index
-// signature to match the SDK's PermissionConfig, so no cast is needed at
-// the assignment site. Unknown tool keys are still validated as rules.
+// A permission object's key order IS its precedence: opencode compiles the
+// entries into {action, resource, effect} rules and evaluates them
+// last-match-wins, so authors write the wildcard base ("*": "deny") first
+// and specific allows after. zod's z.object() emits declared keys first and
+// catchall keys after, which silently inverted that order and made a
+// read-only preset deny its own allows. A record parse preserves author
+// order; the string-only keys keep their narrower validation below.
 const PermissionObjectSchema = z
-  .object({
-    read: PermissionRuleSchema.optional(),
-    edit: PermissionRuleSchema.optional(),
-    glob: PermissionRuleSchema.optional(),
-    grep: PermissionRuleSchema.optional(),
-    list: PermissionRuleSchema.optional(),
-    bash: PermissionRuleSchema.optional(),
-    task: PermissionRuleSchema.optional(),
-    external_directory: PermissionRuleSchema.optional(),
-    lsp: PermissionRuleSchema.optional(),
-    skill: PermissionRuleSchema.optional(),
-    todowrite: PermissionActionSchema.optional(),
-    question: PermissionActionSchema.optional(),
-    webfetch: PermissionActionSchema.optional(),
-    websearch: PermissionActionSchema.optional(),
-    codesearch: PermissionActionSchema.optional(),
-    doom_loop: PermissionActionSchema.optional(),
-  })
-  .catchall(PermissionRuleSchema);
+  .record(z.string(), PermissionRuleSchema)
+  .superRefine((permission, ctx) => {
+    for (const key of STRING_ONLY_PERMISSION_KEYS) {
+      const value = permission[key];
+      if (value !== undefined && typeof value !== 'string') {
+        ctx.addIssue({
+          code: 'custom',
+          path: [key],
+          message: "Expected 'ask' | 'allow' | 'deny'",
+        });
+      }
+    }
+  });
 
 export const PermissionConfigSchema = z.union([
   PermissionActionSchema,
@@ -153,12 +152,23 @@ const MultiplexerMainPaneSizeSchema = z
 const MultiplexerCmuxTuiBinarySchema = z.string().min(1);
 
 /**
+ * Which opencode TUI surface subagent panes open. `tui` (default) is the
+ * full interface; `mini` launches the lightweight `opencode mini`.
+ */
+export const MultiplexerViewerSchema = z.enum(['tui', 'mini']);
+
+export type MultiplexerViewer = z.infer<typeof MultiplexerViewerSchema>;
+
+/**
  * Multiplexer keys accepted by versions before 2.4.x but no longer
  * supported. `zellij_pane_mode` selected the removed agent-tab placement;
  * zellij panes now always open in the tab containing the parent pane.
  *
  * The schema strips unknown keys silently, so the raw input must be
  * inspected before validation to warn instead of dropping the key quietly.
+ * The same per-key check covers invalid `type`, `layout`, `main_pane_size`,
+ * `cmux_tui_binary`, and `viewer` values: any of them disables pane
+ * management with one diagnostic.
  */
 export const DEPRECATED_MULTIPLEXER_KEYS = ['zellij_pane_mode'] as const;
 
@@ -170,7 +180,8 @@ export const MULTIPLEXER_INVALID_VALUE_MESSAGE =
   'Invalid multiplexer config value; pane management is disabled. Expected ' +
   'type (auto|tmux|zellij|herdr|kitty|cmux-tui|none), layout ' +
   '(main-horizontal|main-vertical|tiled|even-horizontal|even-vertical), ' +
-  'main_pane_size (20-80), cmux_tui_binary (non-empty string).';
+  'main_pane_size (20-80), cmux_tui_binary (non-empty string), ' +
+  'viewer (tui|mini).';
 
 export const MULTIPLEXER_RENAMED_TYPE_MESSAGE =
   'multiplexer.type "cmux" was renamed to "cmux-tui"; update your config.';
@@ -232,6 +243,12 @@ function invalidMultiplexerKeys(config: Record<string, unknown>): string[] {
       .success
   ) {
     invalid.push('cmux_tui_binary');
+  }
+  if (
+    'viewer' in config &&
+    !MultiplexerViewerSchema.safeParse(config.viewer).success
+  ) {
+    invalid.push('viewer');
   }
   return invalid;
 }
@@ -318,6 +335,11 @@ export const MultiplexerConfigStrictSchema = z.object({
   cmux_tui_binary: MultiplexerCmuxTuiBinarySchema.optional().describe(
     'Explicit path to the cmux-tui binary. When unset, the adapter probes ' +
       'PATH for `cmux-tui` first and falls back to `cmux`.',
+  ),
+  viewer: MultiplexerViewerSchema.default('mini').describe(
+    'Which opencode TUI surface subagent panes open. "mini" (default) ' +
+      'launches the lightweight `opencode mini`; "tui" runs the full ' +
+      'interface.',
   ),
 });
 
@@ -910,6 +932,14 @@ export const DISABLED_HOOKS_VALUES = [
   'phase-reminder',
   'foreground-fallback',
   'deepwork-guard',
+  'chat-headers',
+  'cache-monitor',
+  'json-error-recovery',
+  'tool-loop-guard',
+  'search-path-guard',
+  'absolute-path-rescue',
+  'apply-patch',
+  'council-inject',
 ] as const;
 
 /** Valid `disabled_commands` entries; single source for the enum and the loader. */
@@ -999,7 +1029,7 @@ export const RawPluginConfigSchema = z
       .describe(
         'Hook names to disable completely. Valid values: ' +
           DISABLED_HOOKS_VALUES.join(', ') +
-          '. "phase-reminder" is not registered, so orchestrator phase reminders are never injected; "foreground-fallback" marks the fallback manager inert: it is still constructed but never triggers automatic intervention, same effect as fallback.enabled = false. Unknown values are stripped with a warning when the config loads. A value consisting only of unknown names is treated as unset, so a lower config layer\'s list still applies.',
+          '. "phase-reminder" is not registered, so orchestrator phase reminders are never injected; "foreground-fallback" marks the fallback manager inert: it is still constructed but never triggers automatic intervention, same effect as fallback.enabled = false; "chat-headers" is not registered, so the Copilot x-initiator header is never stamped (v1 chat.headers and the v2 model.request bridge); "cache-monitor" stops the prompt-cache bust watchdog, so cache warnings are never logged; the on-demand tool guards ("json-error-recovery", "tool-loop-guard", "search-path-guard", "absolute-path-rescue", "apply-patch") stop intercepting tool calls entirely, so malformed output, repeated identical calls, and invalid or guessed paths surface raw to the model; "council-inject" is not registered, so the keyword-triggered Council Mode injection is never appended to orchestrator messages. Unknown values are stripped with a warning when the config loads. A value consisting only of unknown names is treated as unset, so a lower config layer\'s list still applies.',
       ),
     disabled_commands: z
       .array(z.enum(DISABLED_COMMANDS_VALUES))
