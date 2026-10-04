@@ -28,11 +28,7 @@ import {
   appendTaggedSyntheticPart,
   isTaggedPart,
 } from '../cache-safe-injection';
-import {
-  findLatestUserMessage,
-  isUserMessageWithParts,
-  type MessagePart,
-} from '../types';
+import { findLatestUserMessage, isUserMessageWithParts } from '../types';
 
 export const COUNCIL_INJECT_METADATA_KEY = 'oh-my-opencode-slim.councilInject';
 
@@ -150,18 +146,36 @@ export function createCouncilInjectHook(options: CouncilInjectOptions) {
           continue;
         }
 
-        // Scan every eligible text part (not just the first): a trigger in
-        // any part of a multi-part message still injects.
+        // Collect eligible text parts once: the message-level slash gate
+        // and the trigger scan share the same eligibility.
+        const eligibleTexts: string[] = [];
+        for (const part of message.parts) {
+          if (
+            part.type === 'text' &&
+            typeof part.text === 'string' &&
+            part.synthetic !== true &&
+            !isInternalInitiatorPart(part)
+          ) {
+            eligibleTexts.push(part.text);
+          }
+        }
+
+        // Slash commands never trigger (documented behavior): a message
+        // whose FIRST eligible text part leads with a slash is a host
+        // command, and the whole message is skipped — a later part
+        // containing a trigger word must not inject around the command.
         if (
-          message.parts.some(
-            (part: MessagePart) =>
-              part.type === 'text' &&
-              typeof part.text === 'string' &&
-              part.synthetic !== true &&
-              !isInternalInitiatorPart(part) &&
-              matchesCouncilTrigger(part.text),
+          eligibleTexts.length > 0 &&
+          SLASH_COMMAND_LEAD_PATTERN.test(
+            stripCodeForTriggerMatch(eligibleTexts[0]),
           )
         ) {
+          continue;
+        }
+
+        // Scan every eligible text part (not just the first): a trigger in
+        // any part of a multi-part message still injects.
+        if (eligibleTexts.some((text) => matchesCouncilTrigger(text))) {
           appendTaggedSyntheticPart(message, {
             text: block,
             metadataKey: COUNCIL_INJECT_METADATA_KEY,

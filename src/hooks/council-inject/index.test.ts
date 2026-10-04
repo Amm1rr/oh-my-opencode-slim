@@ -152,6 +152,26 @@ describe('createCouncilInjectHook', () => {
     expect(output.messages[0].parts[2]).toMatchObject({ synthetic: true });
   });
 
+  test('a leading slash command disables the whole multipart message', async () => {
+    const output = {
+      messages: [
+        {
+          info: { role: 'user', agent: 'orchestrator', sessionID: 's1' },
+          parts: [
+            { type: 'text', text: '/preset openai' },
+            { type: 'text', text: 'and run a council after that' },
+          ],
+        },
+      ],
+    };
+
+    await transform({}, output);
+
+    // Slash commands never trigger, even when a later part carries a
+    // trigger word.
+    expect(output.messages[0].parts.length).toBe(2);
+  });
+
   test('does not inject onto internal initiator parts', async () => {
     const output = {
       messages: [

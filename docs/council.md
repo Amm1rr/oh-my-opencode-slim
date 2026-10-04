@@ -38,8 +38,11 @@ in parallel via the host's native delegation tool (`task()` on v1,
 `subagent()` on v2) at depth 1, and each
 councillor appears as its own TUI pane.
 
-The council agent waits for all councillors to respond (or fail), then
-synthesizes their results into a single report.
+Once every councillor has responded (or the orchestrator's bounded wait on
+a silent seat expires — see [Failure behavior](#failure-behavior)), the
+orchestrator passes the collected responses to the council agent, which
+synthesizes them into a single report. The council agent itself waits for
+no one: it has no tools and starts from whatever the orchestrator hands it.
 
 ### Who dispatches whom
 
