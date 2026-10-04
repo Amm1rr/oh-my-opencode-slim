@@ -271,7 +271,7 @@ describe('CmuxMultiplexer', () => {
 
     const mini = runScript();
     expect(mini).toContain("cd '/repo' && ");
-    expect(mini).toContain("mini --session '" + CHILD_ID + "'");
+    expect(mini).toContain(`mini --session '${CHILD_ID}'`);
     expect(mini).not.toContain('--server');
   });
 
@@ -310,7 +310,7 @@ describe('CmuxMultiplexer', () => {
 
       const mini = runScript();
       expect(mini).not.toContain('cd ');
-      expect(mini).toContain("mini --session '" + CHILD_ID + "'");
+      expect(mini).toContain(`mini --session '${CHILD_ID}'`);
     } finally {
       if (originalShell === undefined) {
         delete process.env.SHELL;
