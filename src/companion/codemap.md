@@ -14,6 +14,8 @@ The companion system consists of two main components following a **Producer-Cons
   - Publishes live session model metadata for active agent tiles; variants are retained only from observed live chat selections, never inferred from static defaults
   - Maintains state in a JSON file at `~/.local/share/opencode/storage/oh-my-opencode-slim/companion-state.json`
   - Spawns the companion binary process when enabled
+  - Publishes the current/available preset catalog for the active project
+  - Consumes typed preset requests from the native Companion and applies them through the shared preset-switch domain
   - Implements a locking mechanism for concurrent state writes
 
 - **Consumer (updater.ts)**: Binary installation and update logic
