@@ -262,10 +262,8 @@ test('queued recovery refuses conflicting agent evidence before admission', asyn
 
 test('queued recovery refuses unreadable history before admission', async () => {
   const h = harness({ busy: true });
-  h.replace([{ id: 'old-user', type: 'user' }]);
-  await expect(h.revive()).rejects.toThrow(
-    'transcript order is not verifiable',
-  );
+  h.replace([assistant('orphan-answer', 'no delivered input')]);
+  await expect(h.revive()).rejects.toThrow('no delivered user round');
   expect(h.board.get(childID)).toBeUndefined();
   expect(h.prompt).not.toHaveBeenCalled();
 });
