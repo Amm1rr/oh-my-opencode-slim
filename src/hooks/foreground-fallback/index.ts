@@ -1722,7 +1722,8 @@ export class ForegroundFallbackManager {
     const configuredChain =
       agentName === undefined ? undefined : this.chains[agentName];
     const rearmHead =
-      configuredChain?.[0] ?? this.resolveChain(agentName, observedModel)[0];
+      configuredChain?.[0] ??
+      this.resolveChain(agentName, observedModel).chain[0];
     if (observedModel !== rearmHead) return;
     this.sessionTried.set(sessionID, new Set());
     this.sessionRetries.delete(sessionID);
@@ -1735,7 +1736,7 @@ export class ForegroundFallbackManager {
     const observedModel = this.sessionModel.get(sessionID);
     let currentModel = observedModel;
     const agentName = this.sessionAgent.get(sessionID);
-    const chain = this.resolveChain(agentName, currentModel);
+    const { chain, source } = this.resolveChain(agentName, currentModel);
     // Callers pre-check via hasFallbackChain; keep as defensive guard only.
     if (!chain.length) return;
     // When the agent is known but no model was captured (common for
@@ -1843,8 +1844,8 @@ export class ForegroundFallbackManager {
       });
       return;
     }
-    const variant = agentName
-      ? this.chainEntries[agentName]?.find((entry) => entry.id === nextModel)
+    const variant = source
+      ? this.chainEntries[source]?.find((entry) => entry.id === nextModel)
           ?.variant
       : undefined;
     return { agentName, currentModel, nextModel, ref, variant };
@@ -2211,7 +2212,7 @@ export class ForegroundFallbackManager {
       this.resolveChain(
         this.sessionAgent.get(sessionID),
         this.sessionModel.get(sessionID),
-      ).length > 0
+      ).chain.length > 0
     );
   }
 
@@ -2234,7 +2235,7 @@ export class ForegroundFallbackManager {
   private resolveChain(
     agentName: string | undefined,
     currentModel: string | undefined,
-  ): string[] {
+  ): { chain: string[]; source?: string } {
     // The finalized registry can replace an agent's chain after manager
     // construction (for example, with marketplace-provided candidates).
     // Keep the source object live rather than freezing its startup snapshot.
@@ -2257,21 +2258,21 @@ export class ForegroundFallbackManager {
         // Empty chains (disableChain) must stay empty: prepending onto []
         // would resurrect fallback for an agent whose chain was disabled.
         if (currentModel && chain.length > 0 && !chain.includes(currentModel)) {
-          return [currentModel, ...chain];
+          return { chain: [currentModel, ...chain], source: agentName };
         }
-        return chain;
+        return { chain, source: agentName };
       }
       // Any known agent without a configured chain: no fallback.
       // Don't bleed into other agents' chains via model-matching —
       // that switches the session to the wrong agent (e.g. Build
       // inherits Orchestrator's chain and becomes Orchestrator).
-      return [];
+      return { chain: [] };
     }
 
     // Agent unknown: try to infer from the current model.
     if (currentModel) {
-      for (const chain of Object.values(this.chains)) {
-        if (chain.includes(currentModel)) return chain;
+      for (const [name, chain] of Object.entries(this.chains)) {
+        if (chain.includes(currentModel)) return { chain, source: name };
       }
     }
 
@@ -2287,6 +2288,6 @@ export class ForegroundFallbackManager {
         }
       }
     }
-    return all;
+    return { chain: all };
   }
 }

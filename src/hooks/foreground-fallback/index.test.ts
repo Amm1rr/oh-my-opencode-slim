@@ -1519,6 +1519,106 @@ describe('foreground fallback redo: host retry budget', () => {
     expect(refs).toHaveLength(1);
     expect(Object.hasOwn(refs[0], 'variant')).toBe(false);
   });
+
+  test('T11: an unknown agent carries the inferred chain variant to replay and retry', async () => {
+    const sid = 'inferred-variant-replay';
+    const chain = ['test/a', { id: 'test/b', variant: 'fast' }];
+    const assistant = {
+      type: 'message.updated',
+      properties: {
+        info: {
+          sessionID: sid,
+          role: 'assistant',
+          providerID: 'test',
+          modelID: 'a',
+        },
+      },
+    };
+    const v1 = makeManager({ chain });
+    await v1.manager.handleEvent(assistant);
+    await v1.manager.handleEvent(redoEvents.error(sid));
+
+    const v2 = makeManager({ chain, hostFlavor: 'v2' });
+    await v2.manager.handleEvent(assistant);
+    await v2.manager.handleEvent(redoEvents.error(sid));
+    const refs: Array<{ providerID: string; id: string; variant?: string }> =
+      [];
+    await v2.manager.handleV2Retry(
+      {
+        sessionID: 'inferred-variant-hook',
+        model: { providerID: 'test', id: 'a' },
+        error: { message: 'rate limit' },
+        decision: { retry: false },
+      },
+      async (_sid, ref) => {
+        refs.push(ref);
+      },
+    );
+
+    expect(v1.mocks.promptAsync).toHaveBeenCalledTimes(1);
+    expect(v2.mocks.promptAsync).toHaveBeenCalledTimes(1);
+    expect({
+      v1: v1.mocks.promptAsync.mock.calls[0]?.[0],
+      v2: v2.mocks.promptAsync.mock.calls[0]?.[0],
+      refs,
+    }).toMatchObject({
+      v1: {
+        body: { model: { providerID: 'test', modelID: 'b' }, variant: 'fast' },
+      },
+      v2: {
+        body: { model: { providerID: 'test', modelID: 'b' }, variant: 'fast' },
+        modelVariant: 'fast',
+      },
+      refs: [{ providerID: 'test', id: 'b', variant: 'fast' }],
+    });
+  });
+
+  test('T12: an unknown agent and model use the merged list without a variant', async () => {
+    const sid = 'merged-variant-replay';
+    const { mocks } = createMockClient();
+    const manager = new ForegroundFallbackManager(
+      {
+        orchestrator: [{ id: 'test/a', variant: 'fast' }],
+        explorer: [{ id: 'test/a', variant: 'slow' }],
+      },
+      true,
+      { directory: '/test', hostFlavor: 'v2' } as never,
+    );
+    await manager.handleEvent({
+      type: 'message.updated',
+      properties: {
+        info: {
+          sessionID: sid,
+          role: 'assistant',
+          providerID: 'test',
+          modelID: 'unknown',
+        },
+      },
+    });
+    await manager.handleEvent(redoEvents.error(sid));
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+    const call = mocks.promptAsync.mock.calls[0]?.[0] as {
+      body: Record<string, unknown>;
+    };
+    expect(call.body.model).toEqual({ providerID: 'test', modelID: 'a' });
+    expect(Object.hasOwn(call.body, 'variant')).toBe(false);
+    expect(Object.hasOwn(call, 'modelVariant')).toBe(false);
+
+    const refs: Array<{ providerID: string; id: string; variant?: string }> =
+      [];
+    await manager.handleV2Retry(
+      {
+        sessionID: 'merged-variant-hook',
+        model: { providerID: 'test', id: 'unknown' },
+        error: { message: 'rate limit' },
+        decision: { retry: false },
+      },
+      async (_sid, ref) => {
+        refs.push(ref);
+      },
+    );
+    expect(refs).toEqual([{ providerID: 'test', id: 'a' }]);
+  });
 });
 
 describe('ForegroundFallbackManager v2 retry hook', () => {
