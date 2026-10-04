@@ -281,8 +281,6 @@ async function readCurrentChildModel(
 ): Promise<ContinuationModelSelection | undefined> {
   if (!isRecord(session)) return undefined;
 
-  if (signal.aborted) return undefined;
-
   let messages: unknown;
   try {
     messages = session.messages;
@@ -312,7 +310,10 @@ async function readCurrentChildModel(
         message.info.role === 'user'
           ? message.info.model
           : message.info.role === 'assistant'
-            ? message.info
+            ? {
+                providerID: message.info.providerID,
+                modelID: message.info.modelID,
+              }
             : undefined,
         message.info.variant,
       );

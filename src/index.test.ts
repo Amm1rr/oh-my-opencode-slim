@@ -3185,7 +3185,7 @@ describe('plugin config model inheritance', () => {
     };
   }
 
-  test('parent primary in the child chain is not an active fallback', async () => {
+  test('only a real parent fallback routes, keeping the entry variant', async () => {
     const hooks = await loadConfiguredPlugin({
       agents: {
         orchestrator: { model: ['provider/primary', 'backup/parent'] },

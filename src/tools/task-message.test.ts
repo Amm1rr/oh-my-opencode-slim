@@ -176,46 +176,7 @@ describe('task_message', () => {
     });
   });
 
-  test('skips malformed recent identities for the latest valid message', async () => {
-    const board = new BackgroundJobBoard();
-    registerRunningChild(board);
-    const prompt = makePrompt();
-    client = {
-      session: {
-        messages: mock(async () => ({
-          data: [
-            {
-              info: {
-                role: 'user',
-                model: {
-                  providerID: 'anthropic',
-                  modelID: 'claude-sonnet',
-                  variant: 'high',
-                },
-              },
-            },
-            { info: { role: 'assistant' } },
-          ],
-        })),
-        prompt,
-      },
-    };
-
-    await createTool(board).execute(
-      { task_id: 'ses_child1', message: 'Continue with the fix.' },
-      { sessionID: 'parent-1' } as any,
-    );
-
-    expect(prompt.mock.calls[0]?.[0].body).toEqual({
-      agent: 'fixer',
-      model: { providerID: 'anthropic', modelID: 'claude-sonnet' },
-      variant: 'high',
-      noReply: true,
-      parts: [{ type: 'text', text: 'Continue with the fix.' }],
-    });
-  });
-
-  test('skips compaction summaries when pinning the executing step', async () => {
+  test('skips compaction summaries and malformed steps when pinning the model', async () => {
     const board = new BackgroundJobBoard();
     registerRunningChild(board);
     const prompt = makePrompt();
@@ -229,6 +190,7 @@ describe('task_message', () => {
             variant: 'high',
           },
         },
+        { info: { role: 'assistant' } },
         {
           info: {
             role: 'assistant',
