@@ -13,13 +13,9 @@ import {
 
 /** Recursively merge JSON objects; arrays and scalar values are replaced.
  * The override layer's keys come first, in the order the layer writes
- * them; base keys the layer does not mention follow. Key order is
- * precedence for permission objects (opencode compiles them into rules
- * and evaluates last-match-wins), so a later layer must keep its written
- * order for the keys it (re)defines — spreading the base first would pin
- * redefined keys to their base positions and let a later wildcard shadow
- * the allows written after it. Order is irrelevant to every other merged
- * shape, which is looked up by key. */
+ * them; base keys the layer does not mention follow. Order is irrelevant
+ * to every merged shape except `permission` objects, which merge through
+ * `mergePermission` (key order is their precedence). */
 export function deepMerge<T extends Record<string, unknown>>(
   base?: T,
   override?: T,
@@ -32,21 +28,13 @@ export function deepMerge<T extends Record<string, unknown>>(
     const baseVal = base[key];
     const overrideVal = override[key];
 
-    if (
-      typeof baseVal === 'object' &&
-      baseVal !== null &&
-      typeof overrideVal === 'object' &&
-      overrideVal !== null &&
-      !Array.isArray(baseVal) &&
-      !Array.isArray(overrideVal)
-    ) {
+    if (isRecord(baseVal) && isRecord(overrideVal)) {
       defineOwn(
         result,
         key as string,
-        deepMerge(
-          baseVal as Record<string, unknown>,
-          overrideVal as Record<string, unknown>,
-        ) as T[keyof T],
+        key === 'permission'
+          ? mergePermission(baseVal, overrideVal)
+          : deepMerge(baseVal, overrideVal),
       );
     } else {
       defineOwn(result, key as string, overrideVal);
@@ -58,6 +46,92 @@ export function deepMerge<T extends Record<string, unknown>>(
     }
   }
   return result;
+}
+
+/** Strictness of a permission action: deny > ask > allow. */
+const STRICTNESS: Record<string, number> = { allow: 0, ask: 1, deny: 2 };
+const ACTION_BY_STRICTNESS = ['allow', 'ask', 'deny'];
+
+/** Merge two permission maps (top-level or a nested pattern map). opencode
+ * evaluates the compiled rules last-match-wins, so key order is
+ * precedence. The rule: a later layer's wildcard (`"*"`) can tighten
+ * anything but can only loosen what the layer names explicitly.
+ *
+ * - The layer's keys keep the order it writes them; a key both layers
+ *   define lands at the layer's position (nested maps merge recursively
+ *   against the layer's own nested `"*"`).
+ * - Base keys the layer does not mention go before the layer's keys, so
+ *   its wildcard shadows them — except entries at least as strict as that
+ *   wildcard, which go after it and keep winning. A pattern map holding
+ *   such an entry moves whole, in its own order, with each looser entry
+ *   raised to the wildcard's action: overlapping patterns keep their
+ *   precedence, and nothing in it ends up looser than the wildcard.
+ *   Without a layer wildcard only denies move after, unchanged.
+ * - The base's own `"*"` never moves: it is the fallback the layer's
+ *   named keys refine. */
+function mergePermission(
+  base: Record<string, unknown>,
+  override: Record<string, unknown>,
+): Record<string, unknown> {
+  const wildcard = ownValue(override, '*');
+  const hasWildcard = typeof wildcard === 'string' && wildcard in STRICTNESS;
+  const threshold = STRICTNESS[hasWildcard ? wildcard : 'deny'];
+  const before: Record<string, unknown> = {};
+  const after: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(base)) {
+    if (Object.hasOwn(override, key)) continue;
+    const strict = key === '*' ? undefined : strictPart(value, threshold);
+    if (strict === undefined) defineOwn(before, key, value);
+    // Without a layer wildcard nothing shadows the looser entries, so the
+    // whole value moves to keep them.
+    else defineOwn(after, key, hasWildcard ? strict : value);
+  }
+
+  const result = before;
+  for (const [key, overrideVal] of Object.entries(override)) {
+    const baseVal = ownValue(base, key);
+    defineOwn(
+      result,
+      key,
+      isRecord(baseVal) && isRecord(overrideVal)
+        ? mergePermission(baseVal, overrideVal)
+        : overrideVal,
+    );
+  }
+  for (const [key, value] of Object.entries(after)) {
+    defineOwn(result, key, value);
+  }
+  return result;
+}
+
+/** A permission entry for the after-the-wildcard position, or `undefined`
+ * when nothing in it is at least as strict as `threshold`: the scalar
+ * itself, or the whole pattern map with each looser action raised to the
+ * `threshold` action (map order is precedence between its patterns). */
+function strictPart(value: unknown, threshold: number): unknown {
+  const strictness = (action: unknown) =>
+    typeof action === 'string' ? (STRICTNESS[action] ?? -1) : -1;
+  if (typeof value === 'string') {
+    return strictness(value) >= threshold ? value : undefined;
+  }
+  if (!isRecord(value)) return undefined;
+  const entries = Object.entries(value);
+  if (!entries.some(([, action]) => strictness(action) >= threshold)) {
+    return undefined;
+  }
+  const floor = ACTION_BY_STRICTNESS[threshold];
+  const raised: Record<string, unknown> = {};
+  for (const [pattern, action] of entries) {
+    defineOwn(
+      raised,
+      pattern,
+      typeof action === 'string' && strictness(action) < threshold
+        ? floor
+        : action,
+    );
+  }
+  return raised;
 }
 
 /**
@@ -87,9 +161,9 @@ export function mergeAgentOverrides(
   const canonicalBase = canonicalizeAgentAliases(base);
   const canonicalOverride = canonicalizeAgentAliases(override);
   const merged = deepMerge(canonicalBase, canonicalOverride) ?? canonicalBase;
-  // Alias fields are merged first, so an alias model can temporarily appear
-  // beside a canonical inheritModelFrom directive. Remember that directive
-  // from the original layer before clearing the inherited model below.
+  // Alias fields can temporarily appear beside a canonical inheritModelFrom
+  // directive. Remember that directive from the original layer before
+  // clearing the inherited model below.
   const canonicalInheritanceDirectives = new Set(
     Object.entries(override)
       .filter(([name]) => {
