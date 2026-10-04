@@ -173,6 +173,41 @@ test('skips an unreadable ancestor without hiding valid project presets', () => 
   }
 });
 
+test('ignores schema-invalid ancestor pins and presets just like runtime loading', () => {
+  const workspace = path.join(tempDir, 'workspace');
+  const worktree = path.join(workspace, 'worktrees', 'feature');
+  for (const directory of [workspace, worktree]) {
+    fs.mkdirSync(path.join(directory, '.opencode'), { recursive: true });
+  }
+  fs.writeFileSync(
+    path.join(workspace, '.opencode', 'oh-my-opencode-slim.json'),
+    JSON.stringify({
+      autoUpdate: 'not-a-boolean',
+      preset: 'shared',
+      presets: { discarded: { fixer: { model: 'test/discarded' } } },
+    }),
+  );
+  fs.writeFileSync(
+    path.join(worktree, '.opencode', 'oh-my-opencode-slim.json'),
+    JSON.stringify({ presets: { local: { fixer: { model: 'test/local' } } } }),
+  );
+
+  const config = loadPluginConfig(worktree, { silent: true });
+  expect(config.preset).toBeUndefined();
+  expect(readProjectConfig(worktree)?.preset).toBeUndefined();
+  expect(Object.keys(getAllConfiguredPresets(worktree))).toEqual(['local']);
+  expect(getPresetSource(worktree, 'discarded')).toBe('none');
+  const result = switchPresetOnDisk(worktree, 'local', config);
+  expect(result.ok).toBe(true);
+  const userPath = path.join(
+    tempDir,
+    'xdg-config',
+    'opencode',
+    'oh-my-opencode-slim.json',
+  );
+  expect(JSON.parse(fs.readFileSync(userPath, 'utf-8')).preset).toBe('local');
+});
+
 test('preset lookup uses runtime model inheritance rules across all layers', () => {
   const workspace = path.join(tempDir, 'workspace');
   const worktree = path.join(workspace, 'worktrees', 'feature');
@@ -1587,7 +1622,7 @@ describe('deletePreset', () => {
       path.join(projectDir, 'oh-my-opencode-slim.jsonc'),
       JSON.stringify({
         presets: {
-          childInProject: { extends: 'baseInUser', agents: {} },
+          childInProject: { extends: 'baseInUser' },
         },
       }),
     );

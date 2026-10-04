@@ -11,7 +11,11 @@ import type {
 } from '../config';
 import { normalizePreset, PresetResolutionError } from '../config';
 import { AGENT_ALIASES } from '../config/constants';
-import { findPluginConfigPaths, mergePluginConfigs } from '../config/loader';
+import {
+  findPluginConfigPaths,
+  loadRawPluginConfigFromPath,
+  mergePluginConfigs,
+} from '../config/loader';
 import { mergePresetMaps, resolvePresetDefinition } from '../config/presets';
 import {
   isPrototypeSensitiveName,
@@ -34,13 +38,6 @@ function setOwn(
     enumerable: true,
     configurable: true,
   });
-}
-
-function interpolateConfigEnvironment(raw: string): string {
-  return raw.replace(
-    /\{env:([^}]+)\}/g,
-    (_, variableName) => process.env[variableName] ?? '',
-  );
 }
 
 /**
@@ -457,18 +454,9 @@ export function readProjectConfig(
   const { projectConfigPaths } = findPluginConfigPaths(directory);
   let config: RawPluginConfig | undefined;
   for (const configPath of projectConfigPaths) {
-    try {
-      const raw = fs.readFileSync(configPath, 'utf-8').replace(/^\uFEFF/, '');
-      const layer = JSON.parse(
-        interpolateConfigEnvironment(stripJsonComments(raw)),
-      ) as RawPluginConfig;
-      if (typeof layer !== 'object' || layer === null || Array.isArray(layer)) {
-        continue;
-      }
+    const layer = loadRawPluginConfigFromPath(configPath, { silent: true });
+    if (layer) {
       config = mergePluginConfigs(config ?? {}, layer);
-    } catch {
-      // Match the runtime loader: a bad layer must not hide valid ancestors
-      // or closer configuration, including an inherited preset pin.
     }
   }
   return config ?? null;

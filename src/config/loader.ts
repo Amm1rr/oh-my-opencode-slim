@@ -412,6 +412,15 @@ export function loadPluginConfigFromPath(
   configPath: string,
   options?: LoadPluginConfigOptions,
 ): RawPluginConfig | null {
+  const config = loadRawPluginConfigFromPath(configPath, options);
+  return config ? normalizePresetDeclarations(config) : null;
+}
+
+/** Validate a layer without changing its editable preset declaration syntax. */
+export function loadRawPluginConfigFromPath(
+  configPath: string,
+  options?: LoadPluginConfigOptions,
+): RawPluginConfig | null {
   try {
     // Strip a UTF-8 BOM (RFC 8259 permits one); JSON.parse would otherwise
     // fail with "Unrecognized token" and silently drop the whole config.
@@ -595,7 +604,7 @@ export function loadPluginConfigFromPath(
       };
     }
 
-    return normalizePresetDeclarations(layerConfig);
+    return layerConfig;
   } catch (error) {
     // File doesn't exist or isn't readable - this is expected and fine
     if (
