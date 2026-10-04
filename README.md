@@ -193,7 +193,9 @@ example and precedence rules.
 ### Preset Docs
 
 Project settings in `.opencode/oh-my-opencode-slim.json[c]` are inherited from
-ancestor directories, including above repository and nested worktree roots.
+ancestor directories, matching the host's discovery: v2 walks to the filesystem
+root; v1 stops at the Git worktree boundary. `OPENCODE_DISABLE_PROJECT_CONFIG`
+disables the project walk.
 Closer settings override matching fields. Prompt files and the optional
 `skills_include_local` grants also search ancestor `.opencode` directories,
 following OpenCode's directory discovery. See

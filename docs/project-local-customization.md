@@ -9,10 +9,19 @@ This document describes how to configure and customize oh-my-opencode-slim on a 
 > **Only work in and run OpenCode within repositories you explicitly trust.**
 
 Configuration discovery also includes `.opencode/oh-my-opencode-slim.json[c]`
-in every ancestor directory through the filesystem root, even above repository
-and worktree boundaries. Prompt files and optional local skill grants use the
-same ancestor directory walk. Review and trust those ancestor directories too.
-This matches the directory discovery in OpenCode 2.0.22's
+in eligible ancestor directories. This matches the host's discovery: v2 walks
+through the filesystem root, even above repository and worktree boundaries;
+v1 stops at the Git worktree boundary, inclusive, or the filesystem root when
+there is no Git boundary. Prompt files and optional local skill grants use the
+same walk. `OPENCODE_DISABLE_PROJECT_CONFIG=true` or `1` disables that project
+walk, leaving user configuration available. Review and trust ancestor
+directories too. On v2, `~/.opencode` is a project layer for projects under
+`$HOME` and overrides matching `~/.config/opencode` settings; on v1 it must be
+within the worktree walk to be inherited.
+
+The implementation references are OpenCode v1's
+[ConfigPaths.directories](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/config/paths.ts)
+and OpenCode 2.0.22's
 [ConfigDiscovery](https://github.com/anomalyco/opencode/blob/527f0b931d1f9b3ebd34e106c51b31ce5db5b075/packages/core/src/config/discovery.ts)
 and its [filesystem walk](https://github.com/anomalyco/opencode/blob/527f0b931d1f9b3ebd34e106c51b31ce5db5b075/packages/util/src/fs-util.ts).
 
@@ -43,7 +52,7 @@ When oh-my-opencode-slim loads, it resolves configuration properties and prompt 
        ↓ (overridden by)
 [User Config] (global)
        ↓ (overridden by)
-[Ancestor Project Configs] (filesystem root to current directory)
+[Ancestor Project Configs] (host boundary to current directory)
        ↓ (overridden by)
 [Environment Preset Override] (via OH_MY_OPENCODE_SLIM_PRESET env var)
        ↓ (merged into agents)
@@ -118,8 +127,8 @@ When a repository carries several custom OpenCode skills under `.opencode/skills
 ```
 
 The flag behaves like automatically adding every valid skill discovered under
-the current and ancestor `.opencode/skills/**/SKILL.md` trees through the
-filesystem root. Duplicate names are included once; sibling trees are not
+the current and ancestor `.opencode/skills/**/SKILL.md` trees within the
+host's discovery boundary. Duplicate names are included once; sibling trees are not
 searched. The existing Slim skill format is unchanged: identity comes from the
 `name` frontmatter field, not the directory name. This change matches OpenCode's
 ancestor directory discovery, not every host-specific skill format. OpenCode
@@ -159,7 +168,7 @@ When looking up markdown prompt template files (such as `<agent>.md` or `<agent>
    `<project>/.opencode/oh-my-opencode-slim/<agent>.md`
 3. **Ancestor Directories, Nearest First**
    Repeat the preset-directory then root-directory lookup in each ancestor's
-   `.opencode/oh-my-opencode-slim/`, through the filesystem root. A nearer root
+   `.opencode/oh-my-opencode-slim/`, through the host's boundary. A nearer root
    prompt beats a farther preset-specific prompt.
 4. **User Preset Directory (Global)**
    `<user-config-dir>/oh-my-opencode-slim/<preset>/<agent>.md`

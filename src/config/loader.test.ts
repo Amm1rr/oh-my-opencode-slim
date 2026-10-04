@@ -84,11 +84,14 @@ describe('loadPluginConfig', () => {
       },
     });
 
-    expect(loadPluginConfig(worktree)).toEqual(loadPluginConfig(workspace));
-    expect(loadPluginConfig(worktree).agents?.['backend-fixer']?.prompt).toBe(
-      'Implement backend changes.',
+    expect(loadPluginConfig(worktree, { hostFlavor: 'v2' })).toEqual(
+      loadPluginConfig(workspace, { hostFlavor: 'v2' }),
     );
-    const paths = findPluginConfigPaths(worktree);
+    expect(
+      loadPluginConfig(worktree, { hostFlavor: 'v2' }).agents?.['backend-fixer']
+        ?.prompt,
+    ).toBe('Implement backend changes.');
+    const paths = findPluginConfigPaths(worktree, 'v2');
     expect(paths.projectConfigPaths).toEqual([configPath]);
     // Discovery for reads must not redirect project-scoped writes to parents.
     expect(paths.projectConfigPath).toBeNull();

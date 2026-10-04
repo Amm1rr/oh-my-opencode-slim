@@ -16,12 +16,16 @@ Complete reference for all configuration files and options in oh-my-opencode-sli
 > **💡 JSONC recommended:** Use the `.jsonc` extension to add comments and trailing commas. If both `.jsonc` and `.json` exist, `.jsonc` takes precedence.
 
 Project configuration discovery searches the current directory and every
-ancestor through the filesystem root, including directories above a Git
-repository or worktree root. Settings merge in this order:
+ancestor within the host's discovery boundary. V2 walks through the filesystem
+root, including above Git repository and worktree roots. V1 stops at the Git
+worktree boundary, including that directory; without a Git boundary it walks to
+the filesystem root. Set `OPENCODE_DISABLE_PROJECT_CONFIG=true` (or `1`, with
+case-insensitive `true`) to skip project config, prompt, and local skill
+discovery while retaining user configuration. Settings merge in this order:
 
 1. User configuration.
 2. Each ancestor's `.opencode/oh-my-opencode-slim.json[c]`, from the
-   filesystem root down to the current directory.
+   host's discovery boundary down to the current directory.
 
 Closer configurations override matching settings while preserving unrelated
 inherited settings. JSONC preference applies independently in each directory;
@@ -34,10 +38,15 @@ directive or selected preset.
 Only ancestor configurations are inherited, not sibling configurations. Trust
 the ancestor configurations as well as the current project before running
 OpenCode. Prompt files and `skills_include_local` also search ancestor
-`.opencode` directories through the filesystem root. Nearer prompt files win;
+`.opencode` directories within that host-specific boundary. Nearer prompt files win;
 local skill grants combine names from the discovered trees. See
 [Project-local Customization](project-local-customization.md) for precedence
 and the retained skill-format and symlink restrictions.
+
+On v2, projects under `$HOME` also inherit `~/.opencode` as a project layer,
+so it overrides matching settings from `~/.config/opencode` (or the selected
+user config directory). On v1 this applies only when `~/.opencode` is within
+the eligible worktree walk. Review and trust this layer too.
 
 The v2 configuration watcher observes ancestor candidates, including files
 created later, and `doctor` reports every discovered project layer. Project-scoped

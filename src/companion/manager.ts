@@ -307,7 +307,12 @@ export class CompanionManager {
   private presetResultOk: boolean | undefined;
   private presetLastScope: CompanionPresetScope | undefined;
 
-  constructor(sessionId: string, cwd: string, config?: CompanionConfig) {
+  constructor(
+    sessionId: string,
+    cwd: string,
+    config?: CompanionConfig,
+    private readonly hostFlavor?: string,
+  ) {
     this.id = sessionId;
     this.cwd = cwd;
     this.config = config;
@@ -316,6 +321,7 @@ export class CompanionManager {
   private refreshPresetState(): boolean {
     let hardWarning = false;
     loadPluginConfig(this.cwd, {
+      hostFlavor: this.hostFlavor,
       silent: true,
       onWarning: (warning) => {
         if (HARD_PRESET_REFRESH_WARNING_KINDS.has(warning.kind)) {
@@ -325,7 +331,7 @@ export class CompanionManager {
     });
     if (hardWarning) return false;
 
-    const next = getPresetSelectionState(this.cwd);
+    const next = getPresetSelectionState(this.cwd, this.hostFlavor);
     const projectCatalogChanged =
       this.projectAvailablePresets.length !== next.projectAvailable.length ||
       this.projectAvailablePresets.some(
@@ -387,7 +393,10 @@ export class CompanionManager {
     );
     if (!request) return false;
 
-    const config = loadPluginConfig(this.cwd, { silent: true });
+    const config = loadPluginConfig(this.cwd, {
+      silent: true,
+      hostFlavor: this.hostFlavor,
+    });
     const scope: CompanionPresetScope =
       request.scope === 'global'
         ? 'global'
@@ -398,7 +407,10 @@ export class CompanionManager {
       scope === 'project' && request.inherit === true
         ? clearProjectPresetOnDisk(this.cwd)
         : typeof request.preset === 'string' && request.preset.trim()
-          ? switchPresetOnDisk(this.cwd, request.preset, config, { scope })
+          ? switchPresetOnDisk(this.cwd, request.preset, config, {
+              scope,
+              hostFlavor: this.hostFlavor,
+            })
           : {
               ok: false,
               presetName: '',

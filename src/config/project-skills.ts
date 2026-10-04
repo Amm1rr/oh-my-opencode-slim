@@ -13,9 +13,13 @@ import { getProjectConfigDirectories } from './loader';
  */
 export function discoverProjectLocalSkillNames(
   projectDirectory: string,
+  hostFlavor?: string,
 ): string[] {
   const names = new Set<string>();
-  for (const configDirectory of getProjectConfigDirectories(projectDirectory)) {
+  for (const configDirectory of getProjectConfigDirectories(
+    projectDirectory,
+    hostFlavor,
+  )) {
     for (const name of discoverLocalSkills(path.dirname(configDirectory))) {
       names.add(name);
     }

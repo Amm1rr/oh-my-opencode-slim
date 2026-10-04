@@ -51,7 +51,7 @@ describe('discoverProjectLocalSkillNames', () => {
     writeSkill(worktree, 'local', 'local');
     writeSkill(path.join(workspace, 'sibling'), 'sibling', 'sibling');
 
-    expect(discoverProjectLocalSkillNames(worktree)).toEqual([
+    expect(discoverProjectLocalSkillNames(worktree, 'v2')).toEqual([
       'local',
       'repository',
       'shared',

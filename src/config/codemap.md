@@ -32,7 +32,7 @@ The config system follows a layered architecture:
 | `ProviderModelIdSchema` | Zod schema enforcing `provider/model` ID format (provider segment excludes slashes/whitespace) | model-id-schema.ts |
 | Preset resolver | Preset normalization, layered merge (`mergePresetMaps`), and depth-first named-preset resolution (`resolvePresets` atomic, `PresetResolutionError` on unresolvable refs) | presets.ts |
 | `discoverProjectLocalSkillNames` | Current and ancestor `.opencode/skills` discovery from `SKILL.md` frontmatter names, symlink-confined to each location | project-skills.ts |
-| `getProjectConfigDirectories` | Shared root-to-location `.opencode` ancestor walk for config, prompts, and optional local skill grants | loader.ts |
+| `getProjectConfigDirectories` | Shared host-aware `.opencode` walk: worktree-bounded on v1, root-bounded on v2, disabled by the host's project-config flag | loader.ts |
 | `loadRawPluginConfigFromPath` | Shared layer validation for runtime and preset management, preserving editable preset syntax | loader.ts |
 | `RuntimeConfig` | Per-directory runtime config singleton with derived getters, host-config snapshot, and preset/model overrides | runtime.ts |
 

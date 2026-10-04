@@ -51,6 +51,7 @@ describe('Project-local customization - 15 core cases', () => {
       loadAgentPrompt('oracle', {
         preset: 'team',
         projectDirectory: worktree,
+        hostFlavor: 'v2',
       }),
     ).toEqual({ prompt: 'ancestor-preset', appendPrompt: 'ancestor-append' });
 
@@ -65,6 +66,7 @@ describe('Project-local customization - 15 core cases', () => {
       loadAgentPrompt('oracle', {
         preset: 'team',
         projectDirectory: worktree,
+        hostFlavor: 'v2',
       }),
     ).toEqual({ prompt: 'local-root', appendPrompt: 'ancestor-append' });
 
@@ -76,6 +78,7 @@ describe('Project-local customization - 15 core cases', () => {
       loadAgentPrompt('oracle', {
         preset: 'team',
         projectDirectory: worktree,
+        hostFlavor: 'v2',
       }),
     ).toEqual({ prompt: 'local-root', appendPrompt: 'local-append' });
   });

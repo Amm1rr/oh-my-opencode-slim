@@ -366,8 +366,11 @@ async function reportConfigWrite(
 /** Level 1: preset list (apply / edit / delete / create). */
 async function runPresetList(run: ManagerRun): Promise<void> {
   for (;;) {
-    const config = loadPluginConfig(run.directory, { silent: true });
-    const allPresets = getAllConfiguredPresets(run.directory);
+    const config = loadPluginConfig(run.directory, {
+      silent: true,
+      hostFlavor: 'v2',
+    });
+    const allPresets = getAllConfiguredPresets(run.directory, 'v2');
     const names = Array.from(
       new Set([
         ...Object.keys(allPresets),
@@ -384,7 +387,8 @@ async function runPresetList(run: ManagerRun): Promise<void> {
     }
 
     const options: V2PresetDialogOption<PresetChoice>[] = names.map((name) => {
-      const isProject = getPresetSource(run.directory, name) === 'project';
+      const isProject =
+        getPresetSource(run.directory, name, 'v2') === 'project';
       const tag = isProject ? ' [project - read-only]' : '';
       return {
         title:
@@ -435,7 +439,8 @@ async function showPresetActions(
   presetName: string,
 ): Promise<'list' | 'exit'> {
   for (;;) {
-    const isProject = getPresetSource(run.directory, presetName) === 'project';
+    const isProject =
+      getPresetSource(run.directory, presetName, 'v2') === 'project';
     const options: V2PresetDialogOption<string>[] = [
       { title: 'Apply preset', value: 'apply' },
       ...(isProject
@@ -484,8 +489,13 @@ async function applyPresetWithMessage(
   presetName: string,
   title: string,
 ): Promise<void> {
-  const config = loadPluginConfig(run.directory, { silent: true });
-  const result = switchPresetOnDisk(run.directory, presetName, config);
+  const config = loadPluginConfig(run.directory, {
+    silent: true,
+    hostFlavor: 'v2',
+  });
+  const result = switchPresetOnDisk(run.directory, presetName, config, {
+    hostFlavor: 'v2',
+  });
   if (!result.ok) {
     toast(run.ctx, 'warning', 'Preset switch failed', result.message);
     return;
@@ -508,7 +518,7 @@ async function confirmDeletePreset(
     );
     return 'cancelled';
   }
-  if (getPresetSource(run.directory, presetName) === 'project') {
+  if (getPresetSource(run.directory, presetName, 'v2') === 'project') {
     toast(
       run.ctx,
       'warning',
@@ -520,7 +530,7 @@ async function confirmDeletePreset(
 
   const dependents = findPresetDependents(
     presetName,
-    getAllConfiguredPresets(run.directory),
+    getAllConfiguredPresets(run.directory, 'v2'),
   );
   if (dependents.length > 0) {
     toast(
@@ -541,7 +551,7 @@ async function confirmDeletePreset(
   if (confirmed === undefined) return 'dismiss';
   if (confirmed !== true) return 'cancelled';
 
-  const ok = deletePreset(run.directory, presetName);
+  const ok = deletePreset(run.directory, presetName, 'v2');
   toast(
     run.ctx,
     ok ? 'success' : 'warning',
@@ -572,9 +582,9 @@ async function promptAndCreatePreset(
     }
     // Check for a name collision before opening an empty working copy, to
     // avoid silently overwriting an existing preset on save.
-    const allPresets = getAllConfiguredPresets(run.directory);
+    const allPresets = getAllConfiguredPresets(run.directory, 'v2');
     if (Object.hasOwn(allPresets, name)) {
-      if (getPresetSource(run.directory, name) === 'project') {
+      if (getPresetSource(run.directory, name, 'v2') === 'project') {
         toast(
           run.ctx,
           'warning',
@@ -608,7 +618,7 @@ async function editPreset(
     );
     return 'back';
   }
-  if (getPresetSource(run.directory, presetName) === 'project') {
+  if (getPresetSource(run.directory, presetName, 'v2') === 'project') {
     toast(
       run.ctx,
       'warning',
@@ -622,7 +632,7 @@ async function editPreset(
   // into the working copy. Snapshot the on-disk definition as the merge
   // base so a config change behind the editor surfaces a conflict instead
   // of being clobbered (v1 `presetEditBases` parity).
-  const editable = getEditablePreset(run.directory, presetName);
+  const editable = getEditablePreset(run.directory, presetName, 'v2');
   const editBase = structuredClone(editable);
   return editPresetWorkingCopy(
     run,
@@ -761,7 +771,7 @@ function buildWorkingOptions(
   const { inheritedAgents, error } = resolveInheritedAgents(
     presetName,
     working,
-    getAllConfiguredPresets(run.directory),
+    getAllConfiguredPresets(run.directory, 'v2'),
     wouldCreatePresetCycle,
   );
 
@@ -800,7 +810,7 @@ async function pickBasePreset(
   presetName: string,
   working: PresetDefinition,
 ): Promise<SubFlowResult> {
-  const allPresets = getAllConfiguredPresets(run.directory);
+  const allPresets = getAllConfiguredPresets(run.directory, 'v2');
   const options: V2PresetDialogOption<PresetChoice>[] = [
     {
       title: '(none) — No base preset',
@@ -966,7 +976,7 @@ async function savePreset(
     }
     return { ok: false };
   }
-  const committed = getEditablePreset(run.directory, presetName);
+  const committed = getEditablePreset(run.directory, presetName, 'v2');
   const baseline = structuredClone(committed);
   working.extends = committed.extends;
   working.agents = structuredClone(committed.agents);
@@ -1040,7 +1050,7 @@ async function editAgent(
  * (description-only use — must not block the flow). */
 function resolveBaseAgents(run: ManagerRun, base: string): Preset {
   try {
-    return resolvePreset(base, getAllConfiguredPresets(run.directory));
+    return resolvePreset(base, getAllConfiguredPresets(run.directory, 'v2'));
   } catch {
     return {};
   }

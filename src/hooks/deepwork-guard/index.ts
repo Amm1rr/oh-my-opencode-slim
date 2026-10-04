@@ -87,9 +87,12 @@ export function guardOptionsFrom(
 /** Hot-read the guard options per call. The off switch is the existing
  * `disabled_hooks` key; an absent or unreadable config keeps the guard on
  * in shadow mode. */
-export function readGuardOptions(directory: string): GuardOptions {
+export function readGuardOptions(
+  directory: string,
+  hostFlavor?: string,
+): GuardOptions {
   try {
-    const config = loadPluginConfig(directory, { silent: true });
+    const config = loadPluginConfig(directory, { silent: true, hostFlavor });
     return guardOptionsFrom(
       Array.isArray(config.disabled_hooks) ? config.disabled_hooks : [],
       config.deepworkGuardMode,
@@ -296,7 +299,10 @@ export function createDeepworkGuardHook(ctx: PluginInput): {
 
       // Config is read only for deepwork task writes — ordinary file-tool
       // calls pay no schema work.
-      const options = readGuardOptions(ctx.directory);
+      const options = readGuardOptions(
+        ctx.directory,
+        (ctx as PluginInput & { hostFlavor?: string }).hostFlavor,
+      );
       if (!options.enabled) return;
 
       const refPath = path
