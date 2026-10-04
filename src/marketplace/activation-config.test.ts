@@ -102,6 +102,35 @@ function resolveStoredPreset(
 }
 
 describe('marketplace activation persistence', () => {
+  test('masks ancestor activation locally without editing the ancestor', () => {
+    const fixture = setup();
+    try {
+      const shared = JSON.stringify({
+        preset: 'work',
+        presets: {
+          work: { marketplace: { agents: [PACKAGE_A] } },
+        },
+      });
+      writeFileSync(fixture.projectConfig, shared);
+      fixture.store.install(bundle(PACKAGE_A, 'docsresearcher'));
+      const nested = join(fixture.project, '.slim', 'worktrees', 'feature');
+      mkdirSync(nested, { recursive: true });
+
+      disableMarketplacePackage(nested, PACKAGE_A);
+
+      expect(readFileSync(fixture.projectConfig, 'utf8')).toBe(shared);
+      expect(readDesiredMarketplacePackageIds(nested)).not.toContain(PACKAGE_A);
+      expect(readDesiredMarketplacePackageIds(fixture.project)).toContain(
+        PACKAGE_A,
+      );
+      expect(
+        existsSync(join(nested, '.opencode', 'oh-my-opencode-slim.jsonc')),
+      ).toBe(true);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
   for (const layer of ['user', 'project'] as const) {
     for (const [overrideName, override] of [
       ['with model', { model: 'openai/gpt-5' }],

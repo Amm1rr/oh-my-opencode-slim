@@ -4,14 +4,17 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { parse } from 'jsonc-parser';
 import type { PluginConfig } from '../config';
+import { loadPluginConfig } from '../config/loader';
 import {
   buildPresetSummary,
   clearProjectPresetOnDisk,
   deletePreset,
   findPresetDependents,
+  getAllConfiguredPresets,
   getEditablePreset,
   getPresetSelectionState,
   getPresetSource,
+  readProjectConfig,
   removeAgentFromPreset,
   setAgentOverride,
   switchPresetOnDisk,
@@ -67,6 +70,193 @@ afterEach(() => {
   }
 
   fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+test('lists inherited presets without writing ancestor project configs', () => {
+  const workspace = path.join(tempDir, 'workspace');
+  const project = path.join(workspace, 'repo');
+  const nested = path.join(project, 'packages', 'backend');
+  fs.mkdirSync(nested, { recursive: true });
+  const configs = [
+    {
+      directory: workspace,
+      config: { presets: { inherited: { fixer: { model: 'test/model' } } } },
+    },
+    {
+      directory: project,
+      config: { presets: { inherited: { fixer: { variant: 'high' } } } },
+    },
+  ];
+  const configPaths = configs.map(({ directory, config }) => {
+    const configDir = path.join(directory, '.opencode');
+    fs.mkdirSync(configDir);
+    const filename = path.join(configDir, 'oh-my-opencode-slim.json');
+    fs.writeFileSync(filename, JSON.stringify(config));
+    return filename;
+  });
+  const originals = configPaths.map((filename) => fs.readFileSync(filename));
+
+  expect(getAllConfiguredPresets(nested).inherited).toMatchObject({
+    fixer: { model: 'test/model', variant: 'high' },
+  });
+  expect(configPaths.map((filename) => fs.readFileSync(filename))).toEqual(
+    originals,
+  );
+});
+
+test('preserves valid presets and pins around a malformed ancestor layer', () => {
+  const workspace = path.join(tempDir, 'workspace');
+  const repository = path.join(workspace, 'repository');
+  const worktree = path.join(repository, 'worktrees', 'feature');
+  for (const directory of [workspace, repository, worktree]) {
+    fs.mkdirSync(path.join(directory, '.opencode'), { recursive: true });
+  }
+  fs.writeFileSync(
+    path.join(workspace, '.opencode', 'oh-my-opencode-slim.json'),
+    JSON.stringify({
+      preset: 'shared',
+      presets: {
+        shared: { fixer: { model: 'test/shared' } },
+      },
+    }),
+  );
+  fs.writeFileSync(
+    path.join(repository, '.opencode', 'oh-my-opencode-slim.json'),
+    '{ invalid',
+  );
+  fs.writeFileSync(
+    path.join(worktree, '.opencode', 'oh-my-opencode-slim.json'),
+    JSON.stringify({ presets: { local: { fixer: { model: 'test/local' } } } }),
+  );
+
+  expect(Object.keys(getAllConfiguredPresets(worktree)).sort()).toEqual([
+    'local',
+    'shared',
+  ]);
+  expect(readProjectConfig(worktree)?.preset).toBe('shared');
+  expect(getPresetSource(worktree, 'shared')).toBe('project');
+  const result = switchPresetOnDisk(
+    worktree,
+    'local',
+    loadPluginConfig(worktree, { silent: true }),
+  );
+  expect(result.ok).toBe(false);
+  expect(result.message).toContain('shared');
+});
+
+test('skips an unreadable ancestor without hiding valid project presets', () => {
+  const workspace = path.join(tempDir, 'workspace');
+  const worktree = path.join(workspace, 'worktrees', 'feature');
+  const filename = path.join(
+    workspace,
+    '.opencode',
+    'oh-my-opencode-slim.json',
+  );
+  fs.mkdirSync(path.dirname(filename), { recursive: true });
+  fs.writeFileSync(filename, '{}');
+  fs.mkdirSync(path.join(worktree, '.opencode'), { recursive: true });
+  fs.writeFileSync(
+    path.join(worktree, '.opencode', 'oh-my-opencode-slim.json'),
+    JSON.stringify({ presets: { local: { fixer: { model: 'test/local' } } } }),
+  );
+  const originalRead = fs.readFileSync;
+  const readSpy = spyOn(fs, 'readFileSync').mockImplementation(
+    (...args: any[]) => {
+      if (args[0] === filename) throw new Error('Unreadable fixture');
+      return originalRead(...(args as Parameters<typeof originalRead>));
+    },
+  );
+  try {
+    expect(getAllConfiguredPresets(worktree).local).toEqual({
+      fixer: { model: 'test/local' },
+    });
+  } finally {
+    readSpy.mockRestore();
+  }
+});
+
+test('ignores schema-invalid ancestor pins and presets just like runtime loading', () => {
+  const workspace = path.join(tempDir, 'workspace');
+  const worktree = path.join(workspace, 'worktrees', 'feature');
+  for (const directory of [workspace, worktree]) {
+    fs.mkdirSync(path.join(directory, '.opencode'), { recursive: true });
+  }
+  fs.writeFileSync(
+    path.join(workspace, '.opencode', 'oh-my-opencode-slim.json'),
+    JSON.stringify({
+      autoUpdate: 'not-a-boolean',
+      preset: 'shared',
+      presets: { discarded: { fixer: { model: 'test/discarded' } } },
+    }),
+  );
+  fs.writeFileSync(
+    path.join(worktree, '.opencode', 'oh-my-opencode-slim.json'),
+    JSON.stringify({ presets: { local: { fixer: { model: 'test/local' } } } }),
+  );
+
+  const config = loadPluginConfig(worktree, { silent: true });
+  expect(config.preset).toBeUndefined();
+  expect(readProjectConfig(worktree)?.preset).toBeUndefined();
+  expect(Object.keys(getAllConfiguredPresets(worktree))).toEqual(['local']);
+  expect(getPresetSource(worktree, 'discarded')).toBe('none');
+  const result = switchPresetOnDisk(worktree, 'local', config);
+  expect(result.ok).toBe(true);
+  const userPath = path.join(
+    tempDir,
+    'xdg-config',
+    'opencode',
+    'oh-my-opencode-slim.json',
+  );
+  expect(JSON.parse(fs.readFileSync(userPath, 'utf-8')).preset).toBe('local');
+});
+
+test('preset lookup uses runtime model inheritance rules across all layers', () => {
+  const workspace = path.join(tempDir, 'workspace');
+  const worktree = path.join(workspace, 'worktrees', 'feature');
+  const userPath = path.join(
+    tempDir,
+    'xdg-config',
+    'opencode',
+    'oh-my-opencode-slim.json',
+  );
+  fs.writeFileSync(
+    userPath,
+    JSON.stringify({
+      presets: {
+        shared: { fixer: { model: 'test/global' } },
+        fromUser: { fixer: { model: 'test/global' } },
+      },
+    }),
+  );
+  for (const directory of [workspace, worktree]) {
+    fs.mkdirSync(path.join(directory, '.opencode'), { recursive: true });
+  }
+  fs.writeFileSync(
+    path.join(workspace, '.opencode', 'oh-my-opencode-slim.json'),
+    JSON.stringify({
+      presets: { shared: { fixer: { model: 'test/ancestor' } } },
+    }),
+  );
+  fs.writeFileSync(
+    path.join(worktree, '.opencode', 'oh-my-opencode-slim.json'),
+    JSON.stringify({
+      presets: {
+        shared: { fixer: { inheritModelFrom: 'orchestrator' } },
+        fromUser: { fixer: { inheritModelFrom: 'orchestrator' } },
+      },
+    }),
+  );
+
+  const presets = getAllConfiguredPresets(worktree);
+  const runtimePresets = loadPluginConfig(worktree).presets;
+  expect(presets.shared).toEqual({
+    fixer: { inheritModelFrom: 'orchestrator' },
+  });
+  expect(presets.fromUser).toEqual({
+    fixer: { inheritModelFrom: 'orchestrator' },
+  });
+  expect(presets.shared).toEqual(runtimePresets?.shared);
+  expect(presets.fromUser).toEqual(runtimePresets?.fromUser);
 });
 
 describe('switchPresetOnDisk', () => {
@@ -373,6 +563,40 @@ describe('switchPresetOnDisk', () => {
     };
     expect(parsed.preset).toBeUndefined();
     expect(parsed.companion?.enabled).toBe(true);
+  });
+
+  test('clearing project override removes every duplicate top-level preset key', () => {
+    const projectDir = path.join(tempDir, 'project-inherit-duplicates');
+    const projectConfigDir = path.join(projectDir, '.opencode');
+    fs.mkdirSync(projectConfigDir, { recursive: true });
+    const projectConfigPath = path.join(
+      projectConfigDir,
+      'oh-my-opencode-slim.jsonc',
+    );
+    fs.writeFileSync(
+      projectConfigPath,
+      `{
+        "preset": "first",
+        // preserve companion comment
+        "companion": { "enabled": true },
+        "preset": "second",
+        // preserve unrelated comment
+        "unrelated": 7,
+        "preset": "third",
+      }`,
+    );
+
+    const result = clearProjectPresetOnDisk(projectDir);
+
+    expect(result.ok).toBe(true);
+    const text = fs.readFileSync(projectConfigPath, 'utf8');
+    expect(text.match(/"preset"\s*:/g) ?? []).toHaveLength(0);
+    expect(text).toContain('// preserve companion comment');
+    expect(text).toContain('// preserve unrelated comment');
+    expect(parse(text)).toEqual({
+      companion: { enabled: true },
+      unrelated: 7,
+    });
   });
 
   test('selection state interpolates global preset placeholders like the runtime loader', () => {
@@ -1707,7 +1931,7 @@ describe('deletePreset', () => {
       path.join(projectDir, 'oh-my-opencode-slim.jsonc'),
       JSON.stringify({
         presets: {
-          childInProject: { extends: 'baseInUser', agents: {} },
+          childInProject: { extends: 'baseInUser' },
         },
       }),
     );

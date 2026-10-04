@@ -72,7 +72,7 @@ export interface WatchPluginConfigOptions {
 
 /** All config candidates for a directory (existence-independent). */
 export function getPluginConfigCandidates(directory: string): string[] {
-  const { user, project } = getConfigCandidates(directory);
+  const { user, project } = getConfigCandidates(directory, 'v2');
   return [...user, ...project];
 }
 

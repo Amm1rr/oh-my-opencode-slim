@@ -563,6 +563,63 @@ describe('createV2Setup e2e', () => {
     }
   }, 20_000);
 
+  test('v2 permission raw + synthesized delivery advances Companion attention once per request', async () => {
+    await Bun.write(
+      path.join(projectDir, '.opencode', 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        companion: {
+          enabled: true,
+          binaryPath: path.join(fixtureRoot, 'missing-companion-bin'),
+        },
+      }),
+    );
+
+    const { ctx, events } = makeMockV2Context(projectDir);
+    const cleanup = await createV2Setup()(ctx);
+
+    try {
+      events.push({
+        type: 'permission.asked',
+        // Supported envelopes can carry an unrelated properties object while
+        // the canonical request identity remains in data.
+        properties: { transport: 'v2' },
+        data: {
+          id: 'permission-attention-1',
+          sessionID: 'ses_permission_attention',
+          action: 'bash',
+          resources: ['*'],
+        },
+      });
+      await settlePump();
+
+      const readAttentionSeq = () => {
+        const state = JSON.parse(readFileSync(stateFilePath(), 'utf8')) as {
+          sessions: Array<{ attention_seq?: number }>;
+        };
+        return state.sessions[0]?.attention_seq;
+      };
+
+      // mapV2EventToV1 delivers permission.asked raw + synthesized. The raw
+      // copy has unrelated properties while its ID remains in data; both must
+      // still collapse to one attention generation.
+      expect(readAttentionSeq()).toBe(1);
+
+      events.push({
+        type: 'permission.asked',
+        data: {
+          id: 'permission-attention-2',
+          sessionID: 'ses_permission_attention',
+          action: 'read',
+          resources: ['*'],
+        },
+      });
+      await settlePump();
+      expect(readAttentionSeq()).toBe(2);
+    } finally {
+      await cleanup();
+    }
+  }, 20_000);
+
   test('disabled_commands interview gates both registration and execution', async () => {
     // Override the beforeEach fixture: the all-setup wiring test must load
     // its own disabled_commands through the real loadPluginConfig path.

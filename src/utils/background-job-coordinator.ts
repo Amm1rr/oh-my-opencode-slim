@@ -198,6 +198,13 @@ export class BackgroundJobCoordinator implements BackgroundJobStore {
     return record;
   }
 
+  abandonLaunch(
+    launched: BackgroundJobRecord,
+    replaced: BackgroundJobRecord,
+  ): boolean {
+    return this.board.abandonLaunch(launched, replaced);
+  }
+
   restoreRetainedSession(
     input: RestoreRetainedSessionInput,
   ): BackgroundJobRecord | undefined {
