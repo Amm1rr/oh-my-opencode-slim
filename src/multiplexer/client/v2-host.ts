@@ -267,12 +267,12 @@ export function createV2HostProbe(
   return async () => (await readServerInfo(client)) !== undefined;
 }
 
+const V2_LIST_PAGE = 200;
+const V2_LIST_MAX_PAGES = 25;
+
 /**
- * Status reader over the authenticated client: the running set from
- * `session.active` plus the directory's session list (running entries are
- * `busy`, everything else `idle`). Readiness requires the child to *appear*,
- * so the list read must include idle sessions; ordering newest-first keeps a
- * freshly created child inside the page.
+ * Status = the newest directory page (idle) plus every active id (busy).
+ * Newest-first keeps newly created idle children visible for readiness.
  */
 export function createV2StatusReader(
   client: V2ClientLike | undefined,
@@ -289,17 +289,17 @@ export function createV2StatusReader(
           list.call(client?.session, {
             directory,
             order: 'desc',
-            limit: 200,
+            limit: V2_LIST_PAGE,
           }),
           active.call(client?.session),
         ]);
-        const activeIds = readActiveIds(running);
         const statuses = new Map<string, SessionRuntimeStatus>();
         for (const entry of readSessionArray(listed)) {
           const id = readString(entry.id);
           if (id === undefined) continue;
-          statuses.set(id, activeIds.has(id) ? 'busy' : 'idle');
+          statuses.set(id, 'idle');
         }
+        for (const id of readActiveIds(running)) statuses.set(id, 'busy');
         return { statuses };
       } catch (error) {
         return { statuses: new Map(), error: errorMessage(error) };
@@ -308,7 +308,7 @@ export function createV2StatusReader(
   };
 }
 
-/** FR-7 backfill reader: children of one parent, scoped to the directory. */
+/** FR-7 backfill: all child pages, oldest-first so metadata updates stay ahead. */
 export function createV2SessionListReader(
   client: V2ClientLike | undefined,
 ): SessionListReader {
@@ -322,24 +322,38 @@ export function createV2SessionListReader(
         return { sessions: [], error: 'v2 session API unavailable' };
       }
       try {
-        const response = await list.call(client?.session, {
+        let query: Record<string, unknown> = {
           directory,
           parentID,
-          order: 'desc',
-          limit: 200,
-        });
+          order: 'asc',
+          limit: V2_LIST_PAGE,
+        };
         const sessions: SessionListEntry[] = [];
-        for (const entry of readSessionArray(response)) {
-          const id = readString(entry.id);
-          if (id === undefined) continue;
-          const agent = readString(entry.agent);
-          sessions.push(
-            agent === undefined
-              ? { sessionId: id }
-              : { sessionId: id, subagentType: agent },
-          );
+        for (let page = 0; page < V2_LIST_MAX_PAGES; page += 1) {
+          const response = await list.call(client?.session, query);
+          const entries = isRecord(response) ? response.data : response;
+          for (const entry of readSessionArray(entries)) {
+            const id = readString(entry.id);
+            if (id === undefined) continue;
+            const agent = readString(entry.agent);
+            sessions.push(
+              agent === undefined
+                ? { sessionId: id }
+                : { sessionId: id, subagentType: agent },
+            );
+          }
+          const next =
+            isRecord(response) && isRecord(response.cursor)
+              ? readString(response.cursor.next)
+              : undefined;
+          if (Array.isArray(entries) && entries.length < V2_LIST_PAGE) {
+            return { sessions };
+          }
+          if (next === undefined)
+            throw new Error('v2 session list missing next cursor');
+          query = { cursor: next, limit: V2_LIST_PAGE };
         }
-        return { sessions };
+        throw new Error('v2 session list page limit exceeded');
       } catch (error) {
         return { sessions: [], error: errorMessage(error) };
       }

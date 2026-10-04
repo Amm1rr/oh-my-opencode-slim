@@ -370,7 +370,7 @@ a structured, distinguishable reason:
 | `admission-unavailable` | `auto` detected no supported multiplexer, or the config was invalid |
 | `not-our-child` | The child's `parentID` is not the session this client currently displays |
 | `host-unreachable` | Embedded host (no listener / sentinel URL) or the server probe failed |
-| `readiness-timeout` | The child did not appear in `/session/status` (v2: the directory's session list) within the bounded retry budget |
+| `readiness-timeout` | The child did not appear in `/session/status` (v2: neither in the directory's newest session page nor running) within the bounded retry budget |
 | `adapter-unavailable` | The adapter cannot run here (binary missing, old version, protocol self-check failed, no control plane, or the platform/shell cannot support the viewer-secret bridge) |
 | `adapter-not-found` | The adapter could not resolve its anchor target; **no multiplexer command is issued** |
 | `adapter-hard` | The multiplexer command failed for another reason |
@@ -537,7 +537,7 @@ removed or changed behavior, with migration guidance:
    authenticated `server.info()` probe failed; check the shared service or the
    `--server` URL.
 5. `readiness-timeout` → the child never became visible in `/session/status`
-   (v2: the directory's session list; see
+   (v2: neither in the directory's newest session page nor running; see
    [Known Limitations](#known-limitations)).
 
 **Panes open in the wrong place**

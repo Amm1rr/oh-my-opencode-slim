@@ -12,6 +12,55 @@ import {
   V2_SESSION_EVENT_TYPES,
 } from './v2-host';
 
+function pagedChildren(count: number, bump = false) {
+  const rows = Array.from({ length: count }, (_, index) => ({
+    id: `child-${String(index).padStart(4, '0')}`,
+    directory: '/tmp/proj',
+    parentID: 'ses_parent',
+    time: { updated: Math.floor(index / 2) },
+  }));
+  const calls: Array<Record<string, unknown>> = [];
+  const cursors = new Map<string, Record<string, any>>();
+  const compare = (a: (typeof rows)[number], b: (typeof rows)[number]) =>
+    a.time.updated - b.time.updated || a.id.localeCompare(b.id);
+  return {
+    calls,
+    session: {
+      list: async (input: Record<string, unknown> = {}) => {
+        calls.push(input);
+        const { limit = 50, ...initialQuery } = input;
+        const query =
+          typeof input.cursor === 'string'
+            ? cursors.get(input.cursor)
+            : initialQuery;
+        if (!query) throw new Error('Invalid cursor');
+        const direction = query.order === 'asc' ? 1 : -1;
+        const data = rows
+          .filter(
+            (row) =>
+              (query.directory === undefined ||
+                row.directory === query.directory) &&
+              (query.parentID === undefined ||
+                row.parentID === query.parentID) &&
+              (!query.anchor || direction * compare(row, query.anchor) > 0),
+          )
+          .sort((a, b) => direction * compare(a, b))
+          .slice(0, Number(limit));
+        const last = data.at(-1);
+        const next = last ? `cursor-${calls.length}` : undefined;
+        if (next) {
+          cursors.set(next, { ...query, anchor: structuredClone(last) });
+        }
+        if (bump && calls.length === 1) {
+          const unseen = rows.find((row) => !data.includes(row));
+          if (unseen) unseen.time.updated = 10_000;
+        }
+        return { data, cursor: { next } };
+      },
+    },
+  };
+}
+
 describe('detectV2HostMode', () => {
   test('bare argv is the shared background service mode', () => {
     expect(detectV2HostMode(['bun', '/$bunfs/root/opencode'])).toEqual({
@@ -180,13 +229,16 @@ describe('v2 host ports', () => {
           calls.push(input);
           return { data: [{ id: 'ses_a' }, { id: 'ses_b' }] };
         },
-        active: async () => ({ data: { ses_a: { type: 'running' } } }),
+        active: async () => ({
+          data: { ses_a: { type: 'running' }, ses_old: { type: 'running' } },
+        }),
       },
     };
     const read = await createV2StatusReader(client).readStatus('/tmp/proj');
     expect(read.error).toBeUndefined();
     expect(read.statuses.get('ses_a')).toBe('busy');
     expect(read.statuses.get('ses_b')).toBe('idle');
+    expect(read.statuses.get('ses_old')).toBe('busy');
     // The directory scope and newest-first page keep a fresh child visible.
     expect(calls[0]).toEqual({
       directory: '/tmp/proj',
@@ -221,6 +273,37 @@ describe('v2 host ports', () => {
       { sessionId: 'ses_child', subagentType: 'explorer' },
       { sessionId: 'ses_plain' },
     ]);
+  });
+
+  test('list reader reads every asc page despite a child metadata update', async () => {
+    const client = pagedChildren(450, true);
+    const read = await createV2SessionListReader(client).listSessions(
+      '/tmp/proj',
+      'ses_parent',
+    );
+    const ids = new Set(read.sessions.map((entry) => entry.sessionId));
+    expect(read.error).toBeUndefined();
+    expect(ids.size).toBe(450);
+    expect(ids.has('child-0200')).toBe(true);
+    expect(client.calls).toHaveLength(3);
+    expect(client.calls[0]).toEqual({
+      directory: '/tmp/proj',
+      parentID: 'ses_parent',
+      order: 'asc',
+      limit: 200,
+    });
+    expect(client.calls[2]).toEqual({ cursor: expect.any(String), limit: 200 });
+  });
+
+  test('list reader fails closed beyond the page cap without partial children', async () => {
+    const client = pagedChildren(5001);
+    const read = await createV2SessionListReader(client).listSessions(
+      '/tmp/proj',
+      'ses_parent',
+    );
+    expect(read.error).toBeDefined();
+    expect(read.sessions).toEqual([]);
+    expect(client.calls).toHaveLength(25);
   });
 
   test('host probe reflects server.info success and failure', async () => {
