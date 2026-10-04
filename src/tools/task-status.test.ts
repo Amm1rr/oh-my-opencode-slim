@@ -9,6 +9,7 @@ function makeTool(options: {
   board: BackgroundJobBoard;
   now?: () => number;
   statusTimeoutMs?: number;
+  readTimeoutMs?: number;
   hostFlavor?: string;
   resolveCanonicalTaskRef?: (
     parentSessionID: string,
@@ -26,6 +27,7 @@ function makeTool(options: {
     backgroundJobBoard: options.board,
     now: options.now,
     statusTimeoutMs: options.statusTimeoutMs,
+    readTimeoutMs: options.readTimeoutMs,
     resolveCanonicalTaskRef: options.resolveCanonicalTaskRef,
   });
 }
@@ -456,6 +458,58 @@ describe('task_status untracked read-only fallback', () => {
     expect(output).toContain('not tracked by the local background job board');
     expect(output).toContain('state: completed (verified from history)');
     expect(board.get(KID)).toBeUndefined();
+  });
+
+  test('a failed v1 live status read reports unknown, not history completion', async () => {
+    client = hostClient({ transcript: 'completed' });
+    client.session.status = mock(async () => {
+      throw new Error('status unavailable');
+    });
+    const { task_status } = makeTool({ board: new BackgroundJobBoard() });
+    const output = await task_status.execute({ task_id: KID }, {
+      sessionID: 'parent-1',
+    } as any);
+    expect(output).toContain('state: unknown (uncertain; live status');
+    expect(output).not.toContain('completed (verified from history)');
+    expect(client.session.messages).not.toHaveBeenCalled();
+  });
+
+  test('held untracked host reads are aborted at their deadline', async () => {
+    const signals: AbortSignal[] = [];
+    const held = (args: { signal?: AbortSignal }) => {
+      if (args.signal) signals.push(args.signal);
+      return new Promise(() => {});
+    };
+    client = hostClient({ transcript: 'completed' });
+    client.session.messages = mock(held);
+    const { task_status } = makeTool({
+      board: new BackgroundJobBoard(),
+      readTimeoutMs: 20,
+    });
+    const output = await task_status.execute({ task_id: KID }, {
+      sessionID: 'parent-1',
+    } as any);
+    expect(output).toContain('(uncertain; transcript could not be read)');
+    expect(signals).toHaveLength(1);
+    expect(signals[0]?.aborted).toBe(true);
+
+    signals.length = 0;
+    client.session.get = mock(held);
+    await expect(
+      task_status.execute({ task_id: KID }, { sessionID: 'parent-1' } as any),
+    ).rejects.toThrow(`Unknown task ID or alias: ${KID}`);
+    expect(signals).toHaveLength(1);
+    expect(signals[0]?.aborted).toBe(true);
+  });
+
+  test('the host session creation time is labeled as creation, not activity', async () => {
+    client = hostClient({ transcript: 'completed' });
+    const { task_status } = makeTool({ board: new BackgroundJobBoard() });
+    const output = await task_status.execute({ task_id: KID }, {
+      sessionID: 'parent-1',
+    } as any);
+    expect(output).toContain(`created_at: ${new Date(100).toISOString()}`);
+    expect(output).not.toContain('last_activity_at');
   });
 
   test('without session.get the untracked path keeps the unknown error', async () => {

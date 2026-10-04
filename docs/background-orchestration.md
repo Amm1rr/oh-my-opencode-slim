@@ -90,8 +90,8 @@ read-only channels work after a restart: a background launch's marker in the
 parent's history still resolves its alias when it is the final non-empty line of
 that tool result (tail-anchored only), and `task_status` reports a read-only
 observed state for an owned session the board no longer tracks — completed or
-uncertain running-or-incomplete from transcript evidence, never claiming
-definite running — pointing to `task_result` for completed text; it never
+uncertain running-or-incomplete from transcript evidence (unknown when the
+live status read fails), never claiming definite running — pointing to `task_result` for completed text; it never
 re-registers or prompts the task. One recovery channel is explicit:
 `task_revive` on a raw session ID verifies the
 session against the host (existence and parent ownership) and re-adopts an
