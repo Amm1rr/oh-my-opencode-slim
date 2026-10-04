@@ -890,6 +890,41 @@ describe('task-session-manager hook', () => {
     }
   });
 
+  test('a timestampless busy on a restored round reads live status before trusting it', async () => {
+    const board = new BackgroundJobBoard();
+    board.restoreRetainedSession({
+      taskID: 'ses_restored',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+      description: 'restored',
+      state: 'completed',
+      background: true,
+      resultSummary: 'old',
+      launchedAt: 10,
+      completedAt: 20,
+    });
+    const status = mock(async () => ({
+      data: { ses_restored: { type: 'busy' } },
+    }));
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      sessionClient: { status },
+    });
+    try {
+      await hook.event({
+        event: {
+          type: 'session.status',
+          properties: { sessionID: 'ses_restored', status: { type: 'busy' } },
+        },
+      } as never);
+      expect(status).toHaveBeenCalledTimes(1);
+      expect(board.get('ses_restored')?.state).toBe('running');
+      expect(board.hasRunningJobs()).toBe(true);
+    } finally {
+      await hook.event({ event: { type: 'server.instance.disposed' } });
+    }
+  });
+
   test('native v1 adoption waits for host evidence and dispose writes no lease', async () => {
     let disposed = false;
     let releaseGet: (value: unknown) => void = () => {};
@@ -990,6 +1025,7 @@ describe('task-session-manager hook', () => {
     await transformMessages(hook, messages as never);
 
     expect(board.get('historical-child')).toMatchObject({
+      alias: 'historical-child',
       state: 'running',
       statusUncertain: true,
       background: true,
@@ -1000,6 +1036,14 @@ describe('task-session-manager hook', () => {
     expect(boardText(messages)).toContain(
       'historical-child / explorer / running, status uncertain',
     );
+    // An existing child does not consume a number.
+    expect(
+      board.registerLaunch({
+        taskID: 'new-child',
+        parentSessionID: 'parent-1',
+        agent: 'explorer',
+      }).alias,
+    ).toBe('exp-1');
   });
 
   test('rehydrated long objectives keep the duplicate-spawn guard effective', async () => {

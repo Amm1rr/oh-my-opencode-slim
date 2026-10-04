@@ -174,6 +174,12 @@ export function clearBackgroundJobSuppression(
 export interface BackgroundJobStore {
   // ── Mutation methods ──────────────────────────────────────────────
   registerLaunch(input: BackgroundJobLaunchInput): BackgroundJobRecord;
+  /** Restore the record a launch replaced after the host explicitly refused
+   * it. False once that launch's generation no longer owns the row. */
+  abandonLaunch(
+    launched: BackgroundJobRecord,
+    replaced: BackgroundJobRecord,
+  ): boolean;
   /** Cache-only import of an absent verified host session. */
   restoreRetainedSession(
     input: RestoreRetainedSessionInput,

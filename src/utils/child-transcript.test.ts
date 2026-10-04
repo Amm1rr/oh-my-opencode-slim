@@ -212,6 +212,26 @@ describe('classifyTerminalEvidence', () => {
       classifyTerminalEvidence(response, { baselineMessageID: 'base' }),
     ).toEqual({ verdict: 'retry', reason: 'unrecognized segment shape' });
   });
+
+  test('a compaction round after the baseline is not the answer', () => {
+    const summary = message({
+      id: 'sum',
+      finish: 'stop',
+      completed: 9,
+      parts: [{ type: 'text', text: 'SUMMARY' }],
+    });
+    const response = {
+      data: [
+        message({ id: 'base', role: 'user' }),
+        message({ id: 'main', finish: 'stop', completed: 5 }),
+        message({ id: 'cut', role: 'user', parts: [{ type: 'compaction' }] }),
+        { ...summary, info: { ...summary.info, summary: true } },
+      ],
+    };
+    expect(
+      classifyTerminalEvidence(response, { baselineMessageID: 'base' }),
+    ).toEqual({ verdict: 'completed', text: 'the answer' });
+  });
 });
 
 describe('fetchChildTranscript', () => {

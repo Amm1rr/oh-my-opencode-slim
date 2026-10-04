@@ -1,17 +1,28 @@
 import * as fs from 'node:fs';
+import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
-import { mutateJsonFile, stripJsonComments } from '../cli/config-io';
+import {
+  mutateJsonFile,
+  removeTopLevelJsonProperty,
+  stripJsonComments,
+} from '../cli/config-io';
 import type {
   AgentOverrideConfig,
   PluginConfig,
   Preset,
   PresetDefinition,
   PresetInput,
+  RawPluginConfig,
 } from '../config';
-import { deepMerge, normalizePreset, PresetResolutionError } from '../config';
+import { normalizePreset, PresetResolutionError } from '../config';
 import { AGENT_ALIASES } from '../config/constants';
-import { findPluginConfigPaths } from '../config/loader';
-import { resolvePresetDefinition } from '../config/presets';
+import {
+  findPluginConfigPaths,
+  isProjectConfigDisabled,
+  loadRawPluginConfigFromPath,
+  mergePluginConfigs,
+} from '../config/loader';
+import { mergePresetMaps, resolvePresetDefinition } from '../config/presets';
 import {
   isPrototypeSensitiveName,
   ownPresetValue,
@@ -20,6 +31,13 @@ import {
 } from '../preset-editor-domain';
 
 export type PresetMap = Record<string, PresetInput>;
+
+function interpolateConfigEnvironment(raw: string): string {
+  return raw.replace(
+    /\{env:([^}]+)\}/g,
+    (_, variableName) => process.env[variableName] ?? '',
+  );
+}
 
 /** Own-property-only write; a `__proto__` key can never touch the prototype. */
 function setOwn(
@@ -35,13 +53,6 @@ function setOwn(
   });
 }
 
-function interpolateConfigEnvironment(raw: string): string {
-  return raw.replace(
-    /\{env:([^}]+)\}/g,
-    (_, variableName) => process.env[variableName] ?? '',
-  );
-}
-
 /**
  * Result of a preset switch attempt. `message` is user-facing and intended for
  * a TUI toast/dialog (it is never injected into the LLM context).
@@ -52,6 +63,34 @@ export interface PresetSwitchResult {
   message: string;
   /** Per-agent summary lines, e.g. "orchestrator → model: x, variant: y". */
   summary: string[];
+}
+
+export type PresetSwitchScope = 'user' | 'effective' | 'project' | 'global';
+
+export interface PresetSwitchOptions {
+  hostFlavor?: string;
+  /**
+   * "user" preserves historical /preset behavior: write the user config and
+   * refuse when a project-local override would mask the result.
+   *
+   * "effective" preserves the original Companion behavior: update an existing
+   * project override, otherwise fall back to the user config.
+   *
+   * "project" always writes the project layer, creating the canonical
+   * .opencode config when necessary.
+   *
+   * "global" explicitly writes the user/global layer even when this project
+   * has a local override. Callers should make that scope visible to the user.
+   */
+  scope?: PresetSwitchScope;
+}
+
+export interface PresetSelectionState {
+  effective?: string;
+  project?: string;
+  global?: string;
+  projectAvailable: string[];
+  globalAvailable: string[];
 }
 
 type PersistPresetResult = { ok: true } | { ok: false; message: string };
@@ -110,12 +149,29 @@ export function switchPresetOnDisk(
   directory: string,
   presetName: string,
   config: PluginConfig,
+  options: PresetSwitchOptions = {},
 ): PresetSwitchResult {
-  const configuredPresets = getAllConfiguredPresets(directory);
-  const presets: PresetMap = {
-    ...configuredPresets,
-    ...((config.presets ?? {}) as PresetMap),
-  };
+  const scope = options.scope ?? 'user';
+  if (scope === 'project' && isProjectConfigDisabled()) {
+    return {
+      ok: false,
+      presetName,
+      message:
+        'Cannot save a project preset: OPENCODE_DISABLE_PROJECT_CONFIG disables project configuration. Unset it or use Global scope.',
+      summary: [],
+    };
+  }
+  const configuredPresets =
+    scope === 'global'
+      ? readUserPresets(directory)
+      : getAllConfiguredPresets(directory, options.hostFlavor);
+  const presets: PresetMap =
+    scope === 'global'
+      ? { ...configuredPresets }
+      : {
+          ...configuredPresets,
+          ...((config.presets ?? {}) as PresetMap),
+        };
   const rawPreset = ownPresetValue(presets, presetName);
 
   if (!rawPreset) {
@@ -159,13 +215,13 @@ export function switchPresetOnDisk(
     };
   }
 
-  const projectConfig = readProjectConfig(directory);
+  const projectConfig = readProjectConfig(directory, options.hostFlavor);
   const projectPreset =
     typeof projectConfig?.preset === 'string'
       ? projectConfig.preset.trim()
       : undefined;
 
-  if (projectPreset && projectPreset !== presetName) {
+  if (scope === 'user' && projectPreset && projectPreset !== presetName) {
     return {
       ok: false,
       presetName,
@@ -185,7 +241,14 @@ export function switchPresetOnDisk(
   }
 
   const agentUpdates = buildAgentUpdates(effectivePreset);
-  const persistence = persistPresetName(directory, presetName);
+  const persistence =
+    scope === 'project'
+      ? persistProjectPresetName(directory, presetName)
+      : scope === 'global'
+        ? persistPresetName(directory, presetName)
+        : scope === 'effective' && projectPreset
+          ? persistProjectPresetName(directory, presetName)
+          : persistPresetName(directory, presetName);
   if (!persistence.ok) {
     return {
       ok: false,
@@ -198,8 +261,95 @@ export function switchPresetOnDisk(
   return {
     ok: true,
     presetName,
-    message: `Saved preset "${presetName}". Reload OpenCode for it to take effect. The current session keeps its existing agent models to avoid truncating context, drifting prior turns, or destabilizing running subagents.`,
+    message: `Saved${scope === 'project' ? ' project' : scope === 'global' ? ' global' : ''} preset "${presetName}". Reload OpenCode for it to take effect. The current session keeps its existing agent models to avoid truncating context, drifting prior turns, or destabilizing running subagents.`,
     summary: buildPresetSummary(agentUpdates),
+  };
+}
+
+export function getPresetSelectionState(
+  directory: string,
+  hostFlavor?: string,
+): PresetSelectionState {
+  const userConfig = readUserConfig(directory);
+  const projectConfig = readProjectConfig(directory, hostFlavor);
+  const globalPreset =
+    typeof userConfig?.preset === 'string' &&
+    interpolateConfigEnvironment(userConfig.preset).trim()
+      ? interpolateConfigEnvironment(userConfig.preset).trim()
+      : undefined;
+  const projectPreset =
+    typeof projectConfig?.preset === 'string' && projectConfig.preset.trim()
+      ? projectConfig.preset.trim()
+      : undefined;
+  const envPreset = process.env.OH_MY_OPENCODE_SLIM_PRESET?.trim() || undefined;
+
+  return {
+    effective: envPreset ?? projectPreset ?? globalPreset,
+    project: projectPreset,
+    global: globalPreset,
+    projectAvailable: Object.keys(
+      getAllConfiguredPresets(directory, hostFlavor),
+    ).sort((a, b) => a.localeCompare(b)),
+    globalAvailable: Object.keys(readUserPresets(directory)).sort((a, b) =>
+      a.localeCompare(b),
+    ),
+  };
+}
+
+export function clearProjectPresetOnDisk(
+  directory: string,
+  hostFlavor?: string,
+): PresetSwitchResult {
+  if (isProjectConfigDisabled()) {
+    return {
+      ok: false,
+      presetName: '',
+      message:
+        'Cannot change project preset inheritance: OPENCODE_DISABLE_PROJECT_CONFIG disables project configuration. Unset it or use Global scope.',
+      summary: [],
+    };
+  }
+  let projectConfigPath: string | null;
+  try {
+    projectConfigPath = findPluginConfigPaths(
+      directory,
+      hostFlavor,
+    ).projectConfigPath;
+  } catch (error) {
+    return {
+      ok: false,
+      presetName: '',
+      message: `Could not locate the project config file: ${describeError(error)}.`,
+      summary: [],
+    };
+  }
+
+  try {
+    if (projectConfigPath)
+      removeTopLevelJsonProperty(projectConfigPath, 'preset');
+  } catch (error) {
+    return {
+      ok: false,
+      presetName: '',
+      message: `Could not clear the project preset override: ${describeError(error)}.`,
+      summary: [],
+    };
+  }
+
+  const selection = getPresetSelectionState(directory, hostFlavor);
+  const source = process.env.OH_MY_OPENCODE_SLIM_PRESET?.trim()
+    ? 'OH_MY_OPENCODE_SLIM_PRESET'
+    : selection.project
+      ? 'an ancestor project configuration'
+      : 'the global configuration';
+  const inheritance = selection.effective
+    ? `This project now inherits preset "${selection.effective}" from ${source}.`
+    : 'No inherited preset is selected.';
+  return {
+    ok: true,
+    presetName: selection.effective ?? '',
+    message: `${projectConfigPath ? 'Local project preset override cleared.' : 'No local project preset override exists.'} ${inheritance}`,
+    summary: [],
   };
 }
 
@@ -406,6 +556,44 @@ function persistPresetName(
   return { ok: true };
 }
 
+function persistProjectPresetName(
+  directory: string,
+  presetName: string,
+): PersistPresetResult {
+  let projectConfigPath: string;
+  try {
+    const existing = findPluginConfigPaths(directory).projectConfigPath;
+    projectConfigPath =
+      existing ?? join(directory, '.opencode', 'oh-my-opencode-slim.jsonc');
+  } catch (error) {
+    return {
+      ok: false,
+      message: `Could not locate the project config file: ${describeError(error)}.`,
+    };
+  }
+
+  try {
+    mutateJsonFile(projectConfigPath, (current) => ({
+      ...current,
+      preset: presetName,
+    }));
+  } catch (error) {
+    const message = describeError(error);
+    const isReadError =
+      message.includes('Config file must contain') ||
+      message.toLowerCase().includes('parse') ||
+      message.toLowerCase().includes('json');
+    return {
+      ok: false,
+      message: isReadError
+        ? `Could not read or parse the project config file: ${message}.`
+        : `Could not write the project config file: ${message}.`,
+    };
+  }
+
+  return { ok: true };
+}
+
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -448,23 +636,21 @@ export function readUserPresets(
 }
 
 /**
- * Read the project-level config file as a parsed object. Returns null if absent.
+ * Read and merge ancestor project config files. Returns null if absent.
  */
 export function readProjectConfig(
   directory: string,
+  hostFlavor?: string,
 ): Record<string, unknown> | null {
-  try {
-    const { projectConfigPath } = findPluginConfigPaths(directory);
-    if (!projectConfigPath) return null;
-    const raw = fs
-      .readFileSync(projectConfigPath, 'utf-8')
-      .replace(/^\uFEFF/, '');
-    return JSON.parse(
-      interpolateConfigEnvironment(stripJsonComments(raw)),
-    ) as Record<string, unknown>;
-  } catch {
-    return null;
+  const { projectConfigPaths } = findPluginConfigPaths(directory, hostFlavor);
+  let config: RawPluginConfig | undefined;
+  for (const configPath of projectConfigPaths) {
+    const layer = loadRawPluginConfigFromPath(configPath, { silent: true });
+    if (layer) {
+      config = mergePluginConfigs(config ?? {}, layer);
+    }
   }
+  return config ?? null;
 }
 
 /**
@@ -474,9 +660,10 @@ export function readProjectConfig(
  */
 export function getAllConfiguredPresets(
   directory: string,
+  hostFlavor?: string,
 ): Record<string, PresetInput> {
   const userPresets = readUserPresets(directory);
-  const projectConfig = readProjectConfig(directory);
+  const projectConfig = readProjectConfig(directory, hostFlavor);
   const projectPresets =
     projectConfig &&
     typeof projectConfig.presets === 'object' &&
@@ -484,10 +671,7 @@ export function getAllConfiguredPresets(
     !Array.isArray(projectConfig.presets)
       ? (projectConfig.presets as Record<string, PresetInput>)
       : {};
-  const merged = (deepMerge(userPresets, projectPresets) ?? {}) as Record<
-    string,
-    PresetInput
-  >;
+  const merged = mergePresetMaps(userPresets, projectPresets) ?? {};
   const safe: Record<string, PresetInput> = {};
   for (const name of Object.keys(merged)) {
     const value = ownPresetValue(merged, name);
@@ -503,8 +687,12 @@ export type PresetSource = 'project' | 'user' | 'none';
  * Returns 'project' if the preset is defined in project config (.opencode),
  * 'user' if defined in user config, or 'none' if not found.
  */
-export function getPresetSource(directory: string, name: string): PresetSource {
-  const projectConfig = readProjectConfig(directory);
+export function getPresetSource(
+  directory: string,
+  name: string,
+  hostFlavor?: string,
+): PresetSource {
+  const projectConfig = readProjectConfig(directory, hostFlavor);
   if (
     projectConfig &&
     typeof projectConfig.presets === 'object' &&
@@ -528,13 +716,14 @@ export function getPresetSource(directory: string, name: string): PresetSource {
 export function getEditablePreset(
   directory: string,
   name: string,
+  hostFlavor?: string,
 ): PresetDefinition {
   const userPresets = readUserPresets(directory);
   const raw = ownPresetValue(userPresets, name);
   if (raw !== undefined) {
     return normalizePreset(raw);
   }
-  const projectConfig = readProjectConfig(directory);
+  const projectConfig = readProjectConfig(directory, hostFlavor);
   const projectPresets =
     projectConfig &&
     typeof projectConfig.presets === 'object' &&
@@ -810,7 +999,11 @@ export function writePreset(
  * Returns false if the preset did not exist, if the write failed,
  * or if other presets in the editable config depend on it.
  */
-export function deletePreset(directory: string, name: string): boolean {
+export function deletePreset(
+  directory: string,
+  name: string,
+  hostFlavor?: string,
+): boolean {
   if (isPrototypeSensitiveName(name)) {
     // Pre-existing prototype-sensitive entries stay applicable but are
     // never mutated through the editor (own-property operations only).
@@ -824,7 +1017,7 @@ export function deletePreset(directory: string, name: string): boolean {
       if (!isRecord(config.presets) || !Object.hasOwn(config.presets, name)) {
         return config;
       }
-      const allPresets = getAllConfiguredPresets(directory);
+      const allPresets = getAllConfiguredPresets(directory, hostFlavor);
       if (findPresetDependents(name, allPresets).length > 0) return config;
       delete config.presets[name];
       if (config.preset === name) delete config.preset;

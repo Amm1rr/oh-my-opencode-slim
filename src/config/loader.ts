@@ -63,6 +63,8 @@ export interface ConfigLoadWarning {
  * Options for loadPluginConfig.
  */
 export interface LoadPluginConfigOptions {
+  /** Unmarked hosts use v1's worktree-bounded discovery. */
+  hostFlavor?: string;
   /**
    * Called with a warning whenever config loading produces a non-fatal issue.
    * The loader still falls back to defaults and continues normally.
@@ -422,6 +424,15 @@ export function loadPluginConfigFromPath(
   configPath: string,
   options?: LoadPluginConfigOptions,
 ): RawPluginConfig | null {
+  const config = loadRawPluginConfigFromPath(configPath, options);
+  return config ? normalizePresetDeclarations(config) : null;
+}
+
+/** Validate a layer without changing its editable preset declaration syntax. */
+export function loadRawPluginConfigFromPath(
+  configPath: string,
+  options?: LoadPluginConfigOptions,
+): RawPluginConfig | null {
   try {
     // Strip a UTF-8 BOM (RFC 8259 permits one); JSON.parse would otherwise
     // fail with "Unrecognized token" and silently drop the whole config.
@@ -605,7 +616,7 @@ export function loadPluginConfigFromPath(
       };
     }
 
-    return normalizePresetDeclarations(layerConfig);
+    return layerConfig;
   } catch (error) {
     // File doesn't exist or isn't readable - this is expected and fine
     if (
@@ -701,42 +712,100 @@ function validateFinalImageRouting(
   return false;
 }
 
+/** Use the host's case-insensitive boolean flag semantics. */
+export function isProjectConfigDisabled(): boolean {
+  return ['true', '1'].includes(
+    process.env.OPENCODE_DISABLE_PROJECT_CONFIG?.toLowerCase() ?? '',
+  );
+}
+
+/** Project .opencode directories in host-specific, farthest-to-nearest order. */
+export function getProjectConfigDirectories(
+  directory: string,
+  hostFlavor?: string,
+): string[] {
+  if (isProjectConfigDisabled()) {
+    return [];
+  }
+  const directories: string[] = [];
+  let current = path.resolve(directory);
+  for (;;) {
+    directories.push(path.join(current, '.opencode'));
+    if (hostFlavor !== 'v2') {
+      try {
+        fs.lstatSync(path.join(current, '.git'));
+        break;
+      } catch {
+        // As in marketplace preflight, a Git directory or worktree file
+        // marks the inclusive v1 project boundary.
+      }
+    }
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return directories.reverse();
+}
+
+function getProjectConfigBases(
+  directory: string,
+  hostFlavor?: string,
+): string[] {
+  return getProjectConfigDirectories(directory, hostFlavor).map(
+    (configDirectory) => path.join(configDirectory, 'oh-my-opencode-slim'),
+  );
+}
+
 /**
  * Find plugin config paths (user and project) for a given directory.
  * User config uses getConfigSearchDirs() for lookup.
- * Project config uses <directory>/.opencode/oh-my-opencode-slim.
+ * Project configs follow the host's discovery boundary: the Git worktree
+ * on v1 (the default), or the filesystem root on v2. The project's walk is
+ * omitted when OPENCODE_DISABLE_PROJECT_CONFIG is true or 1.
  *
  * @param directory - Project directory to search for .opencode config
- * @returns Object with userConfigPath and projectConfigPath (null if not found)
+ * @returns All project layers in merge order, plus the current directory's
+ * projectConfigPath for callers that edit local configuration. The singular
+ * path must not redirect writes to an inherited ancestor file.
  */
-export function findPluginConfigPaths(directory: string): {
+export function findPluginConfigPaths(
+  directory: string,
+  hostFlavor?: string,
+): {
   userConfigPath: string | null;
   projectConfigPath: string | null;
+  projectConfigPaths: string[];
 } {
   const userConfigPath = findConfigPathInDirs(
     getConfigSearchDirs(),
     'oh-my-opencode-slim',
   );
 
-  const projectConfigBasePath = path.join(
-    directory,
-    '.opencode',
-    'oh-my-opencode-slim',
-  );
+  const projectConfigBases = getProjectConfigBases(directory, hostFlavor);
+  const projectConfigPaths = projectConfigBases
+    .map(findConfigPath)
+    .filter((configPath): configPath is string => configPath !== null);
+  const projectConfigPath = projectConfigBases.length
+    ? findConfigPath(
+        path.resolve(directory, '.opencode', 'oh-my-opencode-slim'),
+      )
+    : null;
 
-  const projectConfigPath = findConfigPath(projectConfigBasePath);
-
-  return { userConfigPath, projectConfigPath };
+  return { userConfigPath, projectConfigPath, projectConfigPaths };
 }
 
 /**
  * All plugin config candidate paths for a directory, independent of
  * existence: `.jsonc` then `.json` for every user config search location and
- * for `<directory>/.opencode`. The loader prefers `.jsonc` over `.json`, and
+ * for each eligible ancestor's `.opencode`, farthest to nearest.
+ * The loader prefers `.jsonc` over `.json`, and
  * the v2 watcher must observe creation/deletion/rename and that precedence
  * change, so it consumes this candidate set instead of existing files only.
  */
-export function getPluginConfigCandidates(directory: string): {
+export function getPluginConfigCandidates(
+  directory: string,
+  hostFlavor?: string,
+): {
   user: string[];
   project: string[];
 } {
@@ -745,14 +814,11 @@ export function getPluginConfigCandidates(directory: string): {
     const basePath = path.join(configDir, 'oh-my-opencode-slim');
     user.push(`${basePath}.jsonc`, `${basePath}.json`);
   }
-  const projectBasePath = path.join(
-    directory,
-    '.opencode',
-    'oh-my-opencode-slim',
-  );
   return {
     user,
-    project: [`${projectBasePath}.jsonc`, `${projectBasePath}.json`],
+    project: getProjectConfigBases(directory, hostFlavor).flatMap(
+      (basePath) => [`${basePath}.jsonc`, `${basePath}.json`],
+    ),
   };
 }
 
@@ -792,13 +858,15 @@ export function mergePluginConfigs(
 /**
  * Load plugin configuration from user and project config files, merging them appropriately.
  *
- * Configuration is loaded from two locations:
+ * Configuration is loaded in precedence order:
  * 1. User config: $OPENCODE_CONFIG_DIR/oh-my-opencode-slim.jsonc or .json,
  *    or ~/.config/opencode/oh-my-opencode-slim.jsonc or .json (or $XDG_CONFIG_HOME)
- * 2. Project config: <directory>/.opencode/oh-my-opencode-slim.jsonc or .json
+ * 2. Ancestor project configs: .opencode/oh-my-opencode-slim.jsonc or .json,
+ *    from the host's discovery boundary down to directory, inclusive
  *
  * JSONC format is preferred over JSON (allows comments and trailing commas).
- * Project config takes precedence over user config. Nested objects (agents, multiplexer) are
+ * Closer project configs take precedence over ancestors and user config.
+ * Nested objects (agents, multiplexer) are
  * deep-merged, while top-level arrays are replaced entirely by project config.
  *
  * @param directory - Project directory to search for .opencode config
@@ -809,18 +877,40 @@ export function loadPluginConfig(
   directory: string,
   options?: LoadPluginConfigOptions,
 ): ResolvedPluginConfig {
-  const { userConfigPath, projectConfigPath } =
-    findPluginConfigPaths(directory);
+  const { userConfigPath, projectConfigPaths } = findPluginConfigPaths(
+    directory,
+    options?.hostFlavor,
+  );
 
   let config: RawPluginConfig = userConfigPath
     ? (loadPluginConfigFromPath(userConfigPath, options) ?? {})
     : {};
 
-  const projectConfig = projectConfigPath
-    ? loadPluginConfigFromPath(projectConfigPath, options)
-    : null;
-  if (projectConfig) {
-    config = mergePluginConfigs(config, projectConfig);
+  const presetPaths = new Map<string, string>();
+  const presetInheritancePaths = new Map<string, string>();
+  let selectedPresetPath = '';
+  let imageRoutingPath = '';
+  const recordConfigSources = (
+    layer: RawPluginConfig,
+    configPath: string,
+  ): void => {
+    if (layer.preset !== undefined) selectedPresetPath = configPath;
+    if (layer.image_routing !== undefined) imageRoutingPath = configPath;
+    for (const [name, definition] of Object.entries(layer.presets ?? {})) {
+      presetPaths.set(name, configPath);
+      if (normalizePreset(definition).extends !== undefined) {
+        presetInheritancePaths.set(name, configPath);
+      }
+    }
+  };
+  if (userConfigPath) recordConfigSources(config, userConfigPath);
+
+  for (const configPath of projectConfigPaths) {
+    const projectConfig = loadPluginConfigFromPath(configPath, options);
+    if (projectConfig) {
+      config = mergePluginConfigs(config, projectConfig);
+      recordConfigSources(projectConfig, configPath);
+    }
   }
 
   // v2-derived defaults (pre-parse, on the merged explicit-only config so a
@@ -894,8 +984,17 @@ export function loadPluginConfig(
           error instanceof PresetResolutionError
             ? error.message
             : `Unable to resolve preset inheritance: ${String(error)}`;
+        const brokenParent =
+          error instanceof PresetResolutionError
+            ? error.chain.at(-2)
+            : undefined;
         options?.onWarning?.({
-          path: projectConfigPath ?? userConfigPath ?? '',
+          path:
+            (brokenParent
+              ? presetInheritancePaths.get(brokenParent)
+              : undefined) ??
+            presetPaths.get(name) ??
+            '',
           kind: 'invalid-schema',
           message,
         });
@@ -940,7 +1039,7 @@ export function loadPluginConfig(
         : 'none';
       const message = `Preset "${runtimeConfig.preset}" not found (from ${presetSource}). Available presets: ${availablePresets}`;
       options?.onWarning?.({
-        path: projectConfigPath ?? userConfigPath ?? '',
+        path: envPreset ? '' : selectedPresetPath,
         kind: 'missing-preset',
         message,
       });
@@ -977,11 +1076,7 @@ export function loadPluginConfig(
     };
   }
 
-  validateFinalImageRouting(
-    runtimeConfig,
-    projectConfigPath ?? userConfigPath ?? '',
-    options,
-  );
+  validateFinalImageRouting(runtimeConfig, imageRoutingPath, options);
   // Note: we intentionally do NOT override image_routing to 'direct' here.
   // The observer-disabled guard in processImageAttachments handles the
   // auto+observer-disabled case by returning true, which triggers the
@@ -1003,19 +1098,23 @@ export function loadPluginConfig(
  */
 export function loadAgentPrompt(
   agentName: string,
-  optionsOrPreset?: string | { preset?: string; projectDirectory?: string },
+  optionsOrPreset?:
+    | string
+    | { preset?: string; projectDirectory?: string; hostFlavor?: string },
 ): {
   prompt?: string;
   appendPrompt?: string;
 } {
   let preset: string | undefined;
   let projectDirectory: string | undefined;
+  let hostFlavor: string | undefined;
 
   if (typeof optionsOrPreset === 'string') {
     preset = optionsOrPreset;
   } else if (optionsOrPreset && typeof optionsOrPreset === 'object') {
     preset = optionsOrPreset.preset;
     projectDirectory = optionsOrPreset.projectDirectory;
+    hostFlavor = optionsOrPreset.hostFlavor;
   }
 
   const presetDirName =
@@ -1023,24 +1122,27 @@ export function loadAgentPrompt(
 
   const searchDirs: string[] = [];
 
-  // Lookup order preference:
-  // 1. Project preset dir
-  if (projectDirectory && presetDirName) {
-    searchDirs.push(
-      path.join(projectDirectory, '.opencode', PROMPTS_DIR_NAME, presetDirName),
-    );
-  }
-  // 2. Project root dir
+  // Nearest project location wins, with preset-specific files preferred
+  // within each location. Use the same ancestor walk as configuration.
   if (projectDirectory) {
-    searchDirs.push(path.join(projectDirectory, '.opencode', PROMPTS_DIR_NAME));
+    for (const configDirectory of getProjectConfigDirectories(
+      projectDirectory,
+      hostFlavor,
+    ).reverse()) {
+      const promptsDirectory = path.join(configDirectory, PROMPTS_DIR_NAME);
+      if (presetDirName) {
+        searchDirs.push(path.join(promptsDirectory, presetDirName));
+      }
+      searchDirs.push(promptsDirectory);
+    }
   }
-  // 3. User preset dirs
+  // User preset dirs
   if (presetDirName) {
     for (const userDir of getConfigSearchDirs()) {
       searchDirs.push(path.join(userDir, PROMPTS_DIR_NAME, presetDirName));
     }
   }
-  // 4. User root dirs
+  // User root dirs
   for (const userDir of getConfigSearchDirs()) {
     searchDirs.push(path.join(userDir, PROMPTS_DIR_NAME));
   }

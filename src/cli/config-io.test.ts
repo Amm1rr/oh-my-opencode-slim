@@ -12,11 +12,13 @@ import {
 import * as fs from 'node:fs';
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
@@ -34,6 +36,7 @@ import {
   parseConfigFile,
   prepareJsonConfigWrite,
   publishPreparedJsonConfig,
+  removeTopLevelJsonProperty,
   restorePreparedJsonConfig,
   stripJsonComments,
   writeConfig,
@@ -143,6 +146,91 @@ describe('config-io', () => {
     expect(JSON.parse(readFileSync(`${path}.bak`, 'utf-8'))).toEqual({
       old: true,
     });
+  });
+
+  test('mutateJsonFile backup replaces a symlink instead of overwriting its target', () => {
+    const path = join(tmpDir, 'symlink-safe.jsonc');
+    const victim = join(tmpDir, 'victim.txt');
+    const backup = `${path}.bak`;
+    writeFileSync(path, '{"preset":"old"}');
+    writeFileSync(victim, 'do-not-touch');
+    symlinkSync(victim, backup);
+
+    mutateJsonFile(path, (current) => ({ ...current, preset: 'new' }));
+
+    expect(readFileSync(victim, 'utf8')).toBe('do-not-touch');
+    expect(lstatSync(backup).isSymbolicLink()).toBe(false);
+    expect(JSON.parse(readFileSync(backup, 'utf8'))).toEqual({
+      preset: 'old',
+    });
+  });
+
+  test('removeTopLevelJsonProperty preserves trailing comments on the previous property', () => {
+    const path = join(tmpDir, 'remove-last-property.jsonc');
+    writeFileSync(
+      path,
+      `{
+  "companion": { "enabled": true }, // keep this explanation
+  "preset": "local",
+}
+`,
+    );
+
+    removeTopLevelJsonProperty(path, 'preset');
+
+    const savedText = readFileSync(path, 'utf-8');
+    expect(savedText).toContain('// keep this explanation');
+    expect(JSON.parse(stripJsonComments(savedText))).toEqual({
+      companion: { enabled: true },
+    });
+    expect(readFileSync(`${path}.bak`, 'utf-8')).toContain('"preset": "local"');
+  });
+
+  test('removeTopLevelJsonProperty removes duplicate keys without losing unrelated JSONC comments', () => {
+    const path = join(tmpDir, 'remove-duplicate-properties.jsonc');
+    writeFileSync(
+      path,
+      `{
+  "preset": "first",
+  // keep companion comment
+  "companion": { "enabled": true },
+  "preset": "second",
+  // keep unrelated comment
+  "unrelated": 42,
+  "preset": "third",
+}
+`,
+    );
+
+    removeTopLevelJsonProperty(path, 'preset');
+
+    const savedText = readFileSync(path, 'utf-8');
+    expect(savedText.match(/"preset"\s*:/g) ?? []).toHaveLength(0);
+    expect(savedText).toContain('// keep companion comment');
+    expect(savedText).toContain('// keep unrelated comment');
+    expect(JSON.parse(stripJsonComments(savedText))).toEqual({
+      companion: { enabled: true },
+      unrelated: 42,
+    });
+    expect(readFileSync(`${path}.bak`, 'utf-8')).toContain('"preset": "third"');
+  });
+
+  test('removeTopLevelJsonProperty handles adjacent duplicate-only keys with trailing comma', () => {
+    const path = join(tmpDir, 'remove-adjacent-duplicate-properties.jsonc');
+    writeFileSync(
+      path,
+      `{
+  "preset": "first",
+  "preset": "second",
+}
+`,
+    );
+
+    removeTopLevelJsonProperty(path, 'preset');
+
+    const savedText = readFileSync(path, 'utf-8');
+    expect(savedText.match(/"preset"\s*:/g) ?? []).toHaveLength(0);
+    expect(JSON.parse(stripJsonComments(savedText))).toEqual({});
   });
 
   test('mutateJsonFile preserves JSONC comments and unrelated keys', () => {

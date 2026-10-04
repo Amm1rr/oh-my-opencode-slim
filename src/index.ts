@@ -746,10 +746,10 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   };
 
   try {
-    // Read the host flavor marker before config load: v2 hosts derive
-    // leaner background-job defaults (see loadPluginConfig), so the flavor
-    // must be known when the config is first resolved — and on every
-    // later in-session reload.
+    // Read the host flavor marker before config load: it bounds project
+    // config discovery, and v2 hosts derive leaner background-job defaults
+    // (see loadPluginConfig), so the flavor must be known when the config
+    // is first resolved — and on every later in-session reload.
     hostFlavor = (ctx as Parameters<Plugin>[0] & { hostFlavor?: string })
       .hostFlavor;
     config = loadPluginConfig(ctx.directory, { hostFlavor });
@@ -757,7 +757,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // config. The runtime preset reapplication below mutates `config` for
     // legacy consumers; RuntimeConfig keeps the pre-mutation snapshot and
     // derives preset/runtime state through its own getters.
-    RuntimeConfig.init(ctx.directory, config);
+    RuntimeConfig.init(ctx.directory, config, hostFlavor);
 
     // Safety net: instance disposal reruns the plugin factory and rebuilds
     // factory-local state, while module-level runtime preset state may persist.
@@ -790,8 +790,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       activePresetName,
     );
     rewriteDisplayNameMentions = createDisplayNameMentionRewriter(runtime);
-    // Native delegation vocabulary: the flavor read moved above the config
-    // load; `delegation` derives from it as before.
+    // Host flavor marker ('v2' on OpenCode v2 hosts, set by the v2 client
+    // shim; absent on v1). Threads the native delegation vocabulary into
+    // prompt assembly so v2 prompts say subagent(...)/agent directly.
     const delegation = delegationWording(hostFlavor);
     agentDefs = createAgents(runtime, {
       projectDirectory: ctx.directory,
@@ -889,6 +890,8 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       graceMs: runtime.backgroundJobs.stopConfirmationMs,
       baselineFor: (taskID, generation) =>
         revivedRunTracker?.baselineFor(taskID, generation),
+      promptMessageIDFor: (taskID, generation) =>
+        revivedRunTracker?.promptMessageIDFor(taskID, generation),
       // Local in-process integration: host and plugin timestamps share Unix ms.
       hostOutcomeClock: 'shared-unix-ms',
       attemptStartedAtFor: (taskID, generation) =>
@@ -905,7 +908,13 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
               resolvePrimaryModelFromFinalHostConfig(record.agent) ??
               sessionMetadata.getModel(record.parentSessionID),
           );
-        backgroundJobSupervisor?.onLaunch(record);
+        if (
+          !revivedRunTracker?.promptMessageIDFor(
+            record.taskID,
+            record.generation,
+          )
+        )
+          backgroundJobSupervisor?.onLaunch(record);
       },
     });
     backgroundJobSupervisor = new BackgroundJobSupervisor({
@@ -1066,7 +1075,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       input: ctx,
       board: backgroundJobBoard,
       isDisposed: () => instanceDisposed,
-      hostFlavor,
     });
     taskSessionManagerHook = createTaskSessionManagerHook(ctx, {
       terminalGate,
@@ -1103,7 +1111,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         sessionMetadata.getModel(sessionID),
       hostFlavor,
       recoverRetainedSession,
-      prepareAliasNumbering: aliasAuthority.prepareParent,
       resolveCanonicalTaskRef: aliasAuthority.resolveCanonical,
       isDisposed: () => instanceDisposed,
       shouldManageSession: (sessionID) =>
@@ -1358,6 +1365,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       `proc_${process.pid}`,
       ctx.directory,
       runtime.companion,
+      hostFlavor,
     );
     taskCancelTools = createCancelTaskTool({
       input: ctx,
@@ -1407,7 +1415,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       backgroundJobBoard: backgroundJobCoordinator,
       activityTracker: taskActivityTracker,
       resolveCanonicalTaskRef: aliasAuthority.resolveCanonical,
-      isDisposed: () => instanceDisposed,
     });
     waitForUserTools = createWaitForUserTool({
       shouldManageSession: (sessionID) =>
@@ -1564,6 +1571,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   let registryBridge: RegistryFactoryBridge;
   const marketplaceService = new MarketplaceService({
     projectDir: ctx.directory,
+    hostFlavor,
     pluginVersion: getBuildInfo().version,
     getLivePackages: () => {
       if (registryRetired || !resolvedAgentRegistry) return undefined;
@@ -1621,6 +1629,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       const freshRuntime = RuntimeConfig.createDetached(
         ctx.directory,
         freshConfig,
+        hostFlavor,
       );
       freshRuntime.captureHostConfig(latestHostSnapshot ?? {});
       if (runtimePreset) freshRuntime.setRuntimePreset(runtimePreset);
@@ -1789,8 +1798,8 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       // report a successful "refresh" that wipes every profile/model.
       const hardWarnings: string[] = [];
       const freshConfig = loadPluginConfig(ctx.directory, {
-        silent: true,
         hostFlavor,
+        silent: true,
         onWarning: (warning) => {
           if (HARD_PROFILE_REFRESH_WARNING_KINDS.has(warning.kind)) {
             hardWarnings.push(
@@ -2002,6 +2011,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
 
       const event = input.event as {
         type: string;
+        // Raw v2 envelope: host time and payload.
+        created?: unknown;
+        data?: { sessionID?: unknown };
         properties?: {
           info?: {
             id?: string;
@@ -2016,6 +2028,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
             };
             sessionID?: string;
             directory?: string;
+            time?: { created?: unknown; completed?: unknown };
           };
           sessionID?: string;
           id?: string;
@@ -2123,6 +2136,10 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
               isInternalAdmission(info.sessionID, info.parentID));
           if (!internalAdmission) {
             sessionMetadata.setModel(info.sessionID, model);
+            companionManager.onSessionModelChanged({
+              sessionId: info.sessionID,
+              model,
+            });
           }
           // Managed background-task sessions are identified by their session
           // ID. If the model serving one changed (fallback re-prompt, runtime
@@ -2153,6 +2170,16 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         const createdSessionParent = (
           event.properties as { info?: { parentID?: unknown } } | undefined
         )?.info?.parentID;
+        // v2 hands over the raw envelope before its mapped shapes: without
+        // `info`, take the session and the host creation time from it.
+        const info = event.properties?.info;
+        const freshID = info
+          ? info.id
+          : (event.data?.sessionID ?? event.properties?.sessionID);
+        const createdAt = info ? info.time?.created : event.created;
+        if (typeof freshID === 'string' && typeof createdAt === 'number') {
+          backgroundJobBoard.noteSessionCreated(freshID, createdAt);
+        }
         if (createdSessionId && typeof createdSessionParent === 'string') {
           if (hostFlavor !== 'v2') {
             v1ChildParents.set(createdSessionId, createdSessionParent);
@@ -2210,11 +2237,25 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         },
       );
 
+      const companionProperties = event.properties;
+      const companionData = (input.event as { data?: Record<string, unknown> })
+        .data;
+      const companionRequestId =
+        typeof companionProperties?.id === 'string'
+          ? companionProperties.id
+          : typeof companionProperties?.requestID === 'string'
+            ? companionProperties.requestID
+            : typeof companionData?.id === 'string'
+              ? companionData.id
+              : typeof companionData?.requestID === 'string'
+                ? companionData.requestID
+                : undefined;
+
       if (
         event.type === 'permission.asked' ||
         event.type === 'question.asked'
       ) {
-        companionManager.onWaitingInput();
+        companionManager.onWaitingInput(companionRequestId);
       }
 
       if (
@@ -2460,6 +2501,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         model?: {
           providerID: string;
           modelID: string;
+          variant?: string;
         };
         variant?: string;
         parts?: unknown[];
@@ -2690,6 +2732,17 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         const model = `${messageModel.providerID}/${messageModel.modelID}`;
         if (!internalAdmission) {
           sessionMetadata.setModel(input.sessionID, model);
+          const liveVariant =
+            routedChild?.entry.variant ??
+            input.variant ??
+            input.model?.variant ??
+            output?.message?.model?.variant;
+          companionManager.onSessionModelChanged({
+            sessionId: input.sessionID,
+            model,
+            ...(liveVariant ? { variant: liveVariant } : {}),
+            variantObserved: true,
+          });
         }
         backgroundTaskConcurrency.migrateTask(input.sessionID, model);
       }

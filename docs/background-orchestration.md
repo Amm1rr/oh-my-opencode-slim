@@ -87,22 +87,49 @@ Aliases and reusable-session history are process-local and do not survive proces
 restarts as a reusable board. Post-restart recovery is partial and best-effort;
 it does not guarantee restoration of those aliases or the complete history. One
 recovery channel is explicit: `task_revive` on a raw session ID verifies the
-session against the host (existence and parent ownership, plus a live-state
-gate) and re-adopts an untracked child owned by the calling parent, then
+session against the host (existence and parent ownership) and re-adopts an
+untracked child owned by the calling parent, then
 continues it with the new prompt.
 Recovery verifies the original agent and latest delivered round before importing
 a retained terminal row. This cache-only import does not launch or notify.
-The production board issues numbered aliases only after a bounded read of that
-parent's complete host history establishes a floor from the local counter,
-backend high-water mark, and verified `prefix-N` markers. Missing, truncated,
-compacted, still-open, or unmarked history leaves numbering off, not task
-creation: refer to the new task by its exact session ID. A later verified read
-can enable numbering without reusing a historical alias.
+The production board numbers a parent's children only when the host's creation
+time shows that parent session was created while the plugin instance runs: the
+board saw every numbered alias it could have. Any other parent (created before a
+restart, or with no creation time) gives its new children their exact session
+ID as alias, and task creation still succeeds. This is deliberate: no cheap host
+read bounds the numbers issued before a restart. The live child count misses
+deleted children and a persisted high-water mark can miss a failed write, so
+either floor could hand an old `fix-2` to a new child while history still pairs
+`fix-2` with another session. Adopted and rehydrated host children keep their
+session ID as alias; a restored child keeps its historical alias only when
+history pairs that alias with it alone and no row of that parent holds it
+(never once the parent's readable history is cut: a v2 compaction or,
+on v1, more than 1,000 messages).
+None of them consumes a new number. A forked session counts as new, but the
+aliases in its copied history belong to the original parent: refer to the
+fork's new children by exact session ID.
 
 The continuation guidance changes the static orchestrator prompt and board
 wording. Existing sessions incur a one-time prompt-cache re-warm on their
 first request with this version; this is not a cache-neutral release. The
 new guidance remains deterministic and does not rewrite earlier messages.
+
+On v2 hosts with `session.prompt` and `session.context`, adoption queues the new
+instruction in the same session after shared recovery verifies parent ownership,
+agent evidence, and readable history. Host-proven aliases use the same path;
+unverified or ambiguous aliases remain refused. An incomplete historical round
+is permitted only for this explicit queued revive; ordinary recovery still
+requires a verified historical terminal. The host wakes an idle session or runs the input
+after the current execution; revival does not wait for idle or interrupt it.
+The plugin assigns a message ID before admission and only delivers the terminal
+answer after that exact input. An older execution's result, error, or idle event
+cannot complete the continuation. Missing input/answer evidence remains pending.
+Only one continuation is admitted locally at a time. An uncertain admission must
+not be retried: its lease stays held until acknowledgement or an attributable
+answer proves completion. Queued adoption does not arm a session-wide timeout
+abort, because that could kill the preceding execution. Deletion suppresses late
+delivery without a compensating interrupt. V1 adoption retains its live-status
+gate; existing tracked revival retains its previous idle-verification behavior.
 
 ---
 
@@ -250,7 +277,7 @@ forever-running ghost, and a session that already reached a terminal host
 outcome is settled to it (the typed NotFound classification is a v2
 in-process artifact — on v1 hosts the probe harmlessly never tombstones). On
 OpenCode v2 hosts with the optional `ctx.storage` domain, deletion tombstones
-and alias counters additionally persist across host restarts (see the
+and epochs additionally persist across host restarts (see the
 [v2 compatibility doc](opencode-v2-compatibility.md#background-job-state-rehydrate-probe-and-persistence)).
 
 Specialist outputs are inputs, not final truth. The orchestrator reconciles them

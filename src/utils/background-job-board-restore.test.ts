@@ -46,7 +46,7 @@ describe('restoreRetainedSession', () => {
     expect(next.alias).toBe('fix-1');
   });
 
-  test('a trusted alias advances high-water once and does not burn extra counters', () => {
+  test('a trusted alias advances the counter once and does not burn extra counters', () => {
     const board = new BackgroundJobBoard();
     const restored = board.restoreRetainedSession({
       ...retained,
@@ -62,13 +62,10 @@ describe('restoreRetainedSession', () => {
     expect(next.alias).toBe('fix-4');
   });
 
-  test('a reentrant or late restore does not overwrite running or spend a generation', () => {
+  test('a reentrant, existing, or leased row is not overwritten and spends no generation', () => {
     const board = new BackgroundJobBoard();
     board.addMutationListener(() => {
-      board.restoreRetainedSession({
-        ...retained,
-        resultSummary: 'LATE',
-      });
+      board.restoreRetainedSession({ ...retained, resultSummary: 'LATE' });
     });
     const running = board.registerLaunch({
       taskID: 'ses_child',
@@ -81,6 +78,14 @@ describe('restoreRetainedSession', () => {
       generation: running.generation,
     });
     expect(board.get('ses_child')?.resultSummary).toBeUndefined();
+    expect(board.restoreRetainedSession(retained)).toBeUndefined();
+
+    const lease = board.acquireRelaunchLease('ses_child', running.generation);
+    expect(lease).toBeDefined();
+    board.drop('ses_child');
+    expect(board.restoreRetainedSession(retained)).toBeUndefined();
+    expect(board.get('ses_child')).toBeUndefined();
+    expect(board.validateLease(lease as NonNullable<typeof lease>)).toBe(true);
     const next = board.registerLaunch({
       taskID: 'ses_other',
       parentSessionID: 'ses_parent',
@@ -88,43 +93,6 @@ describe('restoreRetainedSession', () => {
       now: 20,
     });
     expect(next.generation).toBe(running.generation + 1);
-    expect(board.restoreRetainedSession(retained)).toBeUndefined();
-    const after = board.registerLaunch({
-      taskID: 'ses_third',
-      parentSessionID: 'ses_parent',
-      agent: 'fixer',
-      now: 30,
-    });
-    expect(after.generation).toBe(next.generation + 1);
-  });
-
-  test('does not overwrite an existing row or a live lease', () => {
-    const board = new BackgroundJobBoard();
-    const running = board.registerLaunch({
-      taskID: 'ses_child',
-      parentSessionID: 'ses_parent',
-      agent: 'fixer',
-      now: 10,
-    });
-    expect(board.restoreRetainedSession(retained)).toBeUndefined();
-    expect(board.get('ses_child')).toMatchObject({
-      state: 'running',
-      generation: running.generation,
-    });
-
-    const leased = new BackgroundJobBoard();
-    leased.registerLaunch({
-      taskID: 'ses_child',
-      parentSessionID: 'ses_parent',
-      agent: 'fixer',
-      now: 10,
-    });
-    const lease = leased.acquireRelaunchLease('ses_child', 1);
-    expect(lease).toBeDefined();
-    leased.drop('ses_child');
-    expect(leased.get('ses_child')).toBeUndefined();
-    expect(leased.restoreRetainedSession(retained)).toBeUndefined();
-    expect(leased.validateLease(lease as NonNullable<typeof lease>)).toBe(true);
   });
 
   test('coordinator projects identity and still does not emit a terminal wake', () => {
