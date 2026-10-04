@@ -929,7 +929,7 @@ Guards such as `tool-loop-guard`, `search-path-guard`, `absolute-path-rescue`, a
 
 Notes:
 
-- Injection surfaces that have dedicated switches are not listed here: the Background Job Board (`backgroundJobs.boardInjection`), wake prompts (`backgroundJobs.orchestratorWake.enabled`, `backgroundJobs.childInputWake`), update notifications (`autoUpdate`), and image routing (`image_routing`).
+- Injection surfaces that have dedicated switches are not listed here: the Background Job Board (`backgroundJobs.boardInjection`), wake prompts (`backgroundJobs.orchestratorWake.enabled`, `backgroundJobs.childInputWake`), and image routing (`image_routing`). `autoUpdate` controls automatic installation of updates; update notifications may still appear when it is false.
 - Invalid entries are stripped with a warning when the config loads; a value consisting only of unknown names is treated as unset, so a lower config layer's list still applies.
 
 ### Slash Commands
@@ -941,6 +941,8 @@ Disable built-in commands via `disabled_commands`:
 ```
 
 Available commands: `interview`, `deepwork`, `reflect`, `loop`. Disabled commands are neither registered nor intercepted at execution time, so a user-defined command with the same name is left untouched. Listing `reflect` in `disabled_skills` also disables the `/reflect` command.
+
+Invalid entries are stripped with a warning when the config loads; a value consisting only of unknown names is treated as unset, so a lower config layer's list still applies — it is not an explicit empty override.
 
 ### Multiplexer
 
