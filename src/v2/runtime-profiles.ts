@@ -49,8 +49,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function sameModel(a: unknown, b: { providerID: string; id: string }): boolean {
-  return isRecord(a) && a.providerID === b.providerID && a.id === b.id;
+function sameModel(a: unknown, b: V2AgentRuntimeProfile['model']): boolean {
+  return (
+    isRecord(a) &&
+    b !== undefined &&
+    a.providerID === b.providerID &&
+    a.id === b.id &&
+    (a.variant ?? 'default') === (b.variant ?? 'default')
+  );
 }
 
 async function withProfileTimeout<T>(

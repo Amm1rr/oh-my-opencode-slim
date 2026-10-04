@@ -124,12 +124,13 @@ describe('createSessionProfileBridge', () => {
     expect(bridge.size()).toBe(0);
   });
 
-  test('keeps per-call child models and switches host defaults after a refresh', async () => {
+  test('keeps per-call models and variants but refreshes exact host defaults', async () => {
     let profiles = PROFILES;
     const models: Record<string, ModelRef> = {
       event: { providerID: 'other', id: 'gpt-5-mini', variant: 'low' },
       get: { providerID: 'openai', id: 'per-call', variant: 'low' },
-      default: PROFILES.explorer.model,
+      variant: { ...PROFILES.explorer.model, variant: 'max' },
+      default: { ...PROFILES.explorer.model, variant: 'default' },
     };
     const { bridge, switchCalls } = makeBridge({
       profiles: () => profiles,
@@ -146,6 +147,7 @@ describe('createSessionProfileBridge', () => {
       data: { ...event.data, model: models.event },
     });
     await bridge.ensureSessionProfile('get');
+    await bridge.ensureSessionProfile('variant');
     expect(switchCalls).toEqual([]);
     expect(bridge.profileForSession('get')).toBe(PROFILES.explorer);
 
