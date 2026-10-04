@@ -749,7 +749,7 @@ export class PaneLifecycle {
     const handle = this.ports.clock.setTimeout(() => {
       this.idleTimers.delete(childSessionId);
       this.provisionalIdle.delete(childSessionId);
-      void this.closeIfStillIdle(childSessionId);
+      void this.closeIfStillIdle(childSessionId, provisional);
     }, this.config.stableIdleMs);
     this.idleTimers.set(childSessionId, handle);
   }
@@ -763,7 +763,10 @@ export class PaneLifecycle {
     this.ports.clock.clearTimeout(handle);
   }
 
-  private async closeIfStillIdle(childSessionId: string): Promise<void> {
+  private async closeIfStillIdle(
+    childSessionId: string,
+    provisional = false,
+  ): Promise<void> {
     const record = this.panes.get(childSessionId);
     if (record?.status !== 'active') return;
 
@@ -778,7 +781,7 @@ export class PaneLifecycle {
     const read = await this.readStatus(record.directory);
     if (read.error) {
       if ((this.activityEpoch.get(childSessionId) ?? 0) === epoch) {
-        this.scheduleCloseRetry(childSessionId, record, 'idle');
+        this.scheduleCloseRetry(childSessionId, record, 'idle', provisional);
       }
       return;
     }
@@ -793,13 +796,14 @@ export class PaneLifecycle {
       return;
     }
 
-    await this.closePane(childSessionId, record, 'idle');
+    await this.closePane(childSessionId, record, 'idle', provisional);
   }
 
   private async closePane(
     childSessionId: string,
     record: PaneRecord,
     reason: PaneCloseReason,
+    provisional = false,
   ): Promise<void> {
     if (record.status === 'closing') return;
     record.status = 'closing';
@@ -845,23 +849,26 @@ export class PaneLifecycle {
     record.status = 'active';
     const wasBusy = this.busyWhileClosing.delete(childSessionId);
     if (!wasBusy || reason !== 'idle')
-      this.scheduleCloseRetry(childSessionId, record, reason);
+      this.scheduleCloseRetry(childSessionId, record, reason, provisional);
   }
 
   private scheduleCloseRetry(
     childSessionId: string,
     record: PaneRecord,
     reason: PaneCloseReason,
+    provisional = false,
   ): void {
     if (this.disposed || this.panes.get(childSessionId) !== record) return;
     const attempts = (this.closeAttempts.get(childSessionId) ?? 0) + 1;
     this.closeAttempts.set(childSessionId, attempts);
     if (attempts >= MAX_CLOSE_ATTEMPTS) return;
+    if (provisional) this.provisionalIdle.add(childSessionId);
     const handle = this.ports.clock.setTimeout(() => {
       this.idleTimers.delete(childSessionId);
+      this.provisionalIdle.delete(childSessionId);
       if (this.panes.get(childSessionId) !== record) return;
       void (reason === 'idle'
-        ? this.closeIfStillIdle(childSessionId)
+        ? this.closeIfStillIdle(childSessionId, provisional)
         : this.closePane(childSessionId, record, reason));
     }, CLOSE_RETRY_MS);
     this.idleTimers.set(childSessionId, handle);

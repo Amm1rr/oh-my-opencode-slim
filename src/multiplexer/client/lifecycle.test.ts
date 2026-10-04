@@ -766,19 +766,45 @@ describe('dedup and stable-idle close (2.3)', () => {
     expect(h.lifecycle.getPane(CHILD)).toBeDefined();
   });
 
-  test('retries a failed idle close, then removes the pane', async () => {
+  test('a status retry preserves the provisional deadline until the first real idle', async () => {
     const h = createHarness();
-    await activatePane(h);
+    h.list.setSessionIds(CHILD);
+    h.reader.statuses.set(CHILD, 'busy');
+    await h.lifecycle.onReconnect();
+    h.reader.statuses.set(CHILD, 'idle');
+    h.reader.error = 'temporary';
+    h.clock.advance(STABLE_IDLE_MS);
+    await flushAsync();
+    h.reader.error = undefined;
+    h.clock.advance(990);
+    await h.lifecycle.handleEvent(lifecycleEvent('idle'));
+    h.clock.advance(10);
+    await flushAsync();
+    expect(h.adapter.closeCalls).toHaveLength(0);
+    h.clock.advance(STABLE_IDLE_MS - 10);
+    await flushAsync();
+    expect(h.lifecycle.getPane(CHILD)).toBeUndefined();
+  });
+
+  test('a failed close preserves the provisional deadline until the first real idle', async () => {
+    const h = createHarness();
+    h.list.setSessionIds(CHILD);
+    h.reader.statuses.set(CHILD, 'busy');
+    await h.lifecycle.onReconnect();
     h.reader.statuses.set(CHILD, 'idle');
     h.adapter.closeResult = false;
-    await h.lifecycle.handleEvent(lifecycleEvent('idle'));
     h.clock.advance(STABLE_IDLE_MS);
     await flushAsync();
     expect(h.adapter.closeCalls).toHaveLength(1);
     expect(h.clock.pendingTimers).toBe(1);
 
     h.adapter.closeResult = true;
-    h.clock.advance(1000);
+    h.clock.advance(990);
+    await h.lifecycle.handleEvent(lifecycleEvent('idle'));
+    h.clock.advance(10);
+    await flushAsync();
+    expect(h.adapter.closeCalls).toHaveLength(1);
+    h.clock.advance(STABLE_IDLE_MS - 10);
     await flushAsync();
     expect(h.adapter.closeCalls).toHaveLength(2);
     expect(h.lifecycle.getPane(CHILD)).toBeUndefined();
