@@ -209,7 +209,8 @@ async function recoverRetainedSession(
     !transcriptSourceAvailable ||
     (isRecord(childTranscript) &&
       Array.isArray(childTranscript.data) &&
-      childTranscript.data.length === 0);
+      childTranscript.data.length === 0 &&
+      !hidesHistory(childTranscript));
   if (
     noTranscript &&
     request.purpose === 'revive' &&
@@ -523,7 +524,10 @@ async function readParentTranscript(
   return limit !== undefined &&
     isRecord(transcript) &&
     Array.isArray(transcript.data) &&
-    transcript.data.length > PARENT_READ_WINDOW
+    (transcript.data.length > PARENT_READ_WINDOW ||
+      (transcript.response as Response | undefined)?.headers?.has?.(
+        'x-next-cursor',
+      ))
     ? { ...transcript, page: { complete: false } }
     : transcript;
 }
