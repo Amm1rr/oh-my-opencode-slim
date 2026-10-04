@@ -145,7 +145,9 @@ import {
 } from './utils/internal-initiator';
 import { probeJSDOM } from './utils/jsdom';
 import { initLogger, log } from './utils/logger';
+import { withTimeout } from './utils/session';
 import { SessionMetadataStore } from './utils/session-metadata';
+import { DEFAULT_RUNTIME_SESSION_STATUS_TIMEOUT_MS } from './utils/session-runtime-status';
 import {
   createSessionSelectionReader,
   modelFromMetadataString,
@@ -347,62 +349,13 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   // v1). Survives the try block so prompt-assembly hooks can use it.
   let hostFlavor: string | undefined;
   let instanceDisposed = false;
-  // v1 task() cannot select a model per call. The task before-hook records
-  // the fallback chosen for a delegation; the child's first chat.message
-  // rewrites its model before the host persists it (the host loop reads the
-  // persisted user model). Keyed by parent session for new children and by
-  // child session for task_id resumes. Child links come from session.created,
-  // which v1 publishes synchronously inside session.create.
-  type PendingV1ChildModel = {
-    callID?: string;
-    /** Background tasks return before their child prompts. */
-    background: boolean;
+  // v1 task() has no model override. Prompts claim these bounded intentions
+  // from host state, never from asynchronous session.created delivery.
+  const v1DelegatedIntents: {
+    parentID: string;
     agentName: string;
-    entry: ModelChainEntry;
-  };
-  const MAX_PENDING_V1_CHILD_MODELS = 32;
-  const v1ChildParents = new Map<string, string>();
-  const pendingV1ChildModels = new Map<string, PendingV1ChildModel[]>();
-  const pendingV1ResumeModels = new Map<string, PendingV1ChildModel>();
-  const forgetV1ChildRouting = (sessionID: string) => {
-    v1ChildParents.delete(sessionID);
-    pendingV1ChildModels.delete(sessionID);
-    pendingV1ResumeModels.delete(sessionID);
-  };
-  const dropPendingV1ChildModelsForCall = (callID: string) => {
-    const isDropped = (pending: PendingV1ChildModel) =>
-      pending.callID === callID && !pending.background;
-    for (const [parentID, queue] of pendingV1ChildModels) {
-      const kept = queue.filter((pending) => !isDropped(pending));
-      if (kept.length === 0) pendingV1ChildModels.delete(parentID);
-      else if (kept.length !== queue.length)
-        pendingV1ChildModels.set(parentID, kept);
-    }
-    for (const [childID, pending] of pendingV1ResumeModels) {
-      if (isDropped(pending)) pendingV1ResumeModels.delete(childID);
-    }
-  };
-  const takePendingV1ChildModel = (
-    sessionID: string,
-    agentName: string,
-  ): PendingV1ChildModel | undefined => {
-    const resumed = pendingV1ResumeModels.get(sessionID);
-    if (resumed?.agentName === agentName) {
-      pendingV1ResumeModels.delete(sessionID);
-      return resumed;
-    }
-    const parentID = v1ChildParents.get(sessionID);
-    // Only the child's first prompt follows its creation; later prompts
-    // (task_id resumes) are keyed by the child itself.
-    v1ChildParents.delete(sessionID);
-    const queue = parentID ? pendingV1ChildModels.get(parentID) : undefined;
-    const index =
-      queue?.findIndex((pending) => pending.agentName === agentName) ?? -1;
-    if (!parentID || !queue || index < 0) return undefined;
-    const [pending] = queue.splice(index, 1);
-    if (queue.length === 0) pendingV1ChildModels.delete(parentID);
-    return pending;
-  };
+    childID?: string;
+  }[] = [];
   let autoUpdateChecker: ReturnType<typeof createAutoUpdateCheckerHook>;
   const v1InternalSelectionOverrides = new Map<
     string,
@@ -417,7 +370,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     maxEntries: DEFAULT_MAX_SESSION_METADATA_ENTRIES,
     onEvict: (sessionID) => {
       v1InternalSelectionOverrides.delete(sessionID);
-      forgetV1ChildRouting(sessionID);
       log('[session] evicted oldest session metadata', {
         threshold: DEFAULT_MAX_SESSION_METADATA_ENTRIES,
         droppedSessionId: sessionID,
@@ -2205,9 +2157,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           backgroundJobBoard.noteSessionCreated(freshID, createdAt);
         }
         if (createdSessionId && typeof createdSessionParent === 'string') {
-          if (hostFlavor !== 'v2') {
-            v1ChildParents.set(createdSessionId, createdSessionParent);
-          }
           // Persist the child→parent link so any process can resolve the
           // conversation root, surviving restarts and revives (#1147).
           recordTuiSessionParent(
@@ -2325,7 +2274,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         companionManager.onSessionDeleted(sessionID);
         if (sessionID) {
           v1InternalSelectionOverrides.delete(sessionID);
-          forgetV1ChildRouting(sessionID);
           sessionMetadata.delete(sessionID);
         }
       }
@@ -2354,9 +2302,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       // the other locations' wake state.
       if (!hasLiveInstances()) clearAllWakeSessions();
       v1InternalSelectionOverrides.clear();
-      v1ChildParents.clear();
-      pendingV1ChildModels.clear();
-      pendingV1ResumeModels.clear();
+      if (hostFlavor !== 'v2') v1DelegatedIntents.length = 0;
       await interviewManager.dispose();
       clearTuiActivities();
       tuiReusableProjection?.dispose();
@@ -2418,25 +2364,14 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           // subagent_type stays canonical: the host's task permission and
           // agent lookup see the real specialist name.
           if (selected && selected.index > 0) {
-            const pending: PendingV1ChildModel = {
-              ...(input.callID ? { callID: input.callID } : {}),
-              background: args.background === true,
+            v1DelegatedIntents.push({
+              parentID: input.sessionID,
               agentName: selected.agentName,
-              entry: selected.entry,
-            };
-            if (typeof args.task_id === 'string' && args.task_id) {
-              pendingV1ResumeModels.set(args.task_id, pending);
-            } else {
-              const queue = pendingV1ChildModels.get(input.sessionID) ?? [];
-              queue.push(pending);
-              if (queue.length > MAX_PENDING_V1_CHILD_MODELS) queue.shift();
-              pendingV1ChildModels.set(input.sessionID, queue);
-            }
-            log('[delegation] routing v1 child to active fallback model', {
-              parentSessionID: input.sessionID,
-              agent: selected.agentName,
-              model: selected.entry.id,
+              ...(typeof args.task_id === 'string' && args.task_id
+                ? { childID: args.task_id }
+                : {}),
             });
+            if (v1DelegatedIntents.length > 32) v1DelegatedIntents.shift();
           }
         }
       }
@@ -2589,18 +2524,66 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         foregroundFallback.observeExternalTurn(input.sessionID);
       }
 
-      // v1 delegated child on a parent's active fallback (recorded by the
-      // task before-hook): rewrite the prompt's model before the host
-      // persists the message. The host loop runs on the persisted model.
+      // v1 confirms the session before publishing it, but saves this user
+      // message after chat.message. Only an empty host transcript can claim
+      // a creation intention; task_id resumes claim their explicit child ID.
       const childAgentRaw = input.agent ?? output?.message?.agent;
+      let childRoute: (typeof v1DelegatedIntents)[number] | undefined;
+      if (hostFlavor !== 'v2' && !internalAdmission && childAgentRaw) {
+        const agentName = resolveRuntimeAgentName(runtime, childAgentRaw);
+        childRoute = v1DelegatedIntents.find(
+          (route) =>
+            route.childID === input.sessionID && route.agentName === agentName,
+        );
+        if (
+          !childRoute &&
+          !sessionMetadata.getAgent(input.sessionID) &&
+          v1DelegatedIntents.some(
+            (route) => !route.childID && route.agentName === agentName,
+          )
+        ) {
+          try {
+            const request = {
+              path: { id: input.sessionID },
+              query: { directory: ctx.directory },
+              throwOnError: true as const,
+            };
+            const [{ data: session }, { data: messages }] = await withTimeout(
+              Promise.all([
+                ctx.client.session.get(request),
+                ctx.client.session.messages({
+                  ...request,
+                  query: { ...request.query, limit: 1 },
+                }),
+              ]),
+              DEFAULT_RUNTIME_SESSION_STATUS_TIMEOUT_MS,
+              'Host delegated child lookup timed out',
+            );
+            if (Array.isArray(messages) && messages.length === 0) {
+              childRoute = v1DelegatedIntents.find(
+                (route) =>
+                  !route.childID &&
+                  route.parentID === session?.parentID &&
+                  route.agentName === agentName,
+              );
+            }
+          } catch {
+            // Failed host reads cannot authorize a model rewrite.
+          }
+        }
+        if (childRoute)
+          v1DelegatedIntents.splice(v1DelegatedIntents.indexOf(childRoute), 1);
+      }
       const routedChild =
-        hostFlavor !== 'v2' && !internalAdmission && childAgentRaw
-          ? takePendingV1ChildModel(
-              input.sessionID,
-              resolveRuntimeAgentName(runtime, childAgentRaw),
-            )
+        childRoute &&
+        resolveDelegatedModelForParent(
+          childRoute.agentName,
+          childRoute.parentID,
+        );
+      const routedChildModel =
+        routedChild && routedChild.index > 0
+          ? modelFromMetadataString(routedChild.entry.id)
           : undefined;
-      const routedChildModel = modelFromMetadataString(routedChild?.entry.id);
       // A child already on the routed model (inherited from the parent)
       // keeps its message untouched, including the inherited variant.
       if (
@@ -2618,6 +2601,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         };
         log('[delegation] routed v1 child to active fallback model', {
           sessionID: input.sessionID,
+          parentSessionID: childRoute?.parentID,
           agent: routedChild.agentName,
           model: routedChild.entry.id,
         });
@@ -2952,12 +2936,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
 
     'tool.execute.after': async (input, output) => {
       await deepworkGuardAfter(input, output);
-      // A foreground task that never reached its child prompt must not leave
-      // a routed model for a later delegation. Background entries (flagged
-      // by the before-hook) stay until their child consumes them.
-      if (input.tool.toLowerCase() === 'task' && input.callID) {
-        dropPendingV1ChildModelsForCall(input.callID);
-      }
       if (!runtime.disabledHooks.has('json-error-recovery')) {
         await jsonErrorRecoveryAfter(input, output);
       }
