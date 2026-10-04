@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { adaptPermissions } from '../v2/adapters';
 import { loadPluginConfig } from './loader';
 import {
   mergeAgentOverrides,
@@ -482,37 +483,117 @@ describe('preset inheritance', () => {
     });
   });
 
-  test('a later permission layer keeps its written key order through the merge', () => {
-    // Key order is precedence (opencode evaluates the compiled rules
-    // last-match-wins), so a layer writing {"*": "deny", "read": "allow"}
-    // intends read to survive the wildcard. The merge must not pin
-    // redefined keys to their base positions — the later layer's entries
-    // come first in its written order, base keys it does not mention
-    // follow.
-    const presets = parsePresets({
-      presets: {
-        base: {
-          agents: {
-            oracle: { permission: { read: 'ask', glob: 'allow' } },
+  test('a later layer keeps its written order and never drops unmentioned denies', () => {
+    // Order is precedence: a key the child layer re-defines keeps its
+    // written position; base keys the layer does not mention yield to its
+    // wildcard — except denies, which stay effective so a blanket rule can
+    // never loosen what the layer did not name (nested maps included).
+    const merged = (
+      base: Record<string, unknown>,
+      child: Record<string, unknown>,
+    ) => {
+      const presets = parsePresets({
+        presets: {
+          base: { agents: { oracle: { permission: base } } },
+          child: {
+            extends: 'base',
+            agents: { oracle: { permission: child } },
           },
         },
-        child: {
-          extends: 'base',
-          agents: {
-            oracle: {
-              permission: { '*': 'deny', read: 'allow' },
-            },
-          },
-        },
-      },
-    });
+      });
+      const rules = adaptPermissions(
+        resolvePreset('child', presets).oracle.permission,
+      );
+      // OpenCode's evaluator: the last rule whose action and resource
+      // globs both match wins.
+      const glob = (value: string, pattern: string) => {
+        let source = pattern
+          .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+          .replace(/\*/g, '.*')
+          .replace(/\?/g, '.');
+        if (source.endsWith(' .*')) source = `${source.slice(0, -3)}( .*)?`;
+        return new RegExp(`^${source}$`, 's').test(value);
+      };
+      return (action: string, resource = '*') =>
+        rules.findLast(
+          (r) => glob(action, r.action) && glob(resource, r.resource),
+        )?.effect;
+    };
 
-    const resolved = resolvePreset('child', presets);
+    // Loosening blanket: the base's unmentioned denies survive it.
+    const loosened = merged(
+      { edit: 'deny', read: 'allow', bash: { '*': 'ask', 'rm -rf /': 'deny' } },
+      { '*': 'allow', bash: { '*': 'allow' } },
+    );
+    expect(loosened('edit')).toBe('deny');
+    expect(loosened('read')).toBe('allow');
+    expect(loosened('bash', 'rm -rf /')).toBe('deny');
+    expect(loosened('bash')).toBe('allow');
+
+    // Written order: the re-defined allow follows the layer's wildcard.
+    const written = merged(
+      { read: 'ask', glob: 'allow' },
+      { '*': 'deny', read: 'allow' },
+    );
+    expect(written('read')).toBe('allow');
+    expect(written('glob')).toBe('deny');
+
+    // Lockdown: the blanket deny wins over base allows it does not mention.
+    const locked = merged({ read: 'allow', glob: 'allow' }, { '*': 'deny' });
+    expect(locked('read')).toBe('deny');
+    expect(locked('glob')).toBe('deny');
+
+    // A later wildcard tightens anything but loosens only what it names:
+    // an unmentioned base map moves after the wildcard only with the
+    // entries at least as strict as it (deny > ask > allow).
+    const guarded = { bash: { '*': 'allow', 'rm -rf /': 'deny' } };
+    const lockdown = merged(guarded, { '*': 'deny' });
+    expect(lockdown('bash')).toBe('deny');
+    expect(lockdown('bash', 'ls')).toBe('deny');
+    expect(lockdown('bash', 'rm -rf /')).toBe('deny');
+
+    const open = merged(guarded, { '*': 'allow' });
+    expect(open('bash', 'rm -rf /')).toBe('deny');
+    expect(open('bash', 'ls')).toBe('allow');
+    expect(open('bash')).toBe('allow');
+
+    expect(merged({ edit: 'allow' }, { '*': 'deny' })('edit')).toBe('deny');
+    expect(merged({ edit: 'deny' }, { '*': 'allow' })('edit')).toBe('deny');
     expect(
-      Object.keys(
-        (resolved.oracle as { permission?: object }).permission ?? {},
-      ),
-    ).toEqual(['*', 'read', 'glob']);
+      merged({ edit: 'deny' }, { '*': 'allow', edit: 'allow' })('edit'),
+    ).toBe('allow');
+
+    // Overlapping patterns keep their precedence when the map moves: a
+    // narrower allow after a broad deny is raised to the wildcard, not lost.
+    const layered = merged(
+      { bash: { 'git *': 'deny', 'git log *': 'allow' } },
+      { '*': 'ask' },
+    );
+    expect(layered('bash', 'git log x')).toBe('ask');
+    expect(layered('bash', 'git push')).toBe('deny');
+    expect(layered('bash', 'ls')).toBe('ask');
+
+    // An ask-level wildcard keeps unmentioned asks and denies, not allows.
+    const asked = merged(
+      { bash: { '*': 'allow', 'git push*': 'ask', 'rm -rf /': 'deny' } },
+      { '*': 'ask' },
+    );
+    expect(asked('bash', 'ls')).toBe('ask');
+    expect(asked('bash', 'git push*')).toBe('ask');
+    expect(asked('bash', 'rm -rf /')).toBe('deny');
+
+    // Nested maps apply the same rule against their own wildcard.
+    const nested = merged(
+      { bash: { '*': 'ask', 'git status': 'allow', 'rm -rf /': 'deny' } },
+      { bash: { '*': 'deny' } },
+    );
+    expect(nested('bash', 'git status')).toBe('deny');
+    expect(nested('bash', 'rm -rf /')).toBe('deny');
+
+    // The base's own wildcard stays the fallback the layer's keys refine.
+    const refined = merged({ '*': 'deny' }, { read: 'allow' });
+    expect(refined('read')).toBe('allow');
+    expect(refined('edit')).toBe('deny');
   });
 
   test('deep-merges nested objects and replaces arrays', () => {

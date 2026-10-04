@@ -220,6 +220,7 @@ All config files support **JSONC** (JSON with Comments):
 | `backgroundJobs.orchestratorWake.enabled` | boolean | `true` | When true, idle orchestrator sessions with incomplete todos may receive periodic internal wake prompts (default every 5 minutes of continuous parent idle). Requires host session APIs. See [Background Orchestration](background-orchestration.md#orchestrator-wake-scheduler) See [Background Job Management](#background-job-management). |
 | `backgroundJobs.orchestratorWake.intervalMs` | integer | `300000` | Continuous parent-idle interval between wake evaluations (`60000`–`2147483647` ms). `0` is invalid. See [Background Orchestration](background-orchestration.md#orchestrator-wake-scheduler) See [Background Job Management](#background-job-management). |
 | `backgroundJobs.orchestratorWake.mode` | string | `"auto"` | Wake-condition source: `"auto"` uses todo-gating on OpenCode v1 and children-driven degraded mode on v2 hosts; `"todo"`/`"children"` pin one mode (explicit `"todo"` degrades to children where no todo API exists). See [Background Orchestration](background-orchestration.md#orchestrator-wake-scheduler). |
+| `backgroundJobs.orchestratorWake.periodicWakeEnabled` | boolean | `true` | When false, the periodic idle evaluation never runs; only event-driven wakes (stopped-job recovery, later terminal publications, child-input asks) still deliver, and failed event wakes keep their timer-based retry. On v2 hosts the derived default is `false` when neither config layer sets the key — the native background notifier already delivers first terminal publications to an idle parent. See [Background Orchestration](background-orchestration.md#orchestrator-wake-scheduler). |
 | `backgroundJobs.orchestratorWake.wakeOnTerminalPublication` | boolean | `true` | When true, a terminal completed/error publication that reaches an idle parent wakes it immediately instead of waiting for the next periodic evaluation. The first terminal publication of any generation (terminalRevision 1) is skipped (the native notifier armed by that generation's `subagent` tool call already delivers it); busy parents are skipped the same way See [Background Orchestration](background-orchestration.md#orchestrator-wake-scheduler) See [Background Job Management](#background-job-management). |
 | `backgroundJobs.orchestratorWake.publicationWakeMinIntervalMs` | integer | `30000` | Per-parent minimum spacing between terminal-publication wakes (`1000`–`2147483647` ms; `0` is invalid — the schema floor is 1,000ms). A burst of publications collapses into one wake; the window is consumed only when a wake is actually delivered See [Background Orchestration](background-orchestration.md#orchestrator-wake-scheduler) See [Background Job Management](#background-job-management). |
 | `backgroundJobs.wallClockTimeoutMs` | integer | `0` | **Opt-in wall-clock supervisor.** `0` disables it. Otherwise, only native background child sessions (`task(..., background: true)` on v1, `subagent(..., background: true)` on v2) are supervised; accepted values are `60000`–`2147483647` milliseconds See [Background Job Management](#background-job-management). |
@@ -230,7 +231,7 @@ All config files support **JSONC** (JSON with Comments):
 | `backgroundJobs.concurrency.modelConcurrency` | object | `{}` | Per-model caps keyed by `provider/model` ID. Each value must be `0`–`1000`, where `0` means unlimited for that model. The most specific configured cap wins: model > provider > default See [Background Job Management](#background-job-management). |
 | `backgroundJobs.sameProviderPolicy` | object | `{}` | Opt-in per-provider policy keyed by provider ID; the only value is `"foreground"`. When the parent session's current model and the child agent's resolved model both resolve to a configured provider, an explicit background call (`task(..., background: true)` on v1, `subagent(..., background: true)` on v2) is converted to the existing foreground execution path. Unconfigured, different, or undeterminable providers keep background behavior. See [Background Job Management](#background-job-management). |
 | `backgroundJobs.waitForUserGuard` | boolean | `true` | When true, intercepts `wait_for_user` calls while background tasks are still running and the orchestrator wake scheduler is enabled, returning guidance to end the turn instead of blocking on manual input. See [Background Job Management](#background-job-management). |
-| `backgroundJobs.boardInjection` | boolean | `true` | When false, the Background Job Board reminder is never injected into prompts. Background task tracking, wake, and task_status all keep working; the orchestrator simply no longer passively sees the board. See [Background Job Management](#background-job-management). |
+| `backgroundJobs.boardInjection` | boolean | `true` | When false, the Background Job Board reminder is never injected into prompts. Background task tracking, wake, and task_status all keep working; the orchestrator simply no longer passively sees the board. On v2 hosts the derived default is `false` when neither config layer sets the key — the native background notifier delivers each run's first terminal publication (with its full result) to the parent, so the board's passive injection duplicates that channel there. Explicit `true` restores it. See [Background Job Management](#background-job-management). |
 | `disabled_mcps` | string[] | `[]` | MCP server IDs to disable globally |
 | `disabled_tools` | string[] | `[]` | Slim tool names to disable globally. Disabled Slim tools are not registered with OpenCode and cannot be used by agents; OpenCode built-in tools are not affected |
 | `disabled_skills` | string[] | `[]` | Skill names to disable globally. Disabled skills are not granted to agents, and disabled bundled skills are not registered; listing `reflect` here also disables the `/reflect` command |
@@ -449,6 +450,28 @@ shown, how board snapshots are injected, or to change the default-on
 orchestrator wake interval. For glossary definitions of background-job terms
 (board snapshot, checkpoint cache epoch, injection strategy, etc.), see
 [CONTEXT.md — Background Jobs](../CONTEXT.md#background-jobs).
+
+**v2 derived defaults.** On OpenCode v2 hosts, `boardInjection` and
+`orchestratorWake.periodicWakeEnabled` default to `false` when neither config
+layer sets the key: the v2 native background notifier delivers each run's first
+terminal publication (with its full result) to the parent — idle parents get a
+new turn, busy parents get a steer — so the passive board injection and the
+periodic idle evaluation duplicate that channel. Event-driven wakes
+(stopped-job recovery, later terminal publications, child-input asks) are
+unaffected. Set the keys explicitly (`"boardInjection": true`,
+`"periodicWakeEnabled": true`) to restore the v1-style behavior on v2; v1
+hosts are unchanged.
+
+Board-off behavioral notes: the consumption bookkeeping that retires
+completed/error/cancelled jobs registers on orchestrator turns driven by a
+real user message (pure event-wake turns are internal-initiator and do not
+register), so retirement waits for the next real user turn; stopped jobs
+never register there — the stopped-job recovery wake surfaces them and
+retirement goes through the recovery flow; reopen corrections (a previously
+terminal job running again) still deliver, in a board-free wording that
+points at `task_status`; and a natively delivered result lost host-side has
+no passive display fallback — check `task_status` or `task_result` if a
+completion looks missing.
 The wall-clock supervisor is separately opt-in and remains disabled unless
 `wallClockTimeoutMs` is set:
 
@@ -858,9 +881,9 @@ The field accepts either:
 1. **Shorthand string** — `"ask"`, `"allow"`, or `"deny"` applied to all tools
 2. **Object** — keys are tool names, values are `"ask" | "allow" | "deny"` or (for rule keys) a pattern-to-action map
 
-**Key order is precedence.** Entries compile into ordered `{action, resource, effect}` rules that opencode evaluates last-match-wins (the host parses `permission` with `propertyOrder: "original"`, and the plugin preserves your key order verbatim). Put the wildcard base first and specific rules after it: `{"*": "deny", "read": "allow"}` denies everything except `read`; the reverse order denies `read` too. The same applies inside a pattern map (`bash: {"*": "ask", "git status*": "allow"}`) and across preset inheritance: a later layer's entries keep the order the layer writes them, and base keys the layer does not mention follow — so `{"*": "deny", "read": "allow"}` merged onto any base always yields the wildcard first and `read` after it, while the base's unmentioned keys lose to the layer's wildcard.
+**Key order is precedence.** Entries compile into ordered `{action, resource, effect}` rules that opencode evaluates last-match-wins (the host parses `permission` with `propertyOrder: "original"`, and the plugin preserves your key order verbatim). Put the wildcard base first and specific rules after it: `{"*": "deny", "read": "allow"}` denies everything except `read`; the reverse order denies `read` too. The same applies inside a pattern map (`bash: {"*": "ask", "git status*": "allow"}`) and across preset inheritance: a later layer's entries keep the order the layer writes them, and base keys the layer does not mention precede them, so the layer's `"*"` shadows them and `{"*": "deny", "read": "allow"}` merged onto any base always yields `read` after the wildcard. The rule is that a later wildcard can tighten anything but can only loosen what the layer names. Unmentioned entries at least as strict as the layer's wildcard (deny > ask > allow; only denies when the layer has no wildcard) move after the layer's keys and keep winning. A pattern map holding such an entry moves whole, in its own order, with each looser entry raised to the wildcard's action, so `bash: {"*": "allow", "rm -rf /": "deny"}` under a layer's `{"*": "deny"}` denies all of bash, under `{"*": "allow"}` still denies `rm -rf /`, and `bash: {"git *": "deny", "git log *": "allow"}` under `{"*": "ask"}` asks for `git log` and denies other git commands. Nested maps follow the same rule against their own `"*"`, and the base's own `"*"` always stays the fallback. To lift an inherited deny, name that key.
 
-**Built-in read-only roles ship an enforced matrix.** `explorer`, `librarian`, `oracle`, and `observer` carry a read-only permission matrix (wildcard deny + inspection and web-research allows) built into their definitions, so the read-only boundary holds with zero configuration. An explicit `agents.<name>.permission` replaces the matrix wholesale — opting out or extending it is one entry, never a merge.
+**Built-in read-only roles ship an enforced matrix.** `explorer`, `librarian`, `oracle`, and `observer` carry a read-only permission matrix (wildcard deny + inspection and web-research allows) built into their definitions, so the read-only boundary holds with zero configuration. An explicit `agents.<name>.permission` replaces the matrix wholesale — opting out or extending it is one entry, never a merge. A bare `read: "allow"` replacement re-exposes `.env` reads — re-state the env-file asks yourself.
 
 **Example: read-only `planner` agent:**
 

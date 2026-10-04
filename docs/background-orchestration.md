@@ -36,7 +36,7 @@ The task API and background-control tools are:
 |------|---------|
 | `task(..., background: true)` | Start a specialist in the background and immediately return a task ID |
 | hook-driven completion | OpenCode injects terminal background task results automatically |
-| `task_status` | Check the status of a tracked task |
+| `task_status` | Check the status of a tracked task (read-only fallback for owned untracked sessions after a restart) |
 | `task_result` | Retrieve a tracked task's result |
 | `task_message` | Queue a non-interrupting message and return `queued` |
 | `task_cancel` | Stop a generation while retaining its session |
@@ -85,13 +85,22 @@ This distinction uses explicit provenance, not agent names or description text.
 
 Aliases and reusable-session history are process-local and do not survive process
 restarts as a reusable board. Post-restart recovery is partial and best-effort;
-it does not guarantee restoration of those aliases or the complete history. One
-recovery channel is explicit: `task_revive` on a raw session ID verifies the
+it does not guarantee restoration of those aliases or the complete history. Two
+read-only channels work after a restart: a background launch's marker in the
+parent's history still resolves its alias when it is the final non-empty line of
+that tool result (tail-anchored only), and `task_status` reports a read-only
+observed state for an owned session the board no longer tracks — completed or
+uncertain running-or-incomplete from transcript evidence (unknown when the
+live status read fails), never claiming definite running — pointing to `task_result` for completed text; it never
+re-registers or prompts the task. One recovery channel is explicit:
+`task_revive` on a raw session ID verifies the
 session against the host (existence and parent ownership) and re-adopts an
 untracked child owned by the calling parent, then
 continues it with the new prompt.
 Recovery verifies the original agent and latest delivered round before importing
 a retained terminal row. This cache-only import does not launch or notify.
+`task_cancel` still cannot abort a run launched before the restart — the board
+has no live handle to it (tracked in #1387).
 The production board numbers a parent's children only when the host's creation
 time shows that parent session was created while the plugin instance runs: the
 board saw every numbered alias it could have. Any other parent (created before a
@@ -522,6 +531,45 @@ the children-only fingerprint keeps the two-wake no-progress cap bounding
 cost. v2's native subagent completion nudges still cover the happy path; this
 watchdog covers stuck children and unreconciled jobs.
 
+#### v2 lean defaults
+
+On OpenCode v2 hosts the host's native background notifier already delivers
+each run's first terminal result (completed, error, or cancelled) to the
+parent: an idle parent gets a new turn, a busy parent gets a steer. Two plugin
+channels would duplicate that delivery, so on v2 they default **off** unless a
+config layer sets them explicitly:
+
+- `backgroundJobs.boardInjection` — the passive Background Job Board is not
+  injected into orchestrator prompts.
+- `backgroundJobs.orchestratorWake.periodicWakeEnabled` — the periodic idle
+  evaluation described above never runs.
+
+Event-driven wakes keep working: stopped-job recovery, later terminal
+publications of the same run (for example a child that self-continued), and
+child-input asks still wake an idle parent, and their SDK-error retries still
+use the idle timer. v1 hosts are unchanged. To restore the previous behavior
+on v2, set the keys explicitly:
+
+```jsonc
+{
+  "backgroundJobs": {
+    "boardInjection": true,
+    "orchestratorWake": { "periodicWakeEnabled": true }
+  }
+}
+```
+
+With the board off, the plugin still retires natively delivered results: on
+the parent's next real user turn they are registered, and once the prompt
+advances they are reconciled. Stopped jobs are **not** retired that way,
+because a stop has no native notification. They stay stopped and
+unreconciled, so the stopped-job recovery wake still reports them, and
+`task_revive` acknowledges them when the parent resumes the work. The
+recovery wake and overflow notices point at `task_status` instead of the
+board. Reopen corrections are still delivered with the board off, in a
+board-free variant that points at `task_status`: if a reconciled job reopens
+to running, the parent is told once not to rely on its earlier result.
+
 For external manual work, the orchestrator first gives the user concrete steps,
 then calls `wait_for_user` as its final tool action. This explicit signal covers
 text-only HITL turns without attempting to infer intent from assistant prose. The
@@ -595,7 +643,10 @@ or cancellation.
 Stopped-job recovery facts are checked again by task ID and run generation
 before a queued recovery wake is delivered. The inline detail queue is bounded;
 when it overflows, the wake carries an explicit overflow signal directing the
-orchestrator to inspect all unreconciled stopped jobs on the board.
+orchestrator to inspect all unreconciled stopped jobs on the board. With board
+injection off, the overflow signal instead lists the overflowed task IDs that
+are still stopped (up to 64 per parent, with a note for any beyond that) so
+the orchestrator can check each with `task_status`.
 
 Malformed status entries and failed status requests are surfaced as `status
 uncertain`; they never prove that a job stopped or completed and do not confirm

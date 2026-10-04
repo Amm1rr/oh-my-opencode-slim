@@ -1,9 +1,9 @@
 import { z } from 'zod';
-import { STRING_ONLY_PERMISSION_KEYS } from '../agents/permissions';
 import { MarketplacePackageIdSchema } from '../marketplace/schemas';
 import {
   AGENT_THEME_COLORS,
   DEFAULT_MAX_RETAINED_SNAPSHOTS,
+  STRING_ONLY_PERMISSION_KEYS,
 } from './constants';
 import { CouncilConfigSchema } from './council-schema';
 import { ProviderModelIdSchema } from './model-id-schema';
@@ -559,6 +559,12 @@ export const BackgroundJobsConfigStrictSchema = z.object({
         .describe(
           'Wake-condition source. "auto" uses todo-gating on v1 hosts and children-driven degraded mode on v2 hosts (no todo surface there); "todo" or "children" pin one mode, degrading to children when the host lacks the todo API. Default "auto".',
         ),
+      periodicWakeEnabled: z
+        .boolean()
+        .default(true)
+        .describe(
+          'When false, the periodic idle evaluation never runs; only event-driven wakes (stopped-job recovery, terminal-publication rev>1, child-input) still deliver. Failed event wakes keep their timer-based retry path. Default enabled; v2 hosts derive a disabled default when the key is not explicitly configured.',
+        ),
       wakeOnTerminalPublication: z
         .boolean()
         .default(true)
@@ -579,6 +585,7 @@ export const BackgroundJobsConfigStrictSchema = z.object({
       enabled: true,
       intervalMs: 300_000,
       mode: 'auto',
+      periodicWakeEnabled: true,
       wakeOnTerminalPublication: true,
       publicationWakeMinIntervalMs: 30_000,
     })
@@ -626,7 +633,7 @@ export const BackgroundJobsConfigStrictSchema = z.object({
     .boolean()
     .default(true)
     .describe(
-      'When false, the Background Job Board reminder is never injected into prompts. Background task tracking, wake, and task_status all keep working; the orchestrator simply no longer passively sees the board. Default enabled.',
+      'When false, the Background Job Board reminder is never injected into prompts. Background task tracking, wake, and task_status all keep working; the orchestrator simply no longer passively sees the board. Default enabled; v2 hosts derive a disabled default when the key is not explicitly configured.',
     ),
   childInputWake: z
     .boolean()

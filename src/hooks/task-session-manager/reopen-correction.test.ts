@@ -353,7 +353,7 @@ describe('reopen corrective notice', () => {
 });
 
 describe('backgroundJobs.boardInjection switch (#1314 thread)', () => {
-  test('off: the reopen correction is not delivered at all', async () => {
+  test('off: the reopen correction delivers in the board-free variant (#1443 review)', async () => {
     const board = new BackgroundJobBoard();
     const state = createInjectionState(board, false);
 
@@ -390,14 +390,23 @@ describe('backgroundJobs.boardInjection switch (#1314 thread)', () => {
     };
     await injectBackgroundJobBoard(state, {}, request as never);
 
+    // The staleness correction still delivers — the native notifier covers
+    // terminal publications, not the reopen-to-running transition — but in
+    // the board-free wording: no board reference, task_status pointer.
     const corrections = (request.messages as unknown[]).filter(
       (message) => solePartMetadata(message)?.reopenCorrection === true,
     );
-    expect(corrections).toHaveLength(0);
+    expect(corrections).toHaveLength(1);
     expect(
       (request.messages as unknown[]).some((message) =>
         JSON.stringify(message).includes('Background Job Board'),
       ),
     ).toBe(false);
+    const correctionText = (
+      corrections[0] as { parts: Array<{ text: string }> }
+    ).parts[0].text;
+    expect(correctionText).toContain('superseded');
+    expect(correctionText).toContain('`task_status`');
+    expect((request.messages as unknown[]).at(-1)).toBe(corrections[0]);
   });
 });

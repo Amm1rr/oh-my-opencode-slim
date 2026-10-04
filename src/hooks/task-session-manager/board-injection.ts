@@ -157,6 +157,25 @@ export function formatReopenCorrectionText(
   );
 }
 
+/** Board-injection-off variant of the reopen correction: same facts, but
+ * the pointer goes to the pull channel (the board is not injected in this
+ * mode, so pointing at it would reference a panel the model cannot see).
+ * The correction itself is a staleness notice, not board status — the
+ * native notifier covers terminal publications, not the reopen-to-running
+ * transition (#1314's anti-narration scope is board status lines). */
+export function formatReopenCorrectionTextNoBoard(
+  correction: ReopenCorrection,
+): string {
+  return formatSystemReminder(
+    [
+      '### Background Job — Reopened',
+      'A background job that previously reported a terminal result is running again; the earlier report is superseded.',
+      `- ${correction.alias} / ${correction.taskID} / run ${correction.generation} / previously ${correction.priorTerminalState}, now running`,
+      'Check `task_status` for the current state before acting on the earlier result.',
+    ].join('\n'),
+  );
+}
+
 /** Record that the parent consumed (reconciled) a terminal run, so a later
  * reopen-to-running of the same run can be corrected. */
 function rememberReportedTerminalRun(
@@ -191,9 +210,6 @@ function deliverReopenCorrections(
   messages: unknown[],
   baseInfo: MessageWithParts['info'],
 ): void {
-  // Off stops every board-flavored injection, correction notice included
-  // (#1314 thread).
-  if (state.boardInjection === false) return;
   const reported = state.reportedTerminalRunsByParent?.get(parentSessionID);
   if (!reported || reported.size === 0) return;
   for (const [key, run] of reported) {
@@ -223,7 +239,10 @@ function deliverReopenCorrections(
         id: `${baseInfo.id ?? 'board'}-reopen-correction:${key}`,
       },
       {
-        text: formatReopenCorrectionText(correction),
+        text:
+          state.boardInjection !== false
+            ? formatReopenCorrectionText(correction)
+            : formatReopenCorrectionTextNoBoard(correction),
         metadataKey: state.metadataKey,
         extraMetadata: { reopenCorrection: true },
       },
@@ -1382,17 +1401,56 @@ function injectLatestBoard(state: InjectionState, messages: unknown[]): void {
     reconcileConsumedTerminalJobs(state, sessionID, shapeKey);
   }
 
-  const boardMeta =
-    state.boardInjection === false
-      ? undefined
-      : state.backgroundJobBoard.formatForPromptWithMetadata(sessionID);
-  const reminder = boardMeta?.text;
-  if (!reminder) return;
-
   const textPart = trigger.parts.find(
     (part) => part.type === 'text' && typeof part.text === 'string',
   );
   if (!textPart || isInternalInitiatorPart(textPart)) return;
+
+  if (state.boardInjection === false) {
+    // Board injection disabled: the native background notifier owns
+    // completed/error delivery (first publications are native-owned on
+    // both hosts), so no board part is placed — but those terminal jobs
+    // still register against the current prompt shape so the consumption
+    // reconciliation above keeps retiring them on the parent's next real
+    // activity. Without this, the store stays "completed"/unreconciled
+    // forever and every hasTerminalUnreconciled consumer wedges: explicit
+    // task-id resumes are refused, same-objective dispatches stay
+    // deduplicated, and delegated-work detection never settles.
+    //
+    // Stopped jobs are EXCLUDED: the native notifier never delivers a stop
+    // (it only injects completed/error results), so registering one here
+    // would mark it reconciled before the parent has seen it — the
+    // stopped-job recovery wake's isCurrent check would then drop it and
+    // the stop would be silent. A stopped job retires through the
+    // recovery flow instead: the wake surfaces it, and `task_revive`'s
+    // ack (or the recovery it performs) clears the flag, keeping the
+    // same-objective dispatch safeguard active until actual recovery.
+    const nativeExecutions = (
+      state.backgroundJobBoard.formatForPromptWithMetadata(sessionID)
+        ?.terminalUnreconciledTaskIDs ?? []
+    ).filter((execution) => {
+      const record = state.backgroundJobBoard.get(execution.taskID);
+      return (
+        record !== undefined &&
+        record.generation === execution.generation &&
+        record.state !== 'stopped'
+      );
+    });
+    if (nativeExecutions.length > 0) {
+      rememberInjectedTerminalJobs(
+        state,
+        sessionID,
+        nativeExecutions,
+        shapeKey ?? promptShapeKey(realMessages(messages, state.metadataKey)),
+      );
+    }
+    return;
+  }
+
+  const boardMeta =
+    state.backgroundJobBoard.formatForPromptWithMetadata(sessionID);
+  const reminder = boardMeta?.text;
+  if (!reminder) return;
 
   if (boardMeta.terminalUnreconciledTaskIDs.length > 0) {
     rememberInjectedTerminalJobs(
@@ -1769,6 +1827,48 @@ function injectCheckpointBoard(
     !hasPendingToolResults(currentMessages);
 
   const replayBaseMessage = triggeringMessage ?? tailMessage;
+
+  if (state.boardInjection === false) {
+    // Board injection disabled (see injectLatestBoard for the full
+    // rationale): register natively delivered terminal jobs against the
+    // current prompt shape so consumption reconciliation keeps retiring
+    // them, then stop — no snapshot exists to place or replay in this
+    // mode. Only completed/error executions register: the native
+    // notifier never delivers stops, and a stop must survive until the
+    // stopped-job recovery wake surfaces it and task_revive's ack
+    // retires it (#1314 keeps board-flavored notices off in this mode).
+    if (canSurface) {
+      const nativeExecutions = (
+        state.backgroundJobBoard.formatForPromptWithMetadata(sessionID)
+          ?.terminalUnreconciledTaskIDs ?? []
+      ).filter((execution) => {
+        const record = state.backgroundJobBoard.get(execution.taskID);
+        return (
+          record !== undefined &&
+          record.generation === execution.generation &&
+          record.state !== 'stopped'
+        );
+      });
+      if (nativeExecutions.length > 0) {
+        rememberInjectedTerminalJobs(
+          state,
+          sessionID,
+          nativeExecutions,
+          shapeKey,
+        );
+      }
+    }
+    // Reopen corrections are staleness notices, not board status — they
+    // deliver in the board-less variant here (see
+    // formatReopenCorrectionTextNoBoard).
+    deliverReopenCorrections(
+      state,
+      sessionID,
+      messages,
+      replayBaseMessage.info,
+    );
+    return;
+  }
   const snapshotState = updateBoardHistoryState(
     state,
     sessionID,
