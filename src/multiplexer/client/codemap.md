@@ -130,8 +130,8 @@ Shown for v1. On v2, `v2-host.ts` supplies the base URL, an authenticated
    ├─ Server list by parentID is authoritative
    ├─ Missing children backfilled (same eligibility/dedup guards)
    ├─ Local panes whose child is gone are closed
-   └─ Already-held children log backfill-skipped and get a provisional idle
-      deadline, even for busy snapshots; the first real idle edge restarts it
+   └─ Already-held children log backfill-skipped; quiescent ones re-arm a
+      provisional idle deadline (the first real idle edge restarts it)
 
 5. FR-8 sweep (startup/reconcile):
    ├─ Close encoded leftovers with dead owner and gone child

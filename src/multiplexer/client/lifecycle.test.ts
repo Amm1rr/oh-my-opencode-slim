@@ -624,9 +624,8 @@ describe('dedup and stable-idle close (2.3)', () => {
 
   test('revalidates a busy reconcile snapshot after a lost idle edge', async () => {
     const h = createHarness();
-    await activatePane(h);
     h.list.setSessionIds(CHILD);
-    await h.lifecycle.handleEvent(lifecycleEvent('status', { status: 'busy' }));
+    h.reader.statuses.set(CHILD, 'busy');
     const readStatus = h.reader.readStatus.bind(h.reader);
     const snapshot = new Map(h.reader.statuses);
     const barrier = createDeferred();
@@ -637,6 +636,7 @@ describe('dedup and stable-idle close (2.3)', () => {
     const reconnect = h.lifecycle.onReconnect();
     await flushAsync();
     h.reader.statuses.set(CHILD, 'idle');
+    await h.lifecycle.handleEvent(lifecycleEvent('idle')); // not tracked yet
     barrier.resolve();
     await reconnect;
     h.reader.readStatus = readStatus;
@@ -645,23 +645,19 @@ describe('dedup and stable-idle close (2.3)', () => {
     expect(h.adapter.closeCalls).toEqual(['pane-1']);
   });
 
-  test('revalidates a busy readiness snapshot after a lost idle edge', async () => {
+  test('reconcile re-arms a quiescent held pane whose idle edge was lost', async () => {
     const h = createHarness();
-    h.reader.statuses.set(CHILD, 'busy');
-    const readStatus = h.reader.readStatus.bind(h.reader);
-    const snapshot = new Map(h.reader.statuses);
-    const barrier = createDeferred();
-    h.reader.readStatus = async () => {
-      await barrier.promise;
-      return { statuses: snapshot };
-    };
-    const pending = h.lifecycle.handleEvent(createdEvent());
+    await activatePane(h);
+    h.list.setSessionIds(CHILD);
+    h.reader.statuses.set(CHILD, 'idle'); // the idle edge never arrived
+    await h.lifecycle.onReconnect();
+    expect(h.clock.pendingTimers).toBe(1);
+    h.clock.advance(STABLE_IDLE_MS - 1);
+    await h.lifecycle.handleEvent(lifecycleEvent('idle')); // first real edge
+    h.clock.advance(1);
     await flushAsync();
-    h.reader.statuses.set(CHILD, 'idle');
-    barrier.resolve();
-    await pending;
-    h.reader.readStatus = readStatus;
-    h.clock.advance(STABLE_IDLE_MS);
+    expect(h.adapter.closeCalls).toHaveLength(0);
+    h.clock.advance(STABLE_IDLE_MS - 1);
     await flushAsync();
     expect(h.adapter.closeCalls).toEqual(['pane-1']);
   });
@@ -1688,6 +1684,7 @@ describe('rebuild and reconnect backfill (2.4)', () => {
 
     expect(h.adapter.spawnCalls).toHaveLength(1);
     expect(h.lifecycle.getPanes().size).toBe(1);
+    expect(h.clock.pendingTimers).toBe(0);
     expect(noPaneReasons(h.logger)).toEqual(['backfill-skipped']);
     expect(h.logger.entries.at(-1)?.data).toMatchObject({
       childSessionId: CHILD,

@@ -228,14 +228,13 @@ export class PaneLifecycle {
     )
       return;
 
-    // Remember idle during spawn, but let later activity supersede it.
-    if (this.spawnsInFlight.has(event.sessionId)) {
-      if (event.kind === 'idle') this.idleWhileSpawning.add(event.sessionId);
-      if (event.kind === 'status' && event.status !== undefined) {
-        if (event.status === 'idle')
-          this.idleWhileSpawning.add(event.sessionId);
-        else this.idleWhileSpawning.delete(event.sessionId);
-      }
+    // Remember an idle consumed before the pane exists.
+    if (
+      this.spawnsInFlight.has(event.sessionId) &&
+      (event.kind === 'idle' ||
+        (event.kind === 'status' && event.status === 'idle'))
+    ) {
+      this.idleWhileSpawning.add(event.sessionId);
     }
 
     if (event.kind === 'deleted') {
@@ -318,13 +317,15 @@ export class PaneLifecycle {
       }
     }
 
-    // Even a busy snapshot can be stale: revalidate held panes provisionally
-    // so a lost idle edge cannot keep them forever.
+    // Revalidate quiescent held panes provisionally: their idle edge may be
+    // lost, but a busy/retry snapshot must not arm a new deadline.
     for (const childSessionId of serverChildIds) {
       const record = this.panes.get(childSessionId);
       if (!record) continue;
       if (
         statuses &&
+        statuses.get(childSessionId) !== 'busy' &&
+        statuses.get(childSessionId) !== 'retry' &&
         record.parentSessionId === parentSessionId &&
         record.directory === directory
       )
@@ -366,7 +367,7 @@ export class PaneLifecycle {
     // Backfill children the server has but this client does not track.
     for (const childSessionId of serverChildIds) {
       if (this.panes.has(childSessionId)) continue;
-      if (this.closedWatch.get(childSessionId)?.historical === false) continue;
+      if (this.closedWatch.has(childSessionId)) continue;
       const live = statuses?.get(childSessionId);
       if (live !== 'busy' && live !== 'retry') {
         if (statuses)
@@ -594,13 +595,16 @@ export class PaneLifecycle {
         return;
       }
 
-      // Revalidate even a busy readiness snapshot: its idle edge may be lost
-      // before registration. Only an observed idle starts a real deadline.
-      this.scheduleStableIdleClose(
-        childSessionId,
-        record,
-        !this.idleWhileSpawning.has(childSessionId),
-      );
+      // A snapshot or an idle observed before registration is provisional;
+      // the first real idle edge after registration starts its own window.
+      const idleDuringSpawn = this.idleWhileSpawning.has(childSessionId);
+      if (
+        knownStatus !== undefined ||
+        readyStatus === 'idle' ||
+        idleDuringSpawn
+      ) {
+        this.scheduleStableIdleClose(childSessionId, record, true);
+      }
 
       await this.applyLayout(adapter);
     } finally {
