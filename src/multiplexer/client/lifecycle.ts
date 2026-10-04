@@ -80,8 +80,8 @@ export class PaneLifecycle {
   private readonly spawnsInFlight = new Set<string>();
   /** Bounded tombstones: a deleted session must never spawn or rebuild. */
   private readonly deletedSessions = new Set<string>();
-  /** Children whose idle edge arrived while their spawn was in flight. */
-  private readonly idleWhileSpawning = new Set<string>();
+  /** Latest status for children queued for backfill or spawning. */
+  private readonly spawnStatus = new Map<string, SessionRuntimeStatus>();
   /** Pending `delay()` resolvers, released early by `dispose()`. */
   private readonly pendingDelays = new Set<() => void>();
   /** Children that turned busy while their close was in flight. */
@@ -221,15 +221,14 @@ export class PaneLifecycle {
     )
       return;
 
-    // An idle edge observed while this child's spawn is in flight would be
-    // consumed with no pane to act on; remember it so the pane still follows
-    // the FR-10 close rule once it is registered.
+    // Activity supersedes earlier idle, including while backfill is queued.
     if (
-      this.spawnsInFlight.has(event.sessionId) &&
-      (event.kind === 'idle' ||
-        (event.kind === 'status' && event.status === 'idle'))
+      this.spawnsInFlight.has(event.sessionId) ||
+      this.spawnStatus.has(event.sessionId)
     ) {
-      this.idleWhileSpawning.add(event.sessionId);
+      if (event.kind === 'idle') this.spawnStatus.set(event.sessionId, 'idle');
+      if (event.kind === 'status' && event.status !== undefined)
+        this.spawnStatus.set(event.sessionId, event.status);
     }
 
     if (event.kind === 'deleted') {
@@ -295,6 +294,14 @@ export class PaneLifecycle {
     const serverAgents = new Map<string, string>();
     for (const entry of list.sessions) {
       serverChildIds.add(entry.sessionId);
+      const live = statuses?.get(entry.sessionId);
+      if (
+        !this.panes.has(entry.sessionId) &&
+        !this.spawnStatus.has(entry.sessionId) &&
+        (live === 'busy' || live === 'retry')
+      ) {
+        this.spawnStatus.set(entry.sessionId, live);
+      }
       if (entry.subagentType !== undefined) {
         serverAgents.set(entry.sessionId, entry.subagentType);
       }
@@ -370,6 +377,10 @@ export class PaneLifecycle {
         directory,
         live,
       );
+    }
+    for (const childSessionId of serverChildIds) {
+      if (!this.spawnsInFlight.has(childSessionId))
+        this.spawnStatus.delete(childSessionId);
     }
   }
 
@@ -488,6 +499,7 @@ export class PaneLifecycle {
     // is dropped only once the pane exists, so a failed attempt (readiness
     // timeout, adapter failure) stays eligible for a later busy edge.
     this.spawnsInFlight.add(childSessionId);
+    if (knownStatus === undefined) this.spawnStatus.delete(childSessionId);
     try {
       // Host reachability first: embedded mode (no listener) must stay
       // distinguishable from a readiness timeout (D3/FR-13).
@@ -580,12 +592,9 @@ export class PaneLifecycle {
       // A child that is already idle when its pane appears (e.g. backfilled
       // after the stream was down), or whose idle edge arrived while the
       // spawn was in flight, must still follow the FR-10 close rule.
-      const idleDuringSpawn = this.idleWhileSpawning.delete(childSessionId);
-      if (
-        knownStatus !== undefined ||
-        readyStatus === 'idle' ||
-        idleDuringSpawn
-      ) {
+      const latestStatus = this.spawnStatus.get(childSessionId) ?? readyStatus;
+      this.spawnStatus.delete(childSessionId);
+      if (latestStatus === 'idle') {
         this.scheduleStableIdleClose(childSessionId, record);
       }
 
@@ -604,7 +613,7 @@ export class PaneLifecycle {
           subagentType,
         );
       }
-      this.idleWhileSpawning.delete(childSessionId);
+      this.spawnStatus.delete(childSessionId);
     }
   }
 

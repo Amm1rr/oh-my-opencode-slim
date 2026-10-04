@@ -622,6 +622,50 @@ describe('dedup and stable-idle close (2.3)', () => {
     expect(h.lifecycle.getPane(CHILD)).toBeDefined();
   });
 
+  test('busy backfill starts the debounce only on a real idle edge', async () => {
+    const h = createHarness();
+    h.list.setSessionIds(CHILD);
+    h.reader.statuses.set(CHILD, 'busy');
+    await h.lifecycle.onReconnect();
+    expect(h.clock.pendingTimers).toBe(0);
+
+    h.clock.advance(STABLE_IDLE_MS - 1);
+    h.reader.statuses.set(CHILD, 'idle');
+    await h.lifecycle.handleEvent(lifecycleEvent('idle'));
+    h.clock.advance(1);
+    await flushAsync();
+    expect(h.adapter.closeCalls).toHaveLength(0);
+    await h.lifecycle.handleEvent(lifecycleEvent('idle')); // replay
+    h.clock.advance(STABLE_IDLE_MS - 1);
+    await flushAsync();
+    expect(h.adapter.closeCalls).toEqual(['pane-1']);
+  });
+
+  test('busy activity during spawn supersedes earlier idle', async () => {
+    const h = createHarness();
+    h.reader.statuses.set(CHILD, 'idle');
+    const barrier = createDeferred();
+    h.adapter.spawnBarrier = barrier.promise;
+    const pending = h.lifecycle.handleEvent(createdEvent());
+    await flushAsync();
+    await h.lifecycle.handleEvent(lifecycleEvent('idle'));
+    h.reader.statuses.set(CHILD, 'busy');
+    await h.lifecycle.handleEvent(lifecycleEvent('status', { status: 'busy' }));
+    barrier.resolve();
+    await pending;
+    expect(h.clock.pendingTimers).toBe(0);
+
+    h.clock.advance(STABLE_IDLE_MS - 1);
+    h.reader.statuses.set(CHILD, 'idle');
+    await h.lifecycle.handleEvent(lifecycleEvent('idle'));
+    h.clock.advance(1);
+    await flushAsync();
+    expect(h.adapter.closeCalls).toHaveLength(0);
+    h.clock.advance(STABLE_IDLE_MS - 1);
+    await flushAsync();
+    expect(h.adapter.closeCalls).toEqual(['pane-1']);
+  });
+
   test('keeps the pane when the child turns busy inside the debounce window', async () => {
     const h = createHarness();
     await activatePane(h);
