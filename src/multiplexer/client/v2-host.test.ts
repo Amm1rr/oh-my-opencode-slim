@@ -222,8 +222,10 @@ describe('v2 host ports', () => {
           calls.push(input);
           return { data: [{ id: 'ses_a' }, { id: 'ses_b' }] };
         },
+        // The SDK returns the unwrapped `data` map of GET /api/session/active.
         active: async () => ({
-          data: { ses_a: { type: 'running' }, ses_old: { type: 'running' } },
+          ses_a: { type: 'running' },
+          ses_old: { type: 'running' },
         }),
       },
     };
