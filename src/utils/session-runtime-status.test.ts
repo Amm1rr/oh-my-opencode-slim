@@ -99,4 +99,22 @@ describe('getRuntimeSessionStatusSnapshot capability probe', () => {
     });
     expect(status.mock.calls[0]?.[0].signal?.aborted).toBe(true);
   });
+
+  test('aborts the read when the timeout is invalid', async () => {
+    const status = mock(
+      ({ signal }: { signal?: AbortSignal }) =>
+        new Promise<never>((_, reject) => {
+          signal?.addEventListener('abort', () => reject(new Error('aborted')));
+        }),
+    );
+    const input = pluginInputWithClient({ session: { status } } as never);
+    for (const _ of [0, 1]) {
+      const snapshot = await getRuntimeSessionStatusSnapshot(input, {
+        timeoutMs: 0,
+      });
+      expect(snapshot.error).toBe('Session status lookup timed out');
+    }
+    expect(status).toHaveBeenCalledTimes(2);
+    expect(status.mock.calls[0]?.[0].signal?.aborted).toBe(true);
+  });
 });
