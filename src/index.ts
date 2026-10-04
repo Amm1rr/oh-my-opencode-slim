@@ -199,6 +199,8 @@ type DelegatedModelSelection = {
   agentName: string;
   entry: ModelChainEntry;
   index: number;
+  /** Present for inheritance; true only on a real parent fallback. */
+  inheritedFallback?: boolean;
 };
 
 function modelProvider(model: string): string | undefined {
@@ -221,6 +223,9 @@ function selectDelegatedModel(input: {
 }): DelegatedModelSelection | undefined {
   const { agentName, childChain, parentModel } = input;
   if (!parentModel) return undefined;
+  const parentChain = input.parentChain;
+  const parentIndex =
+    parentChain?.findIndex((entry) => entry.id === parentModel) ?? -1;
 
   if (input.followsParent) {
     const index = childChain?.findIndex((entry) => entry.id === parentModel);
@@ -231,17 +236,11 @@ function selectDelegatedModel(input: {
           ? (childChain?.[index] as ModelChainEntry)
           : { id: parentModel },
       index: index ?? -1,
+      inheritedFallback: parentIndex > 0,
     };
   }
 
-  if (!childChain?.length) return undefined;
-
-  const parentChain = input.parentChain;
-  if (!parentChain) return undefined;
-  const parentIndex = parentChain.findIndex(
-    (entry) => entry.id === parentModel,
-  );
-  if (parentIndex <= 0) return undefined;
+  if (!childChain?.length || !parentChain || parentIndex <= 0) return undefined;
 
   const exact = childChain.findIndex((entry) => entry.id === parentModel);
   if (exact >= 0) {
@@ -712,7 +711,8 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     agentType: string,
   ) => {
     const selected = resolveDelegatedModelForParent(agentType, parentID);
-    if (selected && selected.index > 0) {
+    if (selected?.inheritedFallback !== undefined && !childID) return;
+    if (selected && (selected.inheritedFallback ?? selected.index > 0)) {
       v1DelegatedIntents.push({
         parentID,
         agentName: selected.agentName,
@@ -2601,7 +2601,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           childRoute.parentID,
         );
       const routedChildModel =
-        routedChild && routedChild.index > 0
+        routedChild && (routedChild.inheritedFallback ?? routedChild.index > 0)
           ? modelFromMetadataString(routedChild.entry.id)
           : undefined;
       // A child already on the routed model (inherited from the parent)

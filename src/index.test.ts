@@ -3407,6 +3407,104 @@ describe('plugin config model inheritance', () => {
     }
   });
 
+  async function assertInheritedRevive(
+    operator: Record<string, unknown>,
+    parentModel = fallback,
+    childModel = primary,
+  ) {
+    const hooks = await loadConfiguredPlugin({
+      agents: { orchestrator: { model: delegatedChain }, operator },
+    });
+    try {
+      await selectParent(hooks, primary);
+      const { childOutput } = await delegateV1Child(
+        hooks,
+        'parent',
+        'inherited',
+        childModel,
+      );
+      const sessionID = childOutput.message.sessionID;
+      await hooks['tool.execute.after']?.(
+        { tool: 'task', sessionID: 'parent', callID: 'inherited' } as never,
+        {
+          output: `task_id: ${sessionID}\nstate: completed\nresult: done`,
+        } as never,
+      );
+      await selectParent(hooks, parentModel);
+      client.session.promptAsync = async () => {
+        childOutput.message.model = { ...childModel };
+        const get = mock(client.session.get as any);
+        const messages = mock(client.session.messages as any);
+        client.session.get = get;
+        client.session.messages = messages;
+        await hooks['chat.message']?.(
+          { sessionID, agent: 'operator' } as never,
+          childOutput as never,
+        );
+        expect(get).not.toHaveBeenCalled();
+        expect(messages).not.toHaveBeenCalled();
+        return {};
+      };
+      await hooks.tool?.task_revive.execute(
+        { task_id: sessionID, prompt: 'continue' },
+        { sessionID: 'parent', agent: 'orchestrator' } as never,
+      );
+      expect(childOutput.message.model).toEqual(
+        parentModel === fallback ? fallback : childModel,
+      );
+    } finally {
+      await hooks.dispose?.();
+      mock.restore();
+    }
+  }
+
+  test('v1 inherited revive follows the live parent outside the child chain', async () => {
+    await assertInheritedRevive({ inheritModelFrom: 'orchestrator' });
+  });
+
+  test('v1 inherited revive follows the live parent at child chain index zero', async () => {
+    await assertInheritedRevive({
+      inheritModelFrom: 'session',
+      model: ['openai/gpt-6-luna', 'openrouter/openrouter/auto'],
+    });
+  });
+
+  test('v1 inherited revive does not route a parent primary', async () => {
+    await assertInheritedRevive(
+      {
+        inheritModelFrom: 'session',
+        model: ['other/primary', 'openrouter/openrouter/auto'],
+      },
+      primary,
+      fallback,
+    );
+  });
+
+  test('v1 new inherited child uses the host model without routing reads', async () => {
+    const hooks = await loadConfiguredPlugin({
+      agents: {
+        orchestrator: { model: delegatedChain },
+        operator: { inheritModelFrom: 'session', model: delegatedChain },
+      },
+    });
+    try {
+      await selectParent(hooks, fallback);
+      const get = mock(client.session.get as any);
+      const messages = mock(client.session.messages as any);
+      client.session.get = get;
+      client.session.messages = messages;
+      const routed = await delegateV1Child(hooks, 'parent', 'new', fallback);
+      expect(routed.childModel).toEqual(fallback);
+      expect(get).not.toHaveBeenCalled();
+      expect(messages.mock.calls.map(([input]) => input.path.id)).not.toContain(
+        routed.childOutput.message.sessionID,
+      );
+    } finally {
+      await hooks.dispose?.();
+      mock.restore();
+    }
+  });
+
   test('v1 task_id routes the next prompt of a resumed child', async () => {
     const hooks = await loadConfiguredPlugin(delegatedFallbackConfig);
     try {
