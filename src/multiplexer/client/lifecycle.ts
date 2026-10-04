@@ -82,14 +82,15 @@ export class PaneLifecycle {
   private readonly deletedSessions = new Set<string>();
   /** Idle edges observed while the child's spawn is in flight. */
   private readonly idleWhileSpawning = new Set<string>();
-  /** Deadlines awaiting the first real idle edge. */
-  private readonly provisionalIdle = new Set<string>();
   /** Pending `delay()` resolvers, released early by `dispose()`. */
   private readonly pendingDelays = new Set<() => void>();
   /** Children that turned busy while their close was in flight. */
   private readonly busyWhileClosing = new Set<string>();
-  /** Pending stable-idle debounce timers, keyed by child session id. */
-  private readonly idleTimers = new Map<string, ClockTimerHandle>();
+  /** Idle/retry timers; `provisional` marks one armed from a snapshot. */
+  private readonly idleTimers = new Map<
+    string,
+    { handle: ClockTimerHandle; provisional: boolean }
+  >();
   private readonly closeAttempts = new Map<string, number>();
   /**
    * Children this client closed on stable idle (not terminal deletion), kept
@@ -151,8 +152,8 @@ export class PaneLifecycle {
    */
   async dispose(): Promise<void> {
     this.disposed = true;
-    for (const handle of this.idleTimers.values()) {
-      this.ports.clock.clearTimeout(handle);
+    for (const timer of this.idleTimers.values()) {
+      this.ports.clock.clearTimeout(timer.handle);
     }
     this.idleTimers.clear();
     this.closeAttempts.clear();
@@ -740,27 +741,25 @@ export class PaneLifecycle {
   ): void {
     if (record.status !== 'active') return;
     // Only the first real idle edge restarts a provisional deadline.
-    if (this.idleTimers.has(childSessionId)) {
-      if (provisional || !this.provisionalIdle.has(childSessionId)) return;
+    const pending = this.idleTimers.get(childSessionId);
+    if (pending) {
+      if (provisional || !pending.provisional) return;
       this.cancelIdleClose(childSessionId, false);
     }
-    if (provisional) this.provisionalIdle.add(childSessionId);
 
     const handle = this.ports.clock.setTimeout(() => {
       this.idleTimers.delete(childSessionId);
-      this.provisionalIdle.delete(childSessionId);
       void this.closeIfStillIdle(childSessionId, provisional);
     }, this.config.stableIdleMs);
-    this.idleTimers.set(childSessionId, handle);
+    this.idleTimers.set(childSessionId, { handle, provisional });
   }
 
   private cancelIdleClose(childSessionId: string, resetAttempts = true): void {
     if (resetAttempts) this.closeAttempts.delete(childSessionId);
-    this.provisionalIdle.delete(childSessionId);
-    const handle = this.idleTimers.get(childSessionId);
-    if (handle === undefined) return;
+    const pending = this.idleTimers.get(childSessionId);
+    if (pending === undefined) return;
     this.idleTimers.delete(childSessionId);
-    this.ports.clock.clearTimeout(handle);
+    this.ports.clock.clearTimeout(pending.handle);
   }
 
   private async closeIfStillIdle(
@@ -862,16 +861,14 @@ export class PaneLifecycle {
     const attempts = (this.closeAttempts.get(childSessionId) ?? 0) + 1;
     this.closeAttempts.set(childSessionId, attempts);
     if (attempts >= MAX_CLOSE_ATTEMPTS) return;
-    if (provisional) this.provisionalIdle.add(childSessionId);
     const handle = this.ports.clock.setTimeout(() => {
       this.idleTimers.delete(childSessionId);
-      this.provisionalIdle.delete(childSessionId);
       if (this.panes.get(childSessionId) !== record) return;
       void (reason === 'idle'
         ? this.closeIfStillIdle(childSessionId, provisional)
         : this.closePane(childSessionId, record, reason));
     }, CLOSE_RETRY_MS);
-    this.idleTimers.set(childSessionId, handle);
+    this.idleTimers.set(childSessionId, { handle, provisional });
   }
 
   /** Remembers an idle-closed child for FR-11 rebuilds, bounded in size. */

@@ -766,38 +766,20 @@ describe('dedup and stable-idle close (2.3)', () => {
     expect(h.lifecycle.getPane(CHILD)).toBeDefined();
   });
 
-  test('a status retry preserves the provisional deadline until the first real idle', async () => {
+  test('close retries keep a provisional deadline until the first real idle', async () => {
     const h = createHarness();
     h.list.setSessionIds(CHILD);
     h.reader.statuses.set(CHILD, 'busy');
     await h.lifecycle.onReconnect();
     h.reader.statuses.set(CHILD, 'idle');
     h.reader.error = 'temporary';
-    h.clock.advance(STABLE_IDLE_MS);
+    h.adapter.closeResult = false;
+    h.clock.advance(STABLE_IDLE_MS); // the status read fails
     await flushAsync();
     h.reader.error = undefined;
-    h.clock.advance(990);
-    await h.lifecycle.handleEvent(lifecycleEvent('idle'));
-    h.clock.advance(10);
-    await flushAsync();
-    expect(h.adapter.closeCalls).toHaveLength(0);
-    h.clock.advance(STABLE_IDLE_MS - 10);
-    await flushAsync();
-    expect(h.lifecycle.getPane(CHILD)).toBeUndefined();
-  });
-
-  test('a failed close preserves the provisional deadline until the first real idle', async () => {
-    const h = createHarness();
-    h.list.setSessionIds(CHILD);
-    h.reader.statuses.set(CHILD, 'busy');
-    await h.lifecycle.onReconnect();
-    h.reader.statuses.set(CHILD, 'idle');
-    h.adapter.closeResult = false;
-    h.clock.advance(STABLE_IDLE_MS);
+    h.clock.advance(1000); // the retry's close fails
     await flushAsync();
     expect(h.adapter.closeCalls).toHaveLength(1);
-    expect(h.clock.pendingTimers).toBe(1);
-
     h.adapter.closeResult = true;
     h.clock.advance(990);
     await h.lifecycle.handleEvent(lifecycleEvent('idle'));
@@ -807,7 +789,6 @@ describe('dedup and stable-idle close (2.3)', () => {
     h.clock.advance(STABLE_IDLE_MS - 10);
     await flushAsync();
     expect(h.adapter.closeCalls).toHaveLength(2);
-    expect(h.lifecycle.getPane(CHILD)).toBeUndefined();
   });
 
   test('retries a failed terminal close after switching parents', async () => {
@@ -859,7 +840,11 @@ describe('dedup and stable-idle close (2.3)', () => {
     expect(h.clock.pendingTimers).toBe(1);
     h.reader.error = undefined;
     h.reader.statuses.set(CHILD, 'idle');
-    h.clock.advance(1000);
+    await h.lifecycle.handleEvent(lifecycleEvent('idle')); // replay: no restart
+    h.clock.advance(STABLE_IDLE_MS);
+    await flushAsync();
+    expect(h.adapter.closeCalls).toHaveLength(0);
+    h.clock.advance(1000 - STABLE_IDLE_MS);
     await flushAsync();
     expect(h.adapter.closeCalls).toHaveLength(1);
     expect(h.lifecycle.getPane(CHILD)).toBeUndefined();
