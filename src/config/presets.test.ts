@@ -504,11 +504,19 @@ describe('preset inheritance', () => {
       const rules = adaptPermissions(
         resolvePreset('child', presets).oracle.permission,
       );
+      // OpenCode's evaluator: the last rule whose action and resource
+      // globs both match wins.
+      const glob = (value: string, pattern: string) => {
+        let source = pattern
+          .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+          .replace(/\*/g, '.*')
+          .replace(/\?/g, '.');
+        if (source.endsWith(' .*')) source = `${source.slice(0, -3)}( .*)?`;
+        return new RegExp(`^${source}$`, 's').test(value);
+      };
       return (action: string, resource = '*') =>
         rules.findLast(
-          (r) =>
-            (r.action === action || r.action === '*') &&
-            (r.resource === '*' || r.resource === resource),
+          (r) => glob(action, r.action) && glob(resource, r.resource),
         )?.effect;
     };
 
@@ -554,6 +562,16 @@ describe('preset inheritance', () => {
     expect(
       merged({ edit: 'deny' }, { '*': 'allow', edit: 'allow' })('edit'),
     ).toBe('allow');
+
+    // Overlapping patterns keep their precedence when the map moves: a
+    // narrower allow after a broad deny is raised to the wildcard, not lost.
+    const layered = merged(
+      { bash: { 'git *': 'deny', 'git log *': 'allow' } },
+      { '*': 'ask' },
+    );
+    expect(layered('bash', 'git log x')).toBe('ask');
+    expect(layered('bash', 'git push')).toBe('deny');
+    expect(layered('bash', 'ls')).toBe('ask');
 
     // An ask-level wildcard keeps unmentioned asks and denies, not allows.
     const asked = merged(

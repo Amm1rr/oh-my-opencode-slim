@@ -50,6 +50,7 @@ export function deepMerge<T extends Record<string, unknown>>(
 
 /** Strictness of a permission action: deny > ask > allow. */
 const STRICTNESS: Record<string, number> = { allow: 0, ask: 1, deny: 2 };
+const ACTION_BY_STRICTNESS = ['allow', 'ask', 'deny'];
 
 /** Merge two permission maps (top-level or a nested pattern map). opencode
  * evaluates the compiled rules last-match-wins, so key order is
@@ -61,9 +62,11 @@ const STRICTNESS: Record<string, number> = { allow: 0, ask: 1, deny: 2 };
  *   against the layer's own nested `"*"`).
  * - Base keys the layer does not mention go before the layer's keys, so
  *   its wildcard shadows them — except entries at least as strict as that
- *   wildcard, which go after it and keep winning. For a mixed pattern map
- *   only those strict entries move; the looser ones would lose to the
- *   wildcard anyway. Without a layer wildcard only denies move after.
+ *   wildcard, which go after it and keep winning. A pattern map holding
+ *   such an entry moves whole, in its own order, with each looser entry
+ *   raised to the wildcard's action: overlapping patterns keep their
+ *   precedence, and nothing in it ends up looser than the wildcard.
+ *   Without a layer wildcard only denies move after, unchanged.
  * - The base's own `"*"` never moves: it is the fallback the layer's
  *   named keys refine. */
 function mergePermission(
@@ -102,21 +105,33 @@ function mergePermission(
   return result;
 }
 
-/** The part of a permission entry at least as strict as `threshold`: the
- * scalar itself, or a pattern map filtered to its strict patterns;
- * `undefined` when nothing qualifies. */
+/** A permission entry for the after-the-wildcard position, or `undefined`
+ * when nothing in it is at least as strict as `threshold`: the scalar
+ * itself, or the whole pattern map with each looser action raised to the
+ * `threshold` action (map order is precedence between its patterns). */
 function strictPart(value: unknown, threshold: number): unknown {
+  const strictness = (action: unknown) =>
+    typeof action === 'string' ? (STRICTNESS[action] ?? -1) : -1;
   if (typeof value === 'string') {
-    return (STRICTNESS[value] ?? -1) >= threshold ? value : undefined;
+    return strictness(value) >= threshold ? value : undefined;
   }
   if (!isRecord(value)) return undefined;
-  const kept: Record<string, unknown> = {};
-  for (const [pattern, action] of Object.entries(value)) {
-    if (typeof action === 'string' && (STRICTNESS[action] ?? -1) >= threshold) {
-      defineOwn(kept, pattern, action);
-    }
+  const entries = Object.entries(value);
+  if (!entries.some(([, action]) => strictness(action) >= threshold)) {
+    return undefined;
   }
-  return Object.keys(kept).length > 0 ? kept : undefined;
+  const floor = ACTION_BY_STRICTNESS[threshold];
+  const raised: Record<string, unknown> = {};
+  for (const [pattern, action] of entries) {
+    defineOwn(
+      raised,
+      pattern,
+      typeof action === 'string' && strictness(action) < threshold
+        ? floor
+        : action,
+    );
+  }
+  return raised;
 }
 
 /**
