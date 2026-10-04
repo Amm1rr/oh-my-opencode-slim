@@ -715,6 +715,32 @@ describe('loadPluginConfig', () => {
     });
   });
 
+  test('invalid project viewer disables panes without overriding the user viewer', () => {
+    const projectDir = path.join(tempDir, 'project');
+    const projectConfigDir = path.join(projectDir, '.opencode');
+    fs.mkdirSync(path.join(userConfigDir, 'opencode'), { recursive: true });
+    fs.mkdirSync(projectConfigDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(userConfigDir, 'opencode', 'oh-my-opencode-slim.json'),
+      JSON.stringify({ multiplexer: { type: 'tmux', viewer: 'tui' } }),
+    );
+    fs.writeFileSync(
+      path.join(projectConfigDir, 'oh-my-opencode-slim.json'),
+      JSON.stringify({ multiplexer: { viewer: 'nano' } }),
+    );
+    const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect(loadPluginConfig(projectDir).multiplexer).toEqual({
+        type: 'none',
+        layout: 'main-vertical',
+        main_pane_size: 60,
+        viewer: 'tui',
+      });
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
   test('project main_pane_size does not reset the user multiplexer type', () => {
     const projectDir = path.join(tempDir, 'project');
     const projectConfigDir = path.join(projectDir, '.opencode');
@@ -725,7 +751,7 @@ describe('loadPluginConfig', () => {
     fs.writeFileSync(
       path.join(userConfigDir, 'opencode', 'oh-my-opencode-slim.json'),
       JSON.stringify({
-        multiplexer: { type: 'tmux', layout: 'tiled' },
+        multiplexer: { type: 'tmux', layout: 'tiled', viewer: 'mini' },
       }),
     );
     fs.writeFileSync(
