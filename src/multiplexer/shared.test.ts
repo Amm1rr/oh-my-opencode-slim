@@ -282,25 +282,24 @@ describe('buildViewCommand', () => {
     const { buildOpencodeAttachCommand, buildViewCommand } =
       await importShared();
     const legacy = buildOpencodeAttachCommand('sess', 'http://x', '/repo');
-    expect(buildViewCommand('v1', 'sess', 'http://x', '/repo')).toBe(legacy);
+    expect(buildViewCommand('sess', 'http://x', '/repo')).toBe(legacy);
   });
 
   test('v2-shared omits URL and secret (the viewer discovers the service)', async () => {
     const { buildViewCommand } = await importShared();
     expect(
-      buildViewCommand('v2-shared', 'ses_abc', 'http://unused', '/repo'),
+      buildViewCommand('ses_abc', 'http://unused', '/repo', {
+        viewerFlavor: 'v2-shared',
+      }),
     ).toBe("opencode --session 'ses_abc' '/repo'");
   });
 
   test('v2-remote carries server URL, session and directory — never the secret', async () => {
     const { buildViewCommand } = await importShared();
     expect(
-      buildViewCommand(
-        'v2-remote',
-        'ses_abc',
-        'http://192.168.5.212:8192',
-        '/repo',
-      ),
+      buildViewCommand('ses_abc', 'http://192.168.5.212:8192', '/repo', {
+        viewerFlavor: 'v2-remote',
+      }),
     ).toBe(
       "opencode --server 'http://192.168.5.212:8192' --session 'ses_abc' '/repo'",
     );
@@ -308,18 +307,11 @@ describe('buildViewCommand', () => {
 
   test('v2-remote ignores a stray password option (no secret in command text)', async () => {
     const { buildViewCommand } = await importShared();
-    // Regression guard: the old interface accepted a password and embedded
-    // it as `env OPENCODE_PASSWORD=…`. Any leftover caller must not leak.
-    const options = { password: 'pw-123' } as unknown as Parameters<
-      typeof buildViewCommand
-    >[4];
-    const cmd = buildViewCommand(
-      'v2-remote',
-      'ses_abc',
-      'http://x',
-      '/repo',
-      options,
-    );
+    const options = {
+      viewerFlavor: 'v2-remote' as const,
+      viewerPassword: 'pw-123',
+    };
+    const cmd = buildViewCommand('ses_abc', 'http://x', '/repo', options);
     expect(cmd).toBe(
       "opencode --server 'http://x' --session 'ses_abc' '/repo'",
     );
@@ -330,25 +322,22 @@ describe('buildViewCommand', () => {
   test('viewer "mini" targets the mini interface for every flavor', async () => {
     const { buildViewCommand } = await importShared();
     expect(
-      buildViewCommand('v1', 'sess', 'http://x', '/repo', {
+      buildViewCommand('sess', 'http://x', '/repo', {
+        viewerFlavor: 'v1',
         viewerSurface: 'mini',
       }),
     ).toBe("opencode mini --server 'http://x' --session 'sess'");
     expect(
-      buildViewCommand('v2-shared', 'ses_abc', 'http://unused', '/repo', {
+      buildViewCommand('ses_abc', 'http://unused', '/repo', {
+        viewerFlavor: 'v2-shared',
         viewerSurface: 'mini',
       }),
     ).toBe("opencode mini --session 'ses_abc'");
     expect(
-      buildViewCommand(
-        'v2-remote',
-        'ses_abc',
-        'http://192.168.5.212:8192',
-        '/repo',
-        {
-          viewerSurface: 'mini',
-        },
-      ),
+      buildViewCommand('ses_abc', 'http://192.168.5.212:8192', '/repo', {
+        viewerFlavor: 'v2-remote',
+        viewerSurface: 'mini',
+      }),
     ).toBe(
       "opencode mini --server 'http://192.168.5.212:8192' --session 'ses_abc'",
     );
@@ -357,7 +346,8 @@ describe('buildViewCommand', () => {
   test('v2 flavors quote directories, session ids and executables', async () => {
     const { buildViewCommand } = await importShared();
     expect(
-      buildViewCommand('v2-shared', "s'es s", 'http://x', "/tmp/a b's", {
+      buildViewCommand("s'es s", 'http://x', "/tmp/a b's", {
+        viewerFlavor: 'v2-shared',
         executable: "/opt/King's/opencode",
       }),
     ).toBe(
@@ -373,12 +363,9 @@ describe('buildViewCommand', () => {
     });
     try {
       const { buildViewCommand } = await importShared();
-      const cmd = buildViewCommand(
-        'v2-remote',
-        'ses',
-        'http://x',
-        'C:\\Users\\foo\\repo',
-      );
+      const cmd = buildViewCommand('ses', 'http://x', 'C:\\Users\\foo\\repo', {
+        viewerFlavor: 'v2-remote',
+      });
       expect(cmd).toContain('C:/Users/foo/repo');
     } finally {
       Object.defineProperty(process, 'platform', {

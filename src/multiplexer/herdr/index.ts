@@ -181,11 +181,10 @@ export class HerdrMultiplexer implements Multiplexer {
 
       // 3. Run opencode attach in the new pane
       const opencodeCmd = buildViewCommand(
-        options?.viewerFlavor ?? 'v1',
         sessionId,
         serverUrl,
         attachDir,
-        { viewerSurface: options?.viewerSurface },
+        options,
       );
 
       const runProc = crossSpawn([herdr, 'pane', 'run', paneId, opencodeCmd], {

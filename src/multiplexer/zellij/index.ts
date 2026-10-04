@@ -195,17 +195,16 @@ export class ZellijMultiplexer implements Multiplexer {
     }
 
     const viewerCommand = buildViewCommand(
-      options?.viewerFlavor ?? 'v1',
       sessionId,
       serverUrl,
       directory,
-      { viewerSurface: options?.viewerSurface },
+      options,
     );
     const opencodeCmd = needsSecretBridge
       ? withParentEnvPassword(viewerCommand)
       : viewerCommand;
     // The name doubles as the pane title; the description is the FR-8
-    // metadata (owner pid + child session id) must survive intact.
+    // metadata (owner pid + child session id) and must survive intact.
     const paneName = description.replace(/"/g, '\\"');
     // Mini commands omit the directory, so the pane pins the child session's
     // project directory itself (`new-pane --cwd`; the adapter already gates

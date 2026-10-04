@@ -7,9 +7,9 @@
 
 import { existsSync } from 'node:fs';
 import { basename, isAbsolute } from 'node:path';
-import type { MultiplexerViewer } from '../config/schema';
 import { crossSpawn } from '../utils/compat';
 import { log } from '../utils/logger';
+import type { PaneSpawnOptions } from './types';
 
 export function quoteShellArg(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
@@ -48,19 +48,13 @@ export function buildOpencodeAttachCommand(
  */
 export type ViewerFlavor = 'v1' | 'v2-shared' | 'v2-remote';
 
-/**
- * Which opencode TUI surface a viewer command opens: the full `tui`
- * (default) or the lightweight `mini` interface. Derived from the config
- * schema so the user-facing enum has one source of truth.
- */
-export type ViewerSurface = MultiplexerViewer;
-
-export interface ViewerCommandOptions {
+export type ViewerCommandOptions = Pick<
+  PaneSpawnOptions,
+  'viewerFlavor' | 'viewerSurface'
+> & {
   /** Absolute host binary; defaults to the bare `opencode` name. */
   executable?: string;
-  /** TUI surface to open; defaults to the full `tui`. */
-  viewerSurface?: ViewerSurface;
-}
+};
 
 /**
  * Builds the pane viewer command for one host flavor (FR-2 command matrix).
@@ -83,12 +77,12 @@ export interface ViewerCommandOptions {
  * `--cwd`, kitty `--cwd=`, tmux `-c`, Zellij `--cwd`, cmux-tui `cd`).
  */
 export function buildViewCommand(
-  flavor: ViewerFlavor,
   sessionId: string,
   serverUrl: string,
   directory: string,
   options: ViewerCommandOptions = {},
 ): string {
+  const flavor = options.viewerFlavor ?? 'v1';
   const executable = options.executable ?? 'opencode';
   const isMini = options.viewerSurface === 'mini';
   const exe =
@@ -112,24 +106,13 @@ export function buildViewCommand(
     ].join(' ');
   }
   const viewDir = normalizePathForShell(directory);
-  const dirArgs = isMini ? [] : [quoteShellArg(viewDir)];
-  if (flavor === 'v2-shared') {
-    return [
-      exe,
-      ...(isMini ? ['mini'] : []),
-      '--session',
-      quoteShellArg(sessionId),
-      ...dirArgs,
-    ].join(' ');
-  }
   return [
     exe,
     ...(isMini ? ['mini'] : []),
-    '--server',
-    quoteShellArg(serverUrl),
+    ...(flavor === 'v2-remote' ? ['--server', quoteShellArg(serverUrl)] : []),
     '--session',
     quoteShellArg(sessionId),
-    ...dirArgs,
+    ...(isMini ? [] : [quoteShellArg(viewDir)]),
   ].join(' ');
 }
 

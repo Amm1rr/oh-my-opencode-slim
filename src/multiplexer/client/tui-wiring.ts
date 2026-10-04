@@ -617,13 +617,9 @@ export async function createTuiPaneWiring(
       stableIdleMs: options.stableIdleMs ?? DEFAULT_STABLE_IDLE_MS,
       readiness: options.readiness ?? DEFAULT_READINESS,
       viewer: {
-        ...(options.viewerFlavor === undefined
-          ? {}
-          : { flavor: options.viewerFlavor }),
-        ...(options.viewerPassword === undefined
-          ? {}
-          : { password: options.viewerPassword }),
-        surface: loaded.multiplexer.viewer,
+        viewerFlavor: options.viewerFlavor,
+        viewerPassword: options.viewerPassword,
+        viewerSurface: loaded.multiplexer.viewer,
       },
     },
     logger,

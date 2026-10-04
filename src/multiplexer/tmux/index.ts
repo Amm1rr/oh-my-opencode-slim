@@ -83,11 +83,10 @@ export class TmuxMultiplexer implements Multiplexer {
 
     try {
       const opencodeCmd = `env OPENCODE_DISABLE_TERMINAL_TITLE=1 ${buildViewCommand(
-        options?.viewerFlavor ?? 'v1',
         sessionId,
         serverUrl,
         directory,
-        { viewerSurface: options?.viewerSurface },
+        options,
       )}`;
 
       // v2 remote hosts: the viewer must authenticate with
