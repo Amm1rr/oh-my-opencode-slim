@@ -133,13 +133,19 @@ export function createTaskReplyTool(options: {
       const wait = getChildInputWait(job.taskID, requestID);
       if (!wait) {
         const open = listChildInputWaits(job.taskID);
-        const hint =
-          open.length > 0
-            ? ` Open requests for this task: ${open.map((entry) => entry.requestID).join(', ')}.`
-            : ' This task has no open question or permission requests.';
-        throw new Error(
-          `Task ${requested} has no open request ${requestID}.${hint}`,
-        );
+        if (open.length > 0) {
+          const hint = ` Open requests for this task: ${open
+            .map((entry) => entry.requestID)
+            .join(', ')}.`;
+          throw new Error(
+            `Task ${requested} has no open request ${requestID}.${hint}`,
+          );
+        }
+        // The task has no open asks at all: the request this wake steered
+        // toward was resolved elsewhere (external replier, host policy, or
+        // the parent's own earlier reply) while the child kept running
+        // (#1435). Converge benignly — the parent approved nothing.
+        return `No open request ${requestID} on ${job.alias} (${job.taskID}); it was resolved elsewhere or is no longer tracked. Nothing was replied. Run task_status if you expected an open ask.`;
       }
 
       const client = getClient(options.input) as unknown as {
