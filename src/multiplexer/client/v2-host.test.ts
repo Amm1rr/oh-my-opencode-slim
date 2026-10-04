@@ -240,10 +240,16 @@ describe('v2 host ports', () => {
     });
   });
 
-  test('status reader fails soft without the session API', async () => {
+  test('status reader fails soft without the API or on an array active', async () => {
     const read = await createV2StatusReader(undefined).readStatus('/tmp/proj');
     expect(read.error).toBe('v2 session API unavailable');
     expect(read.statuses.size).toBe(0);
+    const session = {
+      list: async () => [],
+      active: async () => ({ data: [] }),
+    };
+    const bad = await createV2StatusReader({ session }).readStatus('/tmp/proj');
+    expect(bad.error).toBe('invalid v2 active response');
   });
 
   test('list reader maps children with their agent type', async () => {

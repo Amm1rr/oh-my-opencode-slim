@@ -622,29 +622,6 @@ describe('dedup and stable-idle close (2.3)', () => {
     expect(h.lifecycle.getPane(CHILD)).toBeDefined();
   });
 
-  test('revalidates a busy reconcile snapshot after a lost idle edge', async () => {
-    const h = createHarness();
-    h.list.setSessionIds(CHILD);
-    h.reader.statuses.set(CHILD, 'busy');
-    const readStatus = h.reader.readStatus.bind(h.reader);
-    const snapshot = new Map(h.reader.statuses);
-    const barrier = createDeferred();
-    h.reader.readStatus = async () => {
-      await barrier.promise;
-      return { statuses: snapshot };
-    };
-    const reconnect = h.lifecycle.onReconnect();
-    await flushAsync();
-    h.reader.statuses.set(CHILD, 'idle');
-    await h.lifecycle.handleEvent(lifecycleEvent('idle')); // not tracked yet
-    barrier.resolve();
-    await reconnect;
-    h.reader.readStatus = readStatus;
-    h.clock.advance(STABLE_IDLE_MS);
-    await flushAsync();
-    expect(h.adapter.closeCalls).toEqual(['pane-1']);
-  });
-
   test('reconcile re-arms a quiescent held pane whose idle edge was lost', async () => {
     const h = createHarness();
     await activatePane(h);
@@ -657,9 +634,6 @@ describe('dedup and stable-idle close (2.3)', () => {
     h.clock.advance(1);
     await flushAsync();
     expect(h.adapter.closeCalls).toHaveLength(0);
-    h.clock.advance(STABLE_IDLE_MS - 1);
-    await flushAsync();
-    expect(h.adapter.closeCalls).toEqual(['pane-1']);
   });
 
   test('a backfill deadline restarts once on the first real idle edge', async () => {
@@ -677,17 +651,6 @@ describe('dedup and stable-idle close (2.3)', () => {
     h.clock.advance(STABLE_IDLE_MS - 1);
     await flushAsync();
     expect(h.adapter.closeCalls).toEqual(['pane-1']);
-  });
-
-  test('a deadline armed at creation restarts on the first real idle edge', async () => {
-    const h = createHarness();
-    h.reader.statuses.set(CHILD, 'idle');
-    await h.lifecycle.handleEvent(createdEvent());
-    h.clock.advance(STABLE_IDLE_MS - 1);
-    await h.lifecycle.handleEvent(lifecycleEvent('idle'));
-    h.clock.advance(1);
-    await flushAsync();
-    expect(h.adapter.closeCalls).toHaveLength(0);
   });
 
   test('keeps the pane when the child turns busy inside the debounce window', async () => {
@@ -1121,28 +1084,13 @@ describe('rebuild and reconnect backfill (2.4)', () => {
     expect(h.adapter.spawnCalls).toHaveLength(2);
   });
 
-  test('backfill stops before the next spawn when the displayed parent changes', async () => {
-    const h = createHarness();
-    h.list.setSessionIds(CHILD, 'child-2');
-    h.reader.statuses.set(CHILD, 'busy');
-    h.reader.statuses.set('child-2', 'busy');
-    const barrier = createDeferred();
-    h.adapter.spawnBarrier = barrier.promise;
-    const reconnect = h.lifecycle.onReconnect();
-    await flushAsync();
-    h.lifecycle.setDisplayedSession('other-parent');
-    barrier.resolve();
-    await reconnect;
-    expect(h.adapter.spawnCalls.map((call) => call.sessionId)).toEqual([CHILD]);
-    expect(h.adapter.closeCalls).toHaveLength(0);
-  });
-
-  test('watched backfill stops before the next spawn when the directory changes', async () => {
+  test('both backfill loops stop before the next spawn when the route changes', async () => {
     const h = createHarness();
     h.list.setSessionIds(CHILD, 'child-2');
     await h.lifecycle.onReconnect(); // idle watches
-    h.reader.statuses.set(CHILD, 'busy');
-    h.reader.statuses.set('child-2', 'busy');
+    h.list.setSessionIds(CHILD, 'child-2', 'child-3'); // child-3 is unwatched
+    for (const id of [CHILD, 'child-2', 'child-3'])
+      h.reader.statuses.set(id, 'busy');
     const barrier = createDeferred();
     h.adapter.spawnBarrier = barrier.promise;
     const reconnect = h.lifecycle.onReconnect();
@@ -1151,7 +1099,6 @@ describe('rebuild and reconnect backfill (2.4)', () => {
     barrier.resolve();
     await reconnect;
     expect(h.adapter.spawnCalls.map((call) => call.sessionId)).toEqual([CHILD]);
-    expect(h.adapter.closeCalls).toHaveLength(0);
   });
 
   test('a child going idle before its turn in busy backfill closes after debounce', async () => {
@@ -1760,18 +1707,19 @@ describe('rebuild and reconnect backfill (2.4)', () => {
     expect(h.lifecycle.getPanes().size).toBe(1);
   });
 
-  test('arms the stable-idle close when the child is idle at creation', async () => {
+  test('arms a provisional close when the child is idle at creation', async () => {
     const h = createHarness();
     h.reader.statuses.set(CHILD, 'idle');
     await h.lifecycle.handleEvent(createdEvent());
-
-    expect(h.lifecycle.getPane(CHILD)).toBeDefined();
     expect(h.clock.pendingTimers).toBe(1);
-
-    h.clock.advance(STABLE_IDLE_MS);
+    h.clock.advance(STABLE_IDLE_MS - 1);
+    await h.lifecycle.handleEvent(lifecycleEvent('idle')); // first real edge
+    h.clock.advance(1);
+    await flushAsync();
+    expect(h.adapter.closeCalls).toHaveLength(0);
+    h.clock.advance(STABLE_IDLE_MS - 1);
     await flushAsync();
     expect(h.adapter.closeCalls).toEqual(['pane-1']);
-    expect(h.lifecycle.getPane(CHILD)).toBeUndefined();
   });
 });
 

@@ -322,13 +322,8 @@ export class PaneLifecycle {
     for (const childSessionId of serverChildIds) {
       const record = this.panes.get(childSessionId);
       if (!record) continue;
-      if (
-        statuses &&
-        statuses.get(childSessionId) !== 'busy' &&
-        statuses.get(childSessionId) !== 'retry' &&
-        record.parentSessionId === parentSessionId &&
-        record.directory === directory
-      )
+      const live = statuses?.get(childSessionId);
+      if (statuses && live !== 'busy' && live !== 'retry')
         this.scheduleStableIdleClose(childSessionId, record, true);
       logNoPane(this.logger, 'backfill-skipped', {
         childSessionId,
