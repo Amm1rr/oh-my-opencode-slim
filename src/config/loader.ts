@@ -691,17 +691,23 @@ function validateFinalImageRouting(
   return false;
 }
 
-/** Project config bases ordered from the filesystem root to the location. */
-function getProjectConfigBases(directory: string): string[] {
-  const bases: string[] = [];
+/** Project .opencode directories, from filesystem root to the location. */
+export function getProjectConfigDirectories(directory: string): string[] {
+  const directories: string[] = [];
   let current = path.resolve(directory);
   for (;;) {
-    bases.push(path.join(current, '.opencode', 'oh-my-opencode-slim'));
+    directories.push(path.join(current, '.opencode'));
     const parent = path.dirname(current);
     if (parent === current) break;
     current = parent;
   }
-  return bases.reverse();
+  return directories.reverse();
+}
+
+function getProjectConfigBases(directory: string): string[] {
+  return getProjectConfigDirectories(directory).map((configDirectory) =>
+    path.join(configDirectory, 'oh-my-opencode-slim'),
+  );
 }
 
 /**
@@ -1008,24 +1014,26 @@ export function loadAgentPrompt(
 
   const searchDirs: string[] = [];
 
-  // Lookup order preference:
-  // 1. Project preset dir
-  if (projectDirectory && presetDirName) {
-    searchDirs.push(
-      path.join(projectDirectory, '.opencode', PROMPTS_DIR_NAME, presetDirName),
-    );
-  }
-  // 2. Project root dir
+  // Nearest project location wins, with preset-specific files preferred
+  // within each location. Use the same ancestor walk as configuration.
   if (projectDirectory) {
-    searchDirs.push(path.join(projectDirectory, '.opencode', PROMPTS_DIR_NAME));
+    for (const configDirectory of getProjectConfigDirectories(
+      projectDirectory,
+    ).reverse()) {
+      const promptsDirectory = path.join(configDirectory, PROMPTS_DIR_NAME);
+      if (presetDirName) {
+        searchDirs.push(path.join(promptsDirectory, presetDirName));
+      }
+      searchDirs.push(promptsDirectory);
+    }
   }
-  // 3. User preset dirs
+  // User preset dirs
   if (presetDirName) {
     for (const userDir of getConfigSearchDirs()) {
       searchDirs.push(path.join(userDir, PROMPTS_DIR_NAME, presetDirName));
     }
   }
-  // 4. User root dirs
+  // User root dirs
   for (const userDir of getConfigSearchDirs()) {
     searchDirs.push(path.join(userDir, PROMPTS_DIR_NAME));
   }

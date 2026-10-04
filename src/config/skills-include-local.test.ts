@@ -38,6 +38,57 @@ afterEach(() => {
 });
 
 describe('discoverProjectLocalSkillNames', () => {
+  test('includes ancestor skills above Git boundaries without siblings or duplicates', () => {
+    const workspace = makeProject();
+    const repository = path.join(workspace, 'repository');
+    const worktree = path.join(repository, '.slim', 'worktrees', 'feature');
+    fs.mkdirSync(path.join(repository, '.git'), { recursive: true });
+    fs.mkdirSync(worktree, { recursive: true });
+    fs.writeFileSync(path.join(worktree, '.git'), 'gitdir: ignored-fixture');
+    writeSkill(workspace, 'shared', 'shared');
+    writeSkill(repository, 'repository', 'repository');
+    writeSkill(worktree, 'shared', 'shared');
+    writeSkill(worktree, 'local', 'local');
+    writeSkill(path.join(workspace, 'sibling'), 'sibling', 'sibling');
+
+    expect(discoverProjectLocalSkillNames(worktree)).toEqual([
+      'local',
+      'repository',
+      'shared',
+    ]);
+  });
+
+  test('skips symlinked ancestor roots without discarding valid local skills', () => {
+    const workspace = makeProject();
+    const external = makeProject();
+    const worktree = path.join(workspace, 'worktrees', 'feature');
+    fs.mkdirSync(worktree, { recursive: true });
+    writeSkill(external, 'external', 'external');
+    fs.mkdirSync(path.join(workspace, '.opencode'), { recursive: true });
+    fs.symlinkSync(
+      path.join(external, '.opencode', 'skills'),
+      path.join(workspace, '.opencode', 'skills'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    writeSkill(worktree, 'local', 'local');
+    expect(discoverProjectLocalSkillNames(worktree)).toEqual(['local']);
+  });
+
+  test('does not follow symlinked skill entries in ancestor roots', () => {
+    const workspace = makeProject();
+    const external = makeProject();
+    const worktree = path.join(workspace, 'worktrees', 'feature');
+    fs.mkdirSync(worktree, { recursive: true });
+    writeSkill(workspace, 'shared', 'shared');
+    writeSkill(external, 'external', 'external');
+    fs.symlinkSync(
+      path.join(external, '.opencode', 'skills', 'external'),
+      path.join(workspace, '.opencode', 'skills', 'linked'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    expect(discoverProjectLocalSkillNames(worktree)).toEqual(['shared']);
+  });
+
   test('discovers nested skills by frontmatter name and ignores invalid files', () => {
     const projectDir = makeProject();
     writeSkill(
@@ -87,6 +138,33 @@ describe('discoverProjectLocalSkillNames', () => {
 });
 
 describe('skills_include_local', () => {
+  test('grants ancestor skills in worktrees while skills_remove still wins', () => {
+    const workspace = makeProject();
+    const worktree = path.join(workspace, 'worktrees', 'feature');
+    fs.mkdirSync(worktree, { recursive: true });
+    writeSkill(workspace, 'shared', 'shared');
+    writeSkill(workspace, 'excluded', 'excluded');
+    writeSkill(worktree, 'local', 'local');
+    const config = PluginConfigSchema.parse({
+      agents: {
+        oracle: {
+          skills_include_local: true,
+          skills_remove: ['excluded'],
+        },
+      },
+    });
+    const runtime = RuntimeConfig.createDetached(worktree, config);
+    const oracle = createAgents(runtime, { projectDirectory: worktree }).find(
+      (agent) => agent.name === 'oracle',
+    );
+    const permissions = oracle?.config.permission?.skill as
+      | Record<string, string>
+      | undefined;
+    expect(permissions?.shared).toBe('allow');
+    expect(permissions?.local).toBe('allow');
+    expect(permissions?.excluded).not.toBe('allow');
+  });
+
   test('adds all project .opencode/skills entries to an agent effective skills', () => {
     const projectDir = makeProject();
     writeSkill(projectDir, 'project-architecture', 'project-architecture');

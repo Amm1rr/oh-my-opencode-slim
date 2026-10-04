@@ -194,7 +194,9 @@ example and precedence rules.
 
 Project settings in `.opencode/oh-my-opencode-slim.json[c]` are inherited from
 ancestor directories, including above repository and nested worktree roots.
-Closer settings override matching fields. See
+Closer settings override matching fields. Prompt files and the optional
+`skills_include_local` grants also search ancestor `.opencode` directories,
+following OpenCode's directory discovery. See
 [Configuration](docs/configuration.md#config-files) for precedence and trust boundaries.
 
 Consider presets as guidelines as they are often outdated.

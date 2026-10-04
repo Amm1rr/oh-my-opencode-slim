@@ -31,6 +31,112 @@ describe('Project-local customization - 15 core cases', () => {
     process.env = originalEnv;
   });
 
+  test('inherits prompts across repository and nested worktree boundaries', () => {
+    const workspace = path.join(tempDir, 'workspace');
+    const repository = path.join(workspace, 'repository');
+    const worktree = path.join(repository, '.slim', 'worktrees', 'feature');
+    fs.mkdirSync(path.join(repository, '.git'), { recursive: true });
+    fs.mkdirSync(worktree, { recursive: true });
+    fs.writeFileSync(path.join(worktree, '.git'), 'gitdir: ignored-fixture');
+    const prompts = path.join(workspace, '.opencode', 'oh-my-opencode-slim');
+    fs.mkdirSync(path.join(prompts, 'team'), { recursive: true });
+    fs.writeFileSync(path.join(prompts, 'oracle.md'), 'ancestor-root');
+    fs.writeFileSync(
+      path.join(prompts, 'team', 'oracle.md'),
+      'ancestor-preset',
+    );
+    fs.writeFileSync(path.join(prompts, 'oracle_append.md'), 'ancestor-append');
+
+    expect(
+      loadAgentPrompt('oracle', {
+        preset: 'team',
+        projectDirectory: worktree,
+      }),
+    ).toEqual({ prompt: 'ancestor-preset', appendPrompt: 'ancestor-append' });
+
+    const localPrompts = path.join(
+      worktree,
+      '.opencode',
+      'oh-my-opencode-slim',
+    );
+    fs.mkdirSync(localPrompts, { recursive: true });
+    fs.writeFileSync(path.join(localPrompts, 'oracle.md'), 'local-root');
+    expect(
+      loadAgentPrompt('oracle', {
+        preset: 'team',
+        projectDirectory: worktree,
+      }),
+    ).toEqual({ prompt: 'local-root', appendPrompt: 'ancestor-append' });
+
+    fs.writeFileSync(
+      path.join(localPrompts, 'oracle_append.md'),
+      'local-append',
+    );
+    expect(
+      loadAgentPrompt('oracle', {
+        preset: 'team',
+        projectDirectory: worktree,
+      }),
+    ).toEqual({ prompt: 'local-root', appendPrompt: 'local-append' });
+  });
+
+  test('ancestor prompts beat global prompts and do not search siblings', () => {
+    const workspace = path.join(tempDir, 'workspace');
+    const worktree = path.join(workspace, 'worktrees', 'feature');
+    fs.mkdirSync(worktree, { recursive: true });
+    const userPrompts = path.join(tempDir, 'opencode', 'oh-my-opencode-slim');
+    const ancestorPrompts = path.join(
+      workspace,
+      '.opencode',
+      'oh-my-opencode-slim',
+    );
+    const siblingPrompts = path.join(
+      workspace,
+      'other',
+      '.opencode',
+      'oh-my-opencode-slim',
+    );
+    for (const directory of [userPrompts, ancestorPrompts, siblingPrompts]) {
+      fs.mkdirSync(directory, { recursive: true });
+    }
+    fs.writeFileSync(path.join(userPrompts, 'oracle.md'), 'global');
+    fs.writeFileSync(path.join(ancestorPrompts, 'oracle.md'), 'ancestor');
+    fs.writeFileSync(path.join(siblingPrompts, 'explorer.md'), 'sibling');
+
+    expect(
+      loadAgentPrompt('oracle', { projectDirectory: worktree }).prompt,
+    ).toBe('ancestor');
+    expect(
+      loadAgentPrompt('explorer', { projectDirectory: worktree }).prompt,
+    ).toBeUndefined();
+    fs.unlinkSync(path.join(ancestorPrompts, 'oracle.md'));
+    expect(
+      loadAgentPrompt('oracle', { projectDirectory: worktree }).prompt,
+    ).toBe('global');
+  });
+
+  test('agent factories apply inherited prompt files in a nested worktree', () => {
+    const workspace = path.join(tempDir, 'workspace');
+    const worktree = path.join(workspace, 'worktrees', 'feature');
+    fs.mkdirSync(worktree, { recursive: true });
+    const prompts = path.join(workspace, '.opencode', 'oh-my-opencode-slim');
+    fs.mkdirSync(prompts, { recursive: true });
+    fs.writeFileSync(
+      path.join(prompts, 'oracle.md'),
+      'ancestor oracle instructions',
+    );
+    fs.writeFileSync(
+      path.join(prompts, 'oracle_append.md'),
+      'ancestor extra rules',
+    );
+    const runtime = RuntimeConfig.createDetached(worktree, {});
+    const oracle = createAgents(runtime, { projectDirectory: worktree }).find(
+      (agent) => agent.name === 'oracle',
+    );
+    expect(oracle?.config.prompt).toContain('ancestor oracle instructions');
+    expect(oracle?.config.prompt).toContain('ancestor extra rules');
+  });
+
   // Test Case 1: Project prompt root beats user prompt root
   test('1. Project prompt root beats user prompt root', () => {
     const userDir = path.join(tempDir, 'opencode', 'oh-my-opencode-slim');

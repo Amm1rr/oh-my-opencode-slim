@@ -10,9 +10,11 @@ This document describes how to configure and customize oh-my-opencode-slim on a 
 
 Configuration discovery also includes `.opencode/oh-my-opencode-slim.json[c]`
 in every ancestor directory through the filesystem root, even above repository
-and worktree boundaries. Review and trust those files too. This inheritance
-applies to configuration files; prompt-file and local skill discovery retain
-their existing directory-scoped lookup.
+and worktree boundaries. Prompt files and optional local skill grants use the
+same ancestor directory walk. Review and trust those ancestor directories too.
+This matches the directory discovery in OpenCode 2.0.22's
+[ConfigDiscovery](https://github.com/anomalyco/opencode/blob/527f0b931d1f9b3ebd34e106c51b31ce5db5b075/packages/core/src/config/discovery.ts)
+and its [filesystem walk](https://github.com/anomalyco/opencode/blob/527f0b931d1f9b3ebd34e106c51b31ce5db5b075/packages/util/src/fs-util.ts).
 
 ---
 
@@ -25,7 +27,7 @@ their existing directory-scoped lookup.
 | **Built-in prompt overrides** | `.opencode/oh-my-opencode-slim/<agent>.md` | Override the built-in system prompt for any agent (e.g. `oracle.md`, `explorer.md`, `orchestrator.md`, or custom agents). Acts as the default when no inline `prompt` is set in config. |
 | **Append prompts** | `.opencode/oh-my-opencode-slim/<agent>_append.md` | Append additional rules or guidelines to the existing base (inline, file, or default built-in) prompt without overriding it completely. |
 | **Per-agent skills** | `agents.<agent>.skills` | Explicitly restrict or authorize specific local codebase skills/scripts that this agent is allowed to execute. |
-| **Automatic project-local skills** | `agents.<agent>.skills_include_local` | Add all valid skills discovered under this project's `.opencode/skills/**/SKILL.md` tree without listing every skill name. |
+| **Automatic project-local skills** | `agents.<agent>.skills_include_local` | Add valid skills from current and ancestor `.opencode/skills/**/SKILL.md` trees without listing every skill name. |
 | **Per-agent MCPs** | `agents.<agent>.mcps` | Assign, restrict, or authorize specific Model Context Protocol (MCP) servers (like `context7` or `gh_grep`) to specific agents. |
 | **Presets** | `presets` configuration block | Bundle named agent environments. User and project preset definitions deep-merge; the active preset then merges into `agents`. |
 | **Precedence** | User config, project config, presets, prompt files | Project-local settings take precedence over user-global settings, while root `agents.*` entries beat active preset entries. |
@@ -115,7 +117,15 @@ When a repository carries several custom OpenCode skills under `.opencode/skills
 }
 ```
 
-The flag behaves like automatically adding every valid skill discovered under the current project's `.opencode/skills/**/SKILL.md` tree. Skill identity comes from the `name` frontmatter field, not the directory name. If another local `SKILL.md` is added later, it is picked up without another config edit.
+The flag behaves like automatically adding every valid skill discovered under
+the current and ancestor `.opencode/skills/**/SKILL.md` trees through the
+filesystem root. Duplicate names are included once; sibling trees are not
+searched. The existing Slim skill format is unchanged: identity comes from the
+`name` frontmatter field, not the directory name. This change matches OpenCode's
+ancestor directory discovery, not every host-specific skill format. OpenCode
+v2 uses path-derived IDs, so keep the frontmatter name equal to the skill
+directory name when using this flag on v2. If another local `SKILL.md` is added
+later, it is picked up on reload without another config edit.
 
 It composes with the existing directives. For example, include all project-local skills but exclude one from `fixer`:
 
@@ -130,7 +140,12 @@ It composes with the existing directives. For example, include all project-local
 }
 ```
 
-`skills_remove` still wins over automatically included local skills. Global skills, compatibility directories, configured external paths, and URL skill sources are intentionally outside this flag's scope.
+`skills_remove` still wins over automatically included local skills. Global
+skills, compatibility directories, configured external paths, and URL skill
+sources are intentionally outside this flag's scope. The existing safety
+checks remain: symlinked `.opencode` or `skills` roots pointing outside their
+ancestor location are skipped, and symlinked skill entries are not followed.
+OpenCode itself remains responsible for registering and loading skills.
 
 ---
 
@@ -142,10 +157,18 @@ When looking up markdown prompt template files (such as `<agent>.md` or `<agent>
    `<project>/.opencode/oh-my-opencode-slim/<preset>/<agent>.md` (if preset is active and safe)
 2. **Project Root Directory**
    `<project>/.opencode/oh-my-opencode-slim/<agent>.md`
-3. **User Preset Directory (Global)**
+3. **Ancestor Directories, Nearest First**
+   Repeat the preset-directory then root-directory lookup in each ancestor's
+   `.opencode/oh-my-opencode-slim/`, through the filesystem root. A nearer root
+   prompt beats a farther preset-specific prompt.
+4. **User Preset Directory (Global)**
    `<user-config-dir>/oh-my-opencode-slim/<preset>/<agent>.md`
-4. **User Root Directory (Global)**
+5. **User Root Directory (Global)**
    `<user-config-dir>/oh-my-opencode-slim/<agent>.md`
+
+Replacement and append files can come from different levels. Only the first
+matching file of each kind is used; ancestor append files are not concatenated.
+Inline prompt precedence and the composition rules below are unchanged.
 
 ---
 

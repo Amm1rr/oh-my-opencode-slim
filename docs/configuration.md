@@ -29,7 +29,11 @@ top-level arrays retain their existing replacement behavior. This keeps shared
 custom agents and presets available when a session moves into a nested worktree.
 Only ancestor configurations are inherited, not sibling configurations. Trust
 the ancestor configurations as well as the current project before running
-OpenCode. Prompt-file and project-local skill discovery are unchanged.
+OpenCode. Prompt files and `skills_include_local` also search ancestor
+`.opencode` directories through the filesystem root. Nearer prompt files win;
+local skill grants combine names from the discovered trees. See
+[Project-local Customization](project-local-customization.md) for precedence
+and the retained skill-format and symlink restrictions.
 
 The v2 configuration watcher observes ancestor candidates, including files
 created later, and `doctor` reports every discovered project layer. Project-scoped

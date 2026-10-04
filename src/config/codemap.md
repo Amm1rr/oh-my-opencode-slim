@@ -31,7 +31,8 @@ The config system follows a layered architecture:
 | `AgentMcpPolicy` | Per-agent default MCP lists and wildcard/exclusion parsing | agent-mcps.ts |
 | `ProviderModelIdSchema` | Zod schema enforcing `provider/model` ID format (provider segment excludes slashes/whitespace) | model-id-schema.ts |
 | Preset resolver | Preset normalization, layered merge (`mergePresetMaps`), and depth-first named-preset resolution (`resolvePresets` atomic, `PresetResolutionError` on unresolvable refs) | presets.ts |
-| `discoverProjectLocalSkillNames` | Project-local `.opencode/skills` discovery from `SKILL.md` frontmatter names, symlink-confined to the project root | project-skills.ts |
+| `discoverProjectLocalSkillNames` | Current and ancestor `.opencode/skills` discovery from `SKILL.md` frontmatter names, symlink-confined to each location | project-skills.ts |
+| `getProjectConfigDirectories` | Shared root-to-location `.opencode` ancestor walk for config, prompts, and optional local skill grants | loader.ts |
 | `RuntimeConfig` | Per-directory runtime config singleton with derived getters, host-config snapshot, and preset/model overrides | runtime.ts |
 
 ## Flow
@@ -133,7 +134,7 @@ This allows consumers to import directly from `src/config` rather than individua
 - `getAgentOverride(config, name)`: Get agent-specific override with alias support
 - `getCustomAgentNames(config)`: List custom agents declared in config.agents
 - `getAcpAgentNames(config)`: List ACP agent names from config.acpAgents
-- `loadAgentPrompt(agentName, preset?)`: Load custom prompt files for agents
+- `loadAgentPrompt(agentName, preset?)`: Load custom prompt files for agents, searching current and ancestor locations before global directories
 - `stripOrchestratorModel` / `applyOrchestratorModelConfig` (strip-orchestrator-model.ts): Strip the orchestrator's single model/variant when a fallback chain is configured
 
 ### Runtime State
