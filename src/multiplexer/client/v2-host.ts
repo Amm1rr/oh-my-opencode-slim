@@ -216,7 +216,9 @@ function readSessionArray(value: unknown): Array<Record<string, unknown>> {
 
 function readActiveIds(value: unknown): Set<string> | undefined {
   const record = isRecord(value) && isRecord(value.data) ? value.data : value;
-  return isRecord(record) ? new Set(Object.keys(record)) : undefined;
+  return isRecord(record) && !Array.isArray(record)
+    ? new Set(Object.keys(record))
+    : undefined;
 }
 
 function errorMessage(error: unknown): string {
@@ -390,7 +392,6 @@ function isNotFoundError(error: unknown): boolean {
   if (isRecord(error)) {
     if (error.status === 404) return true;
     if (error.name === 'NotFoundError') return true;
-    if (error.name === 'SessionNotFoundError') return true;
     if (error._tag === 'SessionNotFoundError') return true;
     if (error.cause !== undefined && error.cause !== error) {
       return isNotFoundError(error.cause);

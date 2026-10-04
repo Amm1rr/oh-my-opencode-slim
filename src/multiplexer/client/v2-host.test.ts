@@ -316,11 +316,8 @@ describe('v2 host ports', () => {
       session: {
         get: async ({ sessionID }: { sessionID: string }) => {
           if (sessionID === 'ses_gone') {
-            throw Object.assign(new Error('Session not found'), {
-              name: 'SessionNotFoundError',
-              _tag: 'SessionNotFoundError',
-              sessionID,
-            });
+            // SDK 2.0.10 throws this plain tagged value; 2.0.22 adds Error/name.
+            throw { _tag: 'SessionNotFoundError', sessionID, message: 'gone' };
           }
           return { id: sessionID };
         },
