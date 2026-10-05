@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { createBuiltinMcps, userDefinedMcpKeys } from './index';
+import { createBuiltinMcps, getOverriddenBuiltinMcpKeys } from './index';
 
 describe('createBuiltinMcps', () => {
   test('returns all MCPs when no disabled list provided', () => {
@@ -93,24 +93,24 @@ describe('createBuiltinMcps', () => {
   });
 });
 
-describe('userDefinedMcpKeys', () => {
+describe('getOverriddenBuiltinMcpKeys', () => {
   test('returns built-in keys the user has defined', () => {
     const builtins = createBuiltinMcps();
-    const keys = userDefinedMcpKeys(builtins, {
+    const keys = getOverriddenBuiltinMcpKeys(builtins, {
       gh_grep: { type: 'remote', url: 'https://user.example.com/mcp' },
     });
     expect(keys).toEqual(['gh_grep']);
   });
 
   test('returns empty when user defines none of the built-ins', () => {
-    const keys = userDefinedMcpKeys(createBuiltinMcps(), {
+    const keys = getOverriddenBuiltinMcpKeys(createBuiltinMcps(), {
       other_mcp: { type: 'remote', url: 'https://x.example.com' },
     });
     expect(keys).toEqual([]);
   });
 
   test('counts an entry as user-defined even when null', () => {
-    const keys = userDefinedMcpKeys(createBuiltinMcps(), {
+    const keys = getOverriddenBuiltinMcpKeys(createBuiltinMcps(), {
       context7: null,
     });
     expect(keys).toEqual(['context7']);

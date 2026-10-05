@@ -33,6 +33,7 @@ import { LOOP_GUARD_WARNING } from './hooks/tool-loop-guard/hook';
 import type { MessageWithParts } from './hooks/types';
 import pluginModuleDefault, { OhMyOpenCodeLite as plugin } from './index';
 import { MarketplaceStore } from './marketplace/store';
+import { createBuiltinMcps } from './mcp';
 import {
   getTuiStatePath,
   readTuiSnapshot,
@@ -716,6 +717,68 @@ describe('plugin tool registration', () => {
       const status = registryBridge.marketplaceService.status();
       expect(status.reloadRequired).toBe(true);
       expect(status.diagnostics).toEqual([]);
+    } finally {
+      await hooks.dispose?.();
+      process.env = originalEnv;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('user-defined MCP override wins and reconciles back when removed', async () => {
+    const originalEnv = { ...process.env };
+    const root = await mkdtemp('/tmp/oh-my-opencode-slim-mcp-override-');
+    const configDir = path.join(root, 'config');
+    await mkdir(configDir, { recursive: true });
+    process.env = {
+      ...originalEnv,
+      OPENCODE_CONFIG_DIR: configDir,
+      XDG_DATA_HOME: path.join(root, 'data'),
+    };
+    delete process.env.OH_MY_OPENCODE_SLIM_DISABLE;
+    await Bun.write(
+      path.join(configDir, 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        preset: 'active',
+        presets: { active: { marketplace: { agents: [] } } },
+      }),
+    );
+    const hooks = await plugin({
+      client: createPluginClient(async () => ({})),
+      directory: root,
+      worktree: root,
+      serverUrl: new URL('http://127.0.0.1:4096'),
+    } as never);
+    try {
+      // 1. The host config overrides a built-in key (issue #1290).
+      const userGhGrep = {
+        type: 'remote',
+        url: 'https://user.example.com/mcp',
+      };
+      const hostConfig: Record<string, unknown> = {
+        mcp: { gh_grep: userGhGrep },
+      };
+      await hooks.config?.(hostConfig);
+      const merged = hostConfig.mcp as Record<string, unknown>;
+      expect(merged.gh_grep).toEqual(userGhGrep);
+      expect(merged.context7).toBeDefined();
+
+      // 2. The live export drops the overridden built-in, keeps the rest.
+      const exported = (hooks as unknown as { mcp: Record<string, unknown> })
+        .mcp;
+      expect(exported).not.toHaveProperty('gh_grep');
+      expect(exported).toHaveProperty('context7');
+
+      // 3. User removes the override in the same process: both the merged
+      // config and the export must regain the built-in gh_grep. Delete-only
+      // reconciliation left the export pruned forever here.
+      const secondConfig: Record<string, unknown> = { mcp: {} };
+      await hooks.config?.(secondConfig);
+      const rebuilt = secondConfig.mcp as Record<string, unknown>;
+      expect(rebuilt.gh_grep).toEqual(createBuiltinMcps().gh_grep);
+      expect(rebuilt.gh_grep).not.toEqual(userGhGrep);
+      expect(rebuilt.context7).toBeDefined();
+      expect(exported).toHaveProperty('gh_grep');
+      expect(exported.gh_grep).toEqual(createBuiltinMcps().gh_grep);
     } finally {
       await hooks.dispose?.();
       process.env = originalEnv;

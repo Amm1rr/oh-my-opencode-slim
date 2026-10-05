@@ -31,9 +31,9 @@ export function createBuiltinMcps(
  * their own config. A user-defined entry owns its key: the plugin must
  * never inject a built-in over it (issue #1290).
  */
-export function userDefinedMcpKeys(
-  builtin: Record<string, McpConfig>,
+export function getOverriddenBuiltinMcpKeys(
+  builtin: Record<string, unknown>,
   user: Record<string, unknown>,
 ): string[] {
-  return Object.keys(builtin).filter((name) => name in user);
+  return Object.keys(builtin).filter((name) => Object.hasOwn(user, name));
 }

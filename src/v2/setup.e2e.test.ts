@@ -410,7 +410,7 @@ describe('createV2Setup e2e', () => {
     expect(calls.disposed.length).toBeGreaterThan(0);
   }, 20_000);
 
-  test('skips built-in MCP injection when the host owns the namespace', async () => {
+  test('skips built-in MCP injection when the host owns the key', async () => {
     // User/host-configured namespaces own their key (issue #1290): a
     // built-in must never be injected over an existing draft entry.
     const { ctx, calls } = makeMockV2Context(projectDir);
