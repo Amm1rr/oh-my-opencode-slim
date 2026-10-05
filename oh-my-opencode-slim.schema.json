@@ -1309,8 +1309,7 @@
           "minLength": 1
         },
         "viewer": {
-          "default": "mini",
-          "description": "Which opencode TUI surface subagent panes open. \"mini\" (default) launches the lightweight `opencode mini`; \"tui\" runs the full interface.",
+          "description": "Which opencode TUI surface subagent panes open. Defaults to \"tui\" on OpenCode v1 and \"mini\" on v2. \"mini\" uses `attach ... --mini` on v1 (requires OpenCode >= 1.17.10) and `opencode mini` on v2; \"tui\" runs the full interface.",
           "type": "string",
           "enum": [
             "tui",

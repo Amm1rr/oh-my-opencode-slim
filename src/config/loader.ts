@@ -25,6 +25,7 @@ import {
   type RawPluginConfig,
   type ResolvedPluginConfig,
   sanitizeBackgroundJobsConfig,
+  sanitizeMultiplexerConfig,
   WebfetchConfigSchema,
 } from './schema';
 
@@ -341,30 +342,20 @@ function retainExplicitMultiplexerFields(
   parsedConfig: RawPluginConfig,
   rawConfig: unknown,
 ): RawPluginConfig {
-  if (!parsedConfig.multiplexer) {
+  if (!parsedConfig.multiplexer || !isPlainRecord(rawConfig)) {
     return parsedConfig;
   }
 
-  const rawMultiplexer =
-    isPlainRecord(rawConfig) && isPlainRecord(rawConfig.multiplexer)
-      ? rawConfig.multiplexer
-      : undefined;
-  if (!rawMultiplexer) {
-    return { ...parsedConfig, multiplexer: undefined };
-  }
-
-  const explicit: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(
-    parsedConfig.multiplexer as unknown as Record<string, unknown>,
-  )) {
-    if (Object.hasOwn(rawMultiplexer, key)) {
-      explicit[key] = value;
-    }
-  }
-
+  // The sanitizer's once-per-process diagnostic already fired in safeParse.
   return {
     ...parsedConfig,
-    multiplexer: explicit as RawPluginConfig['multiplexer'],
+    multiplexer: retainSanitizedValues(
+      parsedConfig.multiplexer as unknown as Record<string, unknown>,
+      sanitizeMultiplexerConfig(rawConfig.multiplexer) as Record<
+        string,
+        unknown
+      >,
+    ) as RawPluginConfig['multiplexer'],
   };
 }
 

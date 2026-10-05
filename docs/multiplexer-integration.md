@@ -54,7 +54,8 @@ How it works:
    host session events and, for each eligible child session, creates a view in
    **the pane it is itself running in** — a split pane (tmux / Zellij / Herdr /
    kitty), or a sibling tab appended to that pane (cmux-tui).
-3. The pane runs a pure view command:
+3. The pane runs a pure view command (v1 default shown; see
+   [Deployment Modes](#deployment-modes) for v2):
 
    ```text
    opencode attach <serverUrl> --session <childSessionId> --dir <directory>
@@ -87,8 +88,8 @@ Pane behavior is fixed per host mode:
 | `opencode serve` + N × `opencode attach <url>` | multiple processes | real | Supported (target deployment) |
 | `opencode run` | no TUI host | — | No pane (child runs in the host's native background mode) |
 | `opencode --mini` | TUI host does not load plugins | — | No pane |
-| v2 host, shared background service (default) | TUI client of the user-level shared service | discovered via the service registration | Supported: viewers run `opencode --session <id> <dir>` and rediscover the same service |
-| v2 host, `--server <url>` | TUI client of an explicit server | `--server` URL | Supported: viewers run `opencode --server <url> --session <id> <dir>`; the `OPENCODE_PASSWORD` secret comes from the parent process environment and is injected at pane creation through the multiplexer's spawn-time environment mechanism (see [Secret handling](#known-limitations)), never through the viewer's command line |
+| v2 host, shared background service (default) | TUI client of the user-level shared service | discovered via the service registration | Supported: default viewers run `opencode mini --session <id>` and rediscover the same service; `viewer: "tui"` uses `opencode --session <id> <dir>` |
+| v2 host, `--server <url>` | TUI client of an explicit server | `--server` URL | Supported: default viewers run `opencode mini --server <url> --session <id>`; `viewer: "tui"` uses `opencode --server <url> --session <id> <dir>`. The `OPENCODE_PASSWORD` secret comes from the parent process environment and is injected at pane creation through the multiplexer's spawn-time environment mechanism (see [Secret handling](#known-limitations)), never through the viewer's command line |
 | v2 host, `--standalone` | private stdio server (no registration, random password, exits with the parent) | ephemeral loopback | **Not supported**: fail-closed + exactly one diagnostic; the fallback is v2's native subagent surfaces (`/subagent` opens the latest child session in a tab without moving focus — the tab is a salience and quick-switch affordance, and the displayed session stays the interaction surface) |
 
 On v2 hosts the event source is the TUI's own `data` feed
@@ -258,7 +259,7 @@ inside that pane).
 | `layout` | string | `"main-vertical"` | Layout preset: `main-vertical`, `main-horizontal`, `tiled`, `even-horizontal`, `even-vertical`. Each adapter maps it to its nearest native expression; cmux-tui has no layout expression and ignores it (see [Layouts](#layouts)) |
 | `main_pane_size` | number | `60` | Main pane size percentage (`20`–`80`). Applied by tmux for the `main-*` layouts; ignored by Zellij, Herdr, kitty, and cmux-tui |
 | `cmux_tui_binary` | string | omitted | Explicit path to the cmux-tui binary. When omitted, the client resolves `cmux-tui` first, then `cmux`, on `PATH` |
-| `viewer` | string | `"mini"` | Which opencode TUI surface subagent panes open. `"mini"` (default) runs `opencode mini` (requires an opencode build with the `mini` subcommand); `"tui"` runs the full interface. Mini commands omit the directory argument, so each adapter pins the pane to the child session's project directory itself (herdr and kitty set it natively, tmux passes `-c`, Zellij passes `--cwd`, cmux-tui prefixes `cd`). Changing the value takes effect on the next opencode start |
+| `viewer` | string | `"tui"` on v1, `"mini"` on v2 | Subagent pane surface: `"tui"` (full interface) or `"mini"` (lightweight interface). Explicit values override the host default. On v1, `"mini"` requires OpenCode >= 1.17.10 and runs `opencode attach <url> --session <id> --dir <dir> --mini`, without additional pane-cwd pinning. On v2 it runs `opencode mini` without a positional directory, so adapters pin the cwd (herdr/kitty natively, tmux `-c`, Zellij `--cwd`, cmux-tui `cd` for POSIX shells and fish). Changing the value takes effect on the next opencode start |
 
 All `multiplexer.*` values are read by the client only. An invalid value
 disables pane management (fail-closed) with a once-per-process diagnostic.
@@ -369,7 +370,7 @@ a structured, distinguishable reason:
 | `admission-unavailable` | `auto` detected no supported multiplexer, or the config was invalid |
 | `not-our-child` | The child's `parentID` is not the session this client currently displays |
 | `host-unreachable` | Embedded host (no listener / sentinel URL) or the server probe failed |
-| `readiness-timeout` | The child did not appear in `/session/status` within the bounded retry budget |
+| `readiness-timeout` | The child did not appear in `/session/status` (v2: neither in the directory's newest session page nor running) within the bounded retry budget |
 | `adapter-unavailable` | The adapter cannot run here (binary missing, old version, protocol self-check failed, no control plane, or the platform/shell cannot support the viewer-secret bridge) |
 | `adapter-not-found` | The adapter could not resolve its anchor target; **no multiplexer command is issued** |
 | `adapter-hard` | The multiplexer command failed for another reason |
@@ -441,21 +442,22 @@ produces one `multiplexer.host-unsupported` record per process; shared and
   rebalances the whole window; two clients sharing one tmux window can
   interleave layout updates. Scope is limited to anchors this client created,
   but visual interleaving is possible and harmless.
-- **Readiness requires the child to be live.** Before creating a pane the
-  client polls `/session/status` with the project directory (sent as the
+- **On v1, readiness requires the child to be live.** Before creating a pane
+  the client polls `/session/status` with the project directory (sent as the
   pre-encoded `x-opencode-directory` header) with bounded retries. A child that
   was created but never ran never appears in the live status table and gets no
   pane (`readiness-timeout`). Real `task` dispatches make the child busy
   immediately, so this only affects synthetic sessions created through the REST
-  API.
+  API. On v2 the status reader also lists idle sessions, so such a child still
+  gets a pane as long as it is among the directory's 200 newest sessions.
 - **Embedded hosts and v2 `--standalone` hosts have no pane feature** (see
   [Deployment Modes](#deployment-modes)). On v2 `--standalone`, a configured
   `multiplexer.type` is ignored and one diagnostic per process is logged; use
   `/subagent` or the host's subagent picker instead. Opening the child tab is
   deliberately a salience and quick-switch affordance: it does not move focus,
   because the displayed session stays the interaction surface.
-- **v2 viewers are full clients.** A pane opens a regular `opencode` TUI on
-  the child session — there is no read-only mode. Opening a session replaces
+- **v2 viewers are clients, not read-only views.** A pane opens `mini` by
+  default, or the full TUI with `viewer: "tui"`. Opening a session replaces
   the process environment its shell commands use (the last client to open it
   wins), and unread/attention state is shared across clients by the server.
 - **Secret handling (v2 `--server` hosts).** The viewer authenticates with
@@ -530,10 +532,13 @@ removed or changed behavior, with migration guidance:
 2. `admission-none` → set `multiplexer.type` to `auto` or the right adapter.
 3. `admission-mismatch` → the configured adapter is not the one the client is
    inside (for example `type: "zellij"` while running in tmux).
-4. `host-unreachable` → the host has no reachable listener; restart with
-   `--port` or use `serve` + `attach`.
+4. `host-unreachable` → on v1 the host has no reachable listener; restart with
+   `--port` or use `serve` + `attach`. On v2 shared or `--server` hosts the
+   authenticated `server.info()` probe failed; check the shared service or the
+   `--server` URL.
 5. `readiness-timeout` → the child never became visible in `/session/status`
-   (see [Known Limitations](#known-limitations)).
+   (v2: neither in the directory's newest session page nor running; see
+   [Known Limitations](#known-limitations)).
 
 **Panes open in the wrong place**
 
