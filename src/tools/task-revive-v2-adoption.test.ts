@@ -14,6 +14,7 @@ import { createBackgroundJobTerminalGate } from '../utils/background-job-termina
 import * as opencodeClient from '../utils/opencode-client';
 import { buildPluginInput } from '../v2/client-shim';
 import type { V2Context } from '../v2/types';
+import { createTaskMessageTool } from './task-message';
 import { createTaskReviveTool } from './task-revive';
 
 const disposals: Array<() => void> = [];
@@ -55,6 +56,7 @@ function harness(
   const synthetic = mock(async () => ({}));
   let queued: Prompt | undefined;
   const prompt = mock(async (input: Prompt) => {
+    if (!input.id) return { state: 'pending' };
     queued = input;
     expect(input.delivery).toBe('queue');
     expect(input.sessionID).toBe(childID);
@@ -150,6 +152,15 @@ function harness(
     recover,
     probe,
     run,
+    message: (delivery: 'queue' | 'steer') =>
+      createTaskMessageTool({
+        input,
+        backgroundJobBoard: board,
+        promptMessageIDFor: tracker.promptMessageIDFor,
+      }).task_message.execute(
+        { sessionID: childID, message: 'Correction', delivery },
+        { sessionID: parentID } as never,
+      ),
     append: (...messages: unknown[]) => transcript.push(...messages),
     deliver: () => {
       if (!queued) throw new Error('Expected a queued prompt');
@@ -160,6 +171,76 @@ function harness(
     },
   };
 }
+
+test('steer refuses a queued revival until its exact user prompt is delivered', async () => {
+  const h = harness({ busy: true });
+  await h.revive();
+  await expect(h.message('steer')).rejects.toThrow('queued continuation');
+  expect(h.prompt).toHaveBeenCalledTimes(1);
+  h.append({ id: 'unrelated', type: 'user', text: 'Different prompt' });
+  await expect(h.message('steer')).rejects.toThrow('queued continuation');
+  expect(h.prompt).toHaveBeenCalledTimes(1);
+  h.deliver();
+  await expect(h.message('steer')).resolves.toContain('accepted');
+  expect(h.prompt.mock.calls[1]?.[0]).toMatchObject({
+    sessionID: childID,
+    delivery: 'steer',
+    resume: false,
+  });
+  expect(h.interrupt).not.toHaveBeenCalled();
+});
+
+test('queue remains available while a revived continuation is pending', async () => {
+  const h = harness({ busy: true });
+  await h.revive();
+  await expect(h.message('queue')).resolves.toContain('queued');
+  expect(h.prompt.mock.calls[1]?.[0]).toMatchObject({
+    delivery: 'queue',
+    resume: false,
+  });
+});
+
+test.each(['missing', 'malformed', 'error', 'timeout', 'generation'])(
+  'steer fails closed when continuation evidence is %s',
+  async (failure) => {
+    const h = harness({ busy: true });
+    await h.revive();
+    h.deliver();
+    const messages = spyOn(h.input.client.session, 'messages');
+    if (failure === 'missing') messages.mockResolvedValue(undefined as never);
+    if (failure === 'malformed')
+      messages.mockResolvedValue({ data: {} } as never);
+    if (failure === 'error')
+      messages.mockRejectedValue(new Error('read failed'));
+    if (failure === 'timeout')
+      messages.mockImplementation(() => new Promise(() => {}));
+    if (failure === 'generation')
+      messages.mockImplementation(async () => {
+        const record = h.run();
+        const id = h.tracker.promptMessageIDFor(childID, record.generation);
+        // Simulate an external lifecycle change during the awaited read.
+        record.generation += 1;
+        return { data: [{ info: { id, role: 'user' } }] } as never;
+      });
+    const tool = createTaskMessageTool({
+      input: h.input,
+      backgroundJobBoard: h.board,
+      promptMessageIDFor: h.tracker.promptMessageIDFor,
+      messageTimeoutMs: 5,
+    }).task_message;
+    await expect(
+      tool.execute(
+        { sessionID: childID, message: 'Correction', delivery: 'steer' },
+        { sessionID: parentID } as never,
+      ),
+    ).rejects.toThrow();
+    expect(h.prompt).toHaveBeenCalledTimes(1);
+    const record = h.run();
+    const lease = h.board.acquireMessageLease(childID, record.generation);
+    expect(lease).toBeDefined();
+    if (lease) h.board.releaseLease(lease);
+  },
+);
 
 test('v2 adapter wakes an idle untracked owned session once and delivers its new answer', async () => {
   const h = harness();

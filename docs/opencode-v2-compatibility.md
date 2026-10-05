@@ -139,7 +139,7 @@ not an optional-degradation path.
    `finish`, `error` — and the 2.0.8 trailing `idle` lifecycle marker maps
    to the skippable v1 `system` role, so transcript classification works
    natively on v2), `session.prompt` (default `delivery: "steer"`;
-   `noReply: true` maps to `delivery: "queue", resume: false`),
+   `noReply: true` maps to `delivery: "queue", resume: false` — or `delivery: "steer", resume: false` when the v1-shaped body carries an explicit `delivery: 'steer'` from `task_message`),
    `session.update`→
    `session.update` (`{sessionID, title}`), `session.delete`→`remove` (same
    `DELETE /api/session/:id`), and `session.list` (v2 `Session.Info` page → the v1
@@ -318,7 +318,7 @@ child bridge degrades with a one-time warning.
 ### Task-control prompt and idle-wait contracts
 
 The v1-facing `session.prompt` shim preserves text and file attachments. A
-`noReply: true` write is a real, non-synthetic prompt with `queue` + `resume: false`;
+`noReply: true` write is a real, non-synthetic prompt with `queue` + `resume: false` (or `steer` + `resume: false` when `task_message` passes an explicit v2-only `delivery: "steer"`);
 queue alone would not preserve the no-resume intent. Unsupported per-call
 agent/model/variant overrides are rejected before writing, never silently dropped
 or implemented by non-atomic `switchAgent`/`switchModel` calls. `task_message`

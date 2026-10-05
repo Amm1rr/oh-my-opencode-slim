@@ -472,11 +472,22 @@ export function buildPluginInput(
               );
             }
             const files = filesFromBody(args);
+            // `delivery` decides the inbox consumption boundary
+            // (idle queue vs next supported step of the current run)
+            // while `resume` decides waking; both are independent.
+            // An explicit body.delivery of 'steer' opts a noReply
+            // write into steering; anything else stays queued.
             return s.prompt?.({
               sessionID: sessionIDOf(args),
               text: textFromBody(args),
               ...(body.noReply === true
-                ? ({ delivery: 'queue', resume: false } as const)
+                ? ({
+                    delivery:
+                      (body as { delivery?: unknown }).delivery === 'steer'
+                        ? 'steer'
+                        : 'queue',
+                    resume: false,
+                  } as const)
                 : ({ delivery: 'steer' } as const)),
               ...(files.length > 0 ? { files } : {}),
             });

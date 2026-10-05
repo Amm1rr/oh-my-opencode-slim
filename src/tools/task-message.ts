@@ -9,6 +9,7 @@ import {
 } from '../hooks/task-session-manager/continuation-model-selection';
 import { pluginDisposedMessage } from '../hooks/task-session-manager/session-recovery';
 import type { BackgroundJobStore } from '../utils/background-job-store';
+import { fetchChildTranscript } from '../utils/child-transcript';
 import { isRecord } from '../utils/guards';
 import { getClient } from '../utils/opencode-client';
 import { OperationTimeoutError, withTimeout } from '../utils/session';
@@ -39,10 +40,16 @@ export function createTaskMessageTool(options: {
   input: PluginInput;
   backgroundJobBoard: BackgroundJobStore;
   messageTimeoutMs?: number;
+  promptMessageIDFor?: (
+    taskID: string,
+    generation: number,
+  ) => string | undefined;
   resolveCanonicalTaskRef?: CanonicalTaskResolver;
   isDisposed?: () => boolean;
 }): Record<'task_message', ToolDefinition> {
   const idParam = idParamFor(options.input);
+  const hostFlavorAtCreation = (options.input as { hostFlavor?: string })
+    .hostFlavor;
   const task_message = tool({
     description:
       'Queue a bounded message for a live child task without launching, resuming, or interrupting it.',
@@ -54,6 +61,19 @@ export function createTaskMessageTool(options: {
         .min(1)
         .max(MAX_MESSAGE_LENGTH)
         .describe('Short message to queue for the child task'),
+      ...(hostFlavorAtCreation === 'v2'
+        ? {
+            delivery: z
+              .enum(['queue', 'steer'])
+              .optional()
+              .describe(
+                'queue (default) waits for the child to go idle; ' +
+                  'steer is admitted for the next supported step ' +
+                  'boundary of the current run without launching, ' +
+                  'resuming, or interrupting it',
+              ),
+          }
+        : {}),
     },
     async execute(args, toolContext) {
       const parentSessionID = toolContext?.sessionID;
@@ -113,6 +133,47 @@ export function createTaskMessageTool(options: {
           options.messageTimeoutMs ?? DEFAULT_MESSAGE_TIMEOUT_MS,
         );
         const deadline = Date.now() + messageTimeoutMs;
+        if (hostFlavor === 'v2' && args.delivery === 'steer') {
+          const promptMessageID = options.promptMessageIDFor?.(
+            lease.taskID,
+            lease.generation,
+          );
+          if (promptMessageID) {
+            // A running board generation may still be queued behind an old
+            // host execution. Admission alone does not make it steerable.
+            const controller = new AbortController();
+            try {
+              const response = await withTimeout(
+                fetchChildTranscript(
+                  getClient(options.input),
+                  lease.taskID,
+                  options.input.directory,
+                  undefined,
+                  controller.signal,
+                ),
+                messageTimeoutMs,
+                'Task steering continuation lookup timed out; no message was sent',
+              );
+              if (
+                !isRecord(response) ||
+                !Array.isArray(response.data) ||
+                !response.data.some(
+                  (entry) =>
+                    isRecord(entry) &&
+                    isRecord(entry.info) &&
+                    entry.info.id === promptMessageID &&
+                    entry.info.role === 'user',
+                )
+              ) {
+                throw new Error(
+                  `Task ${requested} has an unconfirmed queued continuation; no steering message was sent. Use task_status to inspect it before retrying.`,
+                );
+              }
+            } finally {
+              controller.abort();
+            }
+          }
+        }
         let modelSelection: ContinuationModelSelection | undefined;
         // v2 prompts inherit persisted session selection; per-call overrides
         // cannot be represented atomically. Keep the v1 lookup/pin unchanged.
@@ -170,6 +231,10 @@ export function createTaskMessageTool(options: {
                   }
                 : {}),
               noReply: true,
+              ...(hostFlavor === 'v2' &&
+              (args as { delivery?: string }).delivery === 'steer'
+                ? { delivery: 'steer' as const }
+                : {}),
               parts: [{ type: 'text', text: args.message.trim() }],
             } as Parameters<typeof prompt>[0]['body'];
             return prompt({
@@ -190,6 +255,17 @@ export function createTaskMessageTool(options: {
           lease.generation,
           delegation,
         );
+        if (
+          hostFlavor === 'v2' &&
+          (args as { delivery?: string }).delivery === 'steer'
+        ) {
+          return (
+            `Message accepted for steering ${latestJob.alias} ` +
+            `(${latestJob.taskID}) at the next supported step boundary; ` +
+            `it was not launched or resumed and consumption is ` +
+            `not confirmed.`
+          );
+        }
         return `Message queued for ${latestJob.alias} (${latestJob.taskID}) without launching or resuming it.`;
       } catch (error) {
         keepLeaseUntilSettled =

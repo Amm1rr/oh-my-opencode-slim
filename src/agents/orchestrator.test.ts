@@ -2,6 +2,43 @@ import { describe, expect, test } from 'bun:test';
 import { buildOrchestratorPrompt } from './orchestrator';
 
 describe('orchestrator prompt', () => {
+  test('v2 routes active amendments through soft steering without claiming consumption', () => {
+    const prompt = buildOrchestratorPrompt(
+      undefined,
+      undefined,
+      true,
+      true,
+      'v2',
+    );
+
+    expect(prompt).toContain('`delivery: "queue"` (default) waits for idle');
+    expect(prompt).toContain('next supported model-step boundary');
+    expect(prompt).toContain("after the current step's tool executions finish");
+    expect(prompt).toContain('without launching, resuming, or interrupting');
+    expect(prompt).toContain(
+      'task_message(sessionID: "<existing-session-or-alias>", message: "<concise amendment>", delivery: "steer")',
+    );
+    expect(prompt).toContain('confirms only transport acceptance');
+    expect(prompt).toContain(
+      'never claim that the child saw, read, acknowledged, or acted on it',
+    );
+    expect(prompt).toContain('reconcile the amendment');
+    expect(prompt).not.toContain('There is no safe live-prompt channel');
+    expect(prompt).not.toContain("wait for that lane's terminal result. Then");
+    expect(
+      buildOrchestratorPrompt(undefined, undefined, true, true, 'v2'),
+    ).toBe(prompt);
+  });
+
+  test('v1 retains queued amendment instructions without v2 delivery options', () => {
+    const prompt = buildOrchestratorPrompt();
+
+    expect(prompt).toContain('only queues a concise, non-interrupting');
+    expect(prompt).toContain('There is no safe live-prompt channel');
+    expect(prompt).toContain("wait for that lane's terminal result. Then");
+    expect(prompt).not.toContain('delivery:');
+  });
+
   test('requires the question tool for blocking user input', () => {
     const prompt = buildOrchestratorPrompt();
 

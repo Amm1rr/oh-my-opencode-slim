@@ -38,7 +38,7 @@ The task API and background-control tools are:
 | hook-driven completion | OpenCode injects terminal background task results automatically |
 | `task_status` | Check the status of a tracked task (read-only fallback for owned untracked sessions after a restart) |
 | `task_result` | Retrieve a tracked task's result |
-| `task_message` | Queue a non-interrupting message and return `queued` |
+| `task_message` | Send a non-interrupting message and return `queued` (v2: steering acceptance with `delivery: "steer"`) |
 | `task_cancel` | Stop a generation while retaining its session |
 | `task_revive` | Resume a retained session with a new instruction |
 | `wait_for_user` | Plugin-provided orchestrator tool that pauses automatic orchestrator wakes while the user performs external manual work |
@@ -233,8 +233,16 @@ The orchestrator should use background completion events to:
 
 Use `task_status` to inspect a task and `task_result` to collect its result.
 `task_result` is a read, not a required step before every continuation.
-`task_message` queues a non-interrupting message and returns `queued`; it does
-not stop the current generation. Use `task_cancel` to stop a generation while
+`task_message` sends a non-interrupting message and does not stop the current
+generation. On v2 it accepts an optional `delivery`: the default `"queue"`
+waits for an idle boundary — `resume: false` never wakes the child, so
+consumption is not confirmed — while `"steer"` offers an amendment to a
+running lane at the next supported step boundary of the current run. On v1
+the parameter does not exist and the message is simply queued, returning
+`queued`. On either host, acceptance does not mean the child read it —
+report acceptance without claiming consumption, reconcile the amendment
+against the child's eventual result, and never resume, cancel, or relaunch
+the running child just to deliver an amendment. Use `task_cancel` to stop a generation while
 retaining its session, then inspect and reconcile any partial file changes before
 launching replacement work. On v1, continue an existing session with
 `task_revive` even when it is missing from Reusable Sessions. A new task still

@@ -1405,6 +1405,8 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     taskMessageTools = createTaskMessageTool({
       input: ctx,
       backgroundJobBoard: backgroundJobCoordinator,
+      promptMessageIDFor: (taskID, generation) =>
+        revivedRunTracker.promptMessageIDFor(taskID, generation),
       resolveCanonicalTaskRef: aliasAuthority.resolveCanonical,
       isDisposed: () => instanceDisposed,
     });
