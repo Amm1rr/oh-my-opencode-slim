@@ -1740,3 +1740,69 @@ describe('v2 client shim degradation notices (one-time per process)', () => {
     expect(counts.removeWarnings).toBe(1);
   });
 });
+
+describe('v2 client shim prompt noReply delivery', () => {
+  async function promptThroughShim(body: Record<string, unknown>) {
+    const calls: unknown[] = [];
+    const input = buildPluginInput(
+      makeCtx({
+        prompt: async (i: unknown) => {
+          calls.push(i);
+          return {};
+        },
+      } as never),
+    );
+    await (
+      input.client as {
+        session: { prompt: (a: unknown) => Promise<unknown> };
+      }
+    ).session.prompt({ path: { id: 'ses_1' }, body });
+    return calls[0] as Record<string, unknown>;
+  }
+
+  test('noReply without delivery queues without waking', async () => {
+    const call = await promptThroughShim({
+      noReply: true,
+      parts: [{ type: 'text', text: 'Update' }],
+    });
+    expect(call).toMatchObject({
+      sessionID: 'ses_1',
+      delivery: 'queue',
+      resume: false,
+    });
+  });
+
+  test('noReply with explicit steer steers without waking', async () => {
+    const call = await promptThroughShim({
+      noReply: true,
+      delivery: 'steer',
+      parts: [{ type: 'text', text: 'Update' }],
+    });
+    expect(call).toMatchObject({
+      sessionID: 'ses_1',
+      delivery: 'steer',
+      resume: false,
+    });
+  });
+
+  test('noReply with garbage delivery falls back to queue', async () => {
+    const call = await promptThroughShim({
+      noReply: true,
+      delivery: 'push',
+      parts: [{ type: 'text', text: 'Update' }],
+    });
+    expect(call).toMatchObject({
+      sessionID: 'ses_1',
+      delivery: 'queue',
+      resume: false,
+    });
+  });
+
+  test('prompt without noReply steers', async () => {
+    const call = await promptThroughShim({
+      parts: [{ type: 'text', text: 'Update' }],
+    });
+    expect(call).toMatchObject({ sessionID: 'ses_1', delivery: 'steer' });
+    expect(call).not.toHaveProperty('resume');
+  });
+});

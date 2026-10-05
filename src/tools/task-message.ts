@@ -43,6 +43,8 @@ export function createTaskMessageTool(options: {
   isDisposed?: () => boolean;
 }): Record<'task_message', ToolDefinition> {
   const idParam = idParamFor(options.input);
+  const hostFlavorAtCreation = (options.input as { hostFlavor?: string })
+    .hostFlavor;
   const task_message = tool({
     description:
       'Queue a bounded message for a live child task without launching, resuming, or interrupting it.',
@@ -54,6 +56,19 @@ export function createTaskMessageTool(options: {
         .min(1)
         .max(MAX_MESSAGE_LENGTH)
         .describe('Short message to queue for the child task'),
+      ...(hostFlavorAtCreation === 'v2'
+        ? {
+            delivery: z
+              .enum(['queue', 'steer'])
+              .optional()
+              .describe(
+                'queue (default) waits for the child to go idle; ' +
+                  'steer is admitted for the next supported step ' +
+                  'boundary of the current run without launching, ' +
+                  'resuming, or interrupting it',
+              ),
+          }
+        : {}),
     },
     async execute(args, toolContext) {
       const parentSessionID = toolContext?.sessionID;
@@ -170,6 +185,10 @@ export function createTaskMessageTool(options: {
                   }
                 : {}),
               noReply: true,
+              ...(hostFlavor === 'v2' &&
+              (args as { delivery?: string }).delivery === 'steer'
+                ? { delivery: 'steer' as const }
+                : {}),
               parts: [{ type: 'text', text: args.message.trim() }],
             } as Parameters<typeof prompt>[0]['body'];
             return prompt({
@@ -190,6 +209,17 @@ export function createTaskMessageTool(options: {
           lease.generation,
           delegation,
         );
+        if (
+          hostFlavor === 'v2' &&
+          (args as { delivery?: string }).delivery === 'steer'
+        ) {
+          return (
+            `Message accepted for steering ${latestJob.alias} ` +
+            `(${latestJob.taskID}) at the next supported step boundary; ` +
+            `it was not launched or resumed and consumption is ` +
+            `not confirmed.`
+          );
+        }
         return `Message queued for ${latestJob.alias} (${latestJob.taskID}) without launching or resuming it.`;
       } catch (error) {
         keepLeaseUntilSettled =

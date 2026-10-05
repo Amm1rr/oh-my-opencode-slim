@@ -646,4 +646,99 @@ describe('task_message', () => {
     expect(result).not.toContain('admitted');
     expect(result).not.toContain('nudge');
   });
+
+  test('v2 schema exposes delivery and rejects invalid values', () => {
+    const board = new BackgroundJobBoard();
+    const v2 = createTool(board, 'v2');
+    expect(Object.keys(v2.args)).toContain('delivery');
+    expect(v2.args.delivery.safeParse('queue').success).toBe(true);
+    expect(v2.args.delivery.safeParse('steer').success).toBe(true);
+    expect(v2.args.delivery.safeParse('push').success).toBe(false);
+    expect(v2.args.delivery.safeParse(undefined).success).toBe(true);
+  });
+
+  test('v1 schema has no delivery key and emits no delivery', async () => {
+    const board = new BackgroundJobBoard();
+    registerRunningChild(board);
+    const prompt = makePrompt();
+    client = { session: makeSession(prompt) };
+    const v1 = createTool(board);
+
+    expect(Object.keys(v1.args)).not.toContain('delivery');
+
+    await v1.execute({ task_id: 'ses_child1', message: 'Status update' }, {
+      sessionID: 'parent-1',
+    } as any);
+    const body = prompt.mock.calls[0]?.[0].body;
+    expect(body).not.toHaveProperty('delivery');
+  });
+
+  test('omitted delivery matches explicit queue on v2', async () => {
+    const runOnce = async (extra: Record<string, unknown>) => {
+      const board = new BackgroundJobBoard();
+      registerRunningChild(board);
+      const prompt = makePrompt();
+      client = { session: makeSession(prompt) };
+      const result = await createTool(board, 'v2').execute(
+        { sessionID: 'ses_child1', message: 'Update', ...extra },
+        { sessionID: 'parent-1' } as any,
+      );
+      return { result, body: prompt.mock.calls[0]?.[0].body };
+    };
+
+    const omitted = await runOnce({});
+    const queued = await runOnce({ delivery: 'queue' });
+    expect(omitted.body).toEqual(queued.body);
+    expect(omitted.body).not.toHaveProperty('delivery');
+    expect(omitted.body.noReply).toBe(true);
+    expect(omitted.result).toBe(queued.result);
+    expect(omitted.result).toContain('queued');
+  });
+
+  test('explicit steer on v2 adds delivery and reports acceptance', async () => {
+    const board = new BackgroundJobBoard();
+    registerRunningChild(board);
+    const prompt = makePrompt();
+    client = { session: makeSession(prompt) };
+
+    const result = await createTool(board, 'v2').execute(
+      { sessionID: 'ses_child1', message: 'Update', delivery: 'steer' },
+      { sessionID: 'parent-1' } as any,
+    );
+
+    const body = prompt.mock.calls[0]?.[0].body;
+    expect(body.noReply).toBe(true);
+    expect(body.delivery).toBe('steer');
+    expect(result).toMatch(/steer/i);
+    expect(result).toContain('not confirmed');
+    expect(result).not.toMatch(/read|confirm.*child|applied|acknowledged/i);
+  });
+
+  test('steer refuses a terminal task without leaving a message lease', async () => {
+    const board = new BackgroundJobBoard();
+    registerRunningChild(board);
+    board.updateStatus({ taskID: 'ses_child1', state: 'completed' });
+    const prompt = makePrompt();
+    client = { session: makeSession(prompt) };
+
+    await expect(
+      createTool(board, 'v2').execute(
+        { sessionID: 'ses_child1', message: 'Too late', delivery: 'steer' },
+        { sessionID: 'parent-1' } as any,
+      ),
+    ).rejects.toThrow('task_revive');
+    expect(prompt).not.toHaveBeenCalled();
+
+    const job = board.get('ses_child1');
+    if (!job) throw new Error('missing completed job');
+    expect(
+      board.acquireMessageLease(job.taskID, job.generation),
+    ).toBeUndefined();
+    const terminalLease = board.acquireTerminalNotificationLease(
+      job.taskID,
+      job.generation,
+    );
+    expect(terminalLease).toBeDefined();
+    if (terminalLease) board.releaseLease(terminalLease);
+  });
 });
