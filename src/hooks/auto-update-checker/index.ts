@@ -9,6 +9,7 @@ import { crossSpawn } from '../../utils/compat';
 import { log } from '../../utils/logger';
 import { resolvePackageInstallCommand } from '../../utils/package-manager';
 import {
+  acquirePackageUpdateLock,
   discardPreparedPackageUpdate,
   getTargetInstallContext,
   preparePackageUpdate,
@@ -206,36 +207,109 @@ async function runBackgroundUpdateCheck(
     return;
   }
 
-  const prepared = preparePackageUpdate(
-    latestVersion,
-    PACKAGE_NAME,
-    undefined,
-    cacheIdentity,
-  );
-  if (!prepared) {
-    showToast(
+  // Narrow guard: resolveInstallContext only returns the v1 packages-wrapper
+  // layout, whose parent is `packages`, so getTargetInstallContext always
+  // derives a target for it.
+  if (!targetContext) {
+    showSkippedUpdateToast(
       ctx,
-      `OMO-Slim ${latestVersion}`,
-      `v${latestVersion} available. Auto-update could not prepare the active install.`,
-      'info',
-      8000,
+      currentVersion,
+      latestVersion,
+      pluginInfo.isInstallerManaged,
     );
-    log('[auto-update-checker] Failed to prepare install root for auto-update');
+    log(
+      '[auto-update-checker] Skipped self-install; the active install root is not updatable in place',
+    );
     return;
   }
 
-  const installSuccess =
-    (await runPackageInstallSafe(prepared.stagingDir)) &&
-    verifyInstalledPackage(prepared.stagingDir, latestVersion);
-  const installDir = installSuccess
-    ? publishPackageUpdate(prepared, latestVersion)
-    : null;
-  if (!installSuccess) discardPreparedPackageUpdate(prepared);
+  // Cross-process mutex: parallel OpenCode server processes share the cache
+  // root, so only one may prepare→install→publish a pending version
+  // (issue #1279). The wait is async so the server thread is never blocked.
+  const releaseInstallLock = await acquirePackageUpdateLock(
+    targetContext.installDir,
+  );
+  if (!releaseInstallLock) {
+    log(
+      '[auto-update-checker] Another OpenCode process is installing the update; timed out waiting for the install lock, skipping.',
+    );
+    return;
+  }
+
+  let installDir: string | null = null;
+  try {
+    // The version may have been installed by another process while we waited
+    // for the lock.
+    if (verifyInstalledPackage(targetContext.installDir, latestVersion)) {
+      log(
+        `[auto-update-checker] v${latestVersion} already installed by another OpenCode process; skipping install.`,
+      );
+      if (pluginInfo.isInstallerManaged) {
+        const redirect = updateInstallerManagedVersions(
+          ctx.directory,
+          latestVersion,
+        );
+        if (redirect.status === 'error') {
+          showToast(
+            ctx,
+            `OMO-Slim ${latestVersion}`,
+            'Update installed in cache, but plugin configuration could not be updated.',
+            'error',
+            8000,
+          );
+          log(
+            '[auto-update-checker] Already-installed version detected, but installer-managed config redirect failed:',
+            redirect.error,
+          );
+          return;
+        }
+      }
+      showToast(
+        ctx,
+        'OMO-Slim Updated!',
+        `v${currentVersion} → v${latestVersion}\nRestart OpenCode to apply the plugin update.`,
+        'success',
+        8000,
+      );
+      return;
+    }
+
+    const prepared = preparePackageUpdate(
+      latestVersion,
+      PACKAGE_NAME,
+      undefined,
+      cacheIdentity,
+    );
+    if (!prepared) {
+      showToast(
+        ctx,
+        `OMO-Slim ${latestVersion}`,
+        `v${latestVersion} available. Auto-update could not prepare the active install.`,
+        'info',
+        8000,
+      );
+      log(
+        '[auto-update-checker] Failed to prepare install root for auto-update',
+      );
+      return;
+    }
+
+    const installSuccess =
+      (await runPackageInstallSafe(prepared.stagingDir)) &&
+      verifyInstalledPackage(prepared.stagingDir, latestVersion);
+    installDir = installSuccess
+      ? publishPackageUpdate(prepared, latestVersion)
+      : null;
+    if (!installSuccess) discardPreparedPackageUpdate(prepared);
+  } finally {
+    releaseInstallLock();
+  }
 
   if (installDir) {
     if (
       pluginInfo.isInstallerManaged &&
-      !updateInstallerManagedVersions(ctx.directory, latestVersion)
+      updateInstallerManagedVersions(ctx.directory, latestVersion).status ===
+        'error'
     ) {
       showToast(
         ctx,

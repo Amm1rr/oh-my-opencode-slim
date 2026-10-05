@@ -5,7 +5,6 @@ import {
   readFileSync,
   renameSync,
   rmSync,
-  statSync,
   writeFileSync,
 } from 'node:fs';
 import * as os from 'node:os';
@@ -18,6 +17,11 @@ import {
   switchPresetOnDisk,
 } from '../tools/preset-switch';
 import { log } from '../utils/logger';
+import {
+  acquirePidFileLockWithRetry,
+  isProcessAlive,
+  parsePidFile,
+} from '../utils/pid-file-lock';
 
 // Only one companion `process.on('exit')` listener should be live per process.
 // The plugin function can re-run (config.update() → Instance.dispose()),
@@ -122,74 +126,6 @@ function pidFilePath(): string {
     'oh-my-opencode-slim',
     'companion.pid',
   );
-}
-
-function isProcessAlive(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return (err as NodeJS.ErrnoException).code === 'EPERM';
-  }
-}
-
-function parsePidFile(raw: string): number | null {
-  const pid = Number(raw.trim());
-  if (!Number.isInteger(pid) || pid <= 0) return null;
-  return pid;
-}
-
-function acquirePidFileLock(file: string): (() => void) | null {
-  const lock = `${file}.lock`;
-  mkdirSync(path.dirname(lock), { recursive: true });
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      mkdirSync(lock);
-      writeFileSync(path.join(lock, 'owner'), String(process.pid));
-      return () => {
-        try {
-          rmSync(lock, { recursive: true, force: true });
-        } catch (err) {
-          log('[companion] lock release failed', String(err));
-        }
-      };
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code;
-      if (code !== 'EEXIST') throw err;
-      if (pidFileLockHasLiveOwner(lock)) return null;
-      log('[companion] removing stale PID file lock for dead process');
-      rmSync(lock, { recursive: true, force: true });
-    }
-  }
-  return null;
-}
-
-function acquirePidFileLockWithRetry(
-  file: string,
-  attempts: number,
-): (() => void) | null {
-  for (let attempt = 0; attempt < attempts; attempt++) {
-    const release = acquirePidFileLock(file);
-    if (release) return release;
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
-  }
-  return null;
-}
-
-function pidFileLockHasLiveOwner(lock: string): boolean {
-  try {
-    const owner = parsePidFile(readFileSync(path.join(lock, 'owner'), 'utf8'));
-    if (owner !== null) return isProcessAlive(owner);
-  } catch (err) {
-    log('[companion] lock owner check failed', String(err));
-    try {
-      return Date.now() - statSync(lock).mtimeMs < 5000;
-    } catch (err) {
-      log('[companion] lock owner check failed', String(err));
-    }
-  }
-  return false;
 }
 
 function defaultBinaryPath(): string {

@@ -433,6 +433,12 @@ Auto-update never crosses major versions. For example, a 1.x install can
 auto-update to a newer 1.x release, but it won't auto-install 2.x. When a newer
 major is available, the plugin shows a migration command instead.
 
+Installs are coordinated across OpenCode processes: when several windows are
+open, only one installs a pending version. The others wait for that install to
+finish, then skip their own install and prompt you to restart. If a window
+cannot get the install lock in time, it skips quietly and picks the update up
+on the next start.
+
 > Pinned plugin entries in `opencode.json` (for example
 > `"oh-my-opencode-slim@1.0.1"`) are the true version lock. Those stay pinned
 > regardless of `autoUpdate`.
