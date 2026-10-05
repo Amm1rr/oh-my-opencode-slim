@@ -22,6 +22,11 @@ type WakeGateStore = {
   progress: Map<string, WakeProgressState>;
   inFlight: Map<string, InFlightState>;
   releaseWaiters: Map<string, Set<() => void>>;
+  /** #1411: per session, delta-less wake bodies already delivered with
+   * occurrence counts. */
+  deliveredDeltalessWakeTexts: Map<string, Map<string, number>>;
+  /** #1411: per session, count of duplicate delta-less wakes suppressed. */
+  suppressedDuplicateWakes: Map<string, number>;
   /** Insertion-ordered session keys for bounded eviction. */
   order: string[];
 };
@@ -38,12 +43,19 @@ function getHolders(): Map<string, Set<symbol>> {
 }
 
 function getStore(): WakeGateStore {
-  return getGlobalStore<WakeGateStore>(STORE_KEY, () => ({
+  const store = getGlobalStore<WakeGateStore>(STORE_KEY, () => ({
     progress: new Map(),
     inFlight: new Map(),
     releaseWaiters: new Map(),
+    deliveredDeltalessWakeTexts: new Map(),
+    suppressedDuplicateWakes: new Map(),
     order: [],
   }));
+  // In-process reload can leave a pre-#1411 store object on the global key;
+  // backfill so the delta-less wake path cannot crash on missing maps.
+  store.deliveredDeltalessWakeTexts ??= new Map();
+  store.suppressedDuplicateWakes ??= new Map();
+  return store;
 }
 
 function touchOrder(sessionID: string): void {
@@ -162,6 +174,79 @@ export function commitWakeReservation(
   return true;
 }
 
+/**
+ * #1411: record a delta-less wake body about to be delivered. First
+ * occurrence stores count 1 and returns `repeat: false`; every identical
+ * body afterwards increments the count, bumps the per-session suppressed
+ * counter, and returns `repeat: true` with the new occurrence number.
+ * `reservation` is the map the count was written into: a rollback only
+ * applies while that exact map is still the session's, so an eviction that
+ * replaced it makes a stale rollback a no-op.
+ */
+export function reserveWakeBodyOccurrence(
+  sessionID: string,
+  wakeText: string,
+): {
+  repeat: boolean;
+  occurrence: number;
+  reservation: Map<string, number>;
+} {
+  const store = getStore();
+  let counts = store.deliveredDeltalessWakeTexts.get(sessionID);
+  if (!counts) {
+    counts = new Map();
+    store.deliveredDeltalessWakeTexts.set(sessionID, counts);
+  }
+  touchOrder(sessionID);
+  const previous = counts.get(wakeText) ?? 0;
+  const occurrence = previous + 1;
+  counts.set(wakeText, occurrence);
+  if (previous > 0) {
+    store.suppressedDuplicateWakes.set(
+      sessionID,
+      (store.suppressedDuplicateWakes.get(sessionID) ?? 0) + 1,
+    );
+  }
+  return { repeat: previous > 0, occurrence, reservation: counts };
+}
+
+/** #1411 observability: suppressed duplicate wake count for a session. */
+export function getSuppressedDuplicateWakes(sessionID: string): number {
+  return getStore().suppressedDuplicateWakes.get(sessionID) ?? 0;
+}
+
+/**
+ * #1411: undo the occurrence a failed send reserved, so the retry delivers
+ * the full text instead of a phantom repeat. Removes the sole occurrence
+ * outright; an occurrence that was a counted repeat also undoes its
+ * suppression count (floored at 0). `reservation` and `occurrence` must be
+ * what the caller's `reserveWakeBodyOccurrence` returned: if the session's
+ * occurrence map has since been replaced (LRU eviction, hook disposal,
+ * session deletion) or the count moved on to a newer reservation, this is a
+ * no-op so a stale send cannot undo someone else's reservation.
+ */
+export function rollbackWakeBodyOccurrence(
+  sessionID: string,
+  wakeText: string,
+  occurrence: number,
+  reservation: Map<string, number>,
+): void {
+  const store = getStore();
+  const counts = store.deliveredDeltalessWakeTexts.get(sessionID);
+  if (counts !== reservation || reservation.get(wakeText) !== occurrence) {
+    return;
+  }
+  if (occurrence === 1) {
+    reservation.delete(wakeText);
+    return;
+  }
+  reservation.set(wakeText, occurrence - 1);
+  store.suppressedDuplicateWakes.set(
+    sessionID,
+    Math.max(0, (store.suppressedDuplicateWakes.get(sessionID) ?? 0) - 1),
+  );
+}
+
 /** A failed send did not make progress. Only its current in-flight owner may
  * undo the cap accounting; keep wakeCommitted so release cannot start a
  * waiter storm (the session timer controls the next attempt). */
@@ -255,6 +340,8 @@ export function releaseWakeSessionHolder(holder: symbol): void {
     if (!set.delete(holder) || set.size > 0) continue;
     if (store.inFlight.has(sessionID)) {
       store.progress.delete(sessionID);
+      store.deliveredDeltalessWakeTexts.delete(sessionID);
+      store.suppressedDuplicateWakes.delete(sessionID);
       getHolders().delete(sessionID);
     } else {
       clearWakeSession(sessionID);
@@ -269,6 +356,8 @@ export function clearWakeSession(sessionID: string): void {
   store.progress.delete(sessionID);
   store.inFlight.delete(sessionID);
   store.releaseWaiters.delete(sessionID);
+  store.deliveredDeltalessWakeTexts.delete(sessionID);
+  store.suppressedDuplicateWakes.delete(sessionID);
   const idx = store.order.indexOf(sessionID);
   if (idx >= 0) store.order.splice(idx, 1);
 }
@@ -279,6 +368,8 @@ export function clearAllWakeSessions(): void {
   store.progress.clear();
   store.inFlight.clear();
   store.releaseWaiters.clear();
+  store.deliveredDeltalessWakeTexts.clear();
+  store.suppressedDuplicateWakes.clear();
   store.order.length = 0;
   getHolders().clear();
 }

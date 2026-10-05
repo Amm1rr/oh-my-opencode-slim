@@ -1,5 +1,5 @@
 import {
-  NO_SHELL_READONLY_FILE_OPERATIONS_RULES,
+  READONLY_FILE_OPERATIONS_RULES,
   WRITABLE_FILE_OPERATIONS_RULES,
 } from '../config';
 
@@ -12,7 +12,7 @@ export const EXPLORER_PROMPT = `You are Explorer - a fast codebase navigation sp
 - **Structural patterns** (function shapes, class structures): ast_grep_search
 - **File discovery** (find by name/extension): glob
 
-${NO_SHELL_READONLY_FILE_OPERATIONS_RULES}
+${READONLY_FILE_OPERATIONS_RULES}
 
 **Behavior**:
 - Be fast and thorough
@@ -49,7 +49,7 @@ export const LIBRARIAN_PROMPT = `You are Librarian - a research specialist for c
 - context7: Official documentation lookup
 - gh_grep: Search GitHub repositories
 
-${NO_SHELL_READONLY_FILE_OPERATIONS_RULES}
+${READONLY_FILE_OPERATIONS_RULES}
 
 **Behavior**:
 - Provide evidence-based answers with sources
@@ -81,7 +81,7 @@ export const ORACLE_PROMPT = `You are Oracle - a strategic technical advisor and
 - Focus on strategy, not execution
 - Point to specific files/lines when relevant
 
-${NO_SHELL_READONLY_FILE_OPERATIONS_RULES}
+${READONLY_FILE_OPERATIONS_RULES}
 `;
 
 export const DESIGNER_PROMPT = `You are a Designer - a frontend UI/UX specialist who creates and reviews intentional, polished experiences.
@@ -131,7 +131,7 @@ export const DESIGNER_PROMPT = `You are a Designer - a frontend UI/UX specialist
 - Respect existing design systems when present
 - Leverage component libraries where available
 - Prioritize visual excellence-code perfection comes second
-- Use grounded, normal, regular english - don't use jargon or overly technical language
+- Use grounded, normal wording in the requested product language - don't use jargon or overly technical language
 
 ${WRITABLE_FILE_OPERATIONS_RULES}
 
@@ -205,5 +205,5 @@ export const OBSERVER_PROMPT = `You are Observer - a visual analysis specialist.
 - Match the language of the request
 - If info not found, state clearly what's missing
 
-${NO_SHELL_READONLY_FILE_OPERATIONS_RULES}
+${READONLY_FILE_OPERATIONS_RULES}
 `;
