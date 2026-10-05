@@ -14,7 +14,7 @@ A glossary of the terms used in this project's domain. Definitions describe what
 - **Fixer** — Subagent for bounded implementation and execution.
 - **Observer** — Subagent for visual/media analysis (images, PDFs, diagrams). Disabled by default.
 - **Council** — A multi-LLM agent that runs several councillors and synthesizes their views.
-- **Councillor** — A read-only LLM advisor dispatched as a subagent by the orchestrator. Each councillor is registered as `councillor-<name>` from the council preset. Not hidden; visible in the TUI as panes.
+- **Councillor** — A read-only LLM advisor dispatched as a subagent by the orchestrator. Each councillor is registered as `councillor-<name>` from the council preset. Hidden from the @-mention menu; visible as panes when dispatched.
 - **Agent mode** — SDK classification of an agent: `primary` (orchestrator) or `subagent` (specialist, including council — the synthesizer is dispatched by the orchestrator, never switched to as a primary).
 - **Protected agent** — An agent that cannot be disabled (orchestrator).
 - **Custom agent** — A user-defined agent supplied via config, distinct from the built-ins.

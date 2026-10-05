@@ -299,6 +299,15 @@ describe('finalized existing-agent registry', () => {
     expect(registry.getSdkAgentProjection().council?.prompt).toContain(
       'compaction',
     );
+    // Host prompts that drop the report format get it back via the
+    // fallback reinforcement — on both the effective config and the
+    // visible (display-name) projection.
+    expect(registry.finalAgentConfig.council?.prompt).toContain(
+      'You MUST produce: ## Council Response',
+    );
+    expect(registry.getSdkAgentProjection().council?.prompt).toContain(
+      'You MUST produce: ## Council Response',
+    );
   });
 
   test('host native explore entry does not leak into plugin explorer (#1383)', () => {

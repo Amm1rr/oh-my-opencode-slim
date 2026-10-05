@@ -50,7 +50,7 @@ export const CouncillorConfigSchema = z
       .string()
       .optional()
       .describe(
-        'Optional role/guidance injected into the councillor user prompt',
+        'Optional role/guidance appended to the councillor system prompt',
       ),
   })
   .transform((c) => {

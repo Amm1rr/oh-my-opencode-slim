@@ -19,6 +19,7 @@ import { delegationVocabulary, parseModelRef } from '../v2/adapters';
 import {
   createCouncilAgent,
   ensureCouncilCompactionException,
+  ensureCouncilSynthesisReinforcement,
 } from './council';
 import { buildCouncillorAgents } from './council-agents';
 import { createCouncillorAgent } from './councillor';
@@ -566,7 +567,14 @@ function normalizeCustomAgentName(name: string): string {
 }
 
 function isSafeCustomAgentName(name: string): boolean {
-  return SAFE_AGENT_ALIAS_RE.test(name) && !isKnownAgentName(name);
+  // The councillor- prefix is reserved for dynamic council seats; a custom
+  // agent taking it would become a phantom seat in the council-inject hook's
+  // seat list (agents/index.ts filters agentDefs by the same prefix).
+  return (
+    SAFE_AGENT_ALIAS_RE.test(name) &&
+    !isKnownAgentName(name) &&
+    !name.startsWith('councillor-')
+  );
 }
 
 function hasCustomAgentModel(
@@ -745,6 +753,12 @@ export function createAgents(
     // The bare councillor is only meaningful as part of configured Council Mode.
     disabled.add('councillor');
   }
+  // Explicitly disabling the council agent disables the whole chain: the
+  // injected procedure dispatches seats and then delegates synthesis to
+  // the council agent, so seats/pointer/hook without it would dangle.
+  if (disabled.has('council')) {
+    disabled.add('councillor');
+  }
 
   const primaryModel = runtime.primaryModel;
   const orchestratorOverride = getOverrideFromAgents(
@@ -815,8 +829,12 @@ export function createAgents(
         customPrompts.appendPrompt,
       );
       if (name === 'council') {
+        // resolvePrompt above may have replaced the generated prompt with
+        // an inline or council.md override; re-apply the idempotent
+        // dual-track reinforcement so the required report structure and
+        // the compaction exception survive the override.
         agent.config.prompt = ensureCouncilCompactionException(
-          agent.config.prompt ?? '',
+          ensureCouncilSynthesisReinforcement(agent.config.prompt ?? ''),
         );
       }
 
@@ -877,7 +895,11 @@ export function createAgents(
           `ACP agent name '${name}' must match /^[a-z][a-z0-9_-]*$/i`,
         );
       }
-      if (isKnownAgentName(name) || AGENT_ALIASES[name] !== undefined) {
+      if (
+        isKnownAgentName(name) ||
+        AGENT_ALIASES[name] !== undefined ||
+        name.startsWith('councillor-')
+      ) {
         throw new Error(
           `ACP agent '${name}' conflicts with a built-in agent name or alias`,
         );
@@ -1091,12 +1113,16 @@ export function createAgents(
   // is appended per-message by the council-inject hook when a council trigger
   // is detected. The seat list lives here because hidden councillors appear
   // in no host catalog — this line is the orchestrator's only always-present
-  // source of seat IDs.
+  // source of seat IDs. Wording tracks the hook state: no auto-inject
+  // promise when the hook is disabled.
   if (councillorAgents.length > 0) {
     const seatList = councillorAgents
       .map((a: AgentDefinition) => a.name)
       .join(', ');
-    updatedPrompt = `${updatedPrompt}\n\n## Council\nSeats: ${seatList} — dispatch via ${vocab.tool}() when the user asks for consensus; full procedure auto-injected on council keywords.`;
+    const injectNote = runtime.disabledHooks.has('council-inject')
+      ? `dispatch via ${vocab.tool}() when the user asks for consensus (keyword injection disabled; dispatch seats and synthesize manually).`
+      : `dispatch via ${vocab.tool}() when the user asks for consensus; the full procedure is injected per-message by the council-inject hook on council keywords.`;
+    updatedPrompt = `${updatedPrompt}\n\n## Council\nSeats: ${seatList} — ${injectNote}`;
   }
 
   orchestrator.config.prompt = updatedPrompt;

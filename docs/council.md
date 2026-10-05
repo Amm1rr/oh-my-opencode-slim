@@ -38,27 +38,35 @@ in parallel via the host's native delegation tool (`task()` on v1,
 `subagent()` on v2) at depth 1, and each
 councillor appears as its own TUI pane.
 
+Once every councillor has responded (or the orchestrator's bounded wait on
+a silent seat expires — see [Failure behavior](#failure-behavior)), the
+orchestrator passes the collected responses to the council agent, which
+synthesizes them into a single report. The council agent itself waits for
+no one: it has no tools and starts from whatever the orchestrator hands it.
+
+### Who dispatches whom
+
+The **orchestrator** dispatches all councillor seats and the council
+synthesizer — the council agent itself dispatches nobody (it has no tools):
+
 ```text
 User / Orchestrator
         |
-        v
-Council agent (@council, your configured synthesizer model)
-        |
-        +--> task(): councillor-alpha (configured model)
-        +--> task(): councillor-beta  (configured model)
-        +--> task(): councillor-gamma (configured model)
+        +--> task(): councillor-alpha (configured model)   } dispatched
+        +--> task(): councillor-beta  (configured model)   } in parallel
+        +--> task(): councillor-gamma (configured model)   } by the orchestrator
         |
         v
-Council agent synthesizes councillor results
+task(subagent_type='council', prompt=<question + all councillor responses>)
         |
         v
-Final answer
+Council agent (no tools) synthesizes the responses
+        |
+        v
+Structured report: Council Response / Per-Councillor Details / Council Summary
 ```
 
 > The diagram shows v1 wording; on v2 the same dispatches use `subagent()`.
-
-The council agent waits for all councillors to respond (or fail), then
-synthesizes their results into a single report.
 
 ---
 
@@ -88,7 +96,16 @@ Add a council model and at least one council preset to your plugin config:
 }
 ```
 
-Then ask for it in your message — mentioning `council`, `@council`, `consensus`, or `共识` triggers the Council Mode procedure for that turn:
+Then ask for it in your message. Council Mode is **keyword-triggered**: the
+`council-inject` hook watches orchestrator user messages and appends the full
+Council Mode procedure to the turn when it sees a trigger. Code blocks and
+inline code are stripped before matching, and slash commands never trigger:
+
+- **English**: `council` / `@council`, `councillor`, `consensus`,
+  `second opinion`, `roundtable`, `multiple opinions`, `multiple models`,
+  `several models`, `multi-model` (singular or plural)
+- **Chinese**: `议会`, `顾问团`, `圆桌`, `共识`, `第二意见`, `多方意见`,
+  `多模型`, `多个模型`, `几个模型`, `别的模型`, `其他模型`
 
 ```text
 Run a council: what is the safest migration strategy for this schema change?
@@ -127,7 +144,7 @@ Each entry inside a preset is one councillor:
 |-------|------|----------|-------------|
 | `model` | string \| array | Yes | A `provider/model` string, or an ordered fallback chain tried until one responds |
 | `variant` | string | No | Optional variant/reasoning setting (applies to chain entries without their own) |
-| `prompt` | string | No | Optional role guidance prepended to the user prompt |
+| `prompt` | string | No | Optional role guidance appended to the councillor's system prompt |
 
 ### Council agent (synthesizer) config
 
@@ -294,12 +311,13 @@ Each councillor can receive its own steering prompt:
 }
 ```
 
-The councillor sees:
+The councillor sees the role prompt appended to the tail of its **system
+prompt** (not the user prompt):
 
 ```text
+<councillor system prompt>
+
 <role prompt>
----
-<user prompt>
 ```
 
 ---
@@ -308,9 +326,10 @@ The councillor sees:
 
 ### Invocation
 
-Ask for consensus in your message — `council`, `@council`, `consensus`, or
-`共识` all work. The keyword injects the Council Mode procedure into that
-turn, and the orchestrator dispatches every councillor seat in parallel:
+Ask for consensus in your message — see the [trigger list](#quick-setup)
+above; any of those keywords (e.g. `council`, `@council`, `consensus`,
+`共识`) injects the Council Mode procedure into that turn, and the
+orchestrator dispatches every councillor seat in parallel:
 
 ```text
 Should we use a job queue or an outbox pattern here? Get a council's opinion.
@@ -318,14 +337,27 @@ Should we use a job queue or an outbox pattern here? Get a council's opinion.
 
 The orchestrator may also run a council on its own for high-stakes or
 ambiguous decisions. The injection is keyword-triggered, so sessions that
-never ask pay zero tokens for the procedure; disable it entirely with
-`disabled_hooks: ["council-inject"]`.
+never ask pay zero tokens for the procedure.
+
+**Disabling injection.** Turn the keyword injection off entirely with
+`disabled_hooks: ["council-inject"]` (see
+[Hooks](configuration.md#hooks)). The council agent and councillor seats
+stay available — you can still dispatch them by name — but the automatic
+procedure injection no longer happens. A one-line seat pointer in the
+orchestrator prompt remains as the only static cost.
+
+**Disabling the council.** Listing `council` in `disabled_agents` disables
+the whole chain (council agent, councillor seats, seat pointer, keyword
+injection). Without council config at all, the chain is never built.
 
 ### What you see
 
-Each councillor appears as its own TUI pane, dispatched in parallel. As they
-complete, their responses stream into the panes. Once all councillors have
-responded (or failed), the council agent synthesizes their results.
+Each councillor is dispatched in parallel as its own TUI pane while it
+runs; when idle, councillors are hidden from the @-mention menu (they are
+still dispatchable by name). As they complete, their responses stream into
+the panes. Once all councillors have responded (or failed), the
+orchestrator passes everything to the council agent, which synthesizes
+the report.
 
 ### Output
 
@@ -338,20 +370,13 @@ Council responses include:
    uncertainty, and a consensus confidence rating of `unanimous`, `majority`,
    or `split`.
 
-A footer tracks participation:
-
-```text
----
-*Council: 2/3 councillors responded (alpha: gpt-6-luna, beta: gemini-3-pro)*
-```
-
 ### Failure behavior
 
 | Scenario | Behavior |
 |----------|----------|
-| Some councillors fail | Synthesize from the successful ones |
-| All councillors fail | Return an error |
-| Preset has zero councillors | Return an error |
+| Some councillors fail | Synthesize from the successful ones; failed seats are marked in the report |
+| All councillors fail | The report lists every seat as failed; there is no synthesized answer to present |
+| Empty seat response | Retried once, then marked as failed if still empty |
 
 ---
 

@@ -28,11 +28,7 @@ import {
   appendTaggedSyntheticPart,
   isTaggedPart,
 } from '../cache-safe-injection';
-import {
-  findLatestUserMessage,
-  isUserMessageWithParts,
-  type MessagePart,
-} from '../types';
+import { findLatestUserMessage, isUserMessageWithParts } from '../types';
 
 export const COUNCIL_INJECT_METADATA_KEY = 'oh-my-opencode-slim.councilInject';
 
@@ -46,7 +42,7 @@ export const COUNCIL_INJECT_METADATA_KEY = 'oh-my-opencode-slim.councilInject';
  * ASCII-only). Deliberately excluded: bare seat names in prose, vote/投票.
  */
 const COUNCIL_TRIGGER_PATTERN =
-  /\b(?:councillor|council|consensus|second opinion|roundtable|multiple opinions|multiple models|several models|multi-model)\b|议会|顾问团|圆桌|共识|第二意见|多方意见|多模型|多个模型|几个模型|别的模型|其他模型/i;
+  /\b(?:councillors?|councils?|consensus|second opinions?|roundtable|multiple opinions|multiple models|several models|multi-model)\b|议会|顾问团|圆桌|共识|第二意见|多方意见|多模型|多个模型|几个模型|别的模型|其他模型/i;
 
 const CODE_FENCE_PATTERN = /```[\s\S]*?```/g;
 const INLINE_CODE_PATTERN = /`[^`\n]*`/g;
@@ -150,14 +146,36 @@ export function createCouncilInjectHook(options: CouncilInjectOptions) {
           continue;
         }
 
-        const textPart = message.parts.find(
-          (part: MessagePart) =>
+        // Collect eligible text parts once: the message-level slash gate
+        // and the trigger scan share the same eligibility.
+        const eligibleTexts: string[] = [];
+        for (const part of message.parts) {
+          if (
             part.type === 'text' &&
             typeof part.text === 'string' &&
             part.synthetic !== true &&
-            !isInternalInitiatorPart(part),
-        );
-        if (textPart && matchesCouncilTrigger(textPart.text as string)) {
+            !isInternalInitiatorPart(part)
+          ) {
+            eligibleTexts.push(part.text);
+          }
+        }
+
+        // Slash commands never trigger (documented behavior): a message
+        // whose FIRST eligible text part leads with a slash is a host
+        // command, and the whole message is skipped — a later part
+        // containing a trigger word must not inject around the command.
+        if (
+          eligibleTexts.length > 0 &&
+          SLASH_COMMAND_LEAD_PATTERN.test(
+            stripCodeForTriggerMatch(eligibleTexts[0]),
+          )
+        ) {
+          continue;
+        }
+
+        // Scan every eligible text part (not just the first): a trigger in
+        // any part of a multi-part message still injects.
+        if (eligibleTexts.some((text) => matchesCouncilTrigger(text))) {
           appendTaggedSyntheticPart(message, {
             text: block,
             metadataKey: COUNCIL_INJECT_METADATA_KEY,

@@ -12,7 +12,7 @@
 
 | Doc | Contents |
 |-----|----------|
-| [Council Agent](council.md) | Multi-LLM consensus, presets, role prompts, timeouts |
+| [Council Agent](council.md) | Multi-LLM consensus, presets, role prompts, keyword-triggered injection |
 | [Background Orchestration](background-orchestration.md) | Default scheduler-first orchestrator model for native background subagents |
 | [Interview](interview.md) | `/interview` command, browser UI, dashboard mode, multi-session coordination |
 | [Multiplexer Integration](multiplexer-integration.md) | Real-time pane monitoring, layouts, troubleshooting |

@@ -198,6 +198,10 @@ export function buildHistory(): unknown[] {
     ),
     assistantTurn('m08', 'Wrapping up.'),
     userTurn('m09', 'final adjustments please'),
+    // Council-triggered turn: exercises the council-inject transform in the
+    // property pipeline (block appended to this turn must stay byte-stable
+    // across replays like every other tagged injection).
+    userTurn('m10', 'before we ship, run a council on the final design'),
   ];
 }
 
