@@ -100,7 +100,7 @@ Notify: Success/failure via OpenCode TUI toast
 10. If auto-update disabled: Show notification only
 11. Acquire the cross-process install lock for the target install dir
     (PID-guarded dir lock, async wait up to install timeout + slack);
-    skip quietly if another process is installing
+    skip quietly on timeout
 12. Under the lock: re-verify the target install dir; if another process
     already installed the version, redirect installer-managed configs
     (surfacing redirect errors) and show the restart toast

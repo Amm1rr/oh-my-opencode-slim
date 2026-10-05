@@ -23,19 +23,44 @@ export function isProcessAlive(pid: number): boolean {
 }
 
 export function parsePidFile(raw: string): number | null {
-  const pid = Number(raw.trim());
+  const pid = Number(raw.split('\n')[0].trim());
   if (!Number.isInteger(pid) || pid <= 0) return null;
   return pid;
 }
 
 /**
+ * Reads a lock dir's `owner` file. The current format is the PID on line 1
+ * and a per-acquisition owner token on line 2; legacy locks written by older
+ * plugin versions contain only the PID, so `token` is then null.
+ * Returns null when the file is missing or unparsable.
+ */
+export function readPidFileOwner(
+  lock: string,
+): { pid: number; token: string | null } | null {
+  let raw: string;
+  try {
+    raw = readFileSync(path.join(lock, 'owner'), 'utf8');
+  } catch {
+    return null;
+  }
+  const pid = parsePidFile(raw);
+  if (pid === null) return null;
+  const token = raw.split('\n')[1]?.trim();
+  return { pid, token: token ? token : null };
+}
+
+/**
  * Attempts to take an exclusive lock by creating the `<file>.lock` directory
- * and writing this process's PID into it. Locks left behind by dead processes
- * are detected via the owner PID file and taken over atomically via rename,
- * so two waiters can never both become owners. With `maxAgeMs` set, a lock
- * older than that is treated as stale even when its owner PID is alive (PID
- * reuse or a wedged holder must not wedge peers forever). Returns a release
- * function, or null when a live process holds the lock.
+ * and writing this process's PID plus a unique owner token into it. Locks
+ * left behind by dead processes are detected via the owner PID file and
+ * taken over atomically via rename, so two waiters can never both become
+ * owners. With `maxAgeMs` set, a lock older than that is treated as stale
+ * even when its owner PID is alive (PID reuse or a wedged holder must not
+ * wedge peers forever). Returns a release function, or null when a live
+ * process holds the lock. Release only removes the lock dir when the owner
+ * token it reads still matches the token this acquisition wrote, so a
+ * holder that lost the lock to a takeover can never delete its successor's
+ * lock.
  */
 export function acquirePidFileLock(
   file: string,
@@ -46,8 +71,19 @@ export function acquirePidFileLock(
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       mkdirSync(lock);
-      writeFileSync(path.join(lock, 'owner'), String(process.pid));
+      // Token is only compared against itself on release, never reaches the
+      // prompt, so Date.now/Math.random are safe here (src/utils is outside
+      // the cache-safety tripwire's SCAN_DIRS).
+      const token = `${Date.now().toString(36)}${Math.random()
+        .toString(36)
+        .slice(2)}`;
+      writeFileSync(path.join(lock, 'owner'), `${process.pid}\n${token}`);
       return () => {
+        const owner = readPidFileOwner(lock);
+        if (!owner || owner.token !== token) {
+          log('[pid-file-lock] lock owner changed; skipping release');
+          return;
+        }
         try {
           rmSync(lock, { recursive: true, force: true });
         } catch (err) {
@@ -61,15 +97,25 @@ export function acquirePidFileLock(
       log('[pid-file-lock] removing stale PID file lock for dead process');
       // Claim the stale lock by renaming it away before deleting: only one
       // waiter wins the rename, so a second waiter can never delete a
-      // freshly re-acquired (live) lock and leave two owners.
-      const stalePath = `${lock}.stale-${process.pid}`;
+      // freshly re-acquired (live) lock and leave two owners. The suffix is
+      // random so a leftover stale dir from a crashed same-PID predecessor
+      // can never make this rename fail with EEXIST.
+      const stalePath = `${lock}.stale-${process.pid}-${Date.now().toString(
+        36,
+      )}${Math.random().toString(36).slice(2)}`;
       try {
         renameSync(lock, stalePath);
       } catch {
         // Another waiter took over or removed it; retry the mkdir.
         continue;
       }
-      rmSync(stalePath, { recursive: true, force: true });
+      try {
+        rmSync(stalePath, { recursive: true, force: true });
+      } catch (err) {
+        // Cleanup of the renamed-away dir is best-effort (EACCES/EBUSY on
+        // win32); the lock itself is already ours, so never abort.
+        log('[pid-file-lock] stale lock cleanup failed', String(err));
+      }
     }
   }
   return null;

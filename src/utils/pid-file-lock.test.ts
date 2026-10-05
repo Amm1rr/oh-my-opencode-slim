@@ -6,6 +6,7 @@ import {
   acquirePidFileLock,
   acquirePidFileLockWithRetryAsync,
   parsePidFile,
+  readPidFileOwner,
 } from './pid-file-lock';
 
 const roots: string[] = [];
@@ -61,6 +62,42 @@ describe('pid-file-lock', () => {
       process.pid,
     );
     release?.();
+  });
+
+  test('release does not remove a lock whose owner token was replaced', () => {
+    const root = fs.mkdtempSync(join(tmpdir(), 'omo-pidlock-'));
+    roots.push(root);
+    const lockFile = join(root, 'resource');
+    const lockDir = `${lockFile}.lock`;
+
+    const release = acquirePidFileLock(lockFile);
+    expect(release).not.toBeNull();
+
+    // Simulate a takeover: another process rewrote the owner file with its
+    // own token. Our release must not delete the successor's live lock.
+    fs.writeFileSync(join(lockDir, 'owner'), `${process.pid}\nother-token`);
+    release?.();
+
+    expect(fs.existsSync(lockDir)).toBe(true);
+    expect(readPidFileOwner(lockDir)).toEqual({
+      pid: process.pid,
+      token: 'other-token',
+    });
+  });
+
+  test('release removes the lock when the owner token still matches', () => {
+    const root = fs.mkdtempSync(join(tmpdir(), 'omo-pidlock-'));
+    roots.push(root);
+    const lockFile = join(root, 'resource');
+    const lockDir = `${lockFile}.lock`;
+
+    const release = acquirePidFileLock(lockFile);
+    const owner = readPidFileOwner(lockDir);
+    expect(owner?.pid).toBe(process.pid);
+    expect(owner?.token).toBeTruthy();
+
+    release?.();
+    expect(fs.existsSync(lockDir)).toBe(false);
   });
 
   test('age cap takes over a live-owned lock older than maxAgeMs', async () => {

@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const logMock = mock(() => {});
@@ -415,6 +417,126 @@ describe('auto-update-checker/index', () => {
         message:
           'Update installed in cache, but plugin configuration could not be updated.',
         variant: 'error',
+        duration: 8000,
+      },
+    });
+  });
+
+  test('releases the install lock when the already-installed redirect errors', async () => {
+    checkerMocks.findPluginEntry.mockImplementation(() => ({
+      pinnedVersion: null,
+      isPinned: false,
+      isInstallerManaged: true,
+    }));
+    checkerMocks.getCachedVersion.mockImplementation(() => '0.9.1');
+    checkerMocks.getLatestCompatibleVersion.mockImplementation(async () => ({
+      latestVersion: '0.9.11',
+      latestMajorVersion: null,
+      blockedByMajor: false,
+    }));
+    const versionedDir = '/cache/packages/oh-my-opencode-slim@0.9.11';
+    cacheMocks.resolveInstallContext.mockImplementation(() => ({
+      installDir: '/cache/packages/oh-my-opencode-slim@latest',
+    }));
+    cacheMocks.getTargetInstallContext.mockImplementation(() => ({
+      installDir: versionedDir,
+    }));
+    cacheMocks.verifyInstalledPackage.mockImplementation(
+      (dir: string) => dir === versionedDir,
+    );
+    checkerMocks.updateInstallerManagedVersions.mockImplementation(() => ({
+      status: 'error' as const,
+      error: new Error('config locked'),
+    }));
+
+    // Real lock dir on disk, so the release assertion is filesystem state
+    // rather than a mock call count. The redirect-error branch returns from
+    // inside the try, so only the finally can release this.
+    const lockRoot = mkdtempSync(join(tmpdir(), 'omo-idxlock-'));
+    const lockDir = join(lockRoot, 'install.lock');
+    cacheMocks.acquirePackageUpdateLock.mockImplementation(
+      async (): Promise<(() => void) | null> => {
+        mkdirSync(lockDir, { recursive: true });
+        return () => rmSync(lockDir, { recursive: true, force: true });
+      },
+    );
+
+    try {
+      const { createAutoUpdateCheckerHook } = await import(
+        `./index?test=${importCounter++}`
+      );
+      const { ctx, showToast } = createCtx();
+
+      const hook = createAutoUpdateCheckerHook(ctx as never);
+      hook.event({ event: { type: 'session.created', properties: {} } });
+      await waitForCalls(showToast);
+
+      expect(existsSync(lockDir)).toBe(false);
+      expect(cacheMocks.preparePackageUpdate).not.toHaveBeenCalled();
+      expect(showToast).toHaveBeenCalledTimes(1);
+      expect(showToast).toHaveBeenCalledWith({
+        body: {
+          title: 'OMO-Slim 0.9.11',
+          message:
+            'Update installed in cache, but plugin configuration could not be updated.',
+          variant: 'error',
+          duration: 8000,
+        },
+      });
+    } finally {
+      rmSync(lockRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('still shows the success toast when the already-installed redirect reports unchanged', async () => {
+    checkerMocks.findPluginEntry.mockImplementation(() => ({
+      pinnedVersion: null,
+      isPinned: false,
+      isInstallerManaged: true,
+    }));
+    checkerMocks.getCachedVersion.mockImplementation(() => '0.9.1');
+    checkerMocks.getLatestCompatibleVersion.mockImplementation(async () => ({
+      latestVersion: '0.9.11',
+      latestMajorVersion: null,
+      blockedByMajor: false,
+    }));
+    const versionedDir = '/cache/packages/oh-my-opencode-slim@0.9.11';
+    cacheMocks.resolveInstallContext.mockImplementation(() => ({
+      installDir: '/cache/packages/oh-my-opencode-slim@latest',
+    }));
+    cacheMocks.getTargetInstallContext.mockImplementation(() => ({
+      installDir: versionedDir,
+    }));
+    // The post-lock re-check against the target install dir verifies, while
+    // staging (never reached) would not.
+    cacheMocks.verifyInstalledPackage.mockImplementation(
+      (dir: string) => dir === versionedDir,
+    );
+    checkerMocks.updateInstallerManagedVersions.mockImplementation(() => ({
+      status: 'unchanged' as const,
+    }));
+
+    const { createAutoUpdateCheckerHook } = await import(
+      `./index?test=${importCounter++}`
+    );
+    const { ctx, showToast } = createCtx();
+
+    const hook = createAutoUpdateCheckerHook(ctx as never);
+    hook.event({ event: { type: 'session.created', properties: {} } });
+    await waitForCalls(showToast);
+
+    expect(cacheMocks.preparePackageUpdate).not.toHaveBeenCalled();
+    expect(checkerMocks.updateInstallerManagedVersions).toHaveBeenCalledWith(
+      '/test',
+      '0.9.11',
+    );
+    expect(showToast).toHaveBeenCalledTimes(1);
+    expect(showToast).toHaveBeenCalledWith({
+      body: {
+        title: 'OMO-Slim Updated!',
+        message:
+          'v0.9.1 → v0.9.11\nRestart OpenCode to apply the plugin update.',
+        variant: 'success',
         duration: 8000,
       },
     });

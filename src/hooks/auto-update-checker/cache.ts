@@ -59,16 +59,22 @@ export function resolveInstallContext(
  * runs its own `bun install` for the same pending version (issue #1279).
  *
  * Waits asynchronously (never blocking the JS thread) for up to
- * `timeoutMs` — by default the install timeout plus slack — for a
+ * `timeoutMs` — by default the 300s install timeout plus slack — for a
  * concurrent install to finish. A lock dir older than `maxAgeMs` counts
  * as stale even when its owner PID is alive (PID reuse or a wedged
- * holder must not wedge peers). Returns a release function, or null if
+ * holder must not wedge peers). Age is measured from the lock dir's
+ * mtime, set at acquisition and never heartbeated, so `maxAgeMs`
+ * (default 900s) must exceed the worst-case hold: the 300s install
+ * timeout plus the publish/quarantine recursive rm of a full
+ * `node_modules` tree. The two budgets are deliberately different —
+ * staleness only ever applies across process generations, never to a
+ * healthy holder mid-install. Returns a release function, or null if
  * the lock could not be acquired in time.
  */
 export async function acquirePackageUpdateLock(
   targetInstallDir: string,
   timeoutMs = 330_000,
-  maxAgeMs = 330_000,
+  maxAgeMs = 900_000,
 ): Promise<(() => void) | null> {
   const lockPath = path.join(
     path.dirname(targetInstallDir),
