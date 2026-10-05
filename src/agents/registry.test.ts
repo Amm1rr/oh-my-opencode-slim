@@ -375,10 +375,18 @@ describe('finalized existing-agent registry', () => {
     const registry = build(
       runtime,
       {
-        mcp: { 'host-mcp': { type: 'remote' } },
+        mcp: {
+          'host-mcp': { type: 'remote' },
+          'shared-mcp': { type: 'remote', url: 'https://host.example/mcp' },
+        },
         agent: { explorer: { permission: { host_tool: 'allow' } } },
       },
-      { pluginMcps: { 'plugin-mcp': { type: 'local' } } },
+      {
+        pluginMcps: {
+          'plugin-mcp': { type: 'local' },
+          'shared-mcp': { type: 'local', command: 'shared' },
+        },
+      },
     );
     const config = registry.finalAgentConfig.explorer as {
       permission: Record<string, unknown>;
@@ -386,7 +394,14 @@ describe('finalized existing-agent registry', () => {
     expect(Object.keys(registry.mcpConfig).sort()).toEqual([
       'host-mcp',
       'plugin-mcp',
+      'shared-mcp',
     ]);
+    // On a key collision the host (user) entry wins, not the plugin
+    // built-in (issue #1290).
+    expect(registry.mcpConfig['shared-mcp']).toEqual({
+      type: 'remote',
+      url: 'https://host.example/mcp',
+    });
     expect(config.permission).toMatchObject({
       'host-mcp_*': 'deny',
       'plugin-mcp_*': 'allow',

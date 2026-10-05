@@ -786,6 +786,64 @@ describe('plugin tool registration', () => {
     }
   });
 
+  test('config re-invocation with the same mutated object keeps built-ins', async () => {
+    const originalEnv = { ...process.env };
+    const root = await mkdtemp('/tmp/oh-my-opencode-slim-mcp-reinvoke-');
+    const configDir = path.join(root, 'config');
+    await mkdir(configDir, { recursive: true });
+    process.env = {
+      ...originalEnv,
+      OPENCODE_CONFIG_DIR: configDir,
+      XDG_DATA_HOME: path.join(root, 'data'),
+    };
+    delete process.env.OH_MY_OPENCODE_SLIM_DISABLE;
+    await Bun.write(
+      path.join(configDir, 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        preset: 'active',
+        presets: { active: { marketplace: { agents: [] } } },
+      }),
+    );
+    const hooks = await plugin({
+      client: createPluginClient(async () => ({})),
+      directory: root,
+      worktree: root,
+      serverUrl: new URL('http://127.0.0.1:4096'),
+    } as never);
+    try {
+      const userGhGrep = {
+        type: 'remote',
+        url: 'https://user.example.com/mcp',
+      };
+      const hostConfig: Record<string, unknown> = {
+        mcp: { gh_grep: userGhGrep },
+      };
+      await hooks.config?.(hostConfig);
+      const exportRef = (hooks as unknown as { mcp: Record<string, unknown> })
+        .mcp;
+      expect(exportRef).toHaveProperty('context7');
+      expect(exportRef).not.toHaveProperty('gh_grep');
+
+      // The host hands back the very object the first call mutated (its
+      // `mcp` now holds the plugin-injected built-ins). Those must not be
+      // re-read as user-defined entries and pruned from the live export.
+      await hooks.config?.(hostConfig);
+      const merged = hostConfig.mcp as Record<string, unknown>;
+      expect(merged.context7).toBeDefined();
+      expect(merged.gh_grep).toEqual(userGhGrep);
+      expect((hooks as unknown as { mcp: Record<string, unknown> }).mcp).toBe(
+        exportRef,
+      );
+      expect(exportRef).toHaveProperty('context7');
+      expect(exportRef).not.toHaveProperty('gh_grep');
+      expect(exportRef.context7).toEqual(createBuiltinMcps().context7);
+    } finally {
+      await hooks.dispose?.();
+      process.env = originalEnv;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test('marketplace status follows the active runtime preset over disk and environment selection', async () => {
     const originalEnv = { ...process.env };
     const root = await mkdtemp(
