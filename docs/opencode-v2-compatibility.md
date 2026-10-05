@@ -208,9 +208,12 @@ not an optional-degradation path.
       agent/model discovery; hosts that reject the hook name keep the
       full emulation as fallback. The session-frozen profile bridge is also
       awaited from this hook BEFORE the admission's first model request: it
-      resolves the session's `parentID`/`agent` through `session.get`,
-      then freezes the child's runtime profile and applies
-      `session.switchModel` idempotently (the event-stream
+      resolves the session's identity and model through `session.get`,
+      then freezes the child's runtime profile. It applies `session.switchModel`
+      only while the child still uses the agent's startup-registered model;
+      a different explicit or routed model retains its variant without a switch.
+      Hot refresh compares against that startup model, not the refreshed profile.
+      Capture remains idempotent (the event-stream
       `session.created` consumer is only a prewarm/cleanup path — a first
       child request can never race the asynchronous event pump).
     - a native `ctx.session.hook("model.request")` registration

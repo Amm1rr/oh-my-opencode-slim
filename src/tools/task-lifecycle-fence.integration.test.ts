@@ -66,17 +66,19 @@ async function loadPlugin(
 
 test('dispose during the message model read sends no prompt', async () => {
   const seen = deferred<void>();
-  const read = deferred<{ data: Record<string, unknown> }>();
+  const read = deferred<{ data: unknown[] }>();
   const prompts: unknown[] = [];
   const loaded = await loadPlugin({
     get: async (args: { path?: { id?: string } }) => {
+      return { data: { id: args.path?.id, parentID: PARENT } };
+    },
+    messages: async (args: { path?: { id?: string } }) => {
       if (args.path?.id !== CHILD) {
-        return { data: { id: args.path?.id, parentID: PARENT } };
+        return { data: [] };
       }
       seen.resolve();
       return read.promise;
     },
-    messages: async () => ({ data: [] }),
     status: async () => ({ data: {} }),
     prompt: async (args: unknown) => {
       prompts.push(args);
@@ -112,11 +114,15 @@ test('dispose during the message model read sends no prompt', async () => {
     await seen.promise;
     await loaded.dispose();
     read.resolve({
-      data: {
-        id: CHILD,
-        parentID: PARENT,
-        model: { providerID: 'openai', modelID: 'gpt-test' },
-      },
+      data: [
+        {
+          info: {
+            role: 'assistant',
+            providerID: 'openai',
+            modelID: 'gpt-test',
+          },
+        },
+      ],
     });
     await expect(pending).rejects.toThrow(/disposed/);
     expect(prompts).toHaveLength(0);

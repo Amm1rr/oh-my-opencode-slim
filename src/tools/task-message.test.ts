@@ -26,8 +26,15 @@ function makePrompt(): ReturnType<typeof mock> {
 
 function makeSession(prompt: ReturnType<typeof mock>) {
   return {
-    get: mock(async () => ({
-      data: { model: { providerID: 'openai', id: 'gpt-6' } },
+    messages: mock(async () => ({
+      data: [
+        {
+          info: {
+            role: 'user',
+            model: { providerID: 'openai', modelID: 'gpt-6' },
+          },
+        },
+      ],
     })),
     prompt,
   };
@@ -99,63 +106,61 @@ describe('task_message', () => {
     expect(prompt.mock.calls[1]?.[0].body.noReply).toBe(true);
   });
 
-  test('transports the authoritative current model and variant', async () => {
+  test('pins the executing step instead of stale session selection', async () => {
     const board = new BackgroundJobBoard();
     registerRunningChild(board);
-    const transportOrder: string[] = [];
-    const prompt = mock(async () => {
-      transportOrder.push('prompt');
-      return {};
-    });
-    const get = mock(async () => {
-      transportOrder.push('get');
-      return {
-        data: {
-          model: {
-            providerID: 'openai',
-            id: 'gpt-6',
-            variant: 'high',
+    const prompt = makePrompt();
+    const get = mock(async () => ({
+      data: { model: { providerID: 'openai', id: 'gpt-6' } },
+    }));
+    const messages = mock(async () => ({
+      data: [
+        { info: { role: 'assistant', providerID: 'openai', modelID: 'gpt-6' } },
+        {
+          info: {
+            role: 'assistant',
+            providerID: 'anthropic',
+            modelID: 'claude-sonnet',
+            variant: 'max',
           },
         },
-      };
-    });
-    client = { session: { get, prompt } };
+      ],
+    }));
+    client = { session: { get, messages, prompt } };
 
     await createTool(board).execute(
       { task_id: 'ses_child1', message: 'Continue with the fix.' },
       { sessionID: 'parent-1' } as any,
     );
 
-    expect(get).toHaveBeenCalledWith({
-      path: { id: 'ses_child1' },
-      query: { directory: '/test' },
-      signal: expect.any(AbortSignal),
+    expect(prompt.mock.calls[0]?.[0].body).toMatchObject({
+      model: { providerID: 'anthropic', modelID: 'claude-sonnet' },
+      variant: 'max',
     });
-    expect(transportOrder).toEqual(['get', 'prompt']);
-    expect(prompt).toHaveBeenCalledWith({
+    expect(get).not.toHaveBeenCalled();
+    expect(messages).toHaveBeenCalledWith({
       path: { id: 'ses_child1' },
-      body: {
-        agent: 'fixer',
-        model: { providerID: 'openai', modelID: 'gpt-6' },
-        variant: 'high',
-        noReply: true,
-        parts: [{ type: 'text', text: 'Continue with the fix.' }],
-      },
-      throwOnError: true,
+      query: { directory: '/test', limit: 20 },
+      signal: expect.any(AbortSignal),
     });
   });
 
-  test('transports a separate current session variant', async () => {
+  test('transports a separate user message variant', async () => {
     const board = new BackgroundJobBoard();
     registerRunningChild(board);
     const prompt = makePrompt();
-    const get = mock(async () => ({
-      data: {
-        model: { providerID: 'openai', id: 'gpt-6' },
-        variant: 'medium',
-      },
+    const messages = mock(async () => ({
+      data: [
+        {
+          info: {
+            role: 'user',
+            model: { providerID: 'openai', id: 'gpt-6' },
+            variant: 'medium',
+          },
+        },
+      ],
     }));
-    client = { session: { get, prompt } };
+    client = { session: { messages, prompt } };
 
     await createTool(board).execute(
       { task_id: 'ses_child1', message: 'Continue with the fix.' },
@@ -171,74 +176,7 @@ describe('task_message', () => {
     });
   });
 
-  test('transports a valid current model without a variant', async () => {
-    const board = new BackgroundJobBoard();
-    registerRunningChild(board);
-    const prompt = makePrompt();
-    client = {
-      session: {
-        get: mock(async () => ({
-          data: { model: { providerID: 'openai', id: 'gpt-6' } },
-        })),
-        prompt,
-      },
-    };
-
-    await createTool(board).execute(
-      { task_id: 'ses_child1', message: 'Continue with the fix.' },
-      { sessionID: 'parent-1' } as any,
-    );
-
-    expect(prompt.mock.calls[0]?.[0].body).toEqual({
-      agent: 'fixer',
-      model: { providerID: 'openai', modelID: 'gpt-6' },
-      variant: 'default',
-      noReply: true,
-      parts: [{ type: 'text', text: 'Continue with the fix.' }],
-    });
-  });
-
-  test('falls back to the latest user message when get is malformed', async () => {
-    const board = new BackgroundJobBoard();
-    registerRunningChild(board);
-    const prompt = makePrompt();
-    client = {
-      session: {
-        get: mock(async () => ({ data: { model: { providerID: 'openai' } } })),
-        messages: mock(async () => ({
-          data: [
-            {
-              info: {
-                role: 'user',
-                model: {
-                  providerID: 'anthropic',
-                  modelID: 'claude-sonnet',
-                  variant: 'high',
-                },
-              },
-            },
-            { info: { role: 'assistant' } },
-          ],
-        })),
-        prompt,
-      },
-    };
-
-    await createTool(board).execute(
-      { task_id: 'ses_child1', message: 'Continue with the fix.' },
-      { sessionID: 'parent-1' } as any,
-    );
-
-    expect(prompt.mock.calls[0]?.[0].body).toEqual({
-      agent: 'fixer',
-      model: { providerID: 'anthropic', modelID: 'claude-sonnet' },
-      variant: 'high',
-      noReply: true,
-      parts: [{ type: 'text', text: 'Continue with the fix.' }],
-    });
-  });
-
-  test('falls back to the latest user message when get throws', async () => {
+  test('skips compaction summaries and malformed steps when pinning the model', async () => {
     const board = new BackgroundJobBoard();
     registerRunningChild(board);
     const prompt = makePrompt();
@@ -246,18 +184,25 @@ describe('task_message', () => {
       data: [
         {
           info: {
-            role: 'user',
-            model: { providerID: 'anthropic', id: 'claude-sonnet' },
+            role: 'assistant',
+            providerID: 'anthropic',
+            modelID: 'claude-sonnet',
             variant: 'high',
+          },
+        },
+        { info: { role: 'assistant' } },
+        {
+          info: {
+            role: 'assistant',
+            summary: true,
+            providerID: 'other',
+            modelID: 'compact',
           },
         },
       ],
     }));
     client = {
       session: {
-        get: mock(async () => {
-          throw new Error('session unavailable');
-        }),
         messages,
         prompt,
       },
@@ -268,11 +213,6 @@ describe('task_message', () => {
       { sessionID: 'parent-1' } as any,
     );
 
-    expect(messages).toHaveBeenCalledWith({
-      path: { id: 'ses_child1' },
-      query: { directory: '/test', limit: 20 },
-      signal: expect.any(AbortSignal),
-    });
     expect(prompt.mock.calls[0]?.[0].body).toEqual({
       agent: 'fixer',
       model: { providerID: 'anthropic', modelID: 'claude-sonnet' },
@@ -282,49 +222,12 @@ describe('task_message', () => {
     });
   });
 
-  test('falls back to the latest user message when get is unavailable', async () => {
+  test('rejects without prompting when the transcript has no model identity', async () => {
     const board = new BackgroundJobBoard();
     registerRunningChild(board);
     const prompt = makePrompt();
     client = {
       session: {
-        messages: mock(async () => ({
-          data: [
-            {
-              info: {
-                role: 'user',
-                model: { providerID: 'google', id: 'gemini-pro' },
-              },
-            },
-          ],
-        })),
-        prompt,
-      },
-    };
-
-    await createTool(board).execute(
-      { task_id: 'ses_child1', message: 'Continue with the fix.' },
-      { sessionID: 'parent-1' } as any,
-    );
-
-    expect(prompt.mock.calls[0]?.[0].body).toEqual({
-      agent: 'fixer',
-      model: { providerID: 'google', modelID: 'gemini-pro' },
-      variant: 'default',
-      noReply: true,
-      parts: [{ type: 'text', text: 'Continue with the fix.' }],
-    });
-  });
-
-  test('rejects without prompting when both identity sources are unavailable', async () => {
-    const board = new BackgroundJobBoard();
-    registerRunningChild(board);
-    const prompt = makePrompt();
-    client = {
-      session: {
-        get: mock(async () => ({
-          data: { model: { id: 'missing-provider' } },
-        })),
         messages: mock(async () => ({ data: [] })),
         prompt,
       },
@@ -351,11 +254,11 @@ describe('task_message', () => {
     registerRunningChild(board);
     const prompt = makePrompt();
     let lookupSignal: AbortSignal | undefined;
-    const get = mock((input: { signal?: AbortSignal }) => {
+    const messages = mock((input: { signal?: AbortSignal }) => {
       lookupSignal = input.signal;
       return new Promise<unknown>(() => {});
     });
-    client = { session: { get, prompt } };
+    client = { session: { messages, prompt } };
 
     await expect(
       createToolWithTimeout(board, 5).execute(
@@ -379,16 +282,21 @@ describe('task_message', () => {
     const board = new BackgroundJobBoard();
     registerRunningChild(board);
     const prompt = makePrompt();
-    const get = mock(async () => {
+    const messages = mock(async () => {
       board.updateStatus({ taskID: 'ses_child1', state: 'completed' });
       return {
-        data: {
-          model: { providerID: 'openai', id: 'gpt-6' },
-          variant: 'high',
-        },
+        data: [
+          {
+            info: {
+              role: 'user',
+              model: { providerID: 'openai', id: 'gpt-6' },
+              variant: 'high',
+            },
+          },
+        ],
       };
     });
-    client = { session: { get, prompt } };
+    client = { session: { messages, prompt } };
 
     await expect(
       createTool(board).execute(
@@ -575,9 +483,7 @@ describe('task_message', () => {
     registerRunningChild(board);
     const prompt = makePrompt();
     const session = {
-      get: async () => ({
-        data: { model: { providerID: 'openai', id: 'gpt-6' } },
-      }),
+      ...makeSession(prompt),
       get prompt() {
         board.drop('ses_child1');
         return prompt;

@@ -95,7 +95,7 @@ The council agent is a synthesis-only specialist:
 
 - **Priority arrays**: When `model` is configured as an array in user config, it's stored as `_modelArray`
 - **Explicit inheritance**: `inheritModelFrom: "session"` and `"orchestrator"` leave the agent model unset so OpenCode follows the live parent/orchestrator model, including later runtime fallback switches
-- **Runtime fallback**: ForegroundFallbackManager resolves models at runtime when API errors occur; delegated children follow a live parent fallback through v2's per-call model override or hidden v1 agent routes for secondary chain entries
+- **Runtime fallback**: ForegroundFallbackManager resolves models at runtime when API errors occur; independent specialist chains follow a real parent fallback through v2's per-call model/variant override or v1 prompt-claimed intentions: host state validates new children, while `task_id` and `task_revive` identify resumes; v1 `task_message` preserves transcript execution selection rather than stale session metadata
 - **Preset overrides**: Runtime presets can override model/variant/temperature per agent
 
 ## Integration

@@ -281,34 +281,6 @@ async function readCurrentChildModel(
 ): Promise<ContinuationModelSelection | undefined> {
   if (!isRecord(session)) return undefined;
 
-  const query = directory ? { directory } : undefined;
-  let get: unknown;
-  try {
-    get = session.get;
-  } catch {
-    get = undefined;
-  }
-  if (typeof get === 'function') {
-    try {
-      const response = await get.call(session, {
-        path: { id: taskID },
-        query,
-        signal,
-      });
-      if (isRecord(response) && isRecord(response.data)) {
-        const selection = parseContinuationModelSelection(
-          response.data.model,
-          response.data.variant,
-        );
-        if (selection) return selection;
-      }
-    } catch {
-      // Fall through to the authoritative latest user message.
-      if (signal.aborted) return undefined;
-    }
-  }
-  if (signal.aborted) return undefined;
-
   let messages: unknown;
   try {
     messages = session.messages;
@@ -329,14 +301,23 @@ async function readCurrentChildModel(
     });
     if (!isRecord(response) || !Array.isArray(response.data)) return undefined;
 
+    // Execution messages reflect hook rewrites; Session.model can be stale.
     for (let index = response.data.length - 1; index >= 0; index -= 1) {
       const message = response.data[index];
       if (!isRecord(message) || !isRecord(message.info)) continue;
-      if (message.info.role !== 'user') continue;
-      return parseContinuationModelSelection(
-        message.info.model,
+      if (message.info.summary === true) continue;
+      const selection = parseContinuationModelSelection(
+        message.info.role === 'user'
+          ? message.info.model
+          : message.info.role === 'assistant'
+            ? {
+                providerID: message.info.providerID,
+                modelID: message.info.modelID,
+              }
+            : undefined,
         message.info.variant,
       );
+      if (selection) return selection;
     }
   } catch {
     return undefined;

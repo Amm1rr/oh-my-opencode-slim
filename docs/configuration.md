@@ -665,21 +665,33 @@ starting on a stale primary and waiting for an avoidable provider failure.
 Their own configured model array remains the ordered fallback chain after the
 inherited active model.
 
-Array-configured specialists also avoid a provider the orchestrator has
-already fallen past. When the parent's active fallback is present in the
-child's chain, that exact entry is used. Otherwise Slim prefers the child's
-first entry on the working parent provider, then the first entry outside the
-providers exhausted by the parent. OpenCode v2 uses the native per-call
-subagent model override. OpenCode v1's `task` tool has no model argument, so
-Slim sets the selected model on the child's first prompt before the host saves
-it. In both cases the delegation keeps the canonical specialist name, so
-`task` permission rules and the task tool's agent list are unchanged. On v1,
+Independent specialist chains follow the parent only on its own chain fallbacks.
+A shared primary is not an active fallback. When the parent's active fallback is
+in the child's chain, that exact entry is used. Otherwise Slim prefers the first
+entry on the working parent provider, then the first outside exhausted providers.
+OpenCode v2 uses the native per-call subagent model override. On v1, the child's
+first prompt claims a delegation intention using the host's parent link and empty
+transcript; a `task_id` resume instead targets that child's next prompt. Slim
+recalculates the live parent selection before the host saves the prompt, without
+depending on `session.created` delivery or `tool.execute.after`. Unrelated later
+prompts cannot claim creation intentions. The specialist name stays canonical, so
+`task` permissions and the task tool's agent list are unchanged. On v1,
 `fallback.continuationPolicy` controls what happens when an unpinned native
 background-completion or lifecycle turn follows a confirmed fallback. The
 default, `"retry-primary"`, lets the host try the configured primary again,
 which is useful after a quota or provider outage is repaired. Set it to
 `"stick-to-fallback"` to keep those internal continuations on the confirmed
 fallback until the next external user turn.
+
+V2 forwards configured variants as `provider/model#variant`. The host rejects
+a variant unavailable for that model; Slim does not silently drop it.
+The v2 runtime-profile bridge preserves a child's per-call model and variant
+when its provider, model ID, or variant differs from the startup selection.
+An omitted variant and `default` identify the same default variant.
+If the agent started without a model, any child model is kept, including the
+parent model v2 gives new subagents; a model added later applies after reload.
+Children still on that startup model receive the current profile, including
+hot-refreshed inference fields; captured profiles remain frozen for later turns.
 
 Model selection follows these rules:
 
