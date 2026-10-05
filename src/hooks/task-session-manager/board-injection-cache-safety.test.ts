@@ -510,6 +510,62 @@ describe('checkpoint-compatible board cache safety', () => {
       );
     }
   }, 20_000);
+
+  // ── Compaction keeps snapshots whose anchors survive (#1457) ──────────
+
+  test('keeps retained snapshots whose anchors survive a compaction', async () => {
+    const board = new BackgroundJobBoard();
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: SESSION,
+      agent: 'explorer',
+      description: 'map scheduler hooks',
+    });
+    const hook = createHook(board);
+
+    const history: unknown[] = [
+      userMsg('msg_u1', 'Coordinate the refactor work', BASE_TIME),
+    ];
+    await runTurn(hook, history);
+
+    history.push(
+      assistantMsg('msg_a1', 'step', BASE_TIME + 30_000, 0.01, 5000),
+    );
+    history.push(userMsg('msg_u2', 'Continue', BASE_TIME + 60_000));
+    board.registerLaunch({
+      taskID: 'child-2',
+      parentSessionID: SESSION,
+      agent: 'oracle',
+      description: 'review plan',
+    });
+    await runTurn(hook, history);
+
+    history.push(
+      assistantMsg('msg_a2', 'more', BASE_TIME + 90_000, 0.02, 7000),
+    );
+    history.push(userMsg('msg_u3', 'Keep going', BASE_TIME + 120_000));
+    board.registerLaunch({
+      taskID: 'child-3',
+      parentSessionID: SESSION,
+      agent: 'librarian',
+      description: 'look up docs',
+    });
+    const before = await runTurn(hook, history);
+    const boardIDs = (r: TurnResult) =>
+      summarizeInjected(r.injected as never).filter((s) =>
+        s.startsWith('BOARD('),
+      );
+    expect(boardIDs(before).length).toBe(3);
+
+    // Compaction: the oldest messages disappear, later anchors remain.
+    const compacted = history.slice(2);
+    const after = await runTurn(hook, compacted);
+
+    // Snapshots anchored on surviving messages must be replayed unchanged
+    // (same id, so same epoch and sequence), not purged into a new epoch.
+    const surviving = boardIDs(before).slice(1);
+    expect(boardIDs(after)).toEqual(surviving);
+  }, 20_000);
 });
 
 describe('backgroundJobs.boardInjection switch (#1314 thread)', () => {

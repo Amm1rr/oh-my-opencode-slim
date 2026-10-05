@@ -2060,7 +2060,13 @@ function updateBoardHistoryState(
 ): RetainedBoardSnapshotState {
   const previous = state.retainedBoardSnapshots.get(sessionID);
   if (previous && hasCompacted(previous, messages)) {
-    state.retainedBoardSnapshots.delete(sessionID);
+    const currentAnchorKeys = messageAnchorKeys(messages);
+    previous.snapshots = previous.snapshots.filter((snapshot) =>
+      currentAnchorKeys.includes(snapshot.anchorKey),
+    );
+    if (previous.snapshots.length === 0) {
+      state.retainedBoardSnapshots.delete(sessionID);
+    }
   }
 
   const current = state.retainedBoardSnapshots.get(sessionID) ?? {
