@@ -29,6 +29,10 @@ The built-in tool is Exa-backed (optionally Parallel), needs no API key, and is 
 | `context7` | Official library documentation (up-to-date) | `https://mcp.context7.com/mcp` |
 | `gh_grep` | GitHub code search via grep.app | `https://mcp.grep.app` |
 
+### User-defined entries win
+
+If you define an MCP server with the same name in `opencode.json` / `opencode.jsonc` (for example `mcp.gh_grep`), your entry is used as-is and the plugin does not inject its built-in for that key. To disable a built-in entirely without defining your own, use `disabled_mcps` in the oh-my-opencode-slim config.
+
 ---
 
 ## Default Permissions Per Agent

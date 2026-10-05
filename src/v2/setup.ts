@@ -2261,6 +2261,9 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
             }
             hostMcpSnapshot = Object.fromEntries(configured);
             for (const [name, config] of Object.entries(mcps)) {
+              // User/host-configured namespaces own their key (issue #1290):
+              // never inject a built-in over an existing entry.
+              if (Object.hasOwn(hostMcpSnapshot, name)) continue;
               draft.set(name, adaptMcpServer(config));
             }
             if (pendingAgentDraft) finalizeAgentDraft(pendingAgentDraft);

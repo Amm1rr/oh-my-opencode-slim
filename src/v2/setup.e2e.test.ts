@@ -410,6 +410,41 @@ describe('createV2Setup e2e', () => {
     expect(calls.disposed.length).toBeGreaterThan(0);
   }, 20_000);
 
+  test('skips built-in MCP injection when the host owns the namespace', async () => {
+    // User/host-configured namespaces own their key (issue #1290): a
+    // built-in must never be injected over an existing draft entry.
+    const { ctx, calls } = makeMockV2Context(projectDir);
+    const setupCtx = ctx as unknown as {
+      mcp: {
+        transform: (callback: (draft: unknown) => void) => Promise<{
+          dispose: () => void;
+        }>;
+      };
+    };
+    setupCtx.mcp.transform = async (callback) => {
+      callback({
+        list: () => [['gh_grep', { type: 'local', command: ['x'] }]],
+        get: (name: string) =>
+          name === 'gh_grep' ? { type: 'local', command: ['x'] } : undefined,
+        set: (name: string, config: Record<string, unknown>) => {
+          calls.mcpSets.push({ name, config });
+        },
+        update: () => {},
+        remove: () => {},
+      });
+      return { dispose: () => {} };
+    };
+    const cleanup = await createV2Setup()(ctx);
+    try {
+      expect(calls.mcpSets.map((m) => m.name)).toEqual(['context7']);
+      expect(calls.mcpSets.map((m) => m.config)).toEqual([
+        expect.objectContaining({ type: 'remote' }),
+      ]);
+    } finally {
+      await cleanup();
+    }
+  }, 20_000);
+
   test('bundled skills register through a lazily replayed draft', async () => {
     // Deferred execution previously prevented setup from retaining the
     // registration's explicit cleanup handle.

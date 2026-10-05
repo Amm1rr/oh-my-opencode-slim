@@ -84,7 +84,7 @@ import { createInterviewManager } from './interview';
 import { discoverPreflightSkills } from './marketplace/preflight';
 import { MarketplaceService } from './marketplace/service';
 import { resolveDesiredMarketplacePackageIds } from './marketplace/status';
-import { createBuiltinMcps } from './mcp';
+import { createBuiltinMcps, userDefinedMcpKeys } from './mcp';
 import {
   ast_grep_replace,
   ast_grep_search,
@@ -2004,9 +2004,16 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         opencodeConfig.mcp && typeof opencodeConfig.mcp === 'object'
           ? (opencodeConfig.mcp as Record<string, unknown>)
           : {};
+      // User-authored MCP entries own their key (issue #1290): drop
+      // overridden built-ins from the exported record (it feeds the v1
+      // `mcp` export and the v2 ctx.mcp.transform registration), then
+      // merge user-wins so built-ins only fill keys the user did not set.
+      for (const name of userDefinedMcpKeys(mcps, currentMcpConfig)) {
+        delete mcps[name];
+      }
       opencodeConfig.mcp = {
-        ...currentMcpConfig,
         ...structuredClone(registry.managedMcpConfig),
+        ...currentMcpConfig,
       };
       recordTuiAgentModels(
         {
