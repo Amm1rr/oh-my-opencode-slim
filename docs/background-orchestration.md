@@ -691,7 +691,19 @@ A host session is deleted only when every one of these holds:
 - immediately before the delete, a bounded host `session.get` (same timeout as
   runtime status reads) returns the session and its `parentID` equals the
   record's parent session. A read failure, timeout, missing parent, or
-  mismatch skips the delete. Two eviction paths are deliberately excluded:
+  mismatch skips the delete;
+- a bounded host `session.status` read shows the session idle (or absent
+  from the live status map). Busy, retry, malformed, or failed reads skip the
+  delete;
+- the board does not track the task again, checked both before and after the
+  host reads: a session that was re-registered, revived, adopted, or leased
+  after the eviction is live work and keeps its host session.
+
+The delete itself has the same deadline and is aborted when it expires. An
+error-returning, falsy, or timed-out delete is logged as a failed prune, not
+a success. Every read and the delete are bounded, so the in-flight prune that
+`task_revive` waits on always settles, and recovery waits on it only for a
+bounded interval before asking for a retry. Two eviction paths are deliberately excluded:
 `clearParent` (parent `session.deleted`) and explicit `drop` — both can evict
 running or unreconciled records whose host sessions are still live. There is
 no wall-clock TTL, no polling, and no startup sweep: GC runs only where

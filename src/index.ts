@@ -835,9 +835,11 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       // child session — but only a background, non-provisional child this
       // plugin launched itself (never foreground children, unattributed
       // placeholders, or adopted/restored/rehydrated sessions), and only
-      // after a bounded host read confirms its parentID still matches the
-      // record's parent. A parked child-input wait blocks removal. The
-      // prune is fire-and-forget so the synchronous board never awaits it.
+      // after bounded host reads confirm its parentID still matches the
+      // record's parent and it is idle, and the board does not track it
+      // again. A parked child-input wait blocks removal. The prune is
+      // fire-and-forget so the synchronous board never awaits it; the
+      // delete has a deadline so the pending-prune fence always settles.
       ...(runtime.backgroundJobs.pruneEvictedSessions
         ? {
             onEvictedSession: (evicted: BackgroundJobEvictedSession) => {
@@ -855,6 +857,8 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
                   directory: ctx.directory,
                   evicted,
                   readTimeoutMs: DEFAULT_RUNTIME_SESSION_STATUS_TIMEOUT_MS,
+                  deleteTimeoutMs: DEFAULT_RUNTIME_SESSION_STATUS_TIMEOUT_MS,
+                  isTracked: (taskID) => backgroundJobBoard.isTracked(taskID),
                 }),
               );
             },

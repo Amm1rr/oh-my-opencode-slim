@@ -5137,6 +5137,7 @@ describe('backgroundJobs.pruneEvictedSessions wiring', () => {
     const { hooks, coordinator } = await createHooksWithBoard({
       delete: remove,
       get,
+      status: async () => ({ data: {} }),
     });
     try {
       const onEvictedSession = gcCallbackOf(coordinator);
@@ -5182,6 +5183,7 @@ describe('backgroundJobs.pruneEvictedSessions wiring', () => {
     const { hooks, coordinator } = await createHooksWithBoard({
       delete: remove,
       get,
+      status: async () => ({ data: {} }),
     });
     try {
       const onEvictedSession = gcCallbackOf(coordinator);
@@ -5210,6 +5212,7 @@ describe('backgroundJobs.pruneEvictedSessions wiring', () => {
     const { hooks, coordinator } = await createHooksWithBoard({
       delete: remove,
       get,
+      status: async () => ({ data: {} }),
     });
     try {
       const onEvictedSession = gcCallbackOf(coordinator);
@@ -5221,6 +5224,34 @@ describe('backgroundJobs.pruneEvictedSessions wiring', () => {
       onEvictedSession?.(evicted());
       await pendingSessionPrune('ses_gc_child');
       expect(get).toHaveBeenCalledTimes(2);
+      expect(remove).not.toHaveBeenCalled();
+    } finally {
+      await hooks.dispose?.();
+    }
+  });
+
+  test('a session the board tracks again is never deleted', async () => {
+    const remove = mock(async () => ({}));
+    const get = mock(async () => ({
+      data: { id: 'ses_gc_child', parentID: 'parent-1' },
+    }));
+    const { hooks, coordinator } = await createHooksWithBoard({
+      delete: remove,
+      get,
+      status: async () => ({ data: {} }),
+    });
+    try {
+      const board = (coordinator as unknown as { board: ProductionBoard })
+        .board;
+      // Revived / re-registered after the eviction snapshot.
+      board.registerLaunch({
+        taskID: 'ses_gc_child',
+        parentSessionID: 'parent-1',
+        agent: 'fixer',
+        background: true,
+      });
+      gcCallbackOf(coordinator)?.(evicted());
+      await pendingSessionPrune('ses_gc_child');
       expect(remove).not.toHaveBeenCalled();
     } finally {
       await hooks.dispose?.();

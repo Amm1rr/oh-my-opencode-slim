@@ -1183,6 +1183,11 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     return this.jobs.get(taskID);
   }
 
+  /** True while the board holds a record or a live lease for the task. */
+  isTracked(taskID: string): boolean {
+    return this.jobs.has(taskID) || this.liveLeases.has(taskID);
+  }
+
   field<K extends keyof BackgroundJobRecord>(
     taskID: string,
     key: K,
