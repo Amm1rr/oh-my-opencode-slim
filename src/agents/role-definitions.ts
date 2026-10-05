@@ -4,10 +4,6 @@ import {
 } from '../config/agent-roles';
 import type { AgentDefinition } from './orchestrator';
 import {
-  type AgentPermission,
-  createReadOnlyAgentPermission,
-} from './permissions';
-import {
   DESIGNER_PROMPT,
   EXPLORER_PROMPT,
   FIXER_PROMPT,
@@ -66,42 +62,6 @@ export const ROLE_DEFINITIONS: Readonly<
   }),
 });
 
-/** Roles whose contract is read-only: they inspect and advise, never mutate.
- * The matrix is built into the definition so the read-only boundary holds
- * with zero configuration; an explicit agents.<name>.permission in the
- * plugin config still replaces it (existing ?? semantics). MCP keys are
- * deliberately NOT baked here: the registry derives every <mcp>_* rule
- * from the effective agent mcps list (user-narrowable), and a baked allow
- * would defeat that narrowing because the registry fill only writes
- * absent keys. */
-export const READ_ONLY_ROLE_IDS: ReadonlySet<SpecialistRole> = new Set([
-  'explorer',
-  'librarian',
-  'oracle',
-  'observer',
-]);
-
-function createRolePermission(
-  role: SpecialistRole,
-): AgentPermission | undefined {
-  if (!READ_ONLY_ROLE_IDS.has(role)) return undefined;
-  return {
-    ...createReadOnlyAgentPermission(),
-    // The blanket read allow must re-state the host's env-file safeguards
-    // AFTER itself: rules evaluate last-match-wins, so a bare read: allow
-    // would silently shadow the .env ask defaults and let the advisory
-    // roles read secrets without a prompt.
-    read: {
-      '*': 'allow',
-      '*.env': 'ask',
-      '*.env.*': 'ask',
-      '*.env.example': 'allow',
-    },
-    webfetch: 'allow',
-    websearch: 'allow',
-  };
-}
-
 export function createRoleAgent(
   role: SpecialistRoleDefinition,
   model: string,
@@ -113,11 +73,10 @@ export function createRoleAgent(
     : customAppendPrompt
       ? `${role.prompt}\n\n${customAppendPrompt}`
       : role.prompt;
-  const permission = createRolePermission(role.id);
 
   return {
     name: role.id,
     description: role.description,
-    config: permission ? { model, prompt, permission } : { model, prompt },
+    config: { model, prompt },
   };
 }

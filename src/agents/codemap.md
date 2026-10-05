@@ -13,12 +13,12 @@ Each agent is a **prompt-driven specialist** with a factory function that create
 | Agent | Factory | Role | Permissions | Model Default |
 |-------|---------|------|-------------|---------------|
 | **orchestrator** | `createOrchestratorAgent()` | Workflow manager that delegates tasks to specialists | Primary agent with full tool access | Resolved from config or runtime preset |
-| **explorer** | `createExplorerAgent()` | Fast codebase search and pattern matching | Enforced read-only matrix (inspection + web research) | DEFAULT_MODELS.explorer |
-| **librarian** | `createLibrarianAgent()` | External documentation and library research | Enforced read-only matrix (inspection + web research) | DEFAULT_MODELS.librarian |
-| **oracle** | `createOracleAgent()` | Strategic technical advisor and code reviewer | Enforced read-only matrix (inspection + web research) | DEFAULT_MODELS.oracle |
+| **explorer** | `createExplorerAgent()` | Fast codebase search and pattern matching | Read-only (glob, grep, ast_grep_search) | DEFAULT_MODELS.explorer |
+| **librarian** | `createLibrarianAgent()` | External documentation and library research | Read-only (context7, gh_grep) | DEFAULT_MODELS.librarian |
+| **oracle** | `createOracleAgent()` | Strategic technical advisor and code reviewer | Read-only (read, glob, grep, ast_grep_search) | DEFAULT_MODELS.oracle |
 | **designer** | `createDesignerAgent()` | UI/UX design, review, and implementation | Read/write (read, glob, grep, write, edit) | DEFAULT_MODELS.designer |
 | **fixer** | `createFixerAgent()` | Fast implementation specialist for bounded tasks | Read/write (read, glob, grep, write, edit) | DEFAULT_MODELS.fixer |
-| **observer** | `createObserverAgent()` | Visual analysis specialist (images, PDFs, diagrams) | Enforced read-only matrix (inspection + web research) | DEFAULT_MODELS.observer |
+| **observer** | `createObserverAgent()` | Visual analysis specialist (images, PDFs, diagrams) | Read-only (read, glob, grep, ast_grep_search) | DEFAULT_MODELS.observer |
 | **council** | `createCouncilAgent()` | Multi-model consensus synthesis (read-only, no tools) | Read-only (council permission) | DEFAULT_MODELS.council |
 | **councillor** | Created dynamically by `buildCouncillorAgents()` | Read-only council advisor; registered per preset seat as `councillor-<name>` | Read-only (read, glob, grep, ast_grep_search) | Inherited from council preset |
 
@@ -28,7 +28,6 @@ Each agent is a **prompt-driven specialist** with a factory function that create
 - **User overrides**: From `~/.config/opencode/oh-my-opencode-slim.json` via `loadAgentPrompt()`
 - **Agent colors**: Optional per-agent hex or theme-color overrides; no defaults (colorless agents get the host TUI's distinct palette colors)
 - **Permission wildcards**: Applied via `applyDefaultPermissions()` in `index.ts`
-- **Read-only role matrices**: `createRolePermission()` (`role-definitions.ts`) bakes the enforced matrix into explorer/librarian/oracle/observer — the wildcard-deny base plus read/glob/grep/lsp/list/codesearch/ast_grep_search and webfetch/websearch allows. MCP keys are deliberately not baked: the registry derives every `<mcp>_*` rule from the effective `mcps` list, so user narrowing stays authoritative. An explicit `agents.<name>.permission` replaces the matrix wholesale.
 - **Model resolution**: Supports string models, explicit `inheritModelFrom` policies, and priority-ordered arrays (`_modelArray`) for runtime fallback
 - **Skill permissions**: Per-agent MCP and tool access controlled via `getSkillPermissionsForAgent()`
 - **Council synthesis**: Uses `createSynthesisOnlyPermission()` to block tool calls while allowing synthesis from councillor responses
