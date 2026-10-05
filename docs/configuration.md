@@ -963,7 +963,7 @@ When a user supplies `permission` and also uses the `skills` or `mcps` arrays on
 
 1. **User-supplied `permission` is the base layer.**
 2. **Plugin-generated rules from the `skills` array override `permission.skill`** — the `skills` array is authoritative for skill gating.
-3. **Plugin-generated rules from the `mcps` array set `permission.<mcp>_*` keys** — the `mcps` array is authoritative for MCP gating.
+3. **Plugin-generated rules from the `mcps` array fill the `permission.<mcp>_*` keys you have not set** — an explicit `<mcp>_*` entry in `permission` wins over the `mcps` array.
 4. **User-supplied keys for standard tools** (`edit`, `bash`, `webfetch`, `task`, etc.) survive the merge untouched.
 
 Use the `skills`/`mcps` arrays for skill and MCP gating. Use `permission` for everything else (file access, bash, web, task delegation).
