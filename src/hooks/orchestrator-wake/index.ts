@@ -49,6 +49,7 @@ import {
   releaseWakeSessionHolder,
   reserveWakeBodyOccurrence,
   retryAfterWakeEvaluation,
+  rollbackWakeBodyOccurrence,
   rollbackWakeReservation,
   setObservedWakeModel,
   tryBeginWakeEvaluation,
@@ -238,12 +239,12 @@ export const WAKE_REPEAT_CORES: ReadonlyMap<string, string> = new Map([
   ],
   [
     ORCHESTRATOR_CHILDREN_WAKE_TEXT,
-    'Check on unfinished background child sessions and unreconciled jobs.',
+    'Check on unfinished background child sessions and unreconciled jobs; await running agents; assess a stuck agent before canceling or respawning.',
   ],
 ]);
 
 export function wakeRepeatMarker(core: string, occurrence: number): string {
-  return `<system-reminder>\nRepeat wake #${occurrence} (nothing new). ${core} Do not respond to this reminder.\n</system-reminder>`;
+  return `<system-reminder>\nRepeat wake #${occurrence}: ${core} Do not respond to this reminder.\n</system-reminder>`;
 }
 
 /** After this many successful wakes with an unchanged fingerprint, stop. */
@@ -1715,6 +1716,10 @@ export function createOrchestratorWakeScheduler(
     }
     localWakeOwners.set(sessionID, owner);
 
+    // #1411: the delta-less wake body reserved by this attempt, if any. Kept
+    // outside the try so a failed send can roll the reservation back.
+    let reservedBodyText: string | undefined;
+
     try {
       const snapshot =
         wakeMode === 'children'
@@ -1988,8 +1993,8 @@ export function createOrchestratorWakeScheduler(
       // #1411: collapse byte-identical delta-less wake bodies into a short
       // repeat marker (child-input wakes are exempt: their caveat template
       // must always travel verbatim). Delta-bearing wakes keep the full
-      // template. No reservation to roll back for the occurrence map, so a
-      // failed send leaving the occurrence counted is acceptable.
+      // template. The occurrence is rolled back on a failed send so the
+      // retry delivers the full text rather than a phantom repeat.
       let bodyText = recoveryDetails
         ? `${wakeText}\n${recoveryDetails}`
         : wakeText;
@@ -2001,6 +2006,7 @@ export function createOrchestratorWakeScheduler(
           sessionID,
           wakeText,
         );
+        reservedBodyText = wakeText;
         const core = repeat ? WAKE_REPEAT_CORES.get(wakeText) : undefined;
         if (core) {
           bodyText = wakeRepeatMarker(core, occurrence);
@@ -2121,8 +2127,13 @@ export function createOrchestratorWakeScheduler(
     } catch (error) {
       // Only accepted sends consume the cap. Preserve the reservation's
       // committed marker so waiters do not immediately retry; the timer
-      // controls cadence. Pending recovery deltas stay queued.
+      // controls cadence. Pending recovery deltas stay queued. A delta-less
+      // body occurrence this attempt reserved is undone so the retry sends
+      // the full text again.
       rollbackWakeReservation(sessionID, owner);
+      if (reservedBodyText !== undefined) {
+        rollbackWakeBodyOccurrence(sessionID, reservedBodyText);
+      }
       clearExpectingWakeBusy(sessionID);
       if (state.generation === generation && reason !== 'periodic') {
         state.retryReason = reason;

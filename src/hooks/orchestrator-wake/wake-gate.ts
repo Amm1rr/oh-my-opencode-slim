@@ -43,7 +43,7 @@ function getHolders(): Map<string, Set<symbol>> {
 }
 
 function getStore(): WakeGateStore {
-  return getGlobalStore<WakeGateStore>(STORE_KEY, () => ({
+  const store = getGlobalStore<WakeGateStore>(STORE_KEY, () => ({
     progress: new Map(),
     inFlight: new Map(),
     releaseWaiters: new Map(),
@@ -51,6 +51,11 @@ function getStore(): WakeGateStore {
     suppressedDuplicateWakes: new Map(),
     order: [],
   }));
+  // In-process reload can leave a pre-#1411 store object on the global key;
+  // backfill so the delta-less wake path cannot crash on missing maps.
+  store.deliveredDeltalessWakeTexts ??= new Map();
+  store.suppressedDuplicateWakes ??= new Map();
+  return store;
 }
 
 function touchOrder(sessionID: string): void {
@@ -202,6 +207,31 @@ export function reserveWakeBodyOccurrence(
 /** #1411 observability: suppressed duplicate wake count for a session. */
 export function getSuppressedDuplicateWakes(sessionID: string): number {
   return getStore().suppressedDuplicateWakes.get(sessionID) ?? 0;
+}
+
+/**
+ * #1411: undo the occurrence a failed send reserved, so the retry delivers
+ * the full text instead of a phantom repeat. Removes the sole occurrence
+ * outright; an occurrence that was a counted repeat also undoes its
+ * suppression count (floored at 0).
+ */
+export function rollbackWakeBodyOccurrence(
+  sessionID: string,
+  wakeText: string,
+): void {
+  const store = getStore();
+  const counts = store.deliveredDeltalessWakeTexts.get(sessionID);
+  const count = counts?.get(wakeText) ?? 0;
+  if (count <= 0 || !counts) return;
+  if (count === 1) {
+    counts.delete(wakeText);
+    return;
+  }
+  counts.set(wakeText, count - 1);
+  store.suppressedDuplicateWakes.set(
+    sessionID,
+    Math.max(0, (store.suppressedDuplicateWakes.get(sessionID) ?? 0) - 1),
+  );
 }
 
 /** A failed send did not make progress. Only its current in-flight owner may

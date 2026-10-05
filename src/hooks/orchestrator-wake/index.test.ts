@@ -43,6 +43,7 @@ import {
   reserveWakeBodyOccurrence,
   resetOrchestratorWakeGateForTests,
   retryAfterWakeEvaluation,
+  rollbackWakeBodyOccurrence,
   rollbackWakeReservation,
   tryBeginWakeEvaluation,
 } from './wake-gate';
@@ -3720,7 +3721,7 @@ describe('evaluate verdict observability (INFO logs)', () => {
   });
 });
 describe('#1411 wake body dedupe', () => {
-  const WAKE_REPEAT_MARKER_OCC2 = `<system-reminder>\nRepeat wake #2 (nothing new). Finish any incomplete TODOs; await running agents. Do not respond to this reminder.\n</system-reminder>`;
+  const WAKE_REPEAT_MARKER_OCC2 = `<system-reminder>\nRepeat wake #2: Finish any incomplete TODOs; await running agents. Do not respond to this reminder.\n</system-reminder>`;
 
   test('repeat marker is strictly shorter than every mapped full text', () => {
     for (const [text, core] of WAKE_REPEAT_CORES) {
@@ -3909,5 +3910,102 @@ describe('#1411 wake body dedupe', () => {
     expect(partText(promptAsync, 2)).toBe(
       `${ORCHESTRATOR_WAKE_TEXT}\n<!-- SLIM_INTERNAL_INITIATOR -->`,
     );
+  });
+
+  test('failed send rolls the occurrence back so the retry sends full text', async () => {
+    let attempt = 0;
+    const promptAsync = mock(async () => {
+      attempt += 1;
+      if (attempt === 1) throw new Error('send failed');
+      return {};
+    });
+    const { scheduler } = createScheduler({
+      intervalMs: 60_000,
+      sessionClient: makeClient({ promptAsync }),
+    });
+
+    await scheduler.event({
+      event: { type: 'session.idle', properties: { sessionID: 'p1' } },
+    });
+    await clock.advance(60_000);
+    expect(promptAsync).toHaveBeenCalledTimes(1);
+    // A failed first send counts no suppression.
+    expect(getSuppressedDuplicateWakes('p1')).toBe(0);
+    // The failed send must not leave the full text marked as delivered.
+    expect(reserveWakeBodyOccurrence('p1', ORCHESTRATOR_WAKE_TEXT)).toEqual({
+      repeat: false,
+      occurrence: 1,
+    });
+    resetOrchestratorWakeGateForTests();
+
+    // Retry: the rollback means the next attempt is occurrence 1 again, so it
+    // delivers the full template, never a "repeat" marker.
+    await scheduler.event({
+      event: {
+        type: 'session.status',
+        properties: { sessionID: 'p1', status: { type: 'busy' } },
+      },
+    });
+    await scheduler.event({
+      event: { type: 'session.idle', properties: { sessionID: 'p1' } },
+    });
+    await clock.advance(60_000);
+    expect(promptAsync).toHaveBeenCalledTimes(2);
+    expect(partText(promptAsync, 1)).toBe(
+      `${ORCHESTRATOR_WAKE_TEXT}\n<!-- SLIM_INTERNAL_INITIATOR -->`,
+    );
+  });
+
+  test('rollbackWakeBodyOccurrence removes the sole occurrence and undoes a counted repeat', () => {
+    expect(reserveWakeBodyOccurrence('p1', ORCHESTRATOR_WAKE_TEXT)).toEqual({
+      repeat: false,
+      occurrence: 1,
+    });
+    rollbackWakeBodyOccurrence('p1', ORCHESTRATOR_WAKE_TEXT);
+    expect(reserveWakeBodyOccurrence('p1', ORCHESTRATOR_WAKE_TEXT)).toEqual({
+      repeat: false,
+      occurrence: 1,
+    });
+
+    expect(reserveWakeBodyOccurrence('p1', ORCHESTRATOR_WAKE_TEXT)).toEqual({
+      repeat: true,
+      occurrence: 2,
+    });
+    expect(getSuppressedDuplicateWakes('p1')).toBe(1);
+    rollbackWakeBodyOccurrence('p1', ORCHESTRATOR_WAKE_TEXT);
+    expect(getSuppressedDuplicateWakes('p1')).toBe(0);
+    expect(reserveWakeBodyOccurrence('p1', ORCHESTRATOR_WAKE_TEXT)).toEqual({
+      repeat: true,
+      occurrence: 2,
+    });
+
+    // No-op on an unknown text.
+    rollbackWakeBodyOccurrence('p1', ORCHESTRATOR_CHILDREN_WAKE_TEXT);
+  });
+
+  test('a store left over from before this change is backfilled, not crashed on', () => {
+    const key = Symbol.for('oh-my-opencode-slim.orchestrator-wake-gate');
+    resetOrchestratorWakeGateForTests();
+    const store = (
+      globalThis as unknown as Record<symbol, Record<string, unknown>>
+    )[key] as Record<string, unknown>;
+    delete store.deliveredDeltalessWakeTexts;
+    delete store.suppressedDuplicateWakes;
+
+    expect(reserveWakeBodyOccurrence('p1', ORCHESTRATOR_WAKE_TEXT)).toEqual({
+      repeat: false,
+      occurrence: 1,
+    });
+    expect(getSuppressedDuplicateWakes('p1')).toBe(0);
+  });
+
+  test('children repeat marker keeps the await/assess guidance', () => {
+    const core = WAKE_REPEAT_CORES.get(ORCHESTRATOR_CHILDREN_WAKE_TEXT);
+    expect(core).toContain('await running agents');
+    expect(core).toContain('assess a stuck agent');
+    expect(
+      ORCHESTRATOR_CHILDREN_WAKE_TEXT.length -
+        wakeRepeatMarker(core ?? '', 2).length,
+    ).toBeGreaterThan(0);
   });
 });

@@ -100,7 +100,10 @@ run by default). The v1 code path is unchanged.
   - #1411: `reserveWakeBodyOccurrence` tracks per-session delivered
     delta-less wake bodies with occurrence counts and bumps
     `suppressedDuplicateWakes` on repeats (`getSuppressedDuplicateWakes`
-    reads it). No rollback seam: a failed send keeps the occurrence counted.
+    reads it). `rollbackWakeBodyOccurrence` undoes a failed send's
+    reservation so the retry delivers the full text instead of a phantom
+    repeat. `getStore()` backfills the two maps so a store object left by a
+    pre-#1411 in-process reload cannot crash the delta-less path.
   - Bounded at `MAX_TRACKED_SESSIONS` (256) with insertion-ordered eviction.
 
 ## Flow
