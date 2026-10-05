@@ -119,10 +119,18 @@ session: no wake, no new run, no interrupt, no agent/model/variant switch.
 task_message(sessionID: "<id>", message: "<concise amendment>", delivery: "steer")
 ```
 
-Message lease and timeout protections are unchanged in both modes. A success
-response confirms only transport acceptance, not consumption: the host
+Message lease and timeout protections are unchanged in both modes.
+For a queued v2 `task_revive`, steering is refused until the continuation's
+exact user-message ID appears in the host transcript. Queue admission and a
+`running` job-board state do not establish that the continuation has started;
+otherwise steering could reach the preceding execution. A failed or timed-out
+transcript read sends no message and releases the message lease. Use
+`task_status` to inspect the continuation before retrying. Default queue delivery
+does not require this check.
+
+A success response confirms only transport acceptance, not consumption: the host
 admitted the input, with no proof the child read it. Consumption timing is
-host-dependent and not verified against a live host; a single step's multiple
+host-dependent; a single step's multiple
 tool calls are not individually interleavable. Host errors are not retried
 with weaker semantics. A pending write still retains
 its message lease after timeout; this change does not alter that quarantine.

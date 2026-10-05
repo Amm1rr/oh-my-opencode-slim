@@ -9,6 +9,7 @@ import {
 } from '../hooks/task-session-manager/continuation-model-selection';
 import { pluginDisposedMessage } from '../hooks/task-session-manager/session-recovery';
 import type { BackgroundJobStore } from '../utils/background-job-store';
+import { fetchChildTranscript } from '../utils/child-transcript';
 import { isRecord } from '../utils/guards';
 import { getClient } from '../utils/opencode-client';
 import { OperationTimeoutError, withTimeout } from '../utils/session';
@@ -39,6 +40,10 @@ export function createTaskMessageTool(options: {
   input: PluginInput;
   backgroundJobBoard: BackgroundJobStore;
   messageTimeoutMs?: number;
+  promptMessageIDFor?: (
+    taskID: string,
+    generation: number,
+  ) => string | undefined;
   resolveCanonicalTaskRef?: CanonicalTaskResolver;
   isDisposed?: () => boolean;
 }): Record<'task_message', ToolDefinition> {
@@ -128,6 +133,47 @@ export function createTaskMessageTool(options: {
           options.messageTimeoutMs ?? DEFAULT_MESSAGE_TIMEOUT_MS,
         );
         const deadline = Date.now() + messageTimeoutMs;
+        if (hostFlavor === 'v2' && args.delivery === 'steer') {
+          const promptMessageID = options.promptMessageIDFor?.(
+            lease.taskID,
+            lease.generation,
+          );
+          if (promptMessageID) {
+            // A running board generation may still be queued behind an old
+            // host execution. Admission alone does not make it steerable.
+            const controller = new AbortController();
+            try {
+              const response = await withTimeout(
+                fetchChildTranscript(
+                  getClient(options.input),
+                  lease.taskID,
+                  options.input.directory,
+                  undefined,
+                  controller.signal,
+                ),
+                messageTimeoutMs,
+                'Task steering continuation lookup timed out; no message was sent',
+              );
+              if (
+                !isRecord(response) ||
+                !Array.isArray(response.data) ||
+                !response.data.some(
+                  (entry) =>
+                    isRecord(entry) &&
+                    isRecord(entry.info) &&
+                    entry.info.id === promptMessageID &&
+                    entry.info.role === 'user',
+                )
+              ) {
+                throw new Error(
+                  `Task ${requested} has an unconfirmed queued continuation; no steering message was sent. Use task_status to inspect it before retrying.`,
+                );
+              }
+            } finally {
+              controller.abort();
+            }
+          }
+        }
         let modelSelection: ContinuationModelSelection | undefined;
         // v2 prompts inherit persisted session selection; per-call overrides
         // cannot be represented atomically. Keep the v1 lookup/pin unchanged.
