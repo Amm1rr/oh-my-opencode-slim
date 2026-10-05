@@ -512,6 +512,12 @@ Finish any incomplete TODOs. Await running agents; if one appears stuck, assess 
 </system-reminder>
 ```
 
+If the same delta-less wake body was already delivered in the session, the
+repeat sends a strictly shorter, non-identical marker instead
+(`Repeat wake #N (nothing new).`) so identical reminder bytes are not
+persisted repeatedly; delta-bearing wakes and child-input asks always carry
+the full template.
+
 The scheduler does **not** perform automatic cancellation and does not rely on
 the local job board. When no incomplete TODOs remain, it ends the current idle
 spell and stops polling until new activity.

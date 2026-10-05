@@ -17,9 +17,11 @@ import {
   CHILD_STALENESS_INTERVALS,
   childUpdateEvidenceMs,
   createOrchestratorWakeScheduler,
+  formatChildInputWaitDelta,
   formatStoppedJobDelta,
   isWakeChildActive,
   mapWakeChild,
+  ORCHESTRATOR_CHILD_INPUT_WAKE_TEXT,
   ORCHESTRATOR_CHILDREN_WAKE_TEXT,
   ORCHESTRATOR_STOPPED_JOB_WAKE_TEXT,
   ORCHESTRATOR_STOPPED_JOB_WAKE_TEXT_NO_BOARD,
@@ -30,11 +32,15 @@ import {
   STOPPED_RECOVERY_OVERFLOW_TEXT_NO_BOARD,
   STOPPED_RECOVERY_QUEUE_CAP,
   STOPPED_RECOVERY_WAKE_CHUNK,
+  WAKE_REPEAT_CORES,
+  wakeRepeatMarker,
 } from './index';
 import {
   commitWakeReservation,
+  getSuppressedDuplicateWakes,
   getWakeProgress,
   releaseWakeEvaluation,
+  reserveWakeBodyOccurrence,
   resetOrchestratorWakeGateForTests,
   retryAfterWakeEvaluation,
   rollbackWakeReservation,
@@ -3711,5 +3717,197 @@ describe('evaluate verdict observability (INFO logs)', () => {
     } finally {
       spy.mockRestore();
     }
+  });
+});
+describe('#1411 wake body dedupe', () => {
+  const WAKE_REPEAT_MARKER_OCC2 = `<system-reminder>\nRepeat wake #2 (nothing new). Finish any incomplete TODOs; await running agents. Do not respond to this reminder.\n</system-reminder>`;
+
+  test('repeat marker is strictly shorter than every mapped full text', () => {
+    for (const [text, core] of WAKE_REPEAT_CORES) {
+      for (const occurrence of [2, 10]) {
+        const saved = text.length - wakeRepeatMarker(core, occurrence).length;
+        expect(saved).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  /** Drive two legitimate delta-less periodic deliveries for one session
+   * (same fingerprint, within the unchanged cap) — the L1774 pattern. */
+  async function deliverTwoPeriodicWakes(promptAsync: ReturnType<typeof mock>) {
+    const { scheduler } = createScheduler({
+      intervalMs: 60_000,
+      sessionClient: makeClient({ promptAsync }),
+    });
+    await scheduler.event({
+      event: { type: 'session.idle', properties: { sessionID: 'p1' } },
+    });
+    await clock.advance(60_000);
+    expect(promptAsync).toHaveBeenCalledTimes(1);
+    await scheduler.event({
+      event: {
+        type: 'session.status',
+        properties: { sessionID: 'p1', status: { type: 'busy' } },
+      },
+    });
+    await scheduler.event({
+      event: { type: 'session.idle', properties: { sessionID: 'p1' } },
+    });
+    await clock.advance(60_000);
+    expect(promptAsync).toHaveBeenCalledTimes(2);
+    return scheduler;
+  }
+
+  function partText(
+    promptAsync: ReturnType<typeof mock>,
+    index: number,
+  ): string | undefined {
+    const call = (
+      promptAsync.mock.calls as unknown as Array<
+        [{ body: { parts: Array<{ text: string }> } }]
+      >
+    )[index]?.[0];
+    return call?.body.parts[0]?.text;
+  }
+
+  test('second identical delta-less wake delivers a repeat marker, not the same body', async () => {
+    const promptAsync = mock(async () => ({}));
+    await deliverTwoPeriodicWakes(promptAsync);
+
+    const first = partText(promptAsync, 0);
+    const second = partText(promptAsync, 1);
+    expect(first).toBe(
+      `${ORCHESTRATOR_WAKE_TEXT}\n<!-- SLIM_INTERNAL_INITIATOR -->`,
+    );
+    expect(second).not.toBe(first);
+    expect(second).toBe(
+      `${WAKE_REPEAT_MARKER_OCC2}\n<!-- SLIM_INTERNAL_INITIATOR -->`,
+    );
+    expect(second).toContain('Repeat wake #2');
+  });
+
+  test('delta-bearing stopped-job wake keeps the full template and does not bump the occurrence map', async () => {
+    const promptAsync = mock(async () => ({}));
+    const { scheduler } = createScheduler({
+      sessionClient: makeClient({
+        todos: [],
+        promptAsync,
+        childrenData: [{ id: 'child-2' }],
+        statusData: { 'child-2': { type: 'busy' } },
+      }),
+    });
+
+    scheduler.triggerStoppedJobRecovery(
+      'p1',
+      formatStoppedJobDelta({
+        alias: 'ora-7',
+        taskID: 'ses_x',
+        generation: 3,
+        state: 'stopped',
+        reason: 'stopped without a terminal result',
+      }),
+      'ses_x:3',
+    );
+    await clock.advance(0);
+
+    expect(promptAsync).toHaveBeenCalledTimes(1);
+    const text = partText(promptAsync, 0);
+    expect(text).toContain(ORCHESTRATOR_STOPPED_JOB_WAKE_TEXT);
+    expect(text).toContain('task: ses_x');
+    expect(text).not.toContain('Repeat wake #');
+    expect(getSuppressedDuplicateWakes('p1')).toBe(0);
+    // Side-state read: nothing was recorded for this text by the wake.
+    expect(
+      reserveWakeBodyOccurrence('p1', ORCHESTRATOR_STOPPED_JOB_WAKE_TEXT),
+    ).toEqual({ repeat: false, occurrence: 1 });
+  });
+
+  test('child-input wake keeps the full caveat template and is exempt from occurrence tracking', async () => {
+    const promptAsync = mock(async () => ({}));
+    const { scheduler } = createScheduler({
+      sessionClient: makeClient({
+        todos: [],
+        promptAsync,
+        childrenData: [{ id: 'child-2' }],
+        statusData: { 'child-2': { type: 'busy' } },
+      }),
+    });
+
+    scheduler.triggerChildInputWaitWake(
+      'p1',
+      formatChildInputWaitDelta({
+        alias: 'fix-1',
+        taskID: 'ses_child1',
+        kind: 'question',
+        requestID: 'que_1',
+        detail: 'request: que_1\nkind: question\nquestion: Which env?',
+      }),
+      'ses_child1:que_1',
+    );
+    await clock.advance(0);
+
+    expect(promptAsync).toHaveBeenCalledTimes(1);
+    const text = partText(promptAsync, 0);
+    expect(text).toContain(ORCHESTRATOR_CHILD_INPUT_WAKE_TEXT);
+    expect(text).toContain('Which env?');
+    expect(text).not.toContain('Repeat wake #');
+    expect(getSuppressedDuplicateWakes('p1')).toBe(0);
+    expect(
+      reserveWakeBodyOccurrence('p1', ORCHESTRATOR_CHILD_INPUT_WAKE_TEXT),
+    ).toEqual({ repeat: false, occurrence: 1 });
+  });
+
+  test('suppressed counter increments and the suppression log fires', async () => {
+    const entries: Array<{ message: string; data: unknown }> = [];
+    const spy = spyOn(loggerModule, 'log').mockImplementation(
+      (message: string, data?: unknown) => {
+        entries.push({ message, data });
+      },
+    );
+    try {
+      const promptAsync = mock(async () => ({}));
+      await deliverTwoPeriodicWakes(promptAsync);
+
+      expect(getSuppressedDuplicateWakes('p1')).toBe(1);
+      const suppression = entries.find(
+        (entry) =>
+          entry.message ===
+          '[orchestrator-wake] duplicate wake body suppressed',
+      );
+      expect(suppression?.data).toMatchObject({
+        sessionID: 'p1',
+        occurrence: 2,
+        suppressedTotal: 1,
+      });
+      expect(
+        (suppression?.data as { charsSaved?: number } | undefined)?.charsSaved,
+      ).toBe(ORCHESTRATOR_WAKE_TEXT.length - WAKE_REPEAT_MARKER_OCC2.length);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('resetOrchestratorWakeGateForTests clears occurrence state', async () => {
+    const promptAsync = mock(async () => ({}));
+    const scheduler = await deliverTwoPeriodicWakes(promptAsync);
+    expect(partText(promptAsync, 1)).toContain('Repeat wake #2');
+
+    resetOrchestratorWakeGateForTests();
+
+    // Re-arm the idle window on the same scheduler: with the gate reset the
+    // next delta-less wake delivers the full text again (occurrence 1).
+    await scheduler.event({
+      event: {
+        type: 'session.status',
+        properties: { sessionID: 'p1', status: { type: 'busy' } },
+      },
+    });
+    await scheduler.event({
+      event: { type: 'session.idle', properties: { sessionID: 'p1' } },
+    });
+    await clock.advance(60_000);
+    expect(promptAsync).toHaveBeenCalledTimes(3);
+    expect(partText(promptAsync, 2)).toBe(
+      `${ORCHESTRATOR_WAKE_TEXT}\n<!-- SLIM_INTERNAL_INITIATOR -->`,
+    );
   });
 });

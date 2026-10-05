@@ -40,12 +40,14 @@ import {
   clearWakeSession,
   commitWakeReservation,
   getObservedWakeModel,
+  getSuppressedDuplicateWakes,
   getWakeProgress,
   isExpectingWakeBusy,
   noteHostProgress,
   rearmWakeProgress,
   releaseWakeEvaluation,
   releaseWakeSessionHolder,
+  reserveWakeBodyOccurrence,
   retryAfterWakeEvaluation,
   rollbackWakeReservation,
   setObservedWakeModel,
@@ -215,6 +217,34 @@ export const CHILD_INPUT_OVERFLOW_TEXT =
  * children and unreconciled jobs instead of the todo list. */
 export const ORCHESTRATOR_CHILDREN_WAKE_TEXT =
   '<system-reminder>\nCheck on unfinished background child sessions and unreconciled jobs. Await running agents; if one appears stuck, assess it and cancel/respawn only when justified. Do not respond to this reminder.\n</system-reminder>';
+
+/** #1411: short core per delta-less wake template, used to build the
+ * non-identical repeat marker when the same body was already delivered in
+ * the session. Unmapped delta-less texts keep the full template. The
+ * static wake texts themselves are never modified. Exported for unit tests
+ * (marker length assertions). */
+export const WAKE_REPEAT_CORES: ReadonlyMap<string, string> = new Map([
+  [
+    ORCHESTRATOR_WAKE_TEXT,
+    'Finish any incomplete TODOs; await running agents.',
+  ],
+  [
+    ORCHESTRATOR_STOPPED_JOB_WAKE_TEXT,
+    'A background job stopped without a terminal result; consult the Background Job Board and recover or reroute the work as needed.',
+  ],
+  [
+    ORCHESTRATOR_STOPPED_JOB_WAKE_TEXT_NO_BOARD,
+    'A background job stopped without a terminal result; check task_status for the stopped task and recover or reroute the work as needed.',
+  ],
+  [
+    ORCHESTRATOR_CHILDREN_WAKE_TEXT,
+    'Check on unfinished background child sessions and unreconciled jobs.',
+  ],
+]);
+
+export function wakeRepeatMarker(core: string, occurrence: number): string {
+  return `<system-reminder>\nRepeat wake #${occurrence} (nothing new). ${core} Do not respond to this reminder.\n</system-reminder>`;
+}
 
 /** After this many successful wakes with an unchanged fingerprint, stop. */
 export const ORCHESTRATOR_WAKE_UNCHANGED_CAP = 2;
@@ -1955,14 +1985,37 @@ export function createOrchestratorWakeScheduler(
       ]
         .filter(Boolean)
         .join('\n');
+      // #1411: collapse byte-identical delta-less wake bodies into a short
+      // repeat marker (child-input wakes are exempt: their caveat template
+      // must always travel verbatim). Delta-bearing wakes keep the full
+      // template. No reservation to roll back for the occurrence map, so a
+      // failed send leaving the occurrence counted is acceptable.
+      let bodyText = recoveryDetails
+        ? `${wakeText}\n${recoveryDetails}`
+        : wakeText;
+      if (
+        recoveryDetails === '' &&
+        wakeText !== ORCHESTRATOR_CHILD_INPUT_WAKE_TEXT
+      ) {
+        const { repeat, occurrence } = reserveWakeBodyOccurrence(
+          sessionID,
+          wakeText,
+        );
+        const core = repeat ? WAKE_REPEAT_CORES.get(wakeText) : undefined;
+        if (core) {
+          bodyText = wakeRepeatMarker(core, occurrence);
+          log('[orchestrator-wake] duplicate wake body suppressed', {
+            sessionID,
+            occurrence,
+            suppressedTotal: getSuppressedDuplicateWakes(sessionID),
+            charsSaved: wakeText.length - bodyText.length,
+          });
+        }
+      }
       const body = {
         agent: wakeAgent,
         ...(wakeModel ? { model: wakeModel } : {}),
-        parts: [
-          createInternalAgentTextPart(
-            recoveryDetails ? `${wakeText}\n${recoveryDetails}` : wakeText,
-          ),
-        ],
+        parts: [createInternalAgentTextPart(bodyText)],
       };
       if (wakeMode === 'children' && capabilities.flavor === 'v2') {
         // v1 prompt_async queued; 'queue' preserves that on v2 ('steer'
