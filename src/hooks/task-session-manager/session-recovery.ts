@@ -30,6 +30,7 @@ import {
 } from '../../utils/child-transcript';
 import { isRecord } from '../../utils/guards';
 import { getClient } from '../../utils/opencode-client';
+import { pendingSessionPrune } from '../../utils/pending-session-prunes';
 import { delay } from '../../utils/polling';
 import { SESSION_ID_PATTERN, withTimeout } from '../../utils/session';
 import {
@@ -51,6 +52,8 @@ const TRANSCRIPT_READ_TIMEOUT_MS = 5_000;
 // v1 serves all history at once: 240 MB / 7-8 s at 17.6k messages.
 const PARENT_READ_WINDOW = 1_000;
 const DEFAULT_STATUS_POLL_INTERVAL_MS = 150;
+/** Bounded wait on a GC prune that the initial host read raced (#1387). */
+const PENDING_PRUNE_WAIT_MS = 2_000;
 
 export interface ChildRef {
   parentSessionID: string;
@@ -69,7 +72,11 @@ export type RetainedRecoveryResult =
       description: string;
       deletionEpoch?: number;
     }
-  | { kind: 'refused'; reason: string; reasonCode?: 'agent-unavailable' };
+  | {
+      kind: 'refused';
+      reason: string;
+      reasonCode?: 'agent-unavailable' | 'host-missing';
+    };
 
 export interface RetainedRecoveryRequest {
   parentSessionID: string;
@@ -143,24 +150,77 @@ async function recoverRetainedSession(
       `Task ${sessionID} belongs to a different parent session; no prompt was sent`,
     );
   };
-  const hosted = await readHostSession(client, directory, sessionID);
+  let hosted = await readHostSession(client, directory, sessionID);
+  if (hosted.kind === 'ok') {
+    // A GC prune that this read raced can still be in flight; settling it
+    // (bounded) and re-reading keeps adoption from racing the delete. The
+    // fence sits before the parent check so cancel and revive both benefit.
+    const prune = pendingSessionPrune(sessionID);
+    if (prune) {
+      try {
+        await withTimeout(
+          prune,
+          PENDING_PRUNE_WAIT_MS,
+          'pending session prune timed out',
+        );
+      } catch {
+        return refuse(
+          `${prefix}. A host-session prune is in progress for this task; retry task_revive.`,
+        );
+      }
+      hosted = await readHostSession(client, directory, sessionID);
+    }
+  }
   const generic = `${prefix}. Tracking does not survive a host restart; verify whether the host restored it before re-dispatching.`;
   if (hosted.kind !== 'ok') {
     if (request.purpose !== 'revive') return hosted;
+    // Only a confirmed host 404 may touch the tombstone: a transient
+    // read failure is no evidence the session is gone, and consuming the
+    // one-shot tombstone on it would destroy the only remaining evidence.
+    if (hosted.kind !== 'refused' || hosted.reasonCode !== 'host-missing') {
+      return refuse(generic);
+    }
     // The tombstone carries no parentID, so full-result delivery here
-    // would leak a child's result to any raw-ID caller; name the ending
-    // only and point at this session's transcript (#1387 P2).
+    // would leak a child's result to any raw-ID caller; verify the caller
+    // actually delegated this task, then name the ending only and point
+    // at this session's transcript (#1387 P2).
     const stop = fenced();
     if (stop) return stop;
     const tombstone = getSuppressionTombstone(sessionID);
-    if (tombstone?.terminalState !== undefined && tombstone.resultSummary) {
+    if (tombstone) {
+      let transcript: unknown;
+      try {
+        transcript = await readParentTranscript(
+          client,
+          directory,
+          parentSessionID,
+          options.hostFlavor,
+        );
+      } catch {
+        return refuse(generic);
+      }
+      const owned =
+        !hidesHistory(transcript) &&
+        parentDelegation(
+          parentTaskParts(transcript),
+          parentSessionID,
+          sessionID,
+        ) !== undefined;
+      if (!owned) return refuse(generic);
       clearBackgroundJobSuppression(board, sessionID);
-      const ending =
-        tombstone.terminalState === 'completed'
-          ? 'completed'
-          : `ended in state ${tombstone.terminalState}`;
+      if (tombstone.terminalState !== undefined) {
+        const ending =
+          tombstone.terminalState === 'completed'
+            ? 'completed'
+            : `ended in state ${tombstone.terminalState}`;
+        return refuse(
+          `${prefix}. The session ${ending} and is no longer available on the host; its task record was evicted afterward. Check this session's transcript for its result before re-dispatching.`,
+        );
+      }
+      // No terminal state was recorded (stopped eviction or drop): name
+      // only what is known — deliberately untracked and host-absent.
       return refuse(
-        `${prefix}. The session ${ending} and is no longer available on the host; its task record was evicted afterward. Check this session's transcript for its result before re-dispatching.`,
+        `${prefix}. This session is deliberately no longer tracked and is no longer available on the host; its task record was evicted afterward. Check this session's transcript before re-dispatching; no prompt was sent.`,
       );
     }
     return refuse(generic);
@@ -507,8 +567,7 @@ async function readHostSession(
       query: { directory },
     });
     const error = responseError(response);
-    if (error !== undefined)
-      return refuse(sessionReadRefusal(sessionID, error));
+    if (error !== undefined) return sessionReadRefusal(sessionID, error);
     const rawData = isRecord(response) ? response.data : undefined;
     const data = isRecord(rawData)
       ? (rawData as Record<string, unknown>)
@@ -541,16 +600,28 @@ async function readHostSession(
         : {}),
     };
   } catch (error) {
-    return refuse(sessionReadRefusal(sessionID, error));
+    return sessionReadRefusal(sessionID, error);
   }
 }
 
-function sessionReadRefusal(sessionID: string, error: unknown): string {
+/** A not-found/404 is positive evidence the host session is gone
+ * (`host-missing`); any other failure is a transient read problem and
+ * carries no reason code, so callers never treat it as absence. */
+function sessionReadRefusal(
+  sessionID: string,
+  error: unknown,
+): RetainedRecoveryResult {
   const text = stringifyError(error);
-  if (/not found|\b404\b/i.test(text)) {
-    return `Task ${sessionID} was not found on the host; no prompt was sent`;
+  if (/not\s*found|\b404\b/i.test(text)) {
+    return {
+      kind: 'refused',
+      reason: `Task ${sessionID} was not found on the host; no prompt was sent`,
+      reasonCode: 'host-missing',
+    };
   }
-  return `Task ${sessionID} could not be read (${text}); no prompt was sent`;
+  return refuse(
+    `Task ${sessionID} could not be read (${text}); no prompt was sent`,
+  );
 }
 
 async function readParentTranscript(

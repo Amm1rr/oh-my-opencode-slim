@@ -673,14 +673,20 @@ running or unreconciled records whose host sessions are still live. There is
 no wall-clock TTL, no polling, and no startup sweep: GC runs only where
 retention already decided to evict.
 
-Each tombstone is consumed at most once. Because the tombstone records no
-parent session, a post-pruning revive by raw session ID cannot verify caller
-ownership, so the refusal names the ending ("completed" / "ended in state X")
-and points at this session's transcript instead of replaying the recorded
-result. Residual crash window: the host `session.remove` can land before the
-tombstone's asynchronous persistence flush, in which case a restart loses both
-the session and its recorded result; the transcript remains the source of
-truth.
+Each tombstone is consumed at most once. A post-pruning revive by raw session
+ID is fenced three ways: a transient host read failure never touches the
+tombstone (only a confirmed host 404 counts as absence); the caller's parent
+transcript must show it actually delegated the task before any ending is
+disclosed or the tombstone is consumed; and a tombstone without a recorded
+terminal state (stopped eviction or drop) yields a result-free "no longer
+tracked" refusal. Verified owners of ended tasks get the ending state
+("completed" / "ended in state X") and are pointed at this session's
+transcript instead of the recorded result. A revive whose host read races the
+asynchronous prune delete awaits the in-flight prune (bounded) and re-reads
+before adopting. Residual crash window: the host `session.remove` can land
+before the tombstone's asynchronous persistence flush, in which case a
+restart loses both the session and its recorded result; the transcript
+remains the source of truth.
 
 ### Background Task Concurrency
 

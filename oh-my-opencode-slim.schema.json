@@ -1549,6 +1549,11 @@
           "default": true,
           "description": "When true, a background child that asks a question or permission request wakes its parent with the ask content. Permissions can be answered with task_reply when the host exposes permission.reply; OpenCode v2 form questions are observable but not answerable through the pinned plugin context. Default enabled.",
           "type": "boolean"
+        },
+        "pruneEvictedSessions": {
+          "default": false,
+          "description": "When true, removes the host child session when a retention trim evicts its terminal background job record. Never fires for parent deletion or explicit drops. Default disabled.",
+          "type": "boolean"
         }
       }
     },

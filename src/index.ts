@@ -147,6 +147,7 @@ import {
 } from './utils/internal-initiator';
 import { probeJSDOM } from './utils/jsdom';
 import { initLogger, log } from './utils/logger';
+import { registerPendingSessionPrune } from './utils/pending-session-prunes';
 import { SessionMetadataStore } from './utils/session-metadata';
 import {
   createSessionSelectionReader,
@@ -866,15 +867,30 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         ? {
             onEvictedSession: (evicted: BackgroundJobEvictedSession) => {
               if (listChildInputWaits(evicted.taskID).length > 0) return;
-              void ctx.client.session
-                .delete({ path: { id: evicted.taskID } })
-                .catch((error: unknown) => {
-                  log('[plugin] terminal-session prune remove failed', {
-                    taskID: evicted.taskID,
-                    error:
-                      error instanceof Error ? error.message : String(error),
-                  });
-                });
+              // Same-tick: the delete fires (during argument evaluation,
+              // before registerPendingSessionPrune runs) and is
+              // registered in one synchronous step with no await in
+              // between, so a task_revive can never observe a
+              // fired-but-unregistered delete and adopt the session the
+              // delete is about to remove (#1387 race).
+              registerPendingSessionPrune(
+                evicted.taskID,
+                // `query.directory` pins the delete to this project: on a
+                // shared v1 host an unpinned call can route to the server's
+                // working directory and miss the child session.
+                ctx.client.session
+                  .delete({
+                    path: { id: evicted.taskID },
+                    query: { directory: ctx.directory },
+                  })
+                  .catch((error: unknown) => {
+                    log('[plugin] terminal-session prune remove failed', {
+                      taskID: evicted.taskID,
+                      error:
+                        error instanceof Error ? error.message : String(error),
+                    });
+                  }),
+              );
             },
           }
         : {}),
