@@ -565,6 +565,53 @@ describe('checkpoint-compatible board cache safety', () => {
     // (same id, so same epoch and sequence), not purged into a new epoch.
     const surviving = boardIDs(before).slice(1);
     expect(boardIDs(after)).toEqual(surviving);
+
+    // The provider-visible prompt (text and snapshot placement among real
+    // messages) must also be unchanged for the surviving suffix.
+    const visible = (r: TurnResult) => {
+      const items = r.injected as any[];
+      const start = items.findIndex((m) => m.info.id === 'msg_u2');
+      const end = items.findIndex((m) => m.info.id === 'msg_u3');
+      return serializeMessages(items.slice(start, end));
+    };
+    expect(visible(after)).toBe(visible(before));
+  }, 20_000);
+
+  test('does not replay a removed anonymous message snapshot after pruning duplicates', async () => {
+    const board = new BackgroundJobBoard();
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: SESSION,
+      agent: 'explorer',
+      description: 'map scheduler hooks',
+    });
+    const hook = createHook(board);
+    const anon = (t: number) => {
+      const m = userMsg('x', 'Continue', t) as any;
+      delete m.info.id;
+      return m;
+    };
+
+    const history: unknown[] = [anon(BASE_TIME)];
+    await runTurn(hook, history);
+    history.push(anon(BASE_TIME + 30_000));
+    board.registerLaunch({
+      taskID: 'child-2',
+      parentSessionID: SESSION,
+      agent: 'oracle',
+      description: 'review plan',
+    });
+    const before = await runTurn(hook, history);
+    const ids = (r: TurnResult) =>
+      summarizeInjected(r.injected as never).filter((s) =>
+        s.startsWith('BOARD('),
+      );
+    expect(ids(before).length).toBe(2);
+
+    // Drop the first identical message; the survivor must not inherit the
+    // removed message's snapshot.
+    const after = await runTurn(hook, history.slice(1));
+    expect(ids(after)).not.toContain(ids(before)[0]);
   }, 20_000);
 });
 

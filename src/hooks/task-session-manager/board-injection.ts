@@ -2061,8 +2061,13 @@ function updateBoardHistoryState(
   const previous = state.retainedBoardSnapshots.get(sessionID);
   if (previous && hasCompacted(previous, messages)) {
     const currentAnchorKeys = messageAnchorKeys(messages);
-    previous.snapshots = previous.snapshots.filter((snapshot) =>
-      currentAnchorKeys.includes(snapshot.anchorKey),
+    // Anonymous anchor keys carry an occurrence index, so when identical
+    // anonymous messages are pruned the survivor inherits the removed
+    // message's key. Only id-backed anchors are stable enough to retain.
+    previous.snapshots = previous.snapshots.filter(
+      (snapshot) =>
+        snapshot.anchorKey.startsWith('id:') &&
+        currentAnchorKeys.includes(snapshot.anchorKey),
     );
     if (previous.snapshots.length === 0) {
       state.retainedBoardSnapshots.delete(sessionID);
