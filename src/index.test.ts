@@ -4560,6 +4560,76 @@ describe('plugin foreground fallback host gating', () => {
     }
   });
 
+  test('a non-primary fallback without an inline variant does not inherit the agent variant', async () => {
+    const configPath = `${projectDir}/oh-my-opencode-slim.json`;
+    const config = await Bun.file(configPath).json();
+    config.fallback.continuationPolicy = 'stick-to-fallback';
+    config.agents.orchestrator.variant = 'high';
+    config.agents.orchestrator.model.push({
+      id: 'openai/gpt-c',
+      variant: 'low',
+    });
+    await Bun.write(configPath, JSON.stringify(config));
+    const { client, messages, promptAsync } = createFallbackClient();
+    messages.mockResolvedValue({
+      data: [
+        {
+          info: { role: 'user' },
+          parts: [{ type: 'text', text: 'hello' }],
+        },
+      ],
+    });
+    const hooks = await plugin({
+      client,
+      directory: projectDir,
+      worktree: projectDir,
+      serverUrl: new URL('http://127.0.0.1:4096'),
+    } as never);
+    const input = { sessionID: 'variantless', agent: 'orchestrator' };
+    const primary = { providerID: 'openai', modelID: 'gpt-b' };
+    const fallback = { providerID: 'openai', modelID: 'gpt-c' };
+    const info = { ...input, role: 'assistant', model: primary };
+    jest.useFakeTimers();
+    try {
+      await hooks['chat.message']?.(
+        { ...input, model: primary } as never,
+        {} as never,
+      );
+      await hooks.event?.({
+        event: { type: 'message.updated', properties: { info } },
+      } as never);
+      await hooks.event?.({
+        event: {
+          type: 'session.error',
+          properties: { ...input, error: { message: 'rate limit' } },
+        },
+      } as never);
+      expect(promptAsync).toHaveBeenCalledTimes(1);
+      expect(promptAsync.mock.calls[0]?.[0]?.body).toMatchObject({
+        model: fallback,
+      });
+      expect(promptAsync.mock.calls[0]?.[0]?.body).not.toHaveProperty(
+        'variant',
+      );
+      info.model = fallback;
+      await hooks.event?.({
+        event: { type: 'message.updated', properties: { info } },
+      } as never);
+      const output = {
+        message: { ...input, model: primary },
+        parts: [createInternalAgentTextPart('background task completed')],
+      };
+      await hooks['chat.message']?.(input as never, output as never);
+      expect({
+        projectedVariant:
+          readTuiSnapshot(projectDir).agentVariants.orchestrator,
+        continuationModel: output.message.model,
+      }).toEqual({ projectedVariant: undefined, continuationModel: fallback });
+    } finally {
+      await hooks.dispose?.();
+    }
+  });
+
   test('v2 host with fallback explicitly disabled: no notice, no steering', async () => {
     await Bun.write(
       `${projectDir}/oh-my-opencode-slim.json`,

@@ -1569,7 +1569,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     const chain = runtime.modelArrays[agentName];
     if (chain) {
       const match = chain.find((entry) => entry.id === model);
-      return match ? (match.variant ?? defaultVariant) : undefined;
+      return (
+        match?.variant ?? (chain[0]?.id === model ? defaultVariant : undefined)
+      );
     }
 
     if (
