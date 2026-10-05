@@ -131,6 +131,7 @@ import type {
   BackgroundJobRecord,
   ContextFile,
 } from './utils/background-job-board';
+import { isPrunableEvictedSession } from './utils/background-job-board';
 import {
   type BackgroundJobTerminalGate,
   createBackgroundJobTerminalGate,
@@ -141,6 +142,7 @@ import {
   type EventDirectoryScope,
   hasLiveInstances,
 } from './utils/event-directory-scope';
+import { pruneEvictedHostSession } from './utils/evicted-session-prune';
 import {
   isInternalInitiatorPart,
   isNativeBackgroundTaskNotification,
@@ -830,37 +832,30 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       deferNumberedAliases: true,
       // Terminal-session GC (#1387 P2): when a retention trim evicts a
       // terminal or retained-stopped record, remove the underlying host
-      // child session. A parked
-      // child-input wait blocks removal; the remove call is fire-and-forget
-      // so the synchronous board never awaits it (and the shim degrades to
-      // a no-op + one warning on hosts without session.remove).
+      // child session — but only a background, non-provisional child this
+      // plugin launched itself (never foreground children, unattributed
+      // placeholders, or adopted/restored/rehydrated sessions), and only
+      // after a bounded host read confirms its parentID still matches the
+      // record's parent. A parked child-input wait blocks removal. The
+      // prune is fire-and-forget so the synchronous board never awaits it.
       ...(runtime.backgroundJobs.pruneEvictedSessions
         ? {
             onEvictedSession: (evicted: BackgroundJobEvictedSession) => {
+              if (!isPrunableEvictedSession(evicted)) return;
               if (listChildInputWaits(evicted.taskID).length > 0) return;
-              // Same-tick: the delete fires (during argument evaluation,
-              // before registerPendingSessionPrune runs) and is
+              // Same-tick: the prune (parent read + delete) starts and is
               // registered in one synchronous step with no await in
               // between, so a task_revive can never observe a
-              // fired-but-unregistered delete and adopt the session the
+              // started-but-unregistered prune and adopt the session the
               // delete is about to remove (#1387 race).
               registerPendingSessionPrune(
                 evicted.taskID,
-                // `query.directory` pins the delete to this project: on a
-                // shared v1 host an unpinned call can route to the server's
-                // working directory and miss the child session.
-                ctx.client.session
-                  .delete({
-                    path: { id: evicted.taskID },
-                    query: { directory: ctx.directory },
-                  })
-                  .catch((error: unknown) => {
-                    log('[plugin] terminal-session prune remove failed', {
-                      taskID: evicted.taskID,
-                      error:
-                        error instanceof Error ? error.message : String(error),
-                    });
-                  }),
+                pruneEvictedHostSession({
+                  session: ctx.client.session,
+                  directory: ctx.directory,
+                  evicted,
+                  readTimeoutMs: DEFAULT_RUNTIME_SESSION_STATUS_TIMEOUT_MS,
+                }),
               );
             },
           }

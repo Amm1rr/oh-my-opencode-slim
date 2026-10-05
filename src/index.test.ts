@@ -5093,6 +5093,10 @@ describe('backgroundJobs.pruneEvictedSessions wiring', () => {
     agent: 'fixer',
     description: 'evicted child',
     state: 'completed',
+    background: true,
+    provisional: false,
+    pluginLaunched: true,
+    externalOrigin: false,
     alias: 'fix-1',
     lastUsedAt: 100,
     ...overrides,
@@ -5127,8 +5131,12 @@ describe('backgroundJobs.pruneEvictedSessions wiring', () => {
 
   test('a parked child-input wait skips removal; without one the host session is removed once', async () => {
     const remove = mock(async () => ({}));
+    const get = mock(async () => ({
+      data: { id: 'ses_gc_child', parentID: 'parent-1' },
+    }));
     const { hooks, coordinator } = await createHooksWithBoard({
       delete: remove,
+      get,
     });
     try {
       const onEvictedSession = gcCallbackOf(coordinator);
@@ -5149,17 +5157,71 @@ describe('backgroundJobs.pruneEvictedSessions wiring', () => {
 
       clearChildInputWaitsForSession('ses_gc_child');
       onEvictedSession?.(evicted());
-      expect(remove).toHaveBeenCalledTimes(1);
-      expect(remove.mock.calls[0]?.[0]).toMatchObject({
-        path: { id: 'ses_gc_child' },
-        query: { directory: projectDir },
-      });
       // Registered in the same tick as the fire; self-removal runs in a
       // later microtask, so only the settle-and-await assertion below is
       // deferred — the sync one pins the same-tick registration.
       expect(pendingSessionPrune('ses_gc_child')).toBeDefined();
       await pendingSessionPrune('ses_gc_child');
       expect(pendingSessionPrune('ses_gc_child')).toBeUndefined();
+      expect(get).toHaveBeenCalledTimes(1);
+      expect(remove).toHaveBeenCalledTimes(1);
+      expect(remove.mock.calls[0]?.[0]).toMatchObject({
+        path: { id: 'ses_gc_child' },
+        query: { directory: projectDir },
+      });
+    } finally {
+      await hooks.dispose?.();
+    }
+  });
+
+  test('foreground, provisional, restored and adopted records never reach the host', async () => {
+    const remove = mock(async () => ({}));
+    const get = mock(async () => ({
+      data: { id: 'ses_gc_child', parentID: 'parent-1' },
+    }));
+    const { hooks, coordinator } = await createHooksWithBoard({
+      delete: remove,
+      get,
+    });
+    try {
+      const onEvictedSession = gcCallbackOf(coordinator);
+      for (const overrides of [
+        { background: false },
+        { provisional: true },
+        { externalOrigin: true, pluginLaunched: false },
+        { pluginLaunched: false },
+      ]) {
+        onEvictedSession?.(evicted(overrides));
+        expect(pendingSessionPrune('ses_gc_child')).toBeUndefined();
+      }
+      expect(get).not.toHaveBeenCalled();
+      expect(remove).not.toHaveBeenCalled();
+    } finally {
+      await hooks.dispose?.();
+    }
+  });
+
+  test('a host parentID mismatch or failed read skips the delete', async () => {
+    const remove = mock(async () => ({}));
+    let reply: () => Promise<unknown> = async () => ({
+      data: { id: 'ses_gc_child', parentID: 'someone-else' },
+    });
+    const get = mock(() => reply());
+    const { hooks, coordinator } = await createHooksWithBoard({
+      delete: remove,
+      get,
+    });
+    try {
+      const onEvictedSession = gcCallbackOf(coordinator);
+      onEvictedSession?.(evicted());
+      await pendingSessionPrune('ses_gc_child');
+      reply = async () => {
+        throw new Error('host unavailable');
+      };
+      onEvictedSession?.(evicted());
+      await pendingSessionPrune('ses_gc_child');
+      expect(get).toHaveBeenCalledTimes(2);
+      expect(remove).not.toHaveBeenCalled();
     } finally {
       await hooks.dispose?.();
     }

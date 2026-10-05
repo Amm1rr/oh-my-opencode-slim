@@ -1,6 +1,8 @@
 import { describe, expect, mock, spyOn, test } from 'bun:test';
 import {
   AGED_ENTRY_RENDER_TTL_MS,
+  type BackgroundJobEvictedSession,
+  isPrunableEvictedSession,
   BackgroundJobBoard as ProductionBoard,
   STATUS_UNCERTAIN_DEMOTE_AFTER_MS,
 } from './background-job-board';
@@ -2983,5 +2985,182 @@ describe('terminal-session GC eviction listener', () => {
     }
     expect(board.get('ses_1')).toBeUndefined();
     expect(board.get('ses_2')).toBeDefined();
+  });
+});
+
+describe('terminal-session GC provenance', () => {
+  type Kind =
+    | 'plugin-background'
+    | 'foreground'
+    | 'promoted-placeholder'
+    | 'restored'
+    | 'revive-adopted'
+    | 'adopted-terminal'
+    | 'resume-observed';
+
+  /** Create `ses_target` by kind, then evict it with a newer launch. */
+  const evictTarget = (kind: Kind): BackgroundJobEvictedSession => {
+    const evictions: BackgroundJobEvictedSession[] = [];
+    const board = new BackgroundJobBoard({
+      maxReusablePerAgent: 1,
+      onEvictedSession: (evicted) => evictions.push(evicted),
+    });
+    const base = {
+      taskID: 'ses_target',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'target',
+    };
+    const complete = (taskID: string, now: number) => {
+      board.updateStatus({ taskID, state: 'completed', now });
+      board.markReconciled(taskID, now + 1);
+    };
+    switch (kind) {
+      case 'plugin-background':
+        board.registerLaunch({
+          ...base,
+          background: true,
+          pluginLaunched: true,
+          now: 100,
+        });
+        complete('ses_target', 110);
+        break;
+      case 'foreground':
+        board.registerLaunch({
+          ...base,
+          background: false,
+          pluginLaunched: true,
+          now: 100,
+        });
+        complete('ses_target', 110);
+        break;
+      case 'promoted-placeholder':
+        board.registerLaunch({
+          ...base,
+          background: false,
+          provisional: true,
+          now: 100,
+        });
+        // Promotion clears provisional; a later attributed background
+        // observation must still not grant plugin provenance.
+        board.promoteProvisional('ses_target', 'parent-1', {
+          background: true,
+        });
+        board.registerLaunch({
+          ...base,
+          background: true,
+          pluginLaunched: true,
+          preserveRun: true,
+          now: 105,
+        });
+        expect(board.get('ses_target')?.provisional).toBe(false);
+        expect(board.get('ses_target')?.pluginLaunched).toBeUndefined();
+        complete('ses_target', 110);
+        break;
+      case 'restored':
+        board.restoreRetainedSession({
+          ...base,
+          state: 'completed',
+          background: true,
+          resultSummary: 'done',
+          launchedAt: 100,
+          completedAt: 110,
+        });
+        board.markReconciled('ses_target', 111);
+        break;
+      case 'revive-adopted':
+        board.registerLaunch({
+          ...base,
+          background: true,
+          adopted: true,
+          pluginLaunched: true,
+          now: 100,
+        });
+        complete('ses_target', 110);
+        break;
+      case 'adopted-terminal':
+        board.adoptTerminal({
+          ...base,
+          createdAt: 100,
+          updatedAt: 110,
+          terminalState: 'completed',
+          resultSummary: 'done',
+        });
+        break;
+      case 'resume-observed':
+        // A record of unknown provenance relaunched with background:true
+        // (task_revive style) never gains plugin provenance.
+        board.registerLaunch({ ...base, background: false, now: 100 });
+        complete('ses_target', 110);
+        board.registerLaunch({ ...base, background: true, now: 120 });
+        complete('ses_target', 130);
+        break;
+    }
+    board.registerLaunch({
+      taskID: 'ses_newer',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'newer',
+      background: true,
+      pluginLaunched: true,
+      now: 500,
+    });
+    complete('ses_newer', 510);
+    const target = evictions.find((entry) => entry.taskID === 'ses_target');
+    expect(target).toBeDefined();
+    return target as BackgroundJobEvictedSession;
+  };
+
+  test('a background launch by this plugin is prunable', () => {
+    const evicted = evictTarget('plugin-background');
+    expect(evicted).toMatchObject({
+      background: true,
+      provisional: false,
+      pluginLaunched: true,
+      externalOrigin: false,
+    });
+    expect(isPrunableEvictedSession(evicted)).toBe(true);
+  });
+
+  for (const kind of [
+    'foreground',
+    'promoted-placeholder',
+    'restored',
+    'revive-adopted',
+    'adopted-terminal',
+    'resume-observed',
+  ] as const) {
+    test(`a ${kind} record is never prunable`, () => {
+      expect(isPrunableEvictedSession(evictTarget(kind))).toBe(false);
+    });
+  }
+
+  test('each provenance fact alone blocks pruning', () => {
+    const eligible: BackgroundJobEvictedSession = {
+      taskID: 'ses_x',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'x',
+      state: 'reconciled',
+      background: true,
+      provisional: false,
+      pluginLaunched: true,
+      externalOrigin: false,
+      alias: 'ses_x',
+      lastUsedAt: 1,
+    };
+    expect(isPrunableEvictedSession(eligible)).toBe(true);
+    expect(isPrunableEvictedSession({ ...eligible, background: false })).toBe(
+      false,
+    );
+    expect(isPrunableEvictedSession({ ...eligible, provisional: true })).toBe(
+      false,
+    );
+    expect(
+      isPrunableEvictedSession({ ...eligible, pluginLaunched: false }),
+    ).toBe(false);
+    expect(
+      isPrunableEvictedSession({ ...eligible, externalOrigin: true }),
+    ).toBe(false);
   });
 });

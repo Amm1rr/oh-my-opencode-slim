@@ -112,6 +112,18 @@ export interface BackgroundJobRecord {
   verifiedRetainedRound?: true;
   /** Recovery has not sent a prompt; importing a row does not own host work. */
   recoveredWithoutPrompt?: true;
+  /**
+   * In-memory provenance: this plugin's own tracked native task call launched
+   * this record as a fresh background child. Never set for adopted, restored,
+   * provisional, or once-provisional records. Gates terminal-session GC.
+   */
+  pluginLaunched?: true;
+  /**
+   * Sticky provenance: the host session was adopted, restored, rehydrated,
+   * or first seen as an unattributed placeholder, so this plugin cannot
+   * prove it created it. Never cleared; blocks pluginLaunched.
+   */
+  externalOrigin?: true;
 }
 
 export interface BackgroundJobBoardOptions {
@@ -147,10 +159,35 @@ export interface BackgroundJobEvictedSession {
   agent: string;
   description: string;
   state: BackgroundJobState;
+  /** Record was a background launch (foreground task children are false). */
+  background: boolean;
+  /** Record was still an unattributed session.created placeholder. */
+  provisional: boolean;
+  /** This plugin's own tracked native task call launched the session. */
+  pluginLaunched: boolean;
+  /** Session was adopted, restored, rehydrated, or once provisional. */
+  externalOrigin: boolean;
   terminalState?: TaskOutputState;
   resultSummary?: string;
   alias: string;
   lastUsedAt: number;
+}
+
+/**
+ * Terminal-session GC eligibility: only a background, non-provisional record
+ * that this plugin's own native task call launched, with no adopted,
+ * restored, rehydrated, or placeholder provenance. Everything else keeps its
+ * host session.
+ */
+export function isPrunableEvictedSession(
+  evicted: BackgroundJobEvictedSession,
+): boolean {
+  return (
+    evicted.background &&
+    !evicted.provisional &&
+    evicted.pluginLaunched &&
+    !evicted.externalOrigin
+  );
 }
 
 /** Verified host session placed directly into a terminal retained state.
@@ -184,6 +221,12 @@ export interface BackgroundJobLaunchInput {
   adopted?: true;
   /** Preserve the current run when this is a duplicate lifecycle observation. */
   preserveRun?: boolean;
+  /**
+   * This plugin's own tracked native task call launched a fresh background
+   * child (not a resume). Ignored for adopted/provisional input and for
+   * records with external provenance.
+   */
+  pluginLaunched?: true;
   /** Lease proving that this is an authorized same-ID relaunch observation. */
   relaunchLease?: BackgroundJobLease;
   /** Backwards-compatible generic spelling for the relaunch lease. */
@@ -441,6 +484,14 @@ export class BackgroundJobBoard implements BackgroundJobStore {
           description: input.description || existing.description,
           objective: input.objective ?? existing.objective,
           background: existing.background || input.background === true,
+          ...(existing.pluginLaunched ||
+          (input.pluginLaunched === true &&
+            input.adopted !== true &&
+            existing.provisional !== true &&
+            existing.externalOrigin !== true &&
+            (existing.background || input.background === true))
+            ? { pluginLaunched: true as const }
+            : {}),
         } satisfies BackgroundJobRecord;
         this.setJob(observed);
         return observed;
@@ -535,6 +586,11 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       taskID: input.taskID,
       // Keep the property absent for ordinary launches and legacy records.
       ...(input.provisional === true ? { provisional: true } : {}),
+      ...(input.adopted === true || input.provisional === true
+        ? { externalOrigin: true as const }
+        : input.pluginLaunched === true && input.background === true
+          ? { pluginLaunched: true as const }
+          : {}),
       generation,
       terminalRevision: 0,
       activityRevision: 0,
@@ -1614,6 +1670,10 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       agent: entry.agent,
       description: entry.description,
       state: entry.state,
+      background: entry.background,
+      provisional: entry.provisional === true,
+      pluginLaunched: entry.pluginLaunched === true,
+      externalOrigin: entry.externalOrigin === true,
       ...(entry.terminalState !== undefined
         ? { terminalState: entry.terminalState }
         : {}),
@@ -1802,6 +1862,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       ...(input.state === 'stopped' ? {} : { terminalState: input.state }),
       verifiedRetainedRound: true,
       recoveredWithoutPrompt: true,
+      externalOrigin: true,
       contextFiles: [],
       totalErrors: input.state === 'error' ? 1 : 0,
       timeoutCount: 0,

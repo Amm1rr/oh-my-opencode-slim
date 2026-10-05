@@ -665,9 +665,27 @@ next: when enabled, the evicted record's host child session is removed through
 the session-remove path (capability-probed; hosts without `session.remove`
 degrade to a logged no-op).
 
-Pruning fires only for records that are terminal or retained-stopped,
-actually evicted by a trim, and have no parked child-input wait (an open question or permission request on
-the child blocks removal). Two eviction paths are deliberately excluded:
+A host session is deleted only when every one of these holds:
+
+- the record is terminal or retained-stopped and was actually evicted by a
+  trim;
+- the record is a background launch (`background: true`); foreground task
+  children are never deleted;
+- the record is not provisional, and never was: an unattributed
+  `session.created` placeholder under a managed parent may be a session this
+  plugin did not create, so it keeps its host session even after a later
+  promotion;
+- this plugin's own tracked native task call launched the child as a fresh
+  background run (not a `task_id` resume). Sessions adopted by `task_revive`,
+  adopted terminal host children, sessions restored from the parent
+  transcript (`restoreRetainedSession`), and records rehydrated after a
+  plugin reload carry external provenance and are never deleted;
+- no parked child-input wait exists (an open question or permission request
+  on the child blocks removal);
+- immediately before the delete, a bounded host `session.get` (same timeout as
+  runtime status reads) returns the session and its `parentID` equals the
+  record's parent session. A read failure, timeout, missing parent, or
+  mismatch skips the delete. Two eviction paths are deliberately excluded:
 `clearParent` (parent `session.deleted`) and explicit `drop` — both can evict
 running or unreconciled records whose host sessions are still live. There is
 no wall-clock TTL, no polling, and no startup sweep: GC runs only where

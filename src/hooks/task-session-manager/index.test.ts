@@ -363,6 +363,37 @@ describe('task-session-manager hook', () => {
     expect(concurrency.snapshot()).toEqual({ active: 1, queued: 0 });
   });
 
+  test('only a fresh background launch by a tracked task call carries GC provenance', async () => {
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({ backgroundJobBoard: board });
+    for (const [callID, background] of [
+      ['call-bg', true],
+      ['call-fg', false],
+    ] as const) {
+      await hook['tool.execute.before'](
+        { tool: 'task', sessionID: 'parent-1', callID },
+        {
+          args: {
+            background,
+            subagent_type: 'oracle',
+            description: `${callID} work`,
+          },
+        },
+      );
+      await hook['tool.execute.after'](
+        { tool: 'task', sessionID: 'parent-1', callID },
+        { output: taskLaunchOutput(`ses_${callID}`) },
+      );
+    }
+    expect(board.get('ses_call-bg')).toMatchObject({
+      background: true,
+      pluginLaunched: true,
+    });
+    expect(board.get('ses_call-bg')?.externalOrigin).toBeUndefined();
+    expect(board.get('ses_call-fg')?.background).toBe(false);
+    expect(board.get('ses_call-fg')?.pluginLaunched).toBeUndefined();
+  });
+
   test('an ID-only task output promotes its own placeholder with launch metadata', async () => {
     const board = new BackgroundJobBoard();
     const onLaunch = mock(() => {});
@@ -402,6 +433,9 @@ describe('task-session-manager hook', () => {
     expect(record?.background).toBe(true);
     expect(record?.description).toBe('owned call');
     expect(record?.objective).toBe('owned call');
+    // A once-provisional placeholder never becomes a GC candidate.
+    expect(record?.externalOrigin).toBe(true);
+    expect(record?.pluginLaunched).toBeUndefined();
     expect(onLaunch).toHaveBeenCalledWith(
       expect.objectContaining({ taskID: 'ses_child' }),
     );
@@ -1032,7 +1066,10 @@ describe('task-session-manager hook', () => {
       agent: 'explorer',
       description: 'recover scheduler task',
       objective: 'recover scheduler task',
+      // Rehydrated children are never terminal-session GC candidates.
+      externalOrigin: true,
     });
+    expect(board.get('historical-child')?.pluginLaunched).toBeUndefined();
     expect(boardText(messages)).toContain(
       'historical-child / explorer / running, status uncertain',
     );

@@ -945,6 +945,14 @@ function registerTaskOutputLaunch(
           }),
       background:
         (exactCallConfirmed || hostConfirmedBackground) && pending.background,
+      // Provenance for terminal-session GC: a fresh (non-resume) background
+      // child launched by this plugin's own tracked task call. The board
+      // refuses it for adopted, restored, or placeholder records.
+      ...((exactCallConfirmed || hostConfirmedBackground) &&
+      pending.background &&
+      pending.resumedTaskId === undefined
+        ? { pluginLaunched: true as const }
+        : {}),
       preserveRun:
         pending.earlyRegisteredTaskID === taskID ||
         pending.resumedTaskId === undefined,
