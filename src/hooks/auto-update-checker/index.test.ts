@@ -681,7 +681,45 @@ describe('auto-update-checker/index', () => {
       body: {
         title: 'oh-my-opencode-slim v2.0.0 is available.',
         message:
-          'It requires OpenCode background subagents.\nRun: bunx oh-my-opencode-slim@latest install',
+          'Running v1.1.2.\nIt requires OpenCode background subagents.\nRefresh the cached copy: \`bunx oh-my-opencode-slim@latest install\`',
+        variant: 'info',
+        duration: 12000,
+      },
+    });
+    expect(cacheMocks.preparePackageUpdate).not.toHaveBeenCalled();
+    expect(crossSpawnMock).not.toHaveBeenCalled();
+  });
+
+  test('major toast names the running copy and its origin', async () => {
+    checkerMocks.findPluginEntry.mockImplementation(() => ({
+      pinnedVersion: null,
+      isPinned: false,
+    }));
+    checkerMocks.getCachedVersion.mockImplementation(() => '2.9.9');
+    checkerMocks.getCurrentRuntimePackageJsonPath.mockImplementation(
+      () =>
+        '/home/u/.cache/opencode/packages/oh-my-opencode-slim@latest/node_modules/oh-my-opencode-slim/package.json',
+    );
+    checkerMocks.getLatestCompatibleVersion.mockImplementation(async () => ({
+      latestVersion: null,
+      latestMajorVersion: '3.0.2',
+      blockedByMajor: true,
+    }));
+
+    const { createAutoUpdateCheckerHook } = await import(
+      `./index?test=${importCounter++}`
+    );
+    const { ctx, showToast } = createCtx();
+
+    const hook = createAutoUpdateCheckerHook(ctx as never);
+    hook.event({ event: { type: 'session.created', properties: {} } });
+    await waitForCalls(showToast);
+
+    expect(showToast).toHaveBeenCalledWith({
+      body: {
+        title: 'oh-my-opencode-slim v3.0.2 is available.',
+        message:
+          'Running v2.9.9 from /home/u/.cache/opencode/packages/oh-my-opencode-slim@latest/node_modules/oh-my-opencode-slim/package.json.\nIt requires OpenCode background subagents.\nRefresh the cached copy: \`bunx oh-my-opencode-slim@latest install\`',
         variant: 'info',
         duration: 12000,
       },
