@@ -1,7 +1,16 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  mock,
+  test,
+} from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import * as packageManagerModule from '../../utils/package-manager';
 
 const logMock = mock(() => {});
 
@@ -75,9 +84,19 @@ mock.module('../../utils/compat', () => ({
   isBun: false,
 }));
 
+// bun's mock.module registry is process-global and test files run in
+// filesystem readdir order, so this file's package-manager mock would
+// otherwise leak into src/utils/package-manager.test.ts. Capture the real
+// exports (before mocking) and restore them once this file's tests are done.
+const realPackageExports = { ...packageManagerModule };
+
 mock.module('../../utils/package-manager', () => ({
   resolvePackageInstallCommand: () => resolvedInstall,
 }));
+
+afterAll(() => {
+  mock.module('../../utils/package-manager', () => realPackageExports);
+});
 
 let importCounter = 0;
 
