@@ -903,8 +903,6 @@ The field accepts either:
 
 **Key order is precedence.** Entries compile into ordered `{action, resource, effect}` rules that opencode evaluates last-match-wins (the host parses `permission` with `propertyOrder: "original"`, and the plugin preserves your key order verbatim). Put the wildcard base first and specific rules after it: `{"*": "deny", "read": "allow"}` denies everything except `read`; the reverse order denies `read` too. The same applies inside a pattern map (`bash: {"*": "ask", "git status*": "allow"}`) and across preset inheritance: a later layer's entries keep the order the layer writes them, and base keys the layer does not mention precede them, so the layer's `"*"` shadows them and `{"*": "deny", "read": "allow"}` merged onto any base always yields `read` after the wildcard. The rule is that a later wildcard can tighten anything but can only loosen what the layer names. Unmentioned entries at least as strict as the layer's wildcard (deny > ask > allow; only denies when the layer has no wildcard) move after the layer's keys and keep winning. A pattern map holding such an entry moves whole, in its own order, with each looser entry raised to the wildcard's action, so `bash: {"*": "allow", "rm -rf /": "deny"}` under a layer's `{"*": "deny"}` denies all of bash, under `{"*": "allow"}` still denies `rm -rf /`, and `bash: {"git *": "deny", "git log *": "allow"}` under `{"*": "ask"}` asks for `git log` and denies other git commands. Nested maps follow the same rule against their own `"*"`, and the base's own `"*"` always stays the fallback. To lift an inherited deny, name that key.
 
-**Built-in read-only roles ship an enforced matrix.** `explorer`, `librarian`, `oracle`, and `observer` carry a read-only permission matrix (wildcard deny + inspection and web-research allows) built into their definitions, so the read-only boundary holds with zero configuration. An explicit `agents.<name>.permission` replaces the matrix wholesale — opting out or extending it is one entry, never a merge. A bare `read: "allow"` replacement re-exposes `.env` reads — re-state the env-file asks yourself.
-
 **Example: read-only `planner` agent:**
 
 ```jsonc
@@ -985,7 +983,7 @@ When a user supplies `permission` and also uses the `skills` or `mcps` arrays on
 
 1. **User-supplied `permission` is the base layer.**
 2. **Plugin-generated rules from the `skills` array override `permission.skill`** — the `skills` array is authoritative for skill gating.
-3. **Plugin-generated rules from the `mcps` array set `permission.<mcp>_*` keys** — the `mcps` array is authoritative for MCP gating.
+3. **Plugin-generated rules from the `mcps` array fill the `permission.<mcp>_*` keys you have not set** — an explicit `<mcp>_*` entry in `permission` wins over the `mcps` array.
 4. **User-supplied keys for standard tools** (`edit`, `bash`, `webfetch`, `task`, etc.) survive the merge untouched.
 
 Use the `skills`/`mcps` arrays for skill and MCP gating. Use `permission` for everything else (file access, bash, web, task delegation).
