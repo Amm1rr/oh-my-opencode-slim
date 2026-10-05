@@ -66,6 +66,7 @@ import type { ChildInputWaitRecord } from './hooks/task-session-manager/child-in
 import {
   clearChildInputWaitsForSession,
   getChildInputWait,
+  listChildInputWaits,
 } from './hooks/task-session-manager/child-input-wait';
 import { createBackgroundFallbackHandoff } from './hooks/task-session-manager/fallback-observation-transfer';
 import { createRevivedRunTracker } from './hooks/task-session-manager/revived-run-tracker';
@@ -126,6 +127,7 @@ import {
   resolveRuntimeAgentName,
 } from './utils';
 import type {
+  BackgroundJobEvictedSession,
   BackgroundJobRecord,
   ContextFile,
 } from './utils/background-job-board';
@@ -854,6 +856,28 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       readContextMaxFiles: runtime.backgroundJobs.readContextMaxFiles,
       delegationTool: delegation.tool,
       deferNumberedAliases: true,
+      // Terminal-session GC (#1387 P2): when a retention trim evicts a
+      // terminal or retained-stopped record, remove the underlying host
+      // child session. A parked
+      // child-input wait blocks removal; the remove call is fire-and-forget
+      // so the synchronous board never awaits it (and the shim degrades to
+      // a no-op + one warning on hosts without session.remove).
+      ...(runtime.backgroundJobs.pruneEvictedSessions
+        ? {
+            onEvictedSession: (evicted: BackgroundJobEvictedSession) => {
+              if (listChildInputWaits(evicted.taskID).length > 0) return;
+              void ctx.client.session
+                .delete({ path: { id: evicted.taskID } })
+                .catch((error: unknown) => {
+                  log('[plugin] terminal-session prune remove failed', {
+                    taskID: evicted.taskID,
+                    error:
+                      error instanceof Error ? error.message : String(error),
+                  });
+                });
+            },
+          }
+        : {}),
     });
     admissionRuntimeLease = acquireAdmissionRuntime(
       ctx.directory,

@@ -5,6 +5,7 @@ import { createTaskReviveTool } from '../../tools/task-revive';
 import { createTaskStatusTool } from '../../tools/task-status';
 import { BackgroundJobBoard } from '../../utils/background-job-board';
 import { BackgroundJobBoard as FixtureBoard } from '../../utils/background-job-fixture';
+import { getSuppressionTombstone } from '../../utils/background-job-persistence';
 import {
   getBackgroundJobLifecycleLedger,
   recordBackgroundJobSuppression,
@@ -155,13 +156,16 @@ function installClient() {
 }
 
 describe('master adoption and retained-round integration', () => {
-  function reviveHost(options?: Parameters<typeof host>[0]) {
+  function reviveHost(
+    options?: Parameters<typeof host>[0] & { hostFlavor?: string },
+  ) {
     installClient();
     const hosted = host(options);
     const board = new BackgroundJobBoard();
     const recover = createSessionRecovery({
       input: hosted.input as never,
       backgroundJobBoard: board,
+      ...(options?.hostFlavor ? { hostFlavor: options.hostFlavor } : {}),
     });
     const register = mock(() => {});
     const tools = createTaskReviveTool({
@@ -233,6 +237,53 @@ describe('master adoption and retained-round integration', () => {
     expect(fixture.promptAsync).toHaveBeenCalledTimes(1);
     expect(fixture.abort).not.toHaveBeenCalled();
     expect(fixture.board.get(CHILD)?.taskGeneration).toBe(2);
+  });
+
+  // #1387 P2: GC removes the host session, so on v2 the only remaining
+  // evidence of the result is the persisted tombstone. The tombstone has
+  // no parentID, so the NotFound leg names the ending but stays result-FREE.
+  test('v2 revive after GC surfaces a result-free tombstone refusal', async () => {
+    const fixture = reviveHost({
+      hostFlavor: 'v2',
+      get: () => ({ error: { message: 'NotFound' } }),
+      messages: () => ({ error: { message: 'NotFound' } }),
+    });
+    recordBackgroundJobSuppression(fixture.board, CHILD, {
+      state: 'completed',
+      resultSummary: 'saved old answer',
+    });
+    const message = await fixture.revive
+      .execute({ task_id: CHILD, prompt: 'continue' }, context as never)
+      .catch((error: Error) => error.message);
+    expect(message).toContain('completed');
+    expect(message).toContain('no longer available on the host');
+    expect(message).not.toContain('saved old answer');
+    expect(fixture.promptAsync).not.toHaveBeenCalled();
+    expect(fixture.abort).not.toHaveBeenCalled();
+    // At-most-once: the tombstone is consumed by the first revive.
+    expect(getSuppressionTombstone(CHILD)).toBeUndefined();
+    await expect(
+      fixture.revive.execute(
+        { task_id: CHILD, prompt: 'continue' },
+        context as never,
+      ),
+    ).rejects.toThrow('Tracking does not survive a host restart');
+  });
+
+  test('v2 revive after GC without a tombstone keeps the generic advice', async () => {
+    const fixture = reviveHost({
+      hostFlavor: 'v2',
+      get: () => ({ error: { message: 'NotFound' } }),
+      messages: () => ({ error: { message: 'NotFound' } }),
+    });
+    await expect(
+      fixture.revive.execute(
+        { task_id: CHILD, prompt: 'continue' },
+        context as never,
+      ),
+    ).rejects.toThrow('Tracking does not survive a host restart');
+    expect(fixture.promptAsync).not.toHaveBeenCalled();
+    expect(fixture.abort).not.toHaveBeenCalled();
   });
 
   // 'no transcript' runs task_revive's legacy v1 adoption.

@@ -653,6 +653,35 @@ uncertain`; they never prove that a job stopped or completed and do not confirm
 a pending stop. Each observation is generation-aware, so a delayed response
 cannot modify a relaunched task.
 
+### Terminal-Session GC
+
+Retention trims are the only board mechanic that evicts acknowledged terminal
+records: the per-agent count caps and context-budget caps over reusable and
+retained-stopped entries. All four trim paths share one eviction choke point —
+suppression tombstone, board delete, then the optional GC listener.
+`backgroundJobs.pruneEvictedSessions` (default `false`; see
+[Configuration](configuration.md#background-job-management)) gates what happens
+next: when enabled, the evicted record's host child session is removed through
+the session-remove path (capability-probed; hosts without `session.remove`
+degrade to a logged no-op).
+
+Pruning fires only for records that are terminal or retained-stopped,
+actually evicted by a trim, and have no parked child-input wait (an open question or permission request on
+the child blocks removal). Two eviction paths are deliberately excluded:
+`clearParent` (parent `session.deleted`) and explicit `drop` — both can evict
+running or unreconciled records whose host sessions are still live. There is
+no wall-clock TTL, no polling, and no startup sweep: GC runs only where
+retention already decided to evict.
+
+Each tombstone is consumed at most once. Because the tombstone records no
+parent session, a post-pruning revive by raw session ID cannot verify caller
+ownership, so the refusal names the ending ("completed" / "ended in state X")
+and points at this session's transcript instead of replaying the recorded
+result. Residual crash window: the host `session.remove` can land before the
+tombstone's asynchronous persistence flush, in which case a restart loses both
+the session and its recorded result; the transcript remains the source of
+truth.
+
 ### Background Task Concurrency
 
 `backgroundJobs.concurrency` (disabled by default, see

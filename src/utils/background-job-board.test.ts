@@ -2757,3 +2757,231 @@ describe('BackgroundJobBoard', () => {
     });
   });
 });
+
+describe('terminal-session GC eviction listener', () => {
+  // Each of the four retention-trim sites (trimReusable context/count,
+  // trimRetained context/count) must fire onEvictedSession exactly once
+  // with a pre-delete snapshot. clearParent/drop never fire it.
+  test('trimReusable context-budget eviction fires the listener once', () => {
+    const evictions: unknown[] = [];
+    const board = new BackgroundJobBoard({
+      maxReusablePerAgent: 2,
+      onEvictedSession: (evicted) => evictions.push(evicted),
+    });
+    for (const [taskID, lines, now] of [
+      ['ses_small_1', 100, 100],
+      ['ses_small_2', 200, 300],
+    ] as const) {
+      board.registerLaunch({
+        taskID,
+        parentSessionID: 'parent-1',
+        agent: 'explorer',
+        description: taskID,
+        now,
+      });
+      board.addContext(taskID, [
+        { path: `/src/${taskID}.ts`, lineCount: lines, lastReadAt: now },
+      ]);
+      board.updateStatus({ taskID, state: 'completed', now: now + 100 });
+      board.markReconciled(taskID, now + 200);
+    }
+    board.registerLaunch({
+      taskID: 'ses_bloated',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'bloated session',
+      now: 500,
+    });
+    board.addContext('ses_bloated', [
+      { path: '/src/huge.ts', lineCount: 60_000, lastReadAt: 500 },
+    ]);
+    board.updateStatus({ taskID: 'ses_bloated', state: 'completed', now: 600 });
+    // Ack clears terminalUnreconciled; trimReusable then evicts the bloated
+    // session (a just-committed terminal record is excluded until acked).
+    board.markReconciled('ses_bloated', 700);
+
+    expect(board.get('ses_bloated')).toBeUndefined();
+    expect(evictions).toHaveLength(1);
+    expect(evictions[0]).toMatchObject({
+      taskID: 'ses_bloated',
+      parentSessionID: 'parent-1',
+    });
+  });
+
+  test('trimReusable count-cap eviction fires the listener once', () => {
+    const evictions: unknown[] = [];
+    const board = new BackgroundJobBoard({
+      maxReusablePerAgent: 2,
+      onEvictedSession: (evicted) => evictions.push(evicted),
+    });
+    for (const [taskID, launchAt, reconciledAt] of [
+      ['ses_1', 100, 300],
+      ['ses_2', 400, 600],
+      ['ses_3', 700, 900],
+    ] as const) {
+      board.registerLaunch({
+        taskID,
+        parentSessionID: 'parent-1',
+        agent: 'oracle',
+        description: `${taskID} job`,
+        now: launchAt,
+      });
+      board.updateStatus({
+        taskID,
+        state: 'completed',
+        resultSummary: 'done',
+        now: launchAt + 100,
+      });
+      board.markReconciled(taskID, reconciledAt);
+    }
+
+    expect(board.get('ses_1')).toBeUndefined();
+    expect(evictions).toHaveLength(1);
+    expect(evictions[0]).toMatchObject({
+      taskID: 'ses_1',
+      state: 'reconciled',
+    });
+  });
+
+  test('trimRetained context-budget eviction fires the listener once', () => {
+    const evictions: unknown[] = [];
+    const board = new BackgroundJobBoard({
+      maxContextLines: 100,
+      onEvictedSession: (evicted) => evictions.push(evicted),
+    });
+    board.registerLaunch({
+      taskID: 'ses_bloated_stopped',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'bloated stopped',
+      now: 100,
+    });
+    board.addContext('ses_bloated_stopped', [
+      { path: '/src/huge.ts', lineCount: 200, lastReadAt: 100 },
+    ]);
+    board.markStopped(
+      'ses_bloated_stopped',
+      'no native result',
+      110,
+      undefined,
+      110,
+    );
+    board.markReconciled('ses_bloated_stopped', 120);
+
+    // A second retained-stopped entry triggers trimRetained; only the
+    // bloated entry exceeds the context budget.
+    board.registerLaunch({
+      taskID: 'ses_lean_stopped',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'lean stopped',
+      now: 200,
+    });
+    board.markStopped(
+      'ses_lean_stopped',
+      'no native result',
+      210,
+      undefined,
+      210,
+    );
+    board.markReconciled('ses_lean_stopped', 220);
+
+    expect(board.get('ses_bloated_stopped')).toBeUndefined();
+    expect(board.get('ses_lean_stopped')).toBeDefined();
+    expect(evictions).toHaveLength(1);
+    expect(evictions[0]).toMatchObject({
+      taskID: 'ses_bloated_stopped',
+      state: 'stopped',
+    });
+  });
+
+  test('trimRetained count-cap eviction fires the listener once', () => {
+    const evictions: unknown[] = [];
+    const board = new BackgroundJobBoard({
+      maxReusablePerAgent: 1,
+      onEvictedSession: (evicted) => evictions.push(evicted),
+    });
+    board.registerLaunch({
+      taskID: 'ses_old',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'old stopped',
+      now: 100,
+    });
+    board.markStopped('ses_old', 'no native result', 110, undefined, 110);
+    board.markReconciled('ses_old', 120);
+    board.registerLaunch({
+      taskID: 'ses_new',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'new stopped',
+      now: 200,
+    });
+    board.markStopped('ses_new', 'no native result', 210, undefined, 210);
+    board.markReconciled('ses_new', 220);
+
+    expect(board.get('ses_old')).toBeUndefined();
+    expect(evictions).toHaveLength(1);
+    expect(evictions[0]).toMatchObject({ taskID: 'ses_old', state: 'stopped' });
+  });
+
+  test('clearParent and drop never fire the listener, including a parent deletion with running children', () => {
+    const evictions: unknown[] = [];
+    const board = new BackgroundJobBoard({
+      onEvictedSession: (evicted) => evictions.push(evicted),
+    });
+    board.registerLaunch({
+      taskID: 'ses_running',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+      description: 'still running',
+      now: 100,
+    });
+    board.registerLaunch({
+      taskID: 'ses_other',
+      parentSessionID: 'parent-2',
+      agent: 'fixer',
+      description: 'other',
+      now: 100,
+    });
+
+    // Parent session.deleted with running children: no GC, no listener.
+    board.clearParent('parent-1');
+    expect(board.get('ses_running')).toBeUndefined();
+
+    board.drop('ses_other');
+    expect(board.get('ses_other')).toBeUndefined();
+    expect(evictions).toHaveLength(0);
+  });
+
+  test('a throwing listener never breaks the trim', () => {
+    const board = new BackgroundJobBoard({
+      maxReusablePerAgent: 2,
+      onEvictedSession: () => {
+        throw new Error('listener boom');
+      },
+    });
+    for (const [taskID, launchAt, reconciledAt] of [
+      ['ses_1', 100, 300],
+      ['ses_2', 400, 600],
+      ['ses_3', 700, 900],
+    ] as const) {
+      board.registerLaunch({
+        taskID,
+        parentSessionID: 'parent-1',
+        agent: 'oracle',
+        description: `${taskID} job`,
+        now: launchAt,
+      });
+      board.updateStatus({
+        taskID,
+        state: 'completed',
+        resultSummary: 'done',
+        now: launchAt + 100,
+      });
+      board.markReconciled(taskID, reconciledAt);
+    }
+    expect(board.get('ses_1')).toBeUndefined();
+    expect(board.get('ses_2')).toBeDefined();
+  });
+});

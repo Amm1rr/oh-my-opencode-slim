@@ -146,7 +146,24 @@ async function recoverRetainedSession(
   const hosted = await readHostSession(client, directory, sessionID);
   const generic = `${prefix}. Tracking does not survive a host restart; verify whether the host restored it before re-dispatching.`;
   if (hosted.kind !== 'ok') {
-    return request.purpose === 'revive' ? refuse(generic) : hosted;
+    if (request.purpose !== 'revive') return hosted;
+    // The tombstone carries no parentID, so full-result delivery here
+    // would leak a child's result to any raw-ID caller; name the ending
+    // only and point at this session's transcript (#1387 P2).
+    const stop = fenced();
+    if (stop) return stop;
+    const tombstone = getSuppressionTombstone(sessionID);
+    if (tombstone?.terminalState !== undefined && tombstone.resultSummary) {
+      clearBackgroundJobSuppression(board, sessionID);
+      const ending =
+        tombstone.terminalState === 'completed'
+          ? 'completed'
+          : `ended in state ${tombstone.terminalState}`;
+      return refuse(
+        `${prefix}. The session ${ending} and is no longer available on the host; its task record was evicted afterward. Check this session's transcript for its result before re-dispatching.`,
+      );
+    }
+    return refuse(generic);
   }
   if (hosted.parentID !== parentSessionID) {
     if (request.purpose === 'revive') return refuse(generic);

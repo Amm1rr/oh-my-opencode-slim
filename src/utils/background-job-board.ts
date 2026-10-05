@@ -130,6 +130,27 @@ export interface BackgroundJobBoardOptions {
    * fixtures on the historical immediate counter.
    */
   deferNumberedAliases?: boolean;
+  /**
+   * Fired after a retention trim (trimReusable/trimRetained) evicts a
+   * terminal or retained-stopped record. Never fires for clearParent/drop,
+   * which can evict running or unreconciled records. Listener throws are
+   * contained.
+   */
+  onEvictedSession?: (evicted: BackgroundJobEvictedSession) => void;
+}
+
+/** Snapshot of a record evicted by a retention trim, captured before the
+ * delete. Terminal-session GC removes the underlying host child session. */
+export interface BackgroundJobEvictedSession {
+  taskID: string;
+  parentSessionID: string;
+  agent: string;
+  description: string;
+  state: BackgroundJobState;
+  terminalState?: TaskOutputState;
+  resultSummary?: string;
+  alias: string;
+  lastUsedAt: number;
 }
 
 /** Verified host session placed directly into a terminal retained state.
@@ -277,6 +298,9 @@ export class BackgroundJobBoard implements BackgroundJobStore {
   private readonly readContextMaxFiles: number;
   private readonly delegationTool: string;
   private readonly deferNumberedAliases: boolean;
+  private readonly onEvictedSession?:
+    | ((evicted: BackgroundJobEvictedSession) => void)
+    | undefined;
   private readonly startedAt = Date.now();
   /** Sessions created after this board started: no earlier aliases. */
   private readonly freshParents = new Set<string>();
@@ -291,6 +315,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       options.readContextMaxFiles ?? DEFAULT_READ_CONTEXT_MAX_FILES;
     this.delegationTool = options.delegationTool ?? 'task';
     this.deferNumberedAliases = options.deferNumberedAliases === true;
+    this.onEvictedSession = options.onEvictedSession;
   }
 
   /** False for a production parent not created while this board runs. */
@@ -1572,6 +1597,44 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     // No-op at board level
   }
 
+  /** Single eviction path for the retention trims: suppression, delete,
+   * then the optional terminal-session GC listener. Trim eligibility
+   * predicates live in the callers; clearParent/drop must not route here
+   * (they can evict running/unreconciled records). */
+  private evictRecord(entry: BackgroundJobRecord): void {
+    recordBackgroundJobSuppression(
+      this,
+      entry.taskID,
+      terminalResultPayloadOf(entry),
+    );
+    // Snapshot before the delete: the record is gone from this.jobs after.
+    const evicted: BackgroundJobEvictedSession = {
+      taskID: entry.taskID,
+      parentSessionID: entry.parentSessionID,
+      agent: entry.agent,
+      description: entry.description,
+      state: entry.state,
+      ...(entry.terminalState !== undefined
+        ? { terminalState: entry.terminalState }
+        : {}),
+      ...(entry.resultSummary !== undefined
+        ? { resultSummary: entry.resultSummary }
+        : {}),
+      alias: entry.alias,
+      lastUsedAt: entry.lastUsedAt,
+    };
+    this.deleteJob(entry.taskID);
+    if (!this.onEvictedSession) return;
+    try {
+      this.onEvictedSession(evicted);
+    } catch (error) {
+      log('Board eviction listener threw', {
+        taskID: entry.taskID,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   private trimReusable(taskID: string): void {
     const job = this.jobs.get(taskID);
     if (!job) return;
@@ -1588,12 +1651,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
         (entry.terminalState ?? terminalStateOf(entry.state)) !== undefined &&
         sumContextLines(entry) > this.maxContextLines
       ) {
-        recordBackgroundJobSuppression(
-          this,
-          entry.taskID,
-          terminalResultPayloadOf(entry),
-        );
-        this.deleteJob(entry.taskID);
+        this.evictRecord(entry);
       }
     }
 
@@ -1609,12 +1667,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       )
       .sort((a, b) => b.lastUsedAt - a.lastUsedAt);
     for (const stale of reusable.slice(this.maxReusablePerAgent)) {
-      recordBackgroundJobSuppression(
-        this,
-        stale.taskID,
-        terminalResultPayloadOf(stale),
-      );
-      this.deleteJob(stale.taskID);
+      this.evictRecord(stale);
     }
   }
 
@@ -1629,12 +1682,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
         !this.liveLeases.has(entry.taskID) &&
         sumContextLines(entry) > this.maxContextLines
       ) {
-        recordBackgroundJobSuppression(
-          this,
-          entry.taskID,
-          terminalResultPayloadOf(entry),
-        );
-        this.deleteJob(entry.taskID);
+        this.evictRecord(entry);
       }
     }
 
@@ -1647,12 +1695,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       )
       .sort((a, b) => b.lastUsedAt - a.lastUsedAt);
     for (const stale of retained.slice(this.maxReusablePerAgent)) {
-      recordBackgroundJobSuppression(
-        this,
-        stale.taskID,
-        terminalResultPayloadOf(stale),
-      );
-      this.deleteJob(stale.taskID);
+      this.evictRecord(stale);
     }
   }
 
