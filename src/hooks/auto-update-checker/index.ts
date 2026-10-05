@@ -283,6 +283,10 @@ async function runBackgroundUpdateCheck(
   }
 
   let installDir: string | null = null;
+  // Set when a peer process installed the target version while we waited for
+  // the lock: the install is skipped, but the shared redirect/companion/toast
+  // path below still runs, after the lock is released.
+  let alreadyInstalledByPeer = false;
   try {
     // The version may have been installed by another process while we waited
     // for the lock.
@@ -290,71 +294,37 @@ async function runBackgroundUpdateCheck(
       log(
         `[auto-update-checker] v${latestVersion} already installed by another OpenCode process; skipping install.`,
       );
-      if (pluginInfo.isInstallerManaged) {
-        const redirect = updateInstallerManagedVersions(
-          ctx.directory,
-          latestVersion,
+      alreadyInstalledByPeer = true;
+      installDir = targetContext.installDir;
+    } else {
+      const prepared = preparePackageUpdate(
+        latestVersion,
+        PACKAGE_NAME,
+        undefined,
+        cacheIdentity,
+      );
+      if (!prepared) {
+        showToast(
+          ctx,
+          `OMO-Slim ${latestVersion}`,
+          `v${latestVersion} available. Auto-update could not prepare the active install.`,
+          'info',
+          8000,
         );
-        if (redirect.status === 'error') {
-          showToast(
-            ctx,
-            `OMO-Slim ${latestVersion}`,
-            'Update installed in cache, but plugin configuration could not be updated.',
-            'error',
-            8000,
-          );
-          log(
-            '[auto-update-checker] Already-installed version detected, but installer-managed config redirect failed:',
-            redirect.error,
-          );
-          return;
-        }
+        log(
+          '[auto-update-checker] Failed to prepare install root for auto-update',
+        );
+        return;
       }
-      showToast(
-        ctx,
-        'OMO-Slim Updated!',
-        `v${currentVersion} → v${latestVersion}\nRestart OpenCode to apply the plugin update.`,
-        'success',
-        8000,
-      );
-      // The package is fresh, but the companion binary may still be stale
-      // (it is otherwise only ensured on the fresh-install path below), so
-      // ensure it here too. Failures log inside the helper and retry on
-      // restart; the toast above stays unchanged.
-      await ensureCompanionForPackageRoot(
-        path.join(targetContext.installDir, 'node_modules', PACKAGE_NAME),
-        companion,
-      );
-      return;
-    }
 
-    const prepared = preparePackageUpdate(
-      latestVersion,
-      PACKAGE_NAME,
-      undefined,
-      cacheIdentity,
-    );
-    if (!prepared) {
-      showToast(
-        ctx,
-        `OMO-Slim ${latestVersion}`,
-        `v${latestVersion} available. Auto-update could not prepare the active install.`,
-        'info',
-        8000,
-      );
-      log(
-        '[auto-update-checker] Failed to prepare install root for auto-update',
-      );
-      return;
+      const installSuccess =
+        (await runPackageInstallSafe(prepared.stagingDir)) &&
+        verifyInstalledPackage(prepared.stagingDir, latestVersion);
+      installDir = installSuccess
+        ? publishPackageUpdate(prepared, latestVersion)
+        : null;
+      if (!installSuccess) discardPreparedPackageUpdate(prepared);
     }
-
-    const installSuccess =
-      (await runPackageInstallSafe(prepared.stagingDir)) &&
-      verifyInstalledPackage(prepared.stagingDir, latestVersion);
-    installDir = installSuccess
-      ? publishPackageUpdate(prepared, latestVersion)
-      : null;
-    if (!installSuccess) discardPreparedPackageUpdate(prepared);
   } finally {
     releaseInstallLock();
   }
@@ -396,7 +366,9 @@ async function runBackgroundUpdateCheck(
       8000,
     );
     log(
-      `[auto-update-checker] Update installed: ${currentVersion} → ${latestVersion}`,
+      alreadyInstalledByPeer
+        ? `[auto-update-checker] Update already installed by another process: ${currentVersion} → ${latestVersion}`
+        : `[auto-update-checker] Update installed: ${currentVersion} → ${latestVersion}`,
     );
   } else {
     showToast(
