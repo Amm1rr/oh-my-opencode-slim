@@ -659,6 +659,73 @@ uncertain`; they never prove that a job stopped or completed and do not confirm
 a pending stop. Each observation is generation-aware, so a delayed response
 cannot modify a relaunched task.
 
+### Terminal-Session GC
+
+Retention trims are the only board mechanic that evicts acknowledged terminal
+records: the per-agent count caps and context-budget caps over reusable and
+retained-stopped entries. All four trim paths share one eviction choke point —
+suppression tombstone, board delete, then the optional GC listener.
+`backgroundJobs.pruneEvictedSessions` (default `false`; see
+[Configuration](configuration.md#background-job-management)) gates what happens
+next: when enabled, the evicted record's host child session is removed through
+the session-remove path (capability-probed; hosts without `session.remove`
+degrade to a logged no-op)). On OpenCode v2 hosts there is no live session-status map, so the
+idle check cannot pass and every prune is skipped (logged as `not-idle`):
+the option currently reclaims sessions on v1 hosts only.
+
+A host session is deleted only when every one of these holds:
+
+- the record is terminal or retained-stopped and was actually evicted by a
+  trim;
+- the record is a background launch (`background: true`); foreground task
+  children are never deleted;
+- the record is not provisional, and never was: an unattributed
+  `session.created` placeholder under a managed parent may be a session this
+  plugin did not create, so it keeps its host session even after a later
+  promotion;
+- this plugin's own tracked native task call launched the child as a fresh
+  background run (not a `task_id` resume). Sessions adopted by `task_revive`,
+  adopted terminal host children, sessions restored from the parent
+  transcript (`restoreRetainedSession`), and records rehydrated after a
+  plugin reload carry external provenance and are never deleted;
+- no parked child-input wait exists (an open question or permission request
+  on the child blocks removal);
+- immediately before the delete, a bounded host `session.get` (same timeout as
+  runtime status reads) returns the session and its `parentID` equals the
+  record's parent session. A read failure, timeout, missing parent, or
+  mismatch skips the delete;
+- a bounded host `session.status` read shows the session idle (or absent
+  from the live status map). Busy, retry, malformed, or failed reads skip the
+  delete;
+- the board does not track the task again, checked both before and after the
+  host reads: a session that was re-registered, revived, adopted, or leased
+  after the eviction is live work and keeps its host session.
+
+The delete itself has the same deadline and is aborted when it expires. An
+error-returning, falsy, or timed-out delete is logged as a failed prune, not
+a success. Every read and the delete are bounded, so the in-flight prune that
+`task_revive` waits on always settles, and recovery waits on it only for a
+bounded interval before asking for a retry. Two eviction paths are deliberately excluded:
+`clearParent` (parent `session.deleted`) and explicit `drop` — both can evict
+running or unreconciled records whose host sessions are still live. There is
+no wall-clock TTL, no polling, and no startup sweep: GC runs only where
+retention already decided to evict.
+
+Each tombstone is consumed at most once. A post-pruning revive by raw session
+ID is fenced three ways: a transient host read failure never touches the
+tombstone (only a confirmed host 404 counts as absence); the caller's parent
+transcript must show it actually delegated the task before any ending is
+disclosed or the tombstone is consumed; and a tombstone without a recorded
+terminal state (stopped eviction or drop) yields a result-free "no longer
+tracked" refusal. Verified owners of ended tasks get the ending state
+("completed" / "ended in state X") and are pointed at this session's
+transcript instead of the recorded result. A revive whose host read races the
+asynchronous prune delete awaits the in-flight prune (bounded) and re-reads
+before adopting. Residual crash window: the host `session.remove` can land
+before the tombstone's asynchronous persistence flush, in which case a
+restart loses both the session and its recorded result; the transcript
+remains the source of truth.
+
 ### Background Task Concurrency
 
 `backgroundJobs.concurrency` (disabled by default, see

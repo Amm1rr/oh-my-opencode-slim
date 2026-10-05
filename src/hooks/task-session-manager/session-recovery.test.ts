@@ -5,12 +5,15 @@ import { createTaskReviveTool } from '../../tools/task-revive';
 import { createTaskStatusTool } from '../../tools/task-status';
 import { BackgroundJobBoard } from '../../utils/background-job-board';
 import { BackgroundJobBoard as FixtureBoard } from '../../utils/background-job-fixture';
+import { getSuppressionTombstone } from '../../utils/background-job-persistence';
 import {
+  clearBackgroundJobSuppression,
   getBackgroundJobLifecycleLedger,
   recordBackgroundJobSuppression,
 } from '../../utils/background-job-store';
 import { createBackgroundJobTerminalGate } from '../../utils/background-job-terminal-gate';
 import * as opencodeClient from '../../utils/opencode-client';
+import { registerPendingSessionPrune } from '../../utils/pending-session-prunes';
 import { createRevivedRunTracker } from './revived-run-tracker';
 import {
   appendChildRefSuffix,
@@ -155,13 +158,16 @@ function installClient() {
 }
 
 describe('master adoption and retained-round integration', () => {
-  function reviveHost(options?: Parameters<typeof host>[0]) {
+  function reviveHost(
+    options?: Parameters<typeof host>[0] & { hostFlavor?: string },
+  ) {
     installClient();
     const hosted = host(options);
     const board = new BackgroundJobBoard();
     const recover = createSessionRecovery({
       input: hosted.input as never,
       backgroundJobBoard: board,
+      ...(options?.hostFlavor ? { hostFlavor: options.hostFlavor } : {}),
     });
     const register = mock(() => {});
     const tools = createTaskReviveTool({
@@ -233,6 +239,234 @@ describe('master adoption and retained-round integration', () => {
     expect(fixture.promptAsync).toHaveBeenCalledTimes(1);
     expect(fixture.abort).not.toHaveBeenCalled();
     expect(fixture.board.get(CHILD)?.taskGeneration).toBe(2);
+  });
+
+  // #1387 P2: GC removes the host session, so on v2 the only remaining
+  // evidence of the result is the persisted tombstone. The tombstone has
+  // no parentID, so the NotFound leg first verifies the caller's parent
+  // history actually delegated this task, then names the ending result-FREE.
+  test('v2 revive after GC surfaces a result-free tombstone refusal', async () => {
+    const fixture = reviveHost({
+      hostFlavor: 'v2',
+      get: () => ({ error: { message: 'Session not found' } }),
+    });
+    recordBackgroundJobSuppression(fixture.board, CHILD, {
+      state: 'completed',
+      resultSummary: 'saved old answer',
+    });
+    const message = await fixture.revive
+      .execute({ task_id: CHILD, prompt: 'continue' }, context as never)
+      .catch((error: Error) => error.message);
+    expect(message).toContain('completed');
+    expect(message).toContain('no longer available on the host');
+    expect(message).not.toContain('saved old answer');
+    expect(fixture.promptAsync).not.toHaveBeenCalled();
+    expect(fixture.abort).not.toHaveBeenCalled();
+    // At-most-once: the tombstone is consumed by the first revive.
+    expect(getSuppressionTombstone(CHILD)).toBeUndefined();
+    await expect(
+      fixture.revive.execute(
+        { task_id: CHILD, prompt: 'continue' },
+        context as never,
+      ),
+    ).rejects.toThrow('Tracking does not survive a host restart');
+  });
+
+  test('v2 revive after GC without a tombstone keeps the generic advice', async () => {
+    const fixture = reviveHost({
+      hostFlavor: 'v2',
+      get: () => ({ error: { message: 'NotFound' } }),
+      messages: () => ({ error: { message: 'NotFound' } }),
+    });
+    await expect(
+      fixture.revive.execute(
+        { task_id: CHILD, prompt: 'continue' },
+        context as never,
+      ),
+    ).rejects.toThrow('Tracking does not survive a host restart');
+    expect(fixture.promptAsync).not.toHaveBeenCalled();
+    expect(fixture.abort).not.toHaveBeenCalled();
+  });
+
+  // Host v2 and this repo's fixtures emit camelCase `NotFound`; the
+  // host-missing classifier must treat it as confirmed absence too.
+  test('a camelCase NotFound host error still reaches the disclosure leg', async () => {
+    const fixture = reviveHost({
+      hostFlavor: 'v2',
+      get: () => ({ error: { message: 'NotFound' } }),
+    });
+    recordBackgroundJobSuppression(fixture.board, CHILD, {
+      state: 'completed',
+      resultSummary: 'saved old answer',
+    });
+    const message = await fixture.revive
+      .execute({ task_id: CHILD, prompt: 'continue' }, context as never)
+      .catch((error: Error) => error.message);
+    expect(message).toContain('completed');
+    expect(message).toContain('no longer available on the host');
+    expect(message).not.toContain('saved old answer');
+    expect(getSuppressionTombstone(CHILD)).toBeUndefined();
+    expect(fixture.promptAsync).not.toHaveBeenCalled();
+  });
+
+  // A transient read failure is no evidence of absence: the tombstone is
+  // one-shot evidence and must survive a flaky session.get.
+  test('a transient host read failure leaves the tombstone untouched', async () => {
+    const fixture = reviveHost({
+      hostFlavor: 'v2',
+      get: () => {
+        throw new Error('socket hang up');
+      },
+    });
+    recordBackgroundJobSuppression(fixture.board, CHILD, {
+      state: 'completed',
+      resultSummary: 'saved old answer',
+    });
+    await expect(
+      fixture.revive.execute(
+        { task_id: CHILD, prompt: 'continue' },
+        context as never,
+      ),
+    ).rejects.toThrow('Tracking does not survive a host restart');
+    expect(getSuppressionTombstone(CHILD)?.resultSummary).toBe(
+      'saved old answer',
+    );
+    expect(fixture.promptAsync).not.toHaveBeenCalled();
+    clearBackgroundJobSuppression(fixture.board, CHILD);
+  });
+
+  // The tombstone carries no parentID; a raw-ID caller whose parent history
+  // shows no delegation must neither learn the ending nor consume it.
+  test('a confirmed 404 without parent pairing stays generic and keeps the tombstone', async () => {
+    const fixture = reviveHost({
+      hostFlavor: 'v2',
+      get: () => ({ error: { message: 'Session not found' } }),
+      messages: (id) =>
+        id === CHILD
+          ? { error: { message: 'Session not found' } }
+          : { data: [] },
+    });
+    recordBackgroundJobSuppression(fixture.board, CHILD, {
+      state: 'completed',
+      resultSummary: 'saved old answer',
+    });
+    await expect(
+      fixture.revive.execute(
+        { task_id: CHILD, prompt: 'continue' },
+        context as never,
+      ),
+    ).rejects.toThrow('Tracking does not survive a host restart');
+    expect(getSuppressionTombstone(CHILD)?.resultSummary).toBe(
+      'saved old answer',
+    );
+    expect(fixture.promptAsync).not.toHaveBeenCalled();
+    clearBackgroundJobSuppression(fixture.board, CHILD);
+  });
+
+  // A pairing visible in the window is positive proof of delegation even
+  // when an overflowing v1 window (or v2 compaction) marks the page
+  // incomplete; hiding HISTORY may defeat uniqueness claims, never
+  // existence ones (#1452 review).
+  test('an incomplete parent page with a visible pairing still discloses', async () => {
+    const fixture = reviveHost({
+      hostFlavor: 'v2',
+      get: () => ({ error: { message: 'Session not found' } }),
+      messages: (id) =>
+        id === CHILD
+          ? { error: { message: 'Session not found' } }
+          : { data: parentMessages(), page: { complete: false } },
+    });
+    recordBackgroundJobSuppression(fixture.board, CHILD, {
+      state: 'completed',
+      resultSummary: 'saved old answer',
+    });
+    const message = await fixture.revive
+      .execute({ task_id: CHILD, prompt: 'continue' }, context as never)
+      .catch((error: Error) => error.message);
+    expect(message).toContain('completed');
+    expect(message).toContain('no longer available on the host');
+    expect(message).not.toContain('saved old answer');
+    expect(getSuppressionTombstone(CHILD)).toBeUndefined();
+    expect(fixture.promptAsync).not.toHaveBeenCalled();
+  });
+
+  // Stopped evictions write a bare tombstone (no terminal state): the
+  // refusal must not claim an ending it cannot know.
+  test('a confirmed 404 with a bare tombstone and a verified owner refuses result-free', async () => {
+    const fixture = reviveHost({
+      hostFlavor: 'v2',
+      get: () => ({ error: { message: 'Session not found' } }),
+    });
+    recordBackgroundJobSuppression(fixture.board, CHILD);
+    const message = await fixture.revive
+      .execute({ task_id: CHILD, prompt: 'continue' }, context as never)
+      .catch((error: Error) => error.message);
+    expect(message).toContain('no longer tracked');
+    expect(message).toContain('no longer available on the host');
+    expect(message).not.toContain('Tracking does not survive');
+    expect(fixture.promptAsync).not.toHaveBeenCalled();
+    expect(getSuppressionTombstone(CHILD)).toBeUndefined();
+  });
+
+  // The GC delete raced this revive's first read: recovery must settle the
+  // prune, re-read, and only then trust the host answer.
+  test('a pending prune is awaited and its outcome re-read before adoption', async () => {
+    let missing = false;
+    let settlePrune: (() => void) | undefined;
+    const fixture = reviveHost({
+      hostFlavor: 'v2',
+      get: (id) =>
+        missing && id === CHILD
+          ? { error: { message: 'Session not found' } }
+          : {
+              data: {
+                id: CHILD,
+                parentID: PARENT,
+                agent: 'fixer',
+                time: { created: 1790753027495 },
+              },
+            },
+    });
+    recordBackgroundJobSuppression(fixture.board, CHILD, {
+      state: 'completed',
+      resultSummary: 'saved old answer',
+    });
+    registerPendingSessionPrune(
+      CHILD,
+      new Promise((resolve) => {
+        settlePrune = resolve;
+      }),
+    );
+    const pending = fixture.recover({
+      parentSessionID: PARENT,
+      requested: CHILD,
+      purpose: 'revive',
+    });
+    // Let the first read land; recovery is now fenced on the prune.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settlePrune).toBeDefined();
+    missing = true;
+    settlePrune?.();
+    const result = await pending;
+    expect(result).toMatchObject({ kind: 'refused' });
+    if (result.kind === 'refused') {
+      expect(result.reason).toContain('completed');
+      expect(result.reason).toContain('no longer available on the host');
+      expect(result.reason).not.toContain('saved old answer');
+    }
+    expect(getSuppressionTombstone(CHILD)).toBeUndefined();
+    expect(fixture.promptAsync).not.toHaveBeenCalled();
+  });
+
+  test('a settled prune whose delete failed leaves the session adoptable', async () => {
+    const fixture = reviveHost();
+    registerPendingSessionPrune(CHILD, Promise.resolve());
+    const result = await fixture.recover({
+      parentSessionID: PARENT,
+      requested: CHILD,
+    });
+    expect(result).toEqual({ kind: 'recovered', taskID: CHILD });
+    expect(fixture.board.get(CHILD)).toMatchObject({ state: 'completed' });
   });
 
   // 'no transcript' runs task_revive's legacy v1 adoption.

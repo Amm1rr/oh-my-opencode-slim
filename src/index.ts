@@ -66,6 +66,7 @@ import type { ChildInputWaitRecord } from './hooks/task-session-manager/child-in
 import {
   clearChildInputWaitsForSession,
   getChildInputWait,
+  listChildInputWaits,
 } from './hooks/task-session-manager/child-input-wait';
 import { createBackgroundFallbackHandoff } from './hooks/task-session-manager/fallback-observation-transfer';
 import { createRevivedRunTracker } from './hooks/task-session-manager/revived-run-tracker';
@@ -126,9 +127,11 @@ import {
   resolveRuntimeAgentName,
 } from './utils';
 import type {
+  BackgroundJobEvictedSession,
   BackgroundJobRecord,
   ContextFile,
 } from './utils/background-job-board';
+import { isPrunableEvictedSession } from './utils/background-job-board';
 import {
   type BackgroundJobTerminalGate,
   createBackgroundJobTerminalGate,
@@ -139,12 +142,14 @@ import {
   type EventDirectoryScope,
   hasLiveInstances,
 } from './utils/event-directory-scope';
+import { pruneEvictedHostSession } from './utils/evicted-session-prune';
 import {
   isInternalInitiatorPart,
   isNativeBackgroundTaskNotification,
 } from './utils/internal-initiator';
 import { probeJSDOM } from './utils/jsdom';
 import { initLogger, log } from './utils/logger';
+import { registerPendingSessionPrune } from './utils/pending-session-prunes';
 import { withTimeout } from './utils/session';
 import { SessionMetadataStore } from './utils/session-metadata';
 import { DEFAULT_RUNTIME_SESSION_STATUS_TIMEOUT_MS } from './utils/session-runtime-status';
@@ -825,6 +830,40 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       readContextMaxFiles: runtime.backgroundJobs.readContextMaxFiles,
       delegationTool: delegation.tool,
       deferNumberedAliases: true,
+      // Terminal-session GC (#1387 P2): when a retention trim evicts a
+      // terminal or retained-stopped record, remove the underlying host
+      // child session — but only a background, non-provisional child this
+      // plugin launched itself (never foreground children, unattributed
+      // placeholders, or adopted/restored/rehydrated sessions), and only
+      // after bounded host reads confirm its parentID still matches the
+      // record's parent and it is idle, and the board does not track it
+      // again. A parked child-input wait blocks removal. The prune is
+      // fire-and-forget so the synchronous board never awaits it; the
+      // delete has a deadline so the pending-prune fence always settles.
+      ...(runtime.backgroundJobs.pruneEvictedSessions
+        ? {
+            onEvictedSession: (evicted: BackgroundJobEvictedSession) => {
+              if (!isPrunableEvictedSession(evicted)) return;
+              if (listChildInputWaits(evicted.taskID).length > 0) return;
+              // Same-tick: the prune (parent read + delete) starts and is
+              // registered in one synchronous step with no await in
+              // between, so a task_revive can never observe a
+              // started-but-unregistered prune and adopt the session the
+              // delete is about to remove (#1387 race).
+              registerPendingSessionPrune(
+                evicted.taskID,
+                pruneEvictedHostSession({
+                  session: ctx.client.session,
+                  directory: ctx.directory,
+                  evicted,
+                  readTimeoutMs: DEFAULT_RUNTIME_SESSION_STATUS_TIMEOUT_MS,
+                  deleteTimeoutMs: DEFAULT_RUNTIME_SESSION_STATUS_TIMEOUT_MS,
+                  isTracked: (taskID) => backgroundJobBoard.isTracked(taskID),
+                }),
+              );
+            },
+          }
+        : {}),
     });
     admissionRuntimeLease = acquireAdmissionRuntime(
       ctx.directory,

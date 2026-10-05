@@ -1021,6 +1021,22 @@ describe('PluginConfigSchema backgroundJobs', () => {
     }
   });
 
+  it('defaults pruneEvictedSessions to disabled and accepts an explicit on', () => {
+    const defaults = PluginConfigSchema.safeParse({ backgroundJobs: {} });
+    expect(defaults.success).toBe(true);
+    if (defaults.success) {
+      expect(defaults.data.backgroundJobs?.pruneEvictedSessions).toBe(false);
+    }
+
+    const on = PluginConfigSchema.safeParse({
+      backgroundJobs: { pruneEvictedSessions: true },
+    });
+    expect(on.success).toBe(true);
+    if (on.success) {
+      expect(on.data.backgroundJobs?.pruneEvictedSessions).toBe(true);
+    }
+  });
+
   it('defaults background task concurrency limits to disabled', () => {
     const result = PluginConfigSchema.safeParse({ backgroundJobs: {} });
 

@@ -103,6 +103,7 @@ const DEFAULT_BACKGROUND_JOBS: BackgroundJobsConfig = {
   waitForUserGuard: true,
   childInputWake: true,
   boardInjection: true,
+  pruneEvictedSessions: false,
 };
 
 const DEFAULT_FALLBACK: FailoverConfig = {

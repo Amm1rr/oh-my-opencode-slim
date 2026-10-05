@@ -112,6 +112,18 @@ export interface BackgroundJobRecord {
   verifiedRetainedRound?: true;
   /** Recovery has not sent a prompt; importing a row does not own host work. */
   recoveredWithoutPrompt?: true;
+  /**
+   * In-memory provenance: this plugin's own tracked native task call launched
+   * this record as a fresh background child. Never set for adopted, restored,
+   * provisional, or once-provisional records. Gates terminal-session GC.
+   */
+  pluginLaunched?: true;
+  /**
+   * Sticky provenance: the host session was adopted, restored, rehydrated,
+   * or first seen as an unattributed placeholder, so this plugin cannot
+   * prove it created it. Never cleared; blocks pluginLaunched.
+   */
+  externalOrigin?: true;
 }
 
 export interface BackgroundJobBoardOptions {
@@ -130,6 +142,52 @@ export interface BackgroundJobBoardOptions {
    * fixtures on the historical immediate counter.
    */
   deferNumberedAliases?: boolean;
+  /**
+   * Fired after a retention trim (trimReusable/trimRetained) evicts a
+   * terminal or retained-stopped record. Never fires for clearParent/drop,
+   * which can evict running or unreconciled records. Listener throws are
+   * contained.
+   */
+  onEvictedSession?: (evicted: BackgroundJobEvictedSession) => void;
+}
+
+/** Snapshot of a record evicted by a retention trim, captured before the
+ * delete. Terminal-session GC removes the underlying host child session. */
+export interface BackgroundJobEvictedSession {
+  taskID: string;
+  parentSessionID: string;
+  agent: string;
+  description: string;
+  state: BackgroundJobState;
+  /** Record was a background launch (foreground task children are false). */
+  background: boolean;
+  /** Record was still an unattributed session.created placeholder. */
+  provisional: boolean;
+  /** This plugin's own tracked native task call launched the session. */
+  pluginLaunched: boolean;
+  /** Session was adopted, restored, rehydrated, or once provisional. */
+  externalOrigin: boolean;
+  terminalState?: TaskOutputState;
+  resultSummary?: string;
+  alias: string;
+  lastUsedAt: number;
+}
+
+/**
+ * Terminal-session GC eligibility: only a background, non-provisional record
+ * that this plugin's own native task call launched, with no adopted,
+ * restored, rehydrated, or placeholder provenance. Everything else keeps its
+ * host session.
+ */
+export function isPrunableEvictedSession(
+  evicted: BackgroundJobEvictedSession,
+): boolean {
+  return (
+    evicted.background &&
+    !evicted.provisional &&
+    evicted.pluginLaunched &&
+    !evicted.externalOrigin
+  );
 }
 
 /** Verified host session placed directly into a terminal retained state.
@@ -163,6 +221,12 @@ export interface BackgroundJobLaunchInput {
   adopted?: true;
   /** Preserve the current run when this is a duplicate lifecycle observation. */
   preserveRun?: boolean;
+  /**
+   * This plugin's own tracked native task call launched a fresh background
+   * child (not a resume). Ignored for adopted/provisional input and for
+   * records with external provenance.
+   */
+  pluginLaunched?: true;
   /** Lease proving that this is an authorized same-ID relaunch observation. */
   relaunchLease?: BackgroundJobLease;
   /** Backwards-compatible generic spelling for the relaunch lease. */
@@ -277,6 +341,9 @@ export class BackgroundJobBoard implements BackgroundJobStore {
   private readonly readContextMaxFiles: number;
   private readonly delegationTool: string;
   private readonly deferNumberedAliases: boolean;
+  private readonly onEvictedSession?:
+    | ((evicted: BackgroundJobEvictedSession) => void)
+    | undefined;
   private readonly startedAt = Date.now();
   /** Sessions created after this board started: no earlier aliases. */
   private readonly freshParents = new Set<string>();
@@ -291,6 +358,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       options.readContextMaxFiles ?? DEFAULT_READ_CONTEXT_MAX_FILES;
     this.delegationTool = options.delegationTool ?? 'task';
     this.deferNumberedAliases = options.deferNumberedAliases === true;
+    this.onEvictedSession = options.onEvictedSession;
   }
 
   /** False for a production parent not created while this board runs. */
@@ -416,6 +484,14 @@ export class BackgroundJobBoard implements BackgroundJobStore {
           description: input.description || existing.description,
           objective: input.objective ?? existing.objective,
           background: existing.background || input.background === true,
+          ...(existing.pluginLaunched ||
+          (input.pluginLaunched === true &&
+            input.adopted !== true &&
+            existing.provisional !== true &&
+            existing.externalOrigin !== true &&
+            (existing.background || input.background === true))
+            ? { pluginLaunched: true as const }
+            : {}),
         } satisfies BackgroundJobRecord;
         this.setJob(observed);
         return observed;
@@ -510,6 +586,11 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       taskID: input.taskID,
       // Keep the property absent for ordinary launches and legacy records.
       ...(input.provisional === true ? { provisional: true } : {}),
+      ...(input.adopted === true || input.provisional === true
+        ? { externalOrigin: true as const }
+        : input.pluginLaunched === true && input.background === true
+          ? { pluginLaunched: true as const }
+          : {}),
       generation,
       terminalRevision: 0,
       activityRevision: 0,
@@ -1102,6 +1183,11 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     return this.jobs.get(taskID);
   }
 
+  /** True while the board holds a record or a live lease for the task. */
+  isTracked(taskID: string): boolean {
+    return this.jobs.has(taskID) || this.liveLeases.has(taskID);
+  }
+
   field<K extends keyof BackgroundJobRecord>(
     taskID: string,
     key: K,
@@ -1572,6 +1658,48 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     // No-op at board level
   }
 
+  /** Single eviction path for the retention trims: suppression, delete,
+   * then the optional terminal-session GC listener. Trim eligibility
+   * predicates live in the callers; clearParent/drop must not route here
+   * (they can evict running/unreconciled records). */
+  private evictRecord(entry: BackgroundJobRecord): void {
+    recordBackgroundJobSuppression(
+      this,
+      entry.taskID,
+      terminalResultPayloadOf(entry),
+    );
+    // Snapshot before the delete: the record is gone from this.jobs after.
+    const evicted: BackgroundJobEvictedSession = {
+      taskID: entry.taskID,
+      parentSessionID: entry.parentSessionID,
+      agent: entry.agent,
+      description: entry.description,
+      state: entry.state,
+      background: entry.background,
+      provisional: entry.provisional === true,
+      pluginLaunched: entry.pluginLaunched === true,
+      externalOrigin: entry.externalOrigin === true,
+      ...(entry.terminalState !== undefined
+        ? { terminalState: entry.terminalState }
+        : {}),
+      ...(entry.resultSummary !== undefined
+        ? { resultSummary: entry.resultSummary }
+        : {}),
+      alias: entry.alias,
+      lastUsedAt: entry.lastUsedAt,
+    };
+    this.deleteJob(entry.taskID);
+    if (!this.onEvictedSession) return;
+    try {
+      this.onEvictedSession(evicted);
+    } catch (error) {
+      log('Board eviction listener threw', {
+        taskID: entry.taskID,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   private trimReusable(taskID: string): void {
     const job = this.jobs.get(taskID);
     if (!job) return;
@@ -1588,12 +1716,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
         (entry.terminalState ?? terminalStateOf(entry.state)) !== undefined &&
         sumContextLines(entry) > this.maxContextLines
       ) {
-        recordBackgroundJobSuppression(
-          this,
-          entry.taskID,
-          terminalResultPayloadOf(entry),
-        );
-        this.deleteJob(entry.taskID);
+        this.evictRecord(entry);
       }
     }
 
@@ -1609,12 +1732,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       )
       .sort((a, b) => b.lastUsedAt - a.lastUsedAt);
     for (const stale of reusable.slice(this.maxReusablePerAgent)) {
-      recordBackgroundJobSuppression(
-        this,
-        stale.taskID,
-        terminalResultPayloadOf(stale),
-      );
-      this.deleteJob(stale.taskID);
+      this.evictRecord(stale);
     }
   }
 
@@ -1629,12 +1747,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
         !this.liveLeases.has(entry.taskID) &&
         sumContextLines(entry) > this.maxContextLines
       ) {
-        recordBackgroundJobSuppression(
-          this,
-          entry.taskID,
-          terminalResultPayloadOf(entry),
-        );
-        this.deleteJob(entry.taskID);
+        this.evictRecord(entry);
       }
     }
 
@@ -1647,12 +1760,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       )
       .sort((a, b) => b.lastUsedAt - a.lastUsedAt);
     for (const stale of retained.slice(this.maxReusablePerAgent)) {
-      recordBackgroundJobSuppression(
-        this,
-        stale.taskID,
-        terminalResultPayloadOf(stale),
-      );
-      this.deleteJob(stale.taskID);
+      this.evictRecord(stale);
     }
   }
 
@@ -1759,6 +1867,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       ...(input.state === 'stopped' ? {} : { terminalState: input.state }),
       verifiedRetainedRound: true,
       recoveredWithoutPrompt: true,
+      externalOrigin: true,
       contextFiles: [],
       totalErrors: input.state === 'error' ? 1 : 0,
       timeoutCount: 0,

@@ -642,6 +642,12 @@ export const BackgroundJobsConfigStrictSchema = z.object({
     .describe(
       'When true, a background child that asks a question or permission request wakes its parent with the ask content. Permissions can be answered with task_reply when the host exposes permission.reply; OpenCode v2 form questions are observable but not answerable through the pinned plugin context. Default enabled.',
     ),
+  pruneEvictedSessions: z
+    .boolean()
+    .default(false)
+    .describe(
+      'When true, removes the host child session when a retention trim evicts its terminal or retained-stopped record, only for background children this plugin launched itself (never foreground, unattributed placeholder, adopted, or restored sessions) and only after a host read confirms the session still belongs to the record parent. Never fires for parent deletion or explicit drops. v1 hosts only for now (v2 has no live session-status map, so every prune is skipped). Default disabled.',
+    ),
 });
 
 export const BACKGROUND_JOBS_INVALID_VALUE_MESSAGE =

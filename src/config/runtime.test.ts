@@ -157,6 +157,8 @@ describe('RuntimeConfig', () => {
     // enabled when no config layer sets them (v2 hosts derive otherwise at
     // load time; RuntimeConfig itself is flavor-agnostic).
     expect(runtime.backgroundJobs.boardInjection).toBe(true);
+    // Terminal-session GC is opt-in everywhere (no v2 default derivation).
+    expect(runtime.backgroundJobs.pruneEvictedSessions).toBe(false);
     expect(runtime.backgroundJobs.orchestratorWake.periodicWakeEnabled).toBe(
       true,
     );

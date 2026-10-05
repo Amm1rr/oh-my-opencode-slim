@@ -23,6 +23,12 @@ import {
 } from './hooks/orchestrator-wake/wake-gate';
 import { PHASE_REMINDER_METADATA_KEY } from './hooks/phase-reminder';
 import { BACKGROUND_JOB_BOARD_METADATA_KEY } from './hooks/task-session-manager';
+import {
+  clearChildInputWaitsForSession,
+  listChildInputWaits,
+  noteChildInputWait,
+  resetChildInputWaitForTests,
+} from './hooks/task-session-manager/child-input-wait';
 import { LOOP_GUARD_WARNING } from './hooks/tool-loop-guard/hook';
 import type { MessageWithParts } from './hooks/types';
 import pluginModuleDefault, { OhMyOpenCodeLite as plugin } from './index';
@@ -33,11 +39,16 @@ import {
   snapshotSectionsEqual,
   updateSnapshot,
 } from './tui-state';
+import type {
+  BackgroundJobEvictedSession,
+  BackgroundJobBoard as ProductionBoard,
+} from './utils/background-job-board';
 import { BackgroundJobCoordinator } from './utils/background-job-coordinator';
 import { BackgroundJobBoard } from './utils/background-job-fixture';
 import { resetLiveDirectoriesForTests } from './utils/event-directory-scope';
 import { createInternalAgentTextPart } from './utils/internal-initiator';
 import * as loggerModule from './utils/logger';
+import { pendingSessionPrune } from './utils/pending-session-prunes';
 
 function createPluginClient(
   noop: () => Promise<unknown>,
@@ -5026,6 +5037,249 @@ describe('plugin command registration gating', () => {
         enabledOutput as never,
       );
       expect(enabledOutput.parts.length).toBeGreaterThan(0);
+    } finally {
+      await hooks.dispose?.();
+    }
+  });
+});
+
+describe('backgroundJobs.pruneEvictedSessions wiring', () => {
+  let originalEnv: NodeJS.ProcessEnv;
+  let projectDir = '';
+
+  const noop = async () => ({});
+
+  /** Create hooks and capture the production board the plugin built. */
+  const createHooksWithBoard = async (
+    sessionOverrides: Record<string, unknown> = {},
+  ) => {
+    let coordinator: BackgroundJobCoordinator | undefined;
+    const original =
+      BackgroundJobCoordinator.prototype.addLaunchIdentityListener;
+    const spy = spyOn(
+      BackgroundJobCoordinator.prototype,
+      'addLaunchIdentityListener',
+    ).mockImplementation(function (this: BackgroundJobCoordinator, listener) {
+      coordinator ??= this;
+      return original.call(this, listener);
+    });
+    try {
+      const hooks = await plugin({
+        client: createPluginClient(noop, undefined, sessionOverrides),
+        directory: projectDir,
+        worktree: projectDir,
+        serverUrl: new URL('http://127.0.0.1:4096'),
+      } as never);
+      return { hooks, coordinator: coordinator as BackgroundJobCoordinator };
+    } finally {
+      spy.mockRestore();
+    }
+  };
+
+  const gcCallbackOf = (coordinator: BackgroundJobCoordinator) => {
+    const board = (coordinator as unknown as { board: ProductionBoard }).board;
+    return (
+      board as unknown as {
+        onEvictedSession?: (evicted: BackgroundJobEvictedSession) => void;
+      }
+    ).onEvictedSession;
+  };
+
+  const evicted = (
+    overrides: Partial<BackgroundJobEvictedSession> = {},
+  ): BackgroundJobEvictedSession => ({
+    taskID: 'ses_gc_child',
+    parentSessionID: 'parent-1',
+    agent: 'fixer',
+    description: 'evicted child',
+    state: 'completed',
+    background: true,
+    provisional: false,
+    pluginLaunched: true,
+    externalOrigin: false,
+    alias: 'fix-1',
+    lastUsedAt: 100,
+    ...overrides,
+  });
+
+  beforeEach(async () => {
+    originalEnv = { ...process.env };
+    projectDir = await mkdtemp('/tmp/oh-my-opencode-slim-gc-wiring-');
+    process.env = {
+      ...originalEnv,
+      OPENCODE_CONFIG_DIR: projectDir,
+      XDG_CONFIG_HOME: projectDir,
+      XDG_DATA_HOME: `${projectDir}/data`,
+      XDG_CACHE_HOME: `${projectDir}/cache`,
+      OPENCODE_LOG_DIR: `${projectDir}/logs`,
+    };
+    delete process.env.OH_MY_OPENCODE_SLIM_DISABLE;
+    await Bun.write(
+      `${projectDir}/oh-my-opencode-slim.json`,
+      JSON.stringify({
+        companion: { enabled: false },
+        backgroundJobs: { pruneEvictedSessions: true },
+      }),
+    );
+  });
+
+  afterEach(async () => {
+    process.env = originalEnv;
+    await rm(projectDir, { recursive: true, force: true });
+    resetChildInputWaitForTests();
+  });
+
+  test('a parked child-input wait skips removal; without one the host session is removed once', async () => {
+    const remove = mock(async () => ({}));
+    const get = mock(async () => ({
+      data: { id: 'ses_gc_child', parentID: 'parent-1' },
+    }));
+    const { hooks, coordinator } = await createHooksWithBoard({
+      delete: remove,
+      get,
+      status: async () => ({ data: {} }),
+    });
+    try {
+      const onEvictedSession = gcCallbackOf(coordinator);
+      expect(onEvictedSession).toBeTypeOf('function');
+
+      // Parked wait at evict time: the record's removal is the board's own
+      // business (board tests); the wiring must skip the host session remove.
+      noteChildInputWait({
+        taskID: 'ses_gc_child',
+        parentSessionID: 'parent-1',
+        kind: 'question',
+        requestID: 'req_1',
+        questions: [{ question: 'continue?', header: 'Ask', options: [] }],
+      });
+      onEvictedSession?.(evicted());
+      expect(remove).not.toHaveBeenCalled();
+      expect(listChildInputWaits('ses_gc_child')).toHaveLength(1);
+
+      clearChildInputWaitsForSession('ses_gc_child');
+      onEvictedSession?.(evicted());
+      // Registered in the same tick as the fire; self-removal runs in a
+      // later microtask, so only the settle-and-await assertion below is
+      // deferred — the sync one pins the same-tick registration.
+      expect(pendingSessionPrune('ses_gc_child')).toBeDefined();
+      await pendingSessionPrune('ses_gc_child');
+      expect(pendingSessionPrune('ses_gc_child')).toBeUndefined();
+      expect(get).toHaveBeenCalledTimes(1);
+      expect(remove).toHaveBeenCalledTimes(1);
+      expect(remove.mock.calls[0]?.[0]).toMatchObject({
+        path: { id: 'ses_gc_child' },
+        query: { directory: projectDir },
+      });
+    } finally {
+      await hooks.dispose?.();
+    }
+  });
+
+  test('foreground, provisional, restored and adopted records never reach the host', async () => {
+    const remove = mock(async () => ({}));
+    const get = mock(async () => ({
+      data: { id: 'ses_gc_child', parentID: 'parent-1' },
+    }));
+    const { hooks, coordinator } = await createHooksWithBoard({
+      delete: remove,
+      get,
+      status: async () => ({ data: {} }),
+    });
+    try {
+      const onEvictedSession = gcCallbackOf(coordinator);
+      for (const overrides of [
+        { background: false },
+        { provisional: true },
+        { externalOrigin: true, pluginLaunched: false },
+        { pluginLaunched: false },
+      ]) {
+        onEvictedSession?.(evicted(overrides));
+        expect(pendingSessionPrune('ses_gc_child')).toBeUndefined();
+      }
+      expect(get).not.toHaveBeenCalled();
+      expect(remove).not.toHaveBeenCalled();
+    } finally {
+      await hooks.dispose?.();
+    }
+  });
+
+  test('a host parentID mismatch or failed read skips the delete', async () => {
+    const remove = mock(async () => ({}));
+    let reply: () => Promise<unknown> = async () => ({
+      data: { id: 'ses_gc_child', parentID: 'someone-else' },
+    });
+    const get = mock(() => reply());
+    const { hooks, coordinator } = await createHooksWithBoard({
+      delete: remove,
+      get,
+      status: async () => ({ data: {} }),
+    });
+    try {
+      const onEvictedSession = gcCallbackOf(coordinator);
+      onEvictedSession?.(evicted());
+      await pendingSessionPrune('ses_gc_child');
+      reply = async () => {
+        throw new Error('host unavailable');
+      };
+      onEvictedSession?.(evicted());
+      await pendingSessionPrune('ses_gc_child');
+      expect(get).toHaveBeenCalledTimes(2);
+      expect(remove).not.toHaveBeenCalled();
+    } finally {
+      await hooks.dispose?.();
+    }
+  });
+
+  test('a session the board tracks again is never deleted', async () => {
+    const remove = mock(async () => ({}));
+    const get = mock(async () => ({
+      data: { id: 'ses_gc_child', parentID: 'parent-1' },
+    }));
+    const { hooks, coordinator } = await createHooksWithBoard({
+      delete: remove,
+      get,
+      status: async () => ({ data: {} }),
+    });
+    try {
+      const board = (coordinator as unknown as { board: ProductionBoard })
+        .board;
+      // Revived / re-registered after the eviction snapshot.
+      board.registerLaunch({
+        taskID: 'ses_gc_child',
+        parentSessionID: 'parent-1',
+        agent: 'fixer',
+        background: true,
+      });
+      gcCallbackOf(coordinator)?.(evicted());
+      await pendingSessionPrune('ses_gc_child');
+      expect(remove).not.toHaveBeenCalled();
+    } finally {
+      await hooks.dispose?.();
+    }
+  });
+
+  test('a remove-less host degrades to a no-op without throwing', async () => {
+    // createPluginClient's session proxy returns a resolving noop for any
+    // missing method — the shim's capability-probed degradation shape.
+    const { hooks, coordinator } = await createHooksWithBoard();
+    try {
+      expect(() => gcCallbackOf(coordinator)?.(evicted())).not.toThrow();
+    } finally {
+      await hooks.dispose?.();
+    }
+  });
+
+  test('flag off wires no eviction listener', async () => {
+    await Bun.write(
+      `${projectDir}/oh-my-opencode-slim.json`,
+      JSON.stringify({
+        companion: { enabled: false },
+        backgroundJobs: { pruneEvictedSessions: false },
+      }),
+    );
+    const { hooks, coordinator } = await createHooksWithBoard();
+    try {
+      expect(gcCallbackOf(coordinator)).toBeUndefined();
     } finally {
       await hooks.dispose?.();
     }
