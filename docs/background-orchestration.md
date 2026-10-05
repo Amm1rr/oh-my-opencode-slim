@@ -669,7 +669,9 @@ suppression tombstone, board delete, then the optional GC listener.
 [Configuration](configuration.md#background-job-management)) gates what happens
 next: when enabled, the evicted record's host child session is removed through
 the session-remove path (capability-probed; hosts without `session.remove`
-degrade to a logged no-op).
+degrade to a logged no-op)). On OpenCode v2 hosts there is no live session-status map, so the
+idle check cannot pass and every prune is skipped (logged as `not-idle`):
+the option currently reclaims sessions on v1 hosts only.
 
 A host session is deleted only when every one of these holds:
 

@@ -646,7 +646,7 @@ export const BackgroundJobsConfigStrictSchema = z.object({
     .boolean()
     .default(false)
     .describe(
-      'When true, removes the host child session when a retention trim evicts its terminal or retained-stopped record, only for background children this plugin launched itself (never foreground, unattributed placeholder, adopted, or restored sessions) and only after a host read confirms the session still belongs to the record parent. Never fires for parent deletion or explicit drops. Default disabled.',
+      'When true, removes the host child session when a retention trim evicts its terminal or retained-stopped record, only for background children this plugin launched itself (never foreground, unattributed placeholder, adopted, or restored sessions) and only after a host read confirms the session still belongs to the record parent. Never fires for parent deletion or explicit drops. v1 hosts only for now (v2 has no live session-status map, so every prune is skipped). Default disabled.',
     ),
 });
 
