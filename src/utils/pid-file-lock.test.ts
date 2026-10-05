@@ -11,19 +11,42 @@ import {
 
 const roots: string[] = [];
 
-// Real fs handles captured before any mock.module('node:fs') below: after
-// a mock is registered, lazy `fs.*` lookups resolve to the mock, so the
-// rename wrappers must call these directly to avoid recursing into
-// themselves.
-const realFs = {
-  mkdirSync: fs.mkdirSync,
-  readFileSync: fs.readFileSync,
-  renameSync: fs.renameSync,
-  rmSync: fs.rmSync,
-  statSync: fs.statSync,
-  utimesSync: fs.utimesSync,
-  writeFileSync: fs.writeFileSync,
-};
+// Real fs handles captured before any mock.module('node:fs') below: after a
+// mock is registered, lazy `fs.*` lookups resolve to the mock, so the rename
+// wrapper and its swap simulation must call these directly to avoid
+// recursing into the mock.
+const realRenameSync = fs.renameSync;
+const realWriteFileSync = fs.writeFileSync;
+const realUtimesSync = fs.utimesSync;
+
+/**
+ * Registers a `node:fs` mock that simulates a peer replacing `lockDir`
+ * between the lock's snapshot and its rename: the first time the lock tries
+ * to rename `lockDir`, the mock writes `ownerBytes` plus a fresh dir mtime
+ * (as a real mkdir + write would produce) before performing the rename.
+ * Returns a ref that flips to true once the swap fired. The mock spreads the
+ * real `fs` module so the surrounding test keeps full filesystem access;
+ * only `renameSync` is wrapped.
+ */
+function mockPeerLockSwap(
+  lockDir: string,
+  ownerBytes: string,
+): { swapped: boolean } {
+  const state = { swapped: false };
+  mock.module('node:fs', () => ({
+    ...fs,
+    renameSync: ((from: string, to: string) => {
+      if (!state.swapped && from === lockDir) {
+        state.swapped = true;
+        realWriteFileSync(join(lockDir, 'owner'), ownerBytes);
+        const now = new Date();
+        realUtimesSync(lockDir, now, now);
+      }
+      return realRenameSync(from, to);
+    }) as typeof fs.renameSync,
+  }));
+  return state;
+}
 
 afterEach(() => {
   while (roots.length > 0) {
@@ -171,27 +194,14 @@ describe('pid-file-lock', () => {
     fs.utimesSync(lockDir, old, old);
 
     // Deterministic peer: between our staleness snapshot and our rename, a
-    // peer re-acquires the lock (fresh owner bytes + fresh dir mtime, as a
-    // real mkdir + write would produce).
+    // peer re-acquires the lock (fresh owner bytes + fresh dir mtime).
     const freshOwner = `${process.pid}\nfresh-token`;
-    let swapped = false;
-    mock.module('node:fs', () => ({
-      ...realFs,
-      renameSync: ((from: string, to: string) => {
-        if (!swapped && from === lockDir) {
-          swapped = true;
-          realFs.writeFileSync(join(lockDir, 'owner'), freshOwner);
-          const now = new Date();
-          realFs.utimesSync(lockDir, now, now);
-        }
-        return realFs.renameSync(from, to);
-      }) as typeof fs.renameSync,
-    }));
+    const swap = mockPeerLockSwap(lockDir, freshOwner);
 
     const mod = await import('./pid-file-lock?test=takeover-race');
     const release = mod.acquirePidFileLock(lockFile);
 
-    expect(swapped).toBe(true);
+    expect(swap.swapped).toBe(true);
     expect(release).toBeNull();
     expect(fs.existsSync(lockDir)).toBe(true);
     expect(fs.readFileSync(join(lockDir, 'owner'), 'utf8')).toBe(freshOwner);
@@ -204,26 +214,14 @@ describe('pid-file-lock', () => {
     const lockDir = `${lockFile}.lock`;
 
     const successorOwner = `${process.pid}\nsuccessor-token`;
-    let swapped = false;
-    mock.module('node:fs', () => ({
-      ...realFs,
-      renameSync: ((from: string, to: string) => {
-        if (!swapped && from === lockDir) {
-          swapped = true;
-          realFs.writeFileSync(join(lockDir, 'owner'), successorOwner);
-          const now = new Date();
-          realFs.utimesSync(lockDir, now, now);
-        }
-        return realFs.renameSync(from, to);
-      }) as typeof fs.renameSync,
-    }));
+    const swap = mockPeerLockSwap(lockDir, successorOwner);
 
     const mod = await import('./pid-file-lock?test=release-race');
     const release = mod.acquirePidFileLock(lockFile);
     expect(release).not.toBeNull();
     release?.();
 
-    expect(swapped).toBe(true);
+    expect(swap.swapped).toBe(true);
     expect(fs.existsSync(lockDir)).toBe(true);
     expect(fs.readFileSync(join(lockDir, 'owner'), 'utf8')).toBe(
       successorOwner,

@@ -282,11 +282,15 @@ async function runBackgroundUpdateCheck(
     return;
   }
 
-  let installDir: string | null = null;
-  // Set when a peer process installed the target version while we waited for
-  // the lock: the install is skipped, but the shared redirect/companion/toast
-  // path below still runs, after the lock is released.
-  let alreadyInstalledByPeer = false;
+  // The install phase resolves to one of three outcomes:
+  // 'peer' (a peer process installed the version while we waited for the
+  // lock), 'installed' (we prepared→installed→published it), or 'failed'.
+  // 'peer' and 'installed' both continue to the shared redirect/companion/
+  // toast path below, after the lock is released.
+  let outcome:
+    | { kind: 'peer'; dir: string }
+    | { kind: 'installed'; dir: string }
+    | { kind: 'failed' };
   try {
     // The version may have been installed by another process while we waited
     // for the lock.
@@ -294,8 +298,7 @@ async function runBackgroundUpdateCheck(
       log(
         `[auto-update-checker] v${latestVersion} already installed by another OpenCode process; skipping install.`,
       );
-      alreadyInstalledByPeer = true;
-      installDir = targetContext.installDir;
+      outcome = { kind: 'peer', dir: targetContext.installDir };
     } else {
       const prepared = preparePackageUpdate(
         latestVersion,
@@ -320,16 +323,20 @@ async function runBackgroundUpdateCheck(
       const installSuccess =
         (await runPackageInstallSafe(prepared.stagingDir)) &&
         verifyInstalledPackage(prepared.stagingDir, latestVersion);
-      installDir = installSuccess
+      const published = installSuccess
         ? publishPackageUpdate(prepared, latestVersion)
         : null;
       if (!installSuccess) discardPreparedPackageUpdate(prepared);
+      outcome = published
+        ? { kind: 'installed', dir: published }
+        : { kind: 'failed' };
     }
   } finally {
     releaseInstallLock();
   }
 
-  if (installDir) {
+  if (outcome.kind !== 'failed') {
+    const installDir = outcome.dir;
     if (
       pluginInfo.isInstallerManaged &&
       updateInstallerManagedVersions(ctx.directory, latestVersion).status ===
@@ -366,7 +373,7 @@ async function runBackgroundUpdateCheck(
       8000,
     );
     log(
-      alreadyInstalledByPeer
+      outcome.kind === 'peer'
         ? `[auto-update-checker] Update already installed by another process: ${currentVersion} → ${latestVersion}`
         : `[auto-update-checker] Update installed: ${currentVersion} → ${latestVersion}`,
     );
