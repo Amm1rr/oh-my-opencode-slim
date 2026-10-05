@@ -1717,8 +1717,16 @@ export function createOrchestratorWakeScheduler(
     localWakeOwners.set(sessionID, owner);
 
     // #1411: the delta-less wake body reserved by this attempt, if any. Kept
-    // outside the try so a failed send can roll the reservation back.
-    let reservedBody: { wakeText: string; occurrence: number } | undefined;
+    // outside the try so a failed send can roll the reservation back. The
+    // reservation map is part of the handle so a rollback cannot undo a
+    // newer wake's reservation after the session's map was replaced.
+    let reservedBody:
+      | {
+          wakeText: string;
+          occurrence: number;
+          reservation: Map<string, number>;
+        }
+      | undefined;
 
     try {
       const snapshot =
@@ -2002,11 +2010,11 @@ export function createOrchestratorWakeScheduler(
         recoveryDetails === '' &&
         wakeText !== ORCHESTRATOR_CHILD_INPUT_WAKE_TEXT
       ) {
-        const { repeat, occurrence } = reserveWakeBodyOccurrence(
+        const { repeat, occurrence, reservation } = reserveWakeBodyOccurrence(
           sessionID,
           wakeText,
         );
-        reservedBody = { wakeText, occurrence };
+        reservedBody = { wakeText, occurrence, reservation };
         const core = repeat ? WAKE_REPEAT_CORES.get(wakeText) : undefined;
         if (core) {
           bodyText = wakeRepeatMarker(core, occurrence);
@@ -2136,6 +2144,7 @@ export function createOrchestratorWakeScheduler(
           sessionID,
           reservedBody.wakeText,
           reservedBody.occurrence,
+          reservedBody.reservation,
         );
       }
       clearExpectingWakeBusy(sessionID);

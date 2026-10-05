@@ -36,6 +36,7 @@ import {
   wakeRepeatMarker,
 } from './index';
 import {
+  clearWakeSession,
   commitWakeReservation,
   getSuppressedDuplicateWakes,
   getWakeProgress,
@@ -3819,7 +3820,7 @@ describe('#1411 wake body dedupe', () => {
     // Side-state read: nothing was recorded for this text by the wake.
     expect(
       reserveWakeBodyOccurrence('p1', ORCHESTRATOR_STOPPED_JOB_WAKE_TEXT),
-    ).toEqual({ repeat: false, occurrence: 1 });
+    ).toMatchObject({ repeat: false, occurrence: 1 });
   });
 
   test('child-input wake keeps the full caveat template and is exempt from occurrence tracking', async () => {
@@ -3854,7 +3855,7 @@ describe('#1411 wake body dedupe', () => {
     expect(getSuppressedDuplicateWakes('p1')).toBe(0);
     expect(
       reserveWakeBodyOccurrence('p1', ORCHESTRATOR_CHILD_INPUT_WAKE_TEXT),
-    ).toEqual({ repeat: false, occurrence: 1 });
+    ).toMatchObject({ repeat: false, occurrence: 1 });
   });
 
   test('suppressed counter increments and the suppression log fires', async () => {
@@ -3932,7 +3933,9 @@ describe('#1411 wake body dedupe', () => {
     // A failed first send counts no suppression.
     expect(getSuppressedDuplicateWakes('p1')).toBe(0);
     // The failed send must not leave the full text marked as delivered.
-    expect(reserveWakeBodyOccurrence('p1', ORCHESTRATOR_WAKE_TEXT)).toEqual({
+    expect(
+      reserveWakeBodyOccurrence('p1', ORCHESTRATOR_WAKE_TEXT),
+    ).toMatchObject({
       repeat: false,
       occurrence: 1,
     });
@@ -3957,39 +3960,80 @@ describe('#1411 wake body dedupe', () => {
   });
 
   test('rollbackWakeBodyOccurrence removes the sole occurrence and undoes a counted repeat', () => {
-    expect(reserveWakeBodyOccurrence('p1', ORCHESTRATOR_WAKE_TEXT)).toEqual({
-      repeat: false,
-      occurrence: 1,
-    });
-    rollbackWakeBodyOccurrence('p1', ORCHESTRATOR_WAKE_TEXT, 1);
-    expect(reserveWakeBodyOccurrence('p1', ORCHESTRATOR_WAKE_TEXT)).toEqual({
-      repeat: false,
-      occurrence: 1,
-    });
+    const first = reserveWakeBodyOccurrence('p1', ORCHESTRATOR_WAKE_TEXT);
+    expect(first).toMatchObject({ repeat: false, occurrence: 1 });
+    rollbackWakeBodyOccurrence(
+      'p1',
+      ORCHESTRATOR_WAKE_TEXT,
+      first.occurrence,
+      first.reservation,
+    );
+    const again = reserveWakeBodyOccurrence('p1', ORCHESTRATOR_WAKE_TEXT);
+    expect(again).toMatchObject({ repeat: false, occurrence: 1 });
 
-    expect(reserveWakeBodyOccurrence('p1', ORCHESTRATOR_WAKE_TEXT)).toEqual({
-      repeat: true,
-      occurrence: 2,
-    });
+    const repeat = reserveWakeBodyOccurrence('p1', ORCHESTRATOR_WAKE_TEXT);
+    expect(repeat).toMatchObject({ repeat: true, occurrence: 2 });
     expect(getSuppressedDuplicateWakes('p1')).toBe(1);
-    rollbackWakeBodyOccurrence('p1', ORCHESTRATOR_WAKE_TEXT, 2);
+    rollbackWakeBodyOccurrence(
+      'p1',
+      ORCHESTRATOR_WAKE_TEXT,
+      repeat.occurrence,
+      repeat.reservation,
+    );
     expect(getSuppressedDuplicateWakes('p1')).toBe(0);
-    expect(reserveWakeBodyOccurrence('p1', ORCHESTRATOR_WAKE_TEXT)).toEqual({
-      repeat: true,
-      occurrence: 2,
-    });
+    expect(
+      reserveWakeBodyOccurrence('p1', ORCHESTRATOR_WAKE_TEXT),
+    ).toMatchObject({ repeat: true, occurrence: 2 });
 
     // No-op on an unknown text.
-    rollbackWakeBodyOccurrence('p1', ORCHESTRATOR_CHILDREN_WAKE_TEXT, 1);
+    rollbackWakeBodyOccurrence(
+      'p1',
+      ORCHESTRATOR_CHILDREN_WAKE_TEXT,
+      1,
+      repeat.reservation,
+    );
     // A stale send must not undo a newer reservation: the occurrence guard
     // rejects the rollback once the stored count has moved on.
     const stale = reserveWakeBodyOccurrence('p1', ORCHESTRATOR_WAKE_TEXT);
     expect(stale.occurrence).toBe(3);
-    rollbackWakeBodyOccurrence('p1', ORCHESTRATOR_WAKE_TEXT, 1);
-    expect(reserveWakeBodyOccurrence('p1', ORCHESTRATOR_WAKE_TEXT)).toEqual({
-      repeat: true,
-      occurrence: 4,
-    });
+    rollbackWakeBodyOccurrence(
+      'p1',
+      ORCHESTRATOR_WAKE_TEXT,
+      1,
+      stale.reservation,
+    );
+    expect(
+      reserveWakeBodyOccurrence('p1', ORCHESTRATOR_WAKE_TEXT),
+    ).toMatchObject({ repeat: true, occurrence: 4 });
+  });
+
+  test('a stale rollback cannot remove a newer reservation after the map is replaced', () => {
+    // Wake A reserves, then its session state is cleared while the send is
+    // still pending (LRU eviction, hook disposal, or session deletion).
+    const wakeA = reserveWakeBodyOccurrence('p1', ORCHESTRATOR_WAKE_TEXT);
+    expect(wakeA.occurrence).toBe(1);
+    clearWakeSession('p1');
+
+    // Wake B reserves the same body for the same session: the occurrence
+    // number restarts at 1 in a fresh map.
+    const wakeB = reserveWakeBodyOccurrence('p1', ORCHESTRATOR_WAKE_TEXT);
+    expect(wakeB.occurrence).toBe(1);
+    expect(wakeB.reservation).not.toBe(wakeA.reservation);
+
+    // Wake A's late rollback carries the same occurrence number, but the map
+    // it wrote into is no longer the session's, so it must not fire.
+    rollbackWakeBodyOccurrence(
+      'p1',
+      ORCHESTRATOR_WAKE_TEXT,
+      wakeA.occurrence,
+      wakeA.reservation,
+    );
+
+    // Wake B's reservation survives: the next wake is occurrence 2.
+    expect(
+      reserveWakeBodyOccurrence('p1', ORCHESTRATOR_WAKE_TEXT),
+    ).toMatchObject({ repeat: true, occurrence: 2 });
+    expect(getSuppressedDuplicateWakes('p1')).toBe(1);
   });
 
   test('a store left over from before this change is backfilled, not crashed on', () => {
@@ -4001,7 +4045,9 @@ describe('#1411 wake body dedupe', () => {
     delete store.deliveredDeltalessWakeTexts;
     delete store.suppressedDuplicateWakes;
 
-    expect(reserveWakeBodyOccurrence('p1', ORCHESTRATOR_WAKE_TEXT)).toEqual({
+    expect(
+      reserveWakeBodyOccurrence('p1', ORCHESTRATOR_WAKE_TEXT),
+    ).toMatchObject({
       repeat: false,
       occurrence: 1,
     });

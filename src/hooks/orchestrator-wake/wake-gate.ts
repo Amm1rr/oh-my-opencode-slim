@@ -179,12 +179,18 @@ export function commitWakeReservation(
  * occurrence stores count 1 and returns `repeat: false`; every identical
  * body afterwards increments the count, bumps the per-session suppressed
  * counter, and returns `repeat: true` with the new occurrence number.
- * No rollback seam: a failed send keeps the occurrence counted.
+ * `reservation` is the map the count was written into: a rollback only
+ * applies while that exact map is still the session's, so an eviction that
+ * replaced it makes a stale rollback a no-op.
  */
 export function reserveWakeBodyOccurrence(
   sessionID: string,
   wakeText: string,
-): { repeat: boolean; occurrence: number } {
+): {
+  repeat: boolean;
+  occurrence: number;
+  reservation: Map<string, number>;
+} {
   const store = getStore();
   let counts = store.deliveredDeltalessWakeTexts.get(sessionID);
   if (!counts) {
@@ -201,7 +207,7 @@ export function reserveWakeBodyOccurrence(
       (store.suppressedDuplicateWakes.get(sessionID) ?? 0) + 1,
     );
   }
-  return { repeat: previous > 0, occurrence };
+  return { repeat: previous > 0, occurrence, reservation: counts };
 }
 
 /** #1411 observability: suppressed duplicate wake count for a session. */
@@ -213,25 +219,28 @@ export function getSuppressedDuplicateWakes(sessionID: string): number {
  * #1411: undo the occurrence a failed send reserved, so the retry delivers
  * the full text instead of a phantom repeat. Removes the sole occurrence
  * outright; an occurrence that was a counted repeat also undoes its
- * suppression count (floored at 0). `occurrence` must be the number the
- * caller's `reserveWakeBodyOccurrence` returned: if the stored count has
- * moved on (a newer wake reserved after an eviction), this is a no-op so a
- * stale send cannot undo the newer reservation.
+ * suppression count (floored at 0). `reservation` and `occurrence` must be
+ * what the caller's `reserveWakeBodyOccurrence` returned: if the session's
+ * occurrence map has since been replaced (LRU eviction, hook disposal,
+ * session deletion) or the count moved on to a newer reservation, this is a
+ * no-op so a stale send cannot undo someone else's reservation.
  */
 export function rollbackWakeBodyOccurrence(
   sessionID: string,
   wakeText: string,
   occurrence: number,
+  reservation: Map<string, number>,
 ): void {
   const store = getStore();
   const counts = store.deliveredDeltalessWakeTexts.get(sessionID);
-  const count = counts?.get(wakeText) ?? 0;
-  if (!counts || count !== occurrence) return;
-  if (count === 1) {
-    counts.delete(wakeText);
+  if (counts !== reservation || reservation.get(wakeText) !== occurrence) {
     return;
   }
-  counts.set(wakeText, count - 1);
+  if (occurrence === 1) {
+    reservation.delete(wakeText);
+    return;
+  }
+  reservation.set(wakeText, occurrence - 1);
   store.suppressedDuplicateWakes.set(
     sessionID,
     Math.max(0, (store.suppressedDuplicateWakes.get(sessionID) ?? 0) - 1),
