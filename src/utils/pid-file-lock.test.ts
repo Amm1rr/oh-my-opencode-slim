@@ -11,6 +11,20 @@ import {
 
 const roots: string[] = [];
 
+// Real fs handles captured before any mock.module('node:fs') below: after
+// a mock is registered, lazy `fs.*` lookups resolve to the mock, so the
+// rename wrappers must call these directly to avoid recursing into
+// themselves.
+const realFs = {
+  mkdirSync: fs.mkdirSync,
+  readFileSync: fs.readFileSync,
+  renameSync: fs.renameSync,
+  rmSync: fs.rmSync,
+  statSync: fs.statSync,
+  utimesSync: fs.utimesSync,
+  writeFileSync: fs.writeFileSync,
+};
+
 afterEach(() => {
   while (roots.length > 0) {
     const root = roots.pop();
@@ -162,15 +176,15 @@ describe('pid-file-lock', () => {
     const freshOwner = `${process.pid}\nfresh-token`;
     let swapped = false;
     mock.module('node:fs', () => ({
-      ...fs,
+      ...realFs,
       renameSync: ((from: string, to: string) => {
         if (!swapped && from === lockDir) {
           swapped = true;
-          fs.writeFileSync(join(lockDir, 'owner'), freshOwner);
+          realFs.writeFileSync(join(lockDir, 'owner'), freshOwner);
           const now = new Date();
-          fs.utimesSync(lockDir, now, now);
+          realFs.utimesSync(lockDir, now, now);
         }
-        return fs.renameSync(from, to);
+        return realFs.renameSync(from, to);
       }) as typeof fs.renameSync,
     }));
 
@@ -192,15 +206,15 @@ describe('pid-file-lock', () => {
     const successorOwner = `${process.pid}\nsuccessor-token`;
     let swapped = false;
     mock.module('node:fs', () => ({
-      ...fs,
+      ...realFs,
       renameSync: ((from: string, to: string) => {
         if (!swapped && from === lockDir) {
           swapped = true;
-          fs.writeFileSync(join(lockDir, 'owner'), successorOwner);
+          realFs.writeFileSync(join(lockDir, 'owner'), successorOwner);
           const now = new Date();
-          fs.utimesSync(lockDir, now, now);
+          realFs.utimesSync(lockDir, now, now);
         }
-        return fs.renameSync(from, to);
+        return realFs.renameSync(from, to);
       }) as typeof fs.renameSync,
     }));
 
