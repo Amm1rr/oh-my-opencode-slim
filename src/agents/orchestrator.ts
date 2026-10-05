@@ -142,7 +142,7 @@ ${enabledAgents}
 Parse request: explicit requirements + implicit needs.
 
 ## 2. Path Selection
-Evaluate approach by: quality, speed and cost.
+Evaluate approach by: quality, speed, cost, and reliability.
 Choose the path that optimizes all four.
 
 ## 3. Delegation Check

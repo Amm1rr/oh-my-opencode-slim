@@ -20,7 +20,7 @@ exports[`specialist role definitions matches golden factory prompts and descript
   {
     "description": "UI/UX design, review, and implementation. Use for styling, responsive design, component architecture and visual polish.",
     "name": "designer",
-    "promptSha256": "e2667d9f6771ece1ff74ae697179e7824169baaf4065b43a9c065b8269309aa3",
+    "promptSha256": "2f30988368a2e701290186508aca4e44ff47711da4dc60d0bdcba1527c6b97f4",
   },
   {
     "description": "Fast implementation specialist. Receives complete context and task spec, executes code changes efficiently.",

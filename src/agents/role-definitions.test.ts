@@ -147,4 +147,23 @@ describe('specialist role definitions', () => {
       ROLE_ROUTING_BLOCKS.explorer,
     );
   });
+  test('keeps behavioral steering while fixing local prompt inconsistencies', () => {
+    const designerPrompt = ROLE_DEFINITIONS.designer.prompt;
+
+    expect(designerPrompt).toContain(
+      'Prioritize visual excellence-code perfection comes second',
+    );
+    expect(designerPrompt).toContain('requested product language');
+    expect(designerPrompt).not.toContain('regular english');
+
+    expect(ROLE_ROUTING_BLOCKS.council).toContain(
+      'Permissions: Synthesis only; no tools',
+    );
+    expect(ROLE_ROUTING_BLOCKS.council).toContain(
+      'Stats: 3x slower than orchestrator',
+    );
+    expect(ROLE_ROUTING_BLOCKS.oracle).toContain(
+      'materially reduces risk or uncertainty',
+    );
+  });
 });
