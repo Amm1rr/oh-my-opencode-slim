@@ -129,16 +129,10 @@ export class KittyMultiplexer implements Multiplexer {
     await this.ensureLayout(kittyLayout, parentWindowId);
 
     try {
-      const opencodeCmd = buildViewCommand(
-        options?.viewerFlavor ?? 'v1',
-        sessionId,
-        serverUrl,
-        directory,
-        {
-          executable: resolveOpencodeExecutable(),
-          viewerSurface: options?.viewerSurface,
-        },
-      );
+      const opencodeCmd = buildViewCommand(sessionId, serverUrl, directory, {
+        ...options,
+        executable: resolveOpencodeExecutable(),
+      });
 
       // Normalize for Windows/MSYS2/Git Bash (backslashes would be treated as
       // escape chars). No-op on macOS/Linux. Mirrors the herdr adapter.

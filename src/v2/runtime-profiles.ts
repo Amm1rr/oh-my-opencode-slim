@@ -8,7 +8,8 @@
  * into a per-agent profile, freezes the current profile for each NEW child
  * session, and applies it before that child's first request:
  *
- * - `model`/`variant`: `session.switchModel` (v2 prompts carry no model).
+ * - `model`/`variant`: `session.switchModel` for host defaults; per-call models
+ *   stay untouched (v2 prompts carry no model).
  * - `temperature`/provider `options`: mutated onto the context hook's
  *   `options` record for that captured session only (never system/messages/
  *   tools — prompt bytes and tool catalogs stay untouched).
@@ -48,6 +49,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function sameModel(a: unknown, b: V2AgentRuntimeProfile['model']): boolean {
+  return (
+    isRecord(a) &&
+    b !== undefined &&
+    a.providerID === b.providerID &&
+    a.id === b.id &&
+    (a.variant ?? 'default') === (b.variant ?? 'default')
+  );
+}
+
 async function withProfileTimeout<T>(
   operation: Promise<T>,
   message: string,
@@ -84,6 +95,8 @@ export function resolveV2EventPayload(
 export interface SessionProfileBridgeOptions {
   /** Current profile table (read on every newly seen child). */
   profiles: () => V2AgentRuntimeProfiles;
+  /** Startup profiles, matching the host-registered agent defaults. */
+  registeredProfiles?: V2AgentRuntimeProfiles;
   /** Plugin-defined agent ids; foreign children are never profiled. */
   pluginAgents: ReadonlySet<string>;
   /** Session domain used for `session.get` (identity) and `switchModel`. */
@@ -106,6 +119,7 @@ export interface SessionProfileBridgeOptions {
 export interface SessionProfileIdentity {
   parentID?: string;
   agent?: string;
+  model?: unknown;
 }
 
 export interface SessionProfileBridge {
@@ -194,10 +208,12 @@ export function createSessionProfileBridge(
   ): Promise<{
     parentID?: string;
     agent?: string;
+    model?: unknown;
     authoritative: boolean;
   }> {
     let parentID = cleanID(hint?.parentID);
     let agent = cleanID(hint?.agent);
+    let model = hint?.model;
     let authoritative = hint !== undefined;
     const get = options.session?.get;
     if ((!parentID || !agent) && typeof get === 'function') {
@@ -213,6 +229,7 @@ export function createSessionProfileBridge(
         if (isRecord(info)) {
           if (!parentID) parentID = cleanID(info.parentID);
           if (!agent) agent = cleanID(info.agent);
+          model ??= info.model;
           authoritative = true;
         }
       } catch (err) {
@@ -228,6 +245,7 @@ export function createSessionProfileBridge(
     return {
       ...(parentID ? { parentID } : {}),
       ...(agent ? { agent } : {}),
+      model,
       authoritative,
     };
   }
@@ -288,10 +306,17 @@ export function createSessionProfileBridge(
         });
         return;
       }
-      if (!profile.model) {
+      const registered = options.registeredProfiles?.[resolved.agent]?.model;
+      if (
+        !profile.model ||
+        (options.registeredProfiles &&
+          resolved.model &&
+          !sameModel(resolved.model, registered))
+      ) {
+        // Nothing to switch, or the host already runs a per-call model.
         captured.set(sessionID, profile);
         prune();
-        emitLog('[v2][profile] child session captured without a model', {
+        emitLog('[v2][profile] child session captured without a model switch', {
           sessionID,
           agent: resolved.agent,
         });
@@ -359,6 +384,7 @@ export function createSessionProfileBridge(
         await ensure(sessionID, {
           parentID: cleanID(payload.parentID),
           agent: cleanID(payload.agent),
+          model: payload.model,
         });
       } catch (err) {
         emitLog('[v2][profile] bridge failed', String(err));

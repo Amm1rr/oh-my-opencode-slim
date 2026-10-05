@@ -388,7 +388,6 @@ describe('MultiplexerConfigSchema', () => {
       type: 'none',
       layout: 'main-vertical',
       main_pane_size: 60,
-      viewer: 'mini',
     });
   });
 
@@ -453,18 +452,6 @@ describe('MultiplexerConfigSchema', () => {
     expect(warnSpy).not.toHaveBeenCalled();
   });
 
-  it('accepts viewer "tui" and defaults viewer to "mini" when unset', () => {
-    const tui = MultiplexerConfigSchema.parse({
-      type: 'herdr',
-      viewer: 'tui',
-    });
-    const unset = MultiplexerConfigSchema.parse({ type: 'herdr' });
-
-    expect(tui.viewer).toBe('tui');
-    expect(unset.viewer).toBe('mini');
-    expect(warnSpy).not.toHaveBeenCalled();
-  });
-
   it('disables pane management for an invalid viewer value', () => {
     const result = PluginConfigSchema.safeParse({
       multiplexer: { type: 'herdr', viewer: 'nano' },
@@ -503,7 +490,6 @@ describe('MultiplexerConfigSchema', () => {
         type: 'tmux',
         layout: 'tiled',
         main_pane_size: 40,
-        viewer: 'mini',
       });
       expect(first.data.agents?.oracle?.model).toBe('valid/model');
     }

@@ -421,6 +421,9 @@ export function createRevivedRunTracker(options: {
             body: {
               agent: notifyAgent,
               ...(selection?.model ? { model: selection.model } : {}),
+              ...(selection?.model && selection.variant
+                ? { variant: selection.variant }
+                : {}),
               // Internal-initiator part (synthetic flag + metadata + marker):
               // the v2 client-shim routes these through session.synthetic so
               // the notification stays machine-context instead of a visible

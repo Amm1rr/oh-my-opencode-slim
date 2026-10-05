@@ -192,6 +192,9 @@ async function bootHarness(deferAgentTransform = false): Promise<Harness> {
         id: sessionID,
         ...(sessionID.startsWith('root') ? {} : { parentID: 'parent-1' }),
         agent: sessionID.startsWith('foreign') ? 'build' : 'explorer',
+        ...(sessionID === 'per-call-child' && {
+          model: { providerID: 'other', id: 'per-call', variant: 'low' },
+        }),
       }),
       switchModel: async (input: {
         sessionID: string;
@@ -421,6 +424,12 @@ describe('v2 session-frozen hot refresh', () => {
     env.writeUserConfig(hot('cheap'));
 
     await withHarness(async (harness) => {
+      await harness.invokePrompt({
+        sessionID: 'per-call-child',
+        messageID: 'msg_per_call',
+        prompt: { text: 'keep the per-call model' },
+      });
+      expect(harness.switchCalls).toEqual([]);
       // The host fires the prompt hook BEFORE any session.created event for
       // the child: the awaited request-path capture must still switch the
       // model and freeze the profile before the first request.

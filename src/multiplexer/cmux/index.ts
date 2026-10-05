@@ -44,6 +44,7 @@ import {
   resolveHostOpencodeBinary,
   shellSupportsAndChain,
   shellSupportsHashComments,
+  viewerNeedsPaneCwd,
   withParentEnvPassword,
 } from '../shared';
 import type { Multiplexer, PaneResult, PaneSpawnOptions } from '../types';
@@ -519,23 +520,17 @@ export class CmuxMultiplexer implements Multiplexer {
       }
     }
 
-    const viewerCommand = buildViewCommand(
-      options?.viewerFlavor ?? 'v1',
-      sessionId,
-      serverUrl,
-      directory,
-      {
-        executable: this.opencodeBinary,
-        viewerSurface: options?.viewerSurface,
-      },
-    );
-    // Mini commands omit the directory and `pane run` has no cwd flag, so
+    const viewerCommand = buildViewCommand(sessionId, serverUrl, directory, {
+      ...options,
+      executable: this.opencodeBinary,
+    });
+    // v2 mini omits the directory and `pane run` has no cwd flag, so
     // the command changes directory itself. The wrapper stays on one line,
     // so the FR-8 marker above it remains the first script line. Shells
-    // that cannot parse `&&` (nu, cmd, PowerShell) keep the pre-pinning
-    // behavior instead: the pane inherits the anchor pane's cwd.
+    // outside the POSIX/fish `cd '...' && ...` wrapper allowlist inherit
+    // the anchor pane's cwd instead.
     const withCwd =
-      options?.viewerSurface === 'mini' && shellSupportsAndChain()
+      viewerNeedsPaneCwd(options) && shellSupportsAndChain()
         ? `cd ${quoteShellArg(normalizePathForShell(directory))} && ${viewerCommand}`
         : viewerCommand;
     const command = needsSecretBridge

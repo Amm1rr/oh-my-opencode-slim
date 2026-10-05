@@ -206,7 +206,7 @@ All config files support **JSONC** (JSON with Comments):
 | `multiplexer.layout` | string | `"main-vertical"` | Layout preset: `main-vertical`, `main-horizontal`, `tiled`, `even-horizontal`, `even-vertical`. Each adapter maps it to its nearest native expression (tmux full layouts; split directions for Zellij/Herdr; built-in layouts for kitty); cmux-tui has no layout expression and ignores it. See [Multiplexer Integration](multiplexer-integration.md#layouts). |
 | `multiplexer.main_pane_size` | number | `60` | Main pane size as percentage (20–80) for tmux main layouts; ignored by Zellij, Herdr, kitty, and cmux-tui See [Multiplexer Integration](multiplexer-integration.md#layouts). |
 | `multiplexer.cmux_tui_binary` | string | omitted | Explicit path to the cmux-tui binary. When omitted, the client resolves `cmux-tui` first, then `cmux`, on `PATH` See [Multiplexer Integration](multiplexer-integration.md). |
-| `multiplexer.viewer` | string | `"mini"` | Which opencode TUI surface subagent panes open: `"mini"` (the lightweight `opencode mini`, which requires an opencode build with the `mini` subcommand) or `"tui"` (the full interface). Changes take effect on the next opencode start See [Multiplexer Integration](multiplexer-integration.md). |
+| `multiplexer.viewer` | string | `"tui"` on v1, `"mini"` on v2 | Subagent pane surface: `"tui"` (full interface) or `"mini"` (lightweight interface). Explicit values override the host default. On v1, `"mini"` requires OpenCode >= 1.17.10 and runs `attach ... --dir <dir> --mini`; on v2 it runs `opencode mini` without a positional directory. Changes take effect on the next opencode start. See [Multiplexer Integration](multiplexer-integration.md). |
 | `multiplexer.zellij_pane_mode` | string | — | **Deprecated and ignored.** Zellij panes always open in the tab containing the parent OpenCode pane; a once-per-process warning is logged and pane management keeps working See [Behavior Changes and Removals](multiplexer-integration.md#behavior-changes-and-removals). |
 | `tmux.enabled` | boolean | — | **Deprecated and ignored** (legacy key); use `multiplexer.type = "tmux"` See [Multiplexer Integration](multiplexer-integration.md#legacy-tmux-config). |
 | `tmux.layout` | string | — | **Deprecated and ignored** (legacy key); use `multiplexer.layout` See [Multiplexer Integration](multiplexer-integration.md#legacy-tmux-config). |
@@ -432,7 +432,15 @@ automatically.
 
 Auto-update never crosses major versions. For example, a 1.x install can
 auto-update to a newer 1.x release, but it won't auto-install 2.x. When a newer
-major is available, the plugin shows a migration command instead.
+major is available, the plugin shows a migration command instead, along with the
+running version and the cached copy it resolved from.
+
+Installs are coordinated across OpenCode processes: when several windows are
+open, only one installs a pending version. The others wait for that install to
+finish, then skip their own install and prompt you to restart. If a window
+cannot get the install lock in time, it skips quietly and retries the update
+check on the next OpenCode server start (the check runs once per server
+process, not once per session).
 
 > Pinned plugin entries in `opencode.json` (for example
 > `"oh-my-opencode-slim@1.0.1"`) are the true version lock. Those stay pinned
@@ -665,21 +673,33 @@ starting on a stale primary and waiting for an avoidable provider failure.
 Their own configured model array remains the ordered fallback chain after the
 inherited active model.
 
-Array-configured specialists also avoid a provider the orchestrator has
-already fallen past. When the parent's active fallback is present in the
-child's chain, that exact entry is used. Otherwise Slim prefers the child's
-first entry on the working parent provider, then the first entry outside the
-providers exhausted by the parent. OpenCode v2 uses the native per-call
-subagent model override. OpenCode v1's `task` tool has no model argument, so
-Slim sets the selected model on the child's first prompt before the host saves
-it. In both cases the delegation keeps the canonical specialist name, so
-`task` permission rules and the task tool's agent list are unchanged. On v1,
+Independent specialist chains follow the parent only on its own chain fallbacks.
+A shared primary is not an active fallback. When the parent's active fallback is
+in the child's chain, that exact entry is used. Otherwise Slim prefers the first
+entry on the working parent provider, then the first outside exhausted providers.
+OpenCode v2 uses the native per-call subagent model override. On v1, the child's
+first prompt claims a delegation intention using the host's parent link and empty
+transcript; a `task_id` resume instead targets that child's next prompt. Slim
+recalculates the live parent selection before the host saves the prompt, without
+depending on `session.created` delivery or `tool.execute.after`. Unrelated later
+prompts cannot claim creation intentions. The specialist name stays canonical, so
+`task` permissions and the task tool's agent list are unchanged. On v1,
 `fallback.continuationPolicy` controls what happens when an unpinned native
 background-completion or lifecycle turn follows a confirmed fallback. The
 default, `"retry-primary"`, lets the host try the configured primary again,
 which is useful after a quota or provider outage is repaired. Set it to
 `"stick-to-fallback"` to keep those internal continuations on the confirmed
 fallback until the next external user turn.
+
+V2 forwards configured variants as `provider/model#variant`. The host rejects
+a variant unavailable for that model; Slim does not silently drop it.
+The v2 runtime-profile bridge preserves a child's per-call model and variant
+when its provider, model ID, or variant differs from the startup selection.
+An omitted variant and `default` identify the same default variant.
+If the agent started without a model, any child model is kept, including the
+parent model v2 gives new subagents; a model added later applies after reload.
+Children still on that startup model receive the current profile, including
+hot-refreshed inference fields; captured profiles remain frozen for later turns.
 
 Model selection follows these rules:
 

@@ -2313,6 +2313,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       // swapped here and projected to the sidebar through the existing
       // tui-state writer. Failure is honest: no swap, one logged cause.
       let currentProfiles: V2AgentRuntimeProfiles = {};
+      let registeredProfiles: V2AgentRuntimeProfiles = {};
       try {
         const factoryRefreshProfiles = (
           v1Hooks as { 'v2.refreshProfiles'?: unknown }
@@ -2331,6 +2332,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
           if (!initial.ok) {
             throw new Error(initial.reason);
           }
+          registeredProfiles = initial.profiles;
           currentProfiles = reconcileRuntimeProfileOptionKeys(
             {},
             initial.profiles,
@@ -2559,8 +2561,8 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       const chatHeaderStates = new Map<string, ChatHeaderSessionState>();
 
       // Session-frozen runtime profiles: freeze the current profile for each
-      // newly seen plugin CHILD session and switch its model before the
-      // first request. Existing/resumed children keep their captured
+      // newly seen plugin CHILD session, switching host defaults before the
+      // first request but preserving per-call models. Existing children keep their
       // profile; parents and foreign agents are never touched.
       //
       // Created BEFORE the native prompt hook below so the hook can await
@@ -2571,6 +2573,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       let promptBridge: V2SessionPromptBridge | undefined;
       const sessionProfileBridge = createSessionProfileBridge({
         profiles: () => currentProfiles,
+        registeredProfiles,
         pluginAgents,
         session: ctx.session,
         knownAgent: (sessionID) => promptBridge?.agentForSession(sessionID),

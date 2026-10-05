@@ -1958,6 +1958,7 @@ export function createOrchestratorWakeScheduler(
       const body = {
         agent: wakeAgent,
         ...(wakeModel ? { model: wakeModel } : {}),
+        ...(wakeModel && wakeVariant ? { variant: wakeVariant } : {}),
         parts: [
           createInternalAgentTextPart(
             recoveryDetails ? `${wakeText}\n${recoveryDetails}` : wakeText,
@@ -1966,10 +1967,9 @@ export function createOrchestratorWakeScheduler(
       };
       if (wakeMode === 'children' && capabilities.flavor === 'v2') {
         // v1 prompt_async queued; 'queue' preserves that on v2 ('steer'
-        // would hijack an in-flight run). The v1 prompt body has no variant
-        // slot, so the wake model's reasoning-effort variant travels as the
-        // v2-only `modelVariant`; the shim merges it into the switchModel
-        // ref. Absent variant leaves the call shape unchanged.
+        // would hijack an in-flight run). The shim reads the wake model's
+        // variant from the v2-only modelVariant field, not body.variant.
+        // Absent variant leaves the call shape unchanged.
         // `modelSelection: 'inherit'` marks this as a lifecycle
         // continuation (#1079): the v2 shim takes the host's persisted
         // selection instead of re-pinning this snapshot model.

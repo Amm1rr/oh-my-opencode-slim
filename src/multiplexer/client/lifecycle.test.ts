@@ -622,6 +622,37 @@ describe('dedup and stable-idle close (2.3)', () => {
     expect(h.lifecycle.getPane(CHILD)).toBeDefined();
   });
 
+  test('reconcile re-arms a quiescent held pane whose idle edge was lost', async () => {
+    const h = createHarness();
+    await activatePane(h);
+    h.list.setSessionIds(CHILD);
+    h.reader.statuses.set(CHILD, 'idle'); // the idle edge never arrived
+    await h.lifecycle.onReconnect();
+    expect(h.clock.pendingTimers).toBe(1);
+    h.clock.advance(STABLE_IDLE_MS - 1);
+    await h.lifecycle.handleEvent(lifecycleEvent('idle')); // first real edge
+    h.clock.advance(1);
+    await flushAsync();
+    expect(h.adapter.closeCalls).toHaveLength(0);
+  });
+
+  test('a backfill deadline restarts once on the first real idle edge', async () => {
+    const h = createHarness();
+    h.list.setSessionIds(CHILD);
+    h.reader.statuses.set(CHILD, 'busy');
+    await h.lifecycle.onReconnect();
+    h.clock.advance(STABLE_IDLE_MS - 1);
+    h.reader.statuses.set(CHILD, 'idle');
+    await h.lifecycle.handleEvent(lifecycleEvent('idle'));
+    h.clock.advance(1);
+    await flushAsync();
+    expect(h.adapter.closeCalls).toHaveLength(0);
+    await h.lifecycle.handleEvent(lifecycleEvent('idle')); // replay
+    h.clock.advance(STABLE_IDLE_MS - 1);
+    await flushAsync();
+    expect(h.adapter.closeCalls).toEqual(['pane-1']);
+  });
+
   test('keeps the pane when the child turns busy inside the debounce window', async () => {
     const h = createHarness();
     await activatePane(h);
@@ -735,22 +766,29 @@ describe('dedup and stable-idle close (2.3)', () => {
     expect(h.lifecycle.getPane(CHILD)).toBeDefined();
   });
 
-  test('retries a failed idle close, then removes the pane', async () => {
+  test('close retries keep a provisional deadline until the first real idle', async () => {
     const h = createHarness();
-    await activatePane(h);
+    h.list.setSessionIds(CHILD);
+    h.reader.statuses.set(CHILD, 'busy');
+    await h.lifecycle.onReconnect();
     h.reader.statuses.set(CHILD, 'idle');
+    h.reader.error = 'temporary';
     h.adapter.closeResult = false;
-    await h.lifecycle.handleEvent(lifecycleEvent('idle'));
-    h.clock.advance(STABLE_IDLE_MS);
+    h.clock.advance(STABLE_IDLE_MS); // the status read fails
+    await flushAsync();
+    h.reader.error = undefined;
+    h.clock.advance(1000); // the retry's close fails
     await flushAsync();
     expect(h.adapter.closeCalls).toHaveLength(1);
-    expect(h.clock.pendingTimers).toBe(1);
-
     h.adapter.closeResult = true;
-    h.clock.advance(1000);
+    h.clock.advance(990);
+    await h.lifecycle.handleEvent(lifecycleEvent('idle'));
+    h.clock.advance(10);
+    await flushAsync();
+    expect(h.adapter.closeCalls).toHaveLength(1);
+    h.clock.advance(STABLE_IDLE_MS - 10);
     await flushAsync();
     expect(h.adapter.closeCalls).toHaveLength(2);
-    expect(h.lifecycle.getPane(CHILD)).toBeUndefined();
   });
 
   test('retries a failed terminal close after switching parents', async () => {
@@ -802,7 +840,11 @@ describe('dedup and stable-idle close (2.3)', () => {
     expect(h.clock.pendingTimers).toBe(1);
     h.reader.error = undefined;
     h.reader.statuses.set(CHILD, 'idle');
-    h.clock.advance(1000);
+    await h.lifecycle.handleEvent(lifecycleEvent('idle')); // replay: no restart
+    h.clock.advance(STABLE_IDLE_MS);
+    await flushAsync();
+    expect(h.adapter.closeCalls).toHaveLength(0);
+    h.clock.advance(1000 - STABLE_IDLE_MS);
     await flushAsync();
     expect(h.adapter.closeCalls).toHaveLength(1);
     expect(h.lifecycle.getPane(CHILD)).toBeUndefined();
@@ -1006,6 +1048,26 @@ describe('rebuild and reconnect backfill (2.4)', () => {
     expect(h.clock.pendingTimers).toBe(0);
   });
 
+  test('historical backfill preserves a real idle-close watch at the 64-child bound', async () => {
+    const h = createHarness();
+    const history = Array.from({ length: 65 }, (_, i) => `history-${i}`);
+    h.list.setSessionIds(CHILD, ...history);
+    await activatePane(h);
+    h.reader.statuses.set(CHILD, 'idle');
+    await h.lifecycle.handleEvent(lifecycleEvent('idle'));
+    h.clock.advance(STABLE_IDLE_MS);
+    await flushAsync();
+    await h.lifecycle.onReconnect();
+
+    expect(
+      [CHILD, ...history].filter((id) => h.lifecycle.directoryOf(id)),
+    ).toHaveLength(64);
+    expect(h.lifecycle.directoryOf('history-64')).toBe(DIRECTORY);
+    h.reader.statuses.set(CHILD, 'busy');
+    await h.lifecycle.handleEvent(lifecycleEvent('status', { status: 'busy' }));
+    expect(h.adapter.spawnCalls).toHaveLength(2);
+  });
+
   test('an idle child found at reconnect spawns immediately on resume', async () => {
     const tracked: Array<{ sessionId: string; directory: string }> = [];
     const h = createHarness({
@@ -1031,6 +1093,23 @@ describe('rebuild and reconnect backfill (2.4)', () => {
     await h.lifecycle.onReconnect();
     expect(h.reader.calls).toEqual([DIRECTORY]);
     expect(h.adapter.spawnCalls).toHaveLength(2);
+  });
+
+  test('both backfill loops stop before the next spawn when the route changes', async () => {
+    const h = createHarness();
+    h.list.setSessionIds(CHILD, 'child-2');
+    await h.lifecycle.onReconnect(); // idle watches
+    h.list.setSessionIds(CHILD, 'child-2', 'child-3'); // child-3 is unwatched
+    for (const id of [CHILD, 'child-2', 'child-3'])
+      h.reader.statuses.set(id, 'busy');
+    const barrier = createDeferred();
+    h.adapter.spawnBarrier = barrier.promise;
+    const reconnect = h.lifecycle.onReconnect();
+    await flushAsync();
+    h.lifecycle.setDisplayedDirectory('/other-project');
+    barrier.resolve();
+    await reconnect;
+    expect(h.adapter.spawnCalls.map((call) => call.sessionId)).toEqual([CHILD]);
   });
 
   test('a child going idle before its turn in busy backfill closes after debounce', async () => {
@@ -1563,6 +1642,7 @@ describe('rebuild and reconnect backfill (2.4)', () => {
 
     expect(h.adapter.spawnCalls).toHaveLength(1);
     expect(h.lifecycle.getPanes().size).toBe(1);
+    expect(h.clock.pendingTimers).toBe(0);
     expect(noPaneReasons(h.logger)).toEqual(['backfill-skipped']);
     expect(h.logger.entries.at(-1)?.data).toMatchObject({
       childSessionId: CHILD,
@@ -1638,18 +1718,19 @@ describe('rebuild and reconnect backfill (2.4)', () => {
     expect(h.lifecycle.getPanes().size).toBe(1);
   });
 
-  test('arms the stable-idle close when the child is idle at creation', async () => {
+  test('arms a provisional close when the child is idle at creation', async () => {
     const h = createHarness();
     h.reader.statuses.set(CHILD, 'idle');
     await h.lifecycle.handleEvent(createdEvent());
-
-    expect(h.lifecycle.getPane(CHILD)).toBeDefined();
     expect(h.clock.pendingTimers).toBe(1);
-
-    h.clock.advance(STABLE_IDLE_MS);
+    h.clock.advance(STABLE_IDLE_MS - 1);
+    await h.lifecycle.handleEvent(lifecycleEvent('idle')); // first real edge
+    h.clock.advance(1);
+    await flushAsync();
+    expect(h.adapter.closeCalls).toHaveLength(0);
+    h.clock.advance(STABLE_IDLE_MS - 1);
     await flushAsync();
     expect(h.adapter.closeCalls).toEqual(['pane-1']);
-    expect(h.lifecycle.getPane(CHILD)).toBeUndefined();
   });
 });
 

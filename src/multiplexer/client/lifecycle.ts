@@ -10,8 +10,7 @@
  */
 
 import type { MultiplexerLayout } from '../../config/schema';
-import type { ViewerFlavor, ViewerSurface } from '../shared';
-import type { Multiplexer, PaneResult } from '../types';
+import type { Multiplexer, PaneResult, PaneSpawnOptions } from '../types';
 import {
   type DiagnosticLogger,
   logNoPane,
@@ -54,17 +53,13 @@ export interface PaneLifecycleConfig {
   stableIdleMs: number;
   readiness: ReadinessPolicy;
   /**
-   * Viewer command flavor (FR-2 matrix), the TUI surface the viewer opens,
-   * and, for `v2-remote`, the password forwarded into the viewer command.
-   * The wiring always supplies this object; absent fields fall back at the
-   * adapter layer (`flavor` to the v1 attach form, `surface` to the full
-   * `tui`).
+   * Viewer spawn options, including the in-process `v2-remote` password.
+   * The wiring supplies the surface; adapters default to v1/full TUI.
    */
-  viewer?: {
-    flavor?: ViewerFlavor;
-    password?: string;
-    surface?: ViewerSurface;
-  };
+  viewer?: Pick<
+    PaneSpawnOptions,
+    'viewerFlavor' | 'viewerPassword' | 'viewerSurface'
+  >;
 }
 
 /** Anchor recorded when the wiring cannot resolve a native anchor. */
@@ -85,14 +80,17 @@ export class PaneLifecycle {
   private readonly spawnsInFlight = new Set<string>();
   /** Bounded tombstones: a deleted session must never spawn or rebuild. */
   private readonly deletedSessions = new Set<string>();
-  /** Children whose idle edge arrived while their spawn was in flight. */
+  /** Idle edges observed while the child's spawn is in flight. */
   private readonly idleWhileSpawning = new Set<string>();
   /** Pending `delay()` resolvers, released early by `dispose()`. */
   private readonly pendingDelays = new Set<() => void>();
   /** Children that turned busy while their close was in flight. */
   private readonly busyWhileClosing = new Set<string>();
-  /** Pending stable-idle debounce timers, keyed by child session id. */
-  private readonly idleTimers = new Map<string, ClockTimerHandle>();
+  /** Idle/retry timers; `provisional` marks one armed from a snapshot. */
+  private readonly idleTimers = new Map<
+    string,
+    { handle: ClockTimerHandle; provisional: boolean }
+  >();
   private readonly closeAttempts = new Map<string, number>();
   /**
    * Children this client closed on stable idle (not terminal deletion), kept
@@ -102,7 +100,12 @@ export class PaneLifecycle {
    */
   private readonly closedWatch = new Map<
     string,
-    { parentSessionId: string; directory: string; subagentType?: string }
+    {
+      parentSessionId: string;
+      directory: string;
+      subagentType?: string;
+      historical: boolean;
+    }
   >();
   /**
    * Activity epoch per child, bumped by every held-pane event. A close
@@ -149,8 +152,8 @@ export class PaneLifecycle {
    */
   async dispose(): Promise<void> {
     this.disposed = true;
-    for (const handle of this.idleTimers.values()) {
-      this.ports.clock.clearTimeout(handle);
+    for (const timer of this.idleTimers.values()) {
+      this.ports.clock.clearTimeout(timer.handle);
     }
     this.idleTimers.clear();
     this.closeAttempts.clear();
@@ -226,9 +229,7 @@ export class PaneLifecycle {
     )
       return;
 
-    // An idle edge observed while this child's spawn is in flight would be
-    // consumed with no pane to act on; remember it so the pane still follows
-    // the FR-10 close rule once it is registered.
+    // Remember an idle consumed before the pane exists.
     if (
       this.spawnsInFlight.has(event.sessionId) &&
       (event.kind === 'idle' ||
@@ -317,9 +318,14 @@ export class PaneLifecycle {
       }
     }
 
-    // Already-held children need no action beyond the FR-13 diagnostic.
+    // Revalidate quiescent held panes provisionally: their idle edge may be
+    // lost, but a busy/retry snapshot must not arm a new deadline.
     for (const childSessionId of serverChildIds) {
-      if (!this.panes.has(childSessionId)) continue;
+      const record = this.panes.get(childSessionId);
+      if (!record) continue;
+      const live = statuses?.get(childSessionId);
+      if (statuses && live !== 'busy' && live !== 'retry')
+        this.scheduleStableIdleClose(childSessionId, record, true);
       logNoPane(this.logger, 'backfill-skipped', {
         childSessionId,
         parentSessionId,
@@ -343,6 +349,7 @@ export class PaneLifecycle {
         }
         const live = statuses?.get(childSessionId);
         if (live !== 'busy' && live !== 'retry') continue;
+        if (!this.isDisplayed(parentSessionId, directory)) break;
         await this.createPane(
           childSessionId,
           watched.parentSessionId,
@@ -365,9 +372,11 @@ export class PaneLifecycle {
             parentSessionId,
             directory,
             serverAgents.get(childSessionId),
+            true,
           );
         continue;
       }
+      if (!this.isDisplayed(parentSessionId, directory)) break;
       await this.createPane(
         childSessionId,
         parentSessionId,
@@ -582,16 +591,15 @@ export class PaneLifecycle {
         return;
       }
 
-      // A child that is already idle when its pane appears (e.g. backfilled
-      // after the stream was down), or whose idle edge arrived while the
-      // spawn was in flight, must still follow the FR-10 close rule.
-      const idleDuringSpawn = this.idleWhileSpawning.delete(childSessionId);
+      // A snapshot or an idle observed before registration is provisional;
+      // the first real idle edge after registration starts its own window.
+      const idleDuringSpawn = this.idleWhileSpawning.has(childSessionId);
       if (
         knownStatus !== undefined ||
         readyStatus === 'idle' ||
         idleDuringSpawn
       ) {
-        this.scheduleStableIdleClose(childSessionId, record);
+        this.scheduleStableIdleClose(childSessionId, record, true);
       }
 
       await this.applyLayout(adapter);
@@ -635,19 +643,7 @@ export class PaneLifecycle {
         {
           parentSessionId,
           subagentType,
-          ...(this.config.viewer === undefined
-            ? {}
-            : {
-                ...(this.config.viewer.flavor === undefined
-                  ? {}
-                  : { viewerFlavor: this.config.viewer.flavor }),
-                ...(this.config.viewer.password === undefined
-                  ? {}
-                  : { viewerPassword: this.config.viewer.password }),
-                ...(this.config.viewer.surface === undefined
-                  ? {}
-                  : { viewerSurface: this.config.viewer.surface }),
-              }),
+          ...this.config.viewer,
         },
       );
     } catch {
@@ -741,27 +737,35 @@ export class PaneLifecycle {
   private scheduleStableIdleClose(
     childSessionId: string,
     record: PaneRecord,
+    provisional = false,
   ): void {
     if (record.status !== 'active') return;
-    // Replayed idle edges must not extend the window indefinitely.
-    if (this.idleTimers.has(childSessionId)) return;
+    // Only the first real idle edge restarts a provisional deadline.
+    const pending = this.idleTimers.get(childSessionId);
+    if (pending) {
+      if (provisional || !pending.provisional) return;
+      this.cancelIdleClose(childSessionId, false);
+    }
 
     const handle = this.ports.clock.setTimeout(() => {
       this.idleTimers.delete(childSessionId);
-      void this.closeIfStillIdle(childSessionId);
+      void this.closeIfStillIdle(childSessionId, provisional);
     }, this.config.stableIdleMs);
-    this.idleTimers.set(childSessionId, handle);
+    this.idleTimers.set(childSessionId, { handle, provisional });
   }
 
   private cancelIdleClose(childSessionId: string, resetAttempts = true): void {
     if (resetAttempts) this.closeAttempts.delete(childSessionId);
-    const handle = this.idleTimers.get(childSessionId);
-    if (handle === undefined) return;
+    const pending = this.idleTimers.get(childSessionId);
+    if (pending === undefined) return;
     this.idleTimers.delete(childSessionId);
-    this.ports.clock.clearTimeout(handle);
+    this.ports.clock.clearTimeout(pending.handle);
   }
 
-  private async closeIfStillIdle(childSessionId: string): Promise<void> {
+  private async closeIfStillIdle(
+    childSessionId: string,
+    provisional = false,
+  ): Promise<void> {
     const record = this.panes.get(childSessionId);
     if (record?.status !== 'active') return;
 
@@ -776,7 +780,7 @@ export class PaneLifecycle {
     const read = await this.readStatus(record.directory);
     if (read.error) {
       if ((this.activityEpoch.get(childSessionId) ?? 0) === epoch) {
-        this.scheduleCloseRetry(childSessionId, record, 'idle');
+        this.scheduleCloseRetry(childSessionId, record, 'idle', provisional);
       }
       return;
     }
@@ -791,13 +795,14 @@ export class PaneLifecycle {
       return;
     }
 
-    await this.closePane(childSessionId, record, 'idle');
+    await this.closePane(childSessionId, record, 'idle', provisional);
   }
 
   private async closePane(
     childSessionId: string,
     record: PaneRecord,
     reason: PaneCloseReason,
+    provisional = false,
   ): Promise<void> {
     if (record.status === 'closing') return;
     record.status = 'closing';
@@ -843,13 +848,14 @@ export class PaneLifecycle {
     record.status = 'active';
     const wasBusy = this.busyWhileClosing.delete(childSessionId);
     if (!wasBusy || reason !== 'idle')
-      this.scheduleCloseRetry(childSessionId, record, reason);
+      this.scheduleCloseRetry(childSessionId, record, reason, provisional);
   }
 
   private scheduleCloseRetry(
     childSessionId: string,
     record: PaneRecord,
     reason: PaneCloseReason,
+    provisional = false,
   ): void {
     if (this.disposed || this.panes.get(childSessionId) !== record) return;
     const attempts = (this.closeAttempts.get(childSessionId) ?? 0) + 1;
@@ -859,10 +865,10 @@ export class PaneLifecycle {
       this.idleTimers.delete(childSessionId);
       if (this.panes.get(childSessionId) !== record) return;
       void (reason === 'idle'
-        ? this.closeIfStillIdle(childSessionId)
+        ? this.closeIfStillIdle(childSessionId, provisional)
         : this.closePane(childSessionId, record, reason));
     }, CLOSE_RETRY_MS);
-    this.idleTimers.set(childSessionId, handle);
+    this.idleTimers.set(childSessionId, { handle, provisional });
   }
 
   /** Remembers an idle-closed child for FR-11 rebuilds, bounded in size. */
@@ -871,17 +877,20 @@ export class PaneLifecycle {
     parentSessionId: string,
     directory: string,
     subagentType?: string,
+    historical = false,
   ): void {
     this.closedWatch.delete(childSessionId);
-    this.closedWatch.set(
-      childSessionId,
-      subagentType === undefined
-        ? { parentSessionId, directory }
-        : { parentSessionId, directory, subagentType },
-    );
+    this.closedWatch.set(childSessionId, {
+      parentSessionId,
+      directory,
+      subagentType,
+      historical,
+    });
     this.ports.onChildTracked?.(childSessionId, directory);
     if (this.closedWatch.size <= MAX_REMEMBERED_CLOSED) return;
-    const oldest = this.closedWatch.keys().next().value;
+    const oldest =
+      [...this.closedWatch].find(([, watch]) => watch.historical)?.[0] ??
+      this.closedWatch.keys().next().value;
     if (oldest !== undefined) this.closedWatch.delete(oldest);
   }
 }

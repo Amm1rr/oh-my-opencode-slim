@@ -329,4 +329,45 @@ describe('auto-update-checker/cache', () => {
       fs.rmSync(root, { recursive: true, force: true });
     });
   });
+
+  describe('acquirePackageUpdateLock', () => {
+    test('creates and releases a hidden lock dir next to the target install dir', async () => {
+      const root = fs.mkdtempSync(join(tmpdir(), 'omo-cache-'));
+      const targetDir = join(root, 'packages', 'oh-my-opencode-slim@1.2.4');
+      const lockDir = `${join(
+        root,
+        'packages',
+        '.oh-my-opencode-slim@1.2.4.install',
+      )}.lock`;
+      const { acquirePackageUpdateLock } = await import(
+        `./cache?test=${importCounter++}`
+      );
+
+      const release = await acquirePackageUpdateLock(targetDir);
+      expect(release).not.toBeNull();
+      expect(fs.existsSync(lockDir)).toBe(true);
+      release?.();
+      expect(fs.existsSync(lockDir)).toBe(false);
+      fs.rmSync(root, { recursive: true, force: true });
+    });
+
+    test('returns null when a live process holds the lock', async () => {
+      const root = fs.mkdtempSync(join(tmpdir(), 'omo-cache-'));
+      const targetDir = join(root, 'packages', 'oh-my-opencode-slim@1.2.4');
+      const lockDir = `${join(
+        root,
+        'packages',
+        '.oh-my-opencode-slim@1.2.4.install',
+      )}.lock`;
+      fs.mkdirSync(lockDir, { recursive: true });
+      fs.writeFileSync(join(lockDir, 'owner'), String(process.pid));
+      const { acquirePackageUpdateLock } = await import(
+        `./cache?test=${importCounter++}`
+      );
+
+      // Small timeout override keeps the retry loop bounded.
+      expect(await acquirePackageUpdateLock(targetDir, 50)).toBeNull();
+      fs.rmSync(root, { recursive: true, force: true });
+    });
+  });
 });
