@@ -363,6 +363,33 @@ describe('master adoption and retained-round integration', () => {
     clearBackgroundJobSuppression(fixture.board, CHILD);
   });
 
+  // A pairing visible in the window is positive proof of delegation even
+  // when an overflowing v1 window (or v2 compaction) marks the page
+  // incomplete; hiding HISTORY may defeat uniqueness claims, never
+  // existence ones (#1452 review).
+  test('an incomplete parent page with a visible pairing still discloses', async () => {
+    const fixture = reviveHost({
+      hostFlavor: 'v2',
+      get: () => ({ error: { message: 'Session not found' } }),
+      messages: (id) =>
+        id === CHILD
+          ? { error: { message: 'Session not found' } }
+          : { data: parentMessages(), page: { complete: false } },
+    });
+    recordBackgroundJobSuppression(fixture.board, CHILD, {
+      state: 'completed',
+      resultSummary: 'saved old answer',
+    });
+    const message = await fixture.revive
+      .execute({ task_id: CHILD, prompt: 'continue' }, context as never)
+      .catch((error: Error) => error.message);
+    expect(message).toContain('completed');
+    expect(message).toContain('no longer available on the host');
+    expect(message).not.toContain('saved old answer');
+    expect(getSuppressionTombstone(CHILD)).toBeUndefined();
+    expect(fixture.promptAsync).not.toHaveBeenCalled();
+  });
+
   // Stopped evictions write a bare tombstone (no terminal state): the
   // refusal must not claim an ending it cannot know.
   test('a confirmed 404 with a bare tombstone and a verified owner refuses result-free', async () => {

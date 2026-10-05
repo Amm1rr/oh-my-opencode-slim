@@ -199,8 +199,12 @@ async function recoverRetainedSession(
       } catch {
         return refuse(generic);
       }
+      // Positive evidence only: a pairing visible in the returned window
+      // proves this parent delegated, even when an overflowing v1 window
+      // or v2 compaction marks the page incomplete. An absent pairing
+      // fails closed regardless of completeness — hidesHistory guards
+      // uniqueness claims (alias resolution), not existence ones.
       const owned =
-        !hidesHistory(transcript) &&
         parentDelegation(
           parentTaskParts(transcript),
           parentSessionID,
