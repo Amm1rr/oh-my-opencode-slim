@@ -13,12 +13,12 @@ Each agent is a **prompt-driven specialist** with a factory function that create
 | Agent | Factory | Role | Permissions | Model Default |
 |-------|---------|------|-------------|---------------|
 | **orchestrator** | `createOrchestratorAgent()` | Workflow manager that delegates tasks to specialists | Primary agent with full tool access | Resolved from config or runtime preset |
-| **explorer** | `createExplorerAgent()` | Fast codebase search and pattern matching | Read-only (glob, grep, ast_grep_search) | DEFAULT_MODELS.explorer |
-| **librarian** | `createLibrarianAgent()` | External documentation and library research | Read-only (context7, gh_grep) | DEFAULT_MODELS.librarian |
-| **oracle** | `createOracleAgent()` | Strategic technical advisor and code reviewer | Read-only (read, glob, grep, ast_grep_search) | DEFAULT_MODELS.oracle |
+| **explorer** | `createExplorerAgent()` | Fast codebase search and pattern matching | Read-only by prompt (glob, grep, ast_grep_search) | DEFAULT_MODELS.explorer |
+| **librarian** | `createLibrarianAgent()` | External documentation and library research | Read-only by prompt (context7, gh_grep) | DEFAULT_MODELS.librarian |
+| **oracle** | `createOracleAgent()` | Strategic technical advisor and code reviewer | Read-only by prompt (read, glob, grep, ast_grep_search) | DEFAULT_MODELS.oracle |
 | **designer** | `createDesignerAgent()` | UI/UX design, review, and implementation | Read/write (read, glob, grep, write, edit) | DEFAULT_MODELS.designer |
 | **fixer** | `createFixerAgent()` | Fast implementation specialist for bounded tasks | Read/write (read, glob, grep, write, edit) | DEFAULT_MODELS.fixer |
-| **observer** | `createObserverAgent()` | Visual analysis specialist (images, PDFs, diagrams) | Read-only (read, glob, grep, ast_grep_search) | DEFAULT_MODELS.observer |
+| **observer** | `createObserverAgent()` | Visual analysis specialist (images, PDFs, diagrams) | Read-only by prompt (read, glob, grep, ast_grep_search) | DEFAULT_MODELS.observer |
 | **council** | `createCouncilAgent()` | Multi-model consensus synthesis (read-only, no tools) | Read-only (council permission) | DEFAULT_MODELS.council |
 | **councillor** | Created dynamically by `buildCouncillorAgents()` | Read-only council advisor; registered per preset seat as `councillor-<name>` | Read-only (read, glob, grep, ast_grep_search) | Inherited from council preset |
 
