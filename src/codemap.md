@@ -90,7 +90,7 @@ lifecycle lives in the TUI entry's dependency graph (`multiplexer/client/`).
 7. **Sidebar Rendering**: Renders sidebar with:
    - Plugin header (OMO-Slim + version)
    - Config status warning (if invalid)
-   - Agent list with model/variant details and Braille activity indicators
+   - Agent list with resolved model names and Braille activity indicators
 8. **Lifecycle Management**: Cleans up refresh/animation timers, unsubscribes
    pane events, stops timers, and best-effort closes this client's panes on
    dispose
