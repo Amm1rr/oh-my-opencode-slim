@@ -3961,7 +3961,7 @@ describe('#1411 wake body dedupe', () => {
       repeat: false,
       occurrence: 1,
     });
-    rollbackWakeBodyOccurrence('p1', ORCHESTRATOR_WAKE_TEXT);
+    rollbackWakeBodyOccurrence('p1', ORCHESTRATOR_WAKE_TEXT, 1);
     expect(reserveWakeBodyOccurrence('p1', ORCHESTRATOR_WAKE_TEXT)).toEqual({
       repeat: false,
       occurrence: 1,
@@ -3972,7 +3972,7 @@ describe('#1411 wake body dedupe', () => {
       occurrence: 2,
     });
     expect(getSuppressedDuplicateWakes('p1')).toBe(1);
-    rollbackWakeBodyOccurrence('p1', ORCHESTRATOR_WAKE_TEXT);
+    rollbackWakeBodyOccurrence('p1', ORCHESTRATOR_WAKE_TEXT, 2);
     expect(getSuppressedDuplicateWakes('p1')).toBe(0);
     expect(reserveWakeBodyOccurrence('p1', ORCHESTRATOR_WAKE_TEXT)).toEqual({
       repeat: true,
@@ -3980,7 +3980,16 @@ describe('#1411 wake body dedupe', () => {
     });
 
     // No-op on an unknown text.
-    rollbackWakeBodyOccurrence('p1', ORCHESTRATOR_CHILDREN_WAKE_TEXT);
+    rollbackWakeBodyOccurrence('p1', ORCHESTRATOR_CHILDREN_WAKE_TEXT, 1);
+    // A stale send must not undo a newer reservation: the occurrence guard
+    // rejects the rollback once the stored count has moved on.
+    const stale = reserveWakeBodyOccurrence('p1', ORCHESTRATOR_WAKE_TEXT);
+    expect(stale.occurrence).toBe(3);
+    rollbackWakeBodyOccurrence('p1', ORCHESTRATOR_WAKE_TEXT, 1);
+    expect(reserveWakeBodyOccurrence('p1', ORCHESTRATOR_WAKE_TEXT)).toEqual({
+      repeat: true,
+      occurrence: 4,
+    });
   });
 
   test('a store left over from before this change is backfilled, not crashed on', () => {

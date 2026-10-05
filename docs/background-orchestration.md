@@ -514,7 +514,7 @@ Finish any incomplete TODOs. Await running agents; if one appears stuck, assess 
 
 If the same delta-less wake body was already delivered in the session, the
 repeat sends a strictly shorter, non-identical marker instead
-(`Repeat wake #N (nothing new).`) so identical reminder bytes are not
+(`Repeat wake #N:`) so identical reminder bytes are not
 persisted repeatedly; delta-bearing wakes and child-input asks always carry
 the full template.
 

@@ -1718,7 +1718,7 @@ export function createOrchestratorWakeScheduler(
 
     // #1411: the delta-less wake body reserved by this attempt, if any. Kept
     // outside the try so a failed send can roll the reservation back.
-    let reservedBodyText: string | undefined;
+    let reservedBody: { wakeText: string; occurrence: number } | undefined;
 
     try {
       const snapshot =
@@ -2006,7 +2006,7 @@ export function createOrchestratorWakeScheduler(
           sessionID,
           wakeText,
         );
-        reservedBodyText = wakeText;
+        reservedBody = { wakeText, occurrence };
         const core = repeat ? WAKE_REPEAT_CORES.get(wakeText) : undefined;
         if (core) {
           bodyText = wakeRepeatMarker(core, occurrence);
@@ -2131,8 +2131,12 @@ export function createOrchestratorWakeScheduler(
       // body occurrence this attempt reserved is undone so the retry sends
       // the full text again.
       rollbackWakeReservation(sessionID, owner);
-      if (reservedBodyText !== undefined) {
-        rollbackWakeBodyOccurrence(sessionID, reservedBodyText);
+      if (reservedBody !== undefined) {
+        rollbackWakeBodyOccurrence(
+          sessionID,
+          reservedBody.wakeText,
+          reservedBody.occurrence,
+        );
       }
       clearExpectingWakeBusy(sessionID);
       if (state.generation === generation && reason !== 'periodic') {

@@ -213,16 +213,20 @@ export function getSuppressedDuplicateWakes(sessionID: string): number {
  * #1411: undo the occurrence a failed send reserved, so the retry delivers
  * the full text instead of a phantom repeat. Removes the sole occurrence
  * outright; an occurrence that was a counted repeat also undoes its
- * suppression count (floored at 0).
+ * suppression count (floored at 0). `occurrence` must be the number the
+ * caller's `reserveWakeBodyOccurrence` returned: if the stored count has
+ * moved on (a newer wake reserved after an eviction), this is a no-op so a
+ * stale send cannot undo the newer reservation.
  */
 export function rollbackWakeBodyOccurrence(
   sessionID: string,
   wakeText: string,
+  occurrence: number,
 ): void {
   const store = getStore();
   const counts = store.deliveredDeltalessWakeTexts.get(sessionID);
   const count = counts?.get(wakeText) ?? 0;
-  if (count <= 0 || !counts) return;
+  if (!counts || count !== occurrence) return;
   if (count === 1) {
     counts.delete(wakeText);
     return;
