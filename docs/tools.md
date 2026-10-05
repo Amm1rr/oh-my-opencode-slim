@@ -58,7 +58,7 @@ conservatively passes the path through. Disable with
 | `task` | Start a specialist task and return its task ID |
 | `task_status` | Check the status of a task |
 | `task_result` | Retrieve a task's result |
-| `task_message` | Queue a non-interrupting message and return `queued` |
+| `task_message` | Send a non-interrupting message and return `queued` (v2: steering acceptance with `delivery: "steer"`) |
 | `task_cancel` | Stop a generation while retaining its session |
 | `task_revive` | Resume a retained session with a new instruction |
 | `wait_for_user` | Pause automatic orchestrator wake prompts until the next distinct external user message |
@@ -105,9 +105,26 @@ of reading and pinning selection per call. On v1 it pins the newest valid user o
 assistant model/variant in the bounded transcript, skipping compaction summaries;
 the session's saved selection can predate a hook rewrite. No valid identity means
 no message is sent.
-The v2 write uses `delivery: "queue", resume: false`: it updates the transcript
-without scheduling execution, never via a synthetic message or selection switch.
-Host errors are not retried with weaker semantics. A pending write still retains
+The v2 write accepts an optional `delivery` parameter (`"queue"` | `"steer"`,
+default `"queue"`; the parameter does not exist on v1 hosts). Both modes send
+a real, non-synthetic `noReply` prompt with `resume: false` in the same child
+session: no wake, no new run, no interrupt, no agent/model/variant switch.
+
+| Mode | Consumption boundary | Result text |
+|------|----------------------|-------------|
+| `queue` (default) | waits for an idle boundary; consumption is not confirmed | `Message queued for … without launching or resuming it.` |
+| `steer` | offered at the next supported model-step boundary of the current run, after the current step's tool executions finish | `Message accepted for steering … at the next supported step boundary; … consumption is not confirmed.` |
+
+```text
+task_message(sessionID: "<id>", message: "<concise amendment>", delivery: "steer")
+```
+
+Message lease and timeout protections are unchanged in both modes. A success
+response confirms only transport acceptance, not consumption: the host
+admitted the input, with no proof the child read it. Consumption timing is
+host-dependent and not verified against a live host; a single step's multiple
+tool calls are not individually interleavable. Host errors are not retried
+with weaker semantics. A pending write still retains
 its message lease after timeout; this change does not alter that quarantine.
 
 `task_revive` resumes a retained session with a new instruction. A cancelled,

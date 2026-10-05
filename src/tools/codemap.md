@@ -82,8 +82,8 @@ Each tool is implemented as a factory function that returns a `ToolDefinition` r
 2. Orchestrator invokes task_message
    ├─> Resolves task_id to a live BackgroundJobBoard entry
    ├─> Acquires a generation-scoped message lease
-   ├─> Queues a bounded no-reply message without interrupting or resuming the child
-   └─> Returns transport-confirmed queue status
+   ├─> Queues a bounded no-reply message without interrupting or resuming the child (v2: optional `delivery` — `queue` waits for an idle boundary, `steer` offers it at the next supported step boundary; acceptance ≠ consumption)
+   └─> Returns transport-confirmed queue status (v2 steer: acceptance at the next supported step boundary)
 
 3. Orchestrator invokes task_revive
    ├─> Resolves the retained BackgroundJobBoard entry
