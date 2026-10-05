@@ -286,16 +286,23 @@ describe('task controls through the real v2 client shim', () => {
     async (flavor) => {
       const h = harness({ running: true });
       const prompt = mock(async () => ({}));
-      const get = mock(async () => ({
-        data: {
-          model: { providerID: 'provider', id: 'model', variant: 'high' },
-        },
+      const messages = mock(async () => ({
+        data: [
+          {
+            info: {
+              role: 'assistant',
+              providerID: 'provider',
+              modelID: 'model',
+              variant: 'high',
+            },
+          },
+        ],
       }));
       const input =
         flavor === 'v2'
           ? h.input
           : ({
-              client: { session: { get, prompt } },
+              client: { session: { messages, prompt } },
               directory: '/test',
             } as unknown as PluginInput);
       const shimPrompt = spyOn(h.input.client.session, 'prompt');
@@ -307,7 +314,7 @@ describe('task controls through the real v2 client shim', () => {
         'queued',
       );
       if (flavor === 'v1') {
-        expect(get).toHaveBeenCalledTimes(1);
+        expect(messages).toHaveBeenCalledTimes(1);
         expect(prompt).toHaveBeenCalledWith(
           expect.objectContaining({
             body: {

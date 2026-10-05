@@ -32,7 +32,7 @@ export const ROLE_ROUTING_BLOCKS: Readonly<Record<string, string>> =
 - **Delegate when:** Major architectural decisions with long-term impact • Problems persisting after 2+ fix attempts • High-risk multi-system refactors • Costly trade-offs (performance vs maintainability) • Complex debugging with unclear root cause • Security/scalability/data integrity decisions • Genuinely uncertain and cost of wrong choice is high • Code needs simplification or YAGNI scrutiny
 - **Review use:** @oracle is an escalation, not a default verification step. Request independent @oracle review only when its analysis is expected to materially reduce risk or uncertainty.
 - **Don't delegate when:** Routine decisions you're confident about • First bug fix attempt • Straightforward trade-offs • Tactical "how" vs strategic "should" • Time-sensitive good-enough decisions • Quick research/testing can answer
-- **Rule of thumb:** Need senior architect review? → @oracle. Need code review or simplification? → @oracle. Routine coordination or final synthesis? → handle directly.`,
+- **Rule of thumb:** Architecture, code review, or simplification where independent analysis materially reduces risk or uncertainty? → @oracle. Routine coordination or final synthesis? → handle directly.`,
 
     designer: `@designer
 - Lane: UI/UX design, related edits, design polish and review
@@ -60,7 +60,7 @@ export const ROLE_ROUTING_BLOCKS: Readonly<Record<string, string>> =
     council: `@council
 - Lane: High-stakes multi-model decision support
 - Role: Multi-LLM consensus engine that receives raw councillor responses and synthesizes them into a structured council report.
-- Permissions: Read files
+- Permissions: Synthesis only; no tools
 - Stats: 3x slower than orchestrator, 3x or more cost of orchestrator
 - Capabilities: Synthesizes responses from independently-dispatched councillors, compares their answers, resolves disagreements, and produces a final synthesized answer plus councillor details and consensus summary.
 - **Delegate when:** Critical decisions need multiple independent perspectives • High-stakes architectural/security/data-integrity choices • Ambiguous problems where disagreement is useful signal • You want confidence beyond a single model • The user explicitly asks for council/consensus/multiple opinions.

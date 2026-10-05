@@ -92,4 +92,12 @@ describe('orchestrator prompt', () => {
     expect(prompt).toContain('Background status is ambient');
     expect(prompt.match(/`task_status`/g)?.length ?? 0).toBeGreaterThan(2);
   });
+  test('evaluates all four path-selection criteria', () => {
+    const prompt = buildOrchestratorPrompt();
+
+    expect(prompt).toContain(
+      'Evaluate approach by: quality, speed, cost, and reliability.',
+    );
+    expect(prompt).toContain('Choose the path that optimizes all four.');
+  });
 });

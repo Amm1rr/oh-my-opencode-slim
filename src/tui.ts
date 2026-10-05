@@ -35,7 +35,7 @@ import {
   killAllRunningSubagents,
   killAllSummaryMessage,
 } from './tui-kill';
-import { openPresetManager } from './tui-preset';
+import { fetchModelNameMap, openPresetManager } from './tui-preset';
 import {
   readTuiSnapshot,
   readTuiSnapshotAsync,
@@ -83,10 +83,10 @@ const ACTIVITY_FRAMES = [
 const v2HostUnsupportedGate = createOnceGate();
 
 /**
- * Pane creation lives in the v1 TUI entry only (NFR-6): a multiplexer
- * configured on a v2 host is ignored. Records that at most once per process
- * so the disabled feature is self-explaining instead of silently dropping
- * config; callers re-run it whenever the config is (re)read.
+ * Standalone and invalid v2 hosts cannot create panes (NFR-6): a multiplexer
+ * configured there is ignored. Records that at most once per process so the
+ * disabled feature is self-explaining instead of silently dropping config;
+ * callers re-run it whenever the config is (re)read.
  */
 function warnV2HostUnsupportedMultiplexer(
   configuredType: MultiplexerType,
@@ -369,6 +369,16 @@ export function applyRemoteAgentModels(
 
 const REMOTE_RETRY_MS = 5_000;
 
+const MODEL_NAMES_TTL_MS = 60_000;
+
+const MODEL_NAMES_FETCH_TIMEOUT_MS = 2_000;
+
+export interface ModelNamesCache {
+  directory?: string;
+  names: ReadonlyMap<string, string>;
+  at?: number;
+}
+
 interface RemoteModelCache {
   directory?: string;
   models?: Record<string, string>;
@@ -399,6 +409,61 @@ async function hydrateRemoteModels(
   cache.models = models;
   cache.at = now;
   return applyRemoteAgentModels(snapshot, models);
+}
+
+/**
+ * TTL-cached provider/model display-name map for the sidebar. Falls back
+ * silently to the previous (possibly empty) map on fetch failure — the
+ * sidebar polls forever, so failures must never toast or throw.
+ */
+export async function hydrateModelNames(
+  client: unknown,
+  directory: string,
+  cache: ModelNamesCache,
+  now: () => number = Date.now,
+  timeoutMs: number = MODEL_NAMES_FETCH_TIMEOUT_MS,
+): Promise<ReadonlyMap<string, string>> {
+  const cached =
+    cache.directory === directory &&
+    (cache.names.size > 0 ||
+      (cache.at !== undefined && now() - cache.at < MODEL_NAMES_TTL_MS))
+      ? cache.names
+      : undefined;
+  if (
+    cached !== undefined &&
+    cache.at !== undefined &&
+    now() - cache.at < MODEL_NAMES_TTL_MS
+  ) {
+    return cached;
+  }
+  try {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const names = await Promise.race([
+      fetchModelNameMap({ client }),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error('model names fetch timed out')),
+          timeoutMs,
+        );
+      }),
+    ]).finally(() => {
+      if (timer !== undefined) clearTimeout(timer);
+    });
+    cache.directory = directory;
+    cache.names = new Map(Object.entries(names));
+    cache.at = now();
+  } catch (err) {
+    // Rate-limit retries via TTL. Keep last-known names only when the failed
+    // fetch is for the same directory; a directory switch must not inherit
+    // the previous project's labels.
+    log('[v2][tui] model name fetch failed', String(err));
+    if (cache.directory !== directory) {
+      cache.names = new Map();
+    }
+    cache.directory = directory;
+    cache.at = now();
+  }
+  return cache.names;
 }
 
 /** Skip overlapping sidebar refreshes so a slow host fetch cannot pile up. */
@@ -953,6 +1018,7 @@ function statusDot(
 interface AgentRowOptions {
   label: string;
   model: string;
+  modelName?: string;
   variant?: string;
   active: boolean;
   now: () => number;
@@ -996,8 +1062,15 @@ function agentHeaderCells({
 }
 
 function agentRow(options: AgentRowOptions): JSX.Element {
-  const { model, variant, theme, onClick, hoverBackground, hasSelectedText } =
-    options;
+  const {
+    model,
+    modelName,
+    variant,
+    theme,
+    onClick,
+    hoverBackground,
+    hasSelectedText,
+  } = options;
   const modelParts = splitSidebarModelId(model);
   const detailRows: JSX.Element[] = [];
 
@@ -1020,6 +1093,9 @@ function agentRow(options: AgentRowOptions): JSX.Element {
     detailRows.push(detailRow('provider', modelParts.provider));
   }
   detailRows.push(detailRow('model', modelParts.model));
+  if (modelName && modelName !== modelParts.model) {
+    detailRows.push(detailRow('name', modelName));
+  }
   if (variant) {
     detailRows.push(detailRow('variant', variant));
   }
@@ -1050,8 +1126,9 @@ function agentRow(options: AgentRowOptions): JSX.Element {
 }
 
 function compactAgentRow(options: AgentRowOptions): JSX.Element {
-  const { model, theme, onClick, hoverBackground, hasSelectedText } = options;
-  const modelName = splitSidebarModelId(model).model;
+  const { model, modelName, theme, onClick, hoverBackground, hasSelectedText } =
+    options;
+  const displayedModel = modelName ?? splitSidebarModelId(model).model;
   const row = box(
     {
       width: '100%',
@@ -1078,7 +1155,7 @@ function compactAgentRow(options: AgentRowOptions): JSX.Element {
           flexShrink: 1,
           marginLeft: 1,
         },
-        [modelName],
+        [displayedModel],
       ),
     ],
   );
@@ -1205,7 +1282,7 @@ export function getContrastForeground(
   return RGBA.fromInts(255, 255, 255);
 }
 
-function renderSidebar(
+export function renderSidebar(
   snapshot: TuiSnapshot,
   version: string,
   theme: {
@@ -1225,6 +1302,7 @@ function renderSidebar(
   visibleRootID?: string,
   interaction?: SidebarInteraction,
   presetRow?: SidebarPresetRow,
+  modelNames?: ReadonlyMap<string, string>,
 ): JSX.Element {
   const configStatusRow = buildConfigStatusRow(configInvalid, theme);
   const presetRowEl = presetRow
@@ -1345,6 +1423,7 @@ function renderSidebar(
             const rowOptions: AgentRowOptions = {
               label: agentName,
               model,
+              modelName: modelNames?.get(model),
               variant,
               active,
               now,
@@ -1663,6 +1742,10 @@ function createSidebarRuntime(adapter: SidebarRuntimeAdapter) {
   let disposed = false;
   let unregisterConfigListener = () => {};
   const remoteCache: RemoteModelCache = {};
+  const modelNamesCache: ModelNamesCache = { names: new Map() };
+  const [modelNames, setModelNames] = createSignal<ReadonlyMap<string, string>>(
+    modelNamesCache.names,
+  );
   const refreshSidebar = async () => {
     if (disposed) return;
     const currentDirectory = adapter.getDirectory();
@@ -1696,8 +1779,13 @@ function createSidebarRuntime(adapter: SidebarRuntimeAdapter) {
       remoteCache,
     );
     if (disposed) return;
+    const namesBefore = modelNamesCache.names;
+    await hydrateModelNames(adapter.client, currentDirectory, modelNamesCache);
     if (!isRefreshCurrent(currentDirectory, adapter.getDirectory())) {
       return;
+    }
+    if (modelNamesCache.names !== namesBefore) {
+      setModelNames(modelNamesCache.names);
     }
     const snapshotChanged =
       directoryChanged || !snapshotSectionsEqual(nextSnapshot, snapshot());
@@ -1768,6 +1856,7 @@ function createSidebarRuntime(adapter: SidebarRuntimeAdapter) {
         visible,
         interaction,
         adapter.getPresetRow?.(configDirectory, presetName),
+        modelNames(),
       );
     }),
   );
@@ -2061,7 +2150,7 @@ const plugin: TuiDualContractModule = {
       api.lifecycle.onDispose(disposeCommands);
     }
 
-    // Client-side pane lifecycle (v1 only; v2 `setup()` stays unwired). The
+    // Client-side pane lifecycle (v1; the v2 `setup()` wires its own). The
     // wiring owns admission, config, log init, serverUrl reflection and the
     // event projection; disposal closes this client's panes best-effort.
     const paneWiring = await createTuiPaneWiring({

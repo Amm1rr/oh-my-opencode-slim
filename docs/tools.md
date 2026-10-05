@@ -101,7 +101,10 @@ its timeout signals cancellation of the lookup and releases the lease even if th
 settles, because no message write has started.
 
 On v2, `task_message` inherits the session's persisted agent/model/variant instead
-of reading and pinning selection per call; v1 retains its authoritative lookup.
+of reading and pinning selection per call. On v1 it pins the newest valid user or
+assistant model/variant in the bounded transcript, skipping compaction summaries;
+the session's saved selection can predate a hook rewrite. No valid identity means
+no message is sent.
 The v2 write uses `delivery: "queue", resume: false`: it updates the transcript
 without scheduling execution, never via a synthetic message or selection switch.
 Host errors are not retried with weaker semantics. A pending write still retains
@@ -111,6 +114,10 @@ its message lease after timeout; this change does not alter that quarantine.
 errored, or stopped retained session may be revived immediately once its
 retained state has been verified safe. Acknowledgement controls parent and
 job-board consumption and reusable-pool display, not same-session revival.
+On v1 a real parent fallback routes that child's next prompt, like a `task_id`
+resume, also with explicit model inheritance. V2 retains the session model. A
+failed send may leave the v1 intention pending until claimed or evicted by the
+bounded FIFO.
 For existing tracked sessions, baseline capture has a 5-second deadline: expiry fails without sending a prompt
 and releases the relaunch lease. The local admission wait has a 10-second deadline;
 expiry returns `status: admission_unknown`, not a launch failure. The reported

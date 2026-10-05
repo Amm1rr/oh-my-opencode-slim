@@ -1173,7 +1173,7 @@ describe('orchestrator wake scheduler', () => {
       providerID: 'test',
       modelID: 'model-a',
     });
-    expect(call.body.variant).toBeUndefined();
+    expect(call.body.variant).toBe('high');
     expect(call.body.parts[0]?.text).toBe(
       `${ORCHESTRATOR_WAKE_TEXT}\n<!-- SLIM_INTERNAL_INITIATOR -->`,
     );
@@ -2111,7 +2111,7 @@ describe('orchestrator wake scheduler', () => {
         [{ body: { variant?: string } }]
       >
     )[0]?.[0];
-    expect(call?.body.variant).toBeUndefined();
+    expect(call?.body.variant).toBe('low');
   });
 
   test('paired idle events do not create duplicate timers on one instance', async () => {

@@ -792,6 +792,14 @@ async function fetchModelOptions(api: TuiPluginApi): Promise<ModelOption[]> {
   return options;
 }
 
+/** provider/model-id -> configured display name, for sidebar rendering. */
+export async function fetchModelNameMap(api: {
+  client?: unknown;
+}): Promise<Record<string, string>> {
+  const options = await fetchModelOptions(api as TuiPluginApi);
+  return Object.fromEntries(options.map((o) => [o.value, o.title]));
+}
+
 function pickModel(
   state: ManagerState,
   presetName: string,

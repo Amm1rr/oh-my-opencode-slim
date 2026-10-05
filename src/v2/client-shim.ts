@@ -553,10 +553,9 @@ export function buildPluginInput(
           args?.modelSelection === 'inherit' &&
           args?.modelSwitch !== 'required';
         if (ref && !inheritPersistedSelection) {
-          // `modelVariant` is the v2-only channel for the wake model's
-          // reasoning-effort variant (v1 prompt bodies carry no variant
-          // slot). A non-empty string overrides the ref's variant so
-          // switchModel does not reset it to the host default.
+          // `modelVariant` carries the variant for v2; `body.variant` is
+          // the v1 channel. A non-empty string overrides the ref's variant
+          // so switchModel does not reset it to the host default.
           const explicitVariant =
             typeof args?.modelVariant === 'string' && args.modelVariant
               ? args.modelVariant

@@ -152,8 +152,8 @@ const MultiplexerMainPaneSizeSchema = z
 const MultiplexerCmuxTuiBinarySchema = z.string().min(1);
 
 /**
- * Which opencode TUI surface subagent panes open. `tui` (default) is the
- * full interface; `mini` launches the lightweight `opencode mini`.
+ * Subagent pane surface: the full `tui` (v1 default) or the lightweight
+ * `mini` interface (v2 default). The host wiring resolves an omitted value.
  */
 export const MultiplexerViewerSchema = z.enum(['tui', 'mini']);
 
@@ -260,7 +260,7 @@ function invalidMultiplexerKeys(config: Record<string, unknown>): string[] {
  * - a present `zellij_pane_mode` key is dropped with a once-per-process
  *   deprecation warning; the remaining multiplexer config and the rest of the
  *   plugin config keep working;
- * - an invalid `type` / `layout` / `main_pane_size` / `cmux_tui_binary`
+ * - an invalid `type` / `layout` / `main_pane_size` / `cmux_tui_binary` / `viewer`
  *   value (or a non-object `multiplexer` value) disables pane management
  *   (`type: "none"`) with a once-per-process diagnostic instead of failing
  *   the whole plugin config;
@@ -336,10 +336,11 @@ export const MultiplexerConfigStrictSchema = z.object({
     'Explicit path to the cmux-tui binary. When unset, the adapter probes ' +
       'PATH for `cmux-tui` first and falls back to `cmux`.',
   ),
-  viewer: MultiplexerViewerSchema.default('mini').describe(
-    'Which opencode TUI surface subagent panes open. "mini" (default) ' +
-      'launches the lightweight `opencode mini`; "tui" runs the full ' +
-      'interface.',
+  viewer: MultiplexerViewerSchema.optional().describe(
+    'Which opencode TUI surface subagent panes open. Defaults to "tui" on ' +
+      'OpenCode v1 and "mini" on v2. "mini" uses `attach ... --mini` on v1 ' +
+      '(requires OpenCode >= 1.17.10) and `opencode mini` on v2; "tui" runs ' +
+      'the full interface.',
   ),
 });
 

@@ -1,6 +1,7 @@
 import { describe, expect, mock, test } from 'bun:test';
 import { createTaskSessionManagerHook } from '../hooks/task-session-manager';
 import {
+  clearChildInputWait,
   getChildInputWait,
   listChildInputWaits,
   noteChildInputWait,
@@ -410,6 +411,123 @@ describe('task_reply', () => {
         sessionID: 'parent-1',
       } as never),
     ).rejects.toThrow('no open request que_zzz');
+  });
+
+  test('#1435 a request resolved elsewhere converges benignly when no asks remain', async () => {
+    resetChildInputWaitForTests();
+    const board = new BackgroundJobBoard();
+    registerBackgroundChild(board);
+    noteChildInputWait({
+      taskID: 'ses_child1',
+      parentSessionID: 'parent-1',
+      kind: 'permission',
+      requestID: 'per_gone',
+      permission: 'bash',
+      patterns: ['*'],
+    });
+    // An external replier (host policy, TUI, Safety Net) resolved the ask
+    // after the parent was woken; the sidecar cleared it via the event path.
+    clearChildInputWait('ses_child1', 'per_gone');
+    const reply = mock(async () => ({ data: true }));
+    const client = { permission: { reply } };
+    const { task_reply } = createTaskReplyTool({
+      input: { directory: '/test', client } as never,
+      backgroundJobBoard: board,
+    });
+
+    const output = await task_reply.execute(
+      { task_id: 'ses_child1', request_id: 'per_gone', reply: 'always' },
+      { sessionID: 'parent-1' } as never,
+    );
+
+    expect(reply).not.toHaveBeenCalled();
+    expect(output).toContain('No open request per_gone');
+    expect(output).toContain('Nothing was replied');
+  });
+
+  test('#1435 a request id open on another task steers the parent there', async () => {
+    resetChildInputWaitForTests();
+    const board = new BackgroundJobBoard();
+    registerBackgroundChild(board);
+    board.registerLaunch({
+      taskID: 'ses_child2',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+      description: 'implement',
+      background: true,
+      now: 0,
+    });
+    noteChildInputWait({
+      taskID: 'ses_child1',
+      parentSessionID: 'parent-1',
+      kind: 'permission',
+      requestID: 'per_shared',
+      permission: 'bash',
+      patterns: ['*'],
+    });
+    noteChildInputWait({
+      taskID: 'ses_child2',
+      parentSessionID: 'parent-1',
+      kind: 'permission',
+      requestID: 'per_on_b',
+      permission: 'bash',
+      patterns: ['*'],
+    });
+    const client = {
+      permission: { reply: mock(async () => ({ data: true })) },
+    };
+    const { task_reply } = createTaskReplyTool({
+      input: { directory: '/test', client } as never,
+      backgroundJobBoard: board,
+    });
+
+    const caught = await task_reply
+      .execute(
+        { task_id: 'ses_child1', request_id: 'per_on_b', reply: 'once' },
+        { sessionID: 'parent-1' } as never,
+      )
+      .catch((error) => error);
+
+    expect(caught).toBeInstanceOf(Error);
+    expect(caught.message).toContain('per_on_b');
+    expect(caught.message).toContain('ses_child2');
+  });
+
+  test('#1435 a request id held by another parent does not disclose it', async () => {
+    resetChildInputWaitForTests();
+    const board = new BackgroundJobBoard();
+    registerBackgroundChild(board);
+    board.registerLaunch({
+      taskID: 'ses_foreign',
+      parentSessionID: 'parent-2',
+      agent: 'fixer',
+      description: 'implement',
+      background: true,
+      now: 0,
+    });
+    noteChildInputWait({
+      taskID: 'ses_foreign',
+      parentSessionID: 'parent-2',
+      kind: 'permission',
+      requestID: 'per_foreign',
+      permission: 'bash',
+      patterns: ['*'],
+    });
+    const client = {
+      permission: { reply: mock(async () => ({ data: true })) },
+    };
+    const { task_reply } = createTaskReplyTool({
+      input: { directory: '/test', client } as never,
+      backgroundJobBoard: board,
+    });
+
+    const output = await task_reply.execute(
+      { task_id: 'ses_child1', request_id: 'per_foreign', reply: 'once' },
+      { sessionID: 'parent-1' } as never,
+    );
+
+    expect(output).toContain('Nothing was replied');
+    expect(output).not.toContain('ses_foreign');
   });
 
   test('rejects a task id owned by a different parent', async () => {

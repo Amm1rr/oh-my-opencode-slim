@@ -232,41 +232,6 @@ describe('HerdrMultiplexer', () => {
     expect(shared).not.toContain('attach');
   });
 
-  test('viewer "mini" runs opencode mini in the pane', async () => {
-    const { HerdrMultiplexer } = await importFreshHerdr();
-    const herdr = new HerdrMultiplexer('main-vertical', 60);
-
-    await herdr.spawnPane(
-      'session-mini',
-      'Mini worker',
-      'http://localhost:4096',
-      '/repo',
-      { viewerFlavor: 'v2-shared', viewerSurface: 'mini' },
-    );
-
-    const runCommand =
-      commands()
-        .filter((command) => command.includes('run'))
-        .at(-1)
-        ?.at(-1) ?? '';
-    expect(runCommand).toBe("opencode mini --session 'session-mini'");
-
-    crossSpawnMock.mockClear();
-    await herdr.spawnPane(
-      'session-tui',
-      'Tui worker',
-      'http://localhost:4096',
-      '/repo',
-      { viewerFlavor: 'v2-shared' },
-    );
-    const tuiCommand =
-      commands()
-        .filter((command) => command.includes('run'))
-        .at(-1)
-        ?.at(-1) ?? '';
-    expect(tuiCommand).toBe("opencode --session 'session-tui' '/repo'");
-  });
-
   test('returns not_found and issues no command when HERDR_PANE_ID is not set', async () => {
     delete process.env.HERDR_PANE_ID;
 

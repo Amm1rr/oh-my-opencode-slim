@@ -5,22 +5,22 @@ exports[`specialist role definitions matches golden factory prompts and descript
   {
     "description": "Fast codebase search and pattern matching. Use for finding files, locating code patterns, and answering 'where is X?' questions.",
     "name": "explorer",
-    "promptSha256": "8706550b93a221d1d11021999d35c33ff13faa474f69a4a4cc9704adcc495fcc",
+    "promptSha256": "657724c5b0702192c525270046ea67fe6e7ba9627186a0f155661aba04820788",
   },
   {
     "description": "External documentation and library research. Use for official docs lookup, GitHub examples, and understanding library internals.",
     "name": "librarian",
-    "promptSha256": "cfaefa3ded1afff72f82d3a57f460efb56505886e20cd14419a0293c3f310d74",
+    "promptSha256": "3f91bd61566c33dcfac8bd3a60c8aa3d19badf8ad0815f2d49a072f97faecaa5",
   },
   {
     "description": "Strategic technical advisor. Use for architecture decisions, complex debugging, code review, simplification, and engineering guidance.",
     "name": "oracle",
-    "promptSha256": "67e05d2a1f8aa54fbb0d66acc1779f6f21d93efa63b726bf5b5718dd0dfcaaf9",
+    "promptSha256": "1189ff70ac4fea4fe380ac68a93b5f0f3e8ea0d639737b34241b920be74cc119",
   },
   {
     "description": "UI/UX design, review, and implementation. Use for styling, responsive design, component architecture and visual polish.",
     "name": "designer",
-    "promptSha256": "e2667d9f6771ece1ff74ae697179e7824169baaf4065b43a9c065b8269309aa3",
+    "promptSha256": "2f30988368a2e701290186508aca4e44ff47711da4dc60d0bdcba1527c6b97f4",
   },
   {
     "description": "Fast implementation specialist. Receives complete context and task spec, executes code changes efficiently.",
@@ -30,7 +30,7 @@ exports[`specialist role definitions matches golden factory prompts and descript
   {
     "description": "Visual analysis. Use for interpreting images, screenshots, PDFs, and diagrams - extracts structured observations without loading raw files into main context. Requires a vision-capable model.",
     "name": "observer",
-    "promptSha256": "156c328a202557dd3132d2a4257f39192280afc2298c07e7166c07c0b5bf03db",
+    "promptSha256": "f227ecbf75d8a8ca5fdfcad94746bec754c6f3d639707bd0255e7277fe225788",
   },
 ]
 `;

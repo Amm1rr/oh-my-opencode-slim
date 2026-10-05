@@ -5,7 +5,7 @@ import {
   reconcileRuntimeProfileOptionKeys,
   resolveV2EventPayload,
 } from './runtime-profiles';
-import type { V2SessionContextEvent } from './types';
+import type { ModelRef, V2SessionContextEvent } from './types';
 
 const PROFILES = {
   explorer: {
@@ -26,6 +26,7 @@ interface BridgeOptions {
   knownAgent?: (sessionID: string) => string | undefined;
   /** Current profile table (mutable for freshness tests). */
   profiles?: () => typeof PROFILES;
+  registeredProfiles?: typeof PROFILES;
   /** Defaults to the fixture plugin agents. */
   pluginAgents?: string[];
   /** Bound for the request-path switch. */
@@ -51,6 +52,7 @@ function makeBridge(options?: BridgeOptions) {
   }
   const bridge = createSessionProfileBridge({
     profiles: options?.profiles ?? (() => PROFILES),
+    registeredProfiles: options?.registeredProfiles,
     pluginAgents: new Set(options?.pluginAgents ?? ['explorer', 'oracle']),
     session: session as never,
     ...(options?.knownAgent ? { knownAgent: options.knownAgent } : {}),
@@ -122,30 +124,48 @@ describe('createSessionProfileBridge', () => {
     expect(bridge.size()).toBe(0);
   });
 
-  test('freezes the profile once: a later refresh does not change an existing child', async () => {
+  test('keeps per-call models and variants but refreshes exact host defaults', async () => {
     let profiles = PROFILES;
-    const { bridge, switchCalls } = makeBridge({ profiles: () => profiles });
+    const models: Record<string, ModelRef> = {
+      event: { providerID: 'other', id: 'gpt-5-mini', variant: 'low' },
+      get: { providerID: 'openai', id: 'per-call', variant: 'low' },
+      variant: { ...PROFILES.explorer.model, variant: 'max' },
+      default: { ...PROFILES.explorer.model, variant: 'default' },
+    };
+    const { bridge, switchCalls } = makeBridge({
+      profiles: () => profiles,
+      registeredProfiles: PROFILES,
+      get: async (input) => ({
+        parentID: 'parent',
+        agent: 'explorer',
+        model: models[(input as { sessionID: string }).sessionID],
+      }),
+    });
+    const event = created('event');
+    await bridge.observeEvent({
+      ...event,
+      data: { ...event.data, model: models.event },
+    });
+    await bridge.ensureSessionProfile('get');
+    await bridge.ensureSessionProfile('variant');
+    expect(switchCalls).toEqual([]);
+    expect(bridge.profileForSession('get')).toBe(PROFILES.explorer);
 
-    await bridge.observeEvent(created('child-1', 'explorer', 'parent'));
-
-    // Config changes between admissions: the profile table updates...
     profiles = {
+      ...PROFILES,
       explorer: {
+        ...PROFILES.explorer,
         model: { providerID: 'anthropic', id: 'claude-sonnet-4-5' },
         sidebarModel: 'anthropic/claude-sonnet-4-5',
       },
     };
-    // ...but a duplicate/replayed creation for the same session is a no-op.
-    await bridge.observeEvent(created('child-1', 'explorer', 'parent'));
-    expect(switchCalls).toHaveLength(1);
-
-    // A NEW child captures the fresh profile.
-    await bridge.observeEvent(created('child-2', 'explorer', 'parent'));
-    expect(switchCalls).toHaveLength(2);
-    expect(bridge.profileForSession('child-1')?.model?.id).toBe('gpt-5-mini');
-    expect(bridge.profileForSession('child-2')?.model?.id).toBe(
-      'claude-sonnet-4-5',
-    );
+    await bridge.observeEvent(event);
+    await bridge.ensureSessionProfile('default');
+    expect(switchCalls).toEqual([
+      { sessionID: 'default', model: profiles.explorer.model },
+    ]);
+    expect(bridge.profileForSession('event')).toBe(PROFILES.explorer);
+    expect(bridge.profileForSession('default')).toBe(profiles.explorer);
   });
 
   test('captures without a model and leaves a failed switch uncaptured', async () => {
@@ -161,6 +181,29 @@ describe('createSessionProfileBridge', () => {
     expect(bridge.profileForSession('c1')?.model).toBeUndefined();
     expect(bridge.profileForSession('c2')).toBeUndefined();
     expect(bridge.size()).toBe(1);
+  });
+
+  test('keeps an explicit model when a model-less startup profile is refreshed', async () => {
+    const model = { providerID: 'other', id: 'fallback', variant: 'max' };
+    const { bridge, switchCalls } = makeBridge({
+      registeredProfiles: PROFILES,
+      profiles: () => ({ ...PROFILES, oracle: PROFILES.explorer }),
+      get: async (input) => ({
+        parentID: 'p',
+        agent: 'oracle',
+        model:
+          (input as { sessionID: string }).sessionID === 'default'
+            ? undefined
+            : model,
+      }),
+    });
+    await bridge.ensureSessionProfile('child');
+    expect(switchCalls).toEqual([]);
+    expect(bridge.profileForSession('child')).toBe(PROFILES.explorer);
+    await bridge.ensureSessionProfile('default');
+    expect(switchCalls).toEqual([
+      { sessionID: 'default', model: PROFILES.explorer.model },
+    ]);
   });
 
   test('leaves a modeled child uncaptured without session.switchModel', async () => {
