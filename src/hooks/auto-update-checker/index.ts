@@ -9,6 +9,7 @@ import { crossSpawn } from '../../utils/compat';
 import { log } from '../../utils/logger';
 import { resolvePackageInstallCommand } from '../../utils/package-manager';
 import {
+  acquirePackageUpdateLock,
   discardPreparedPackageUpdate,
   getTargetInstallContext,
   preparePackageUpdate,
@@ -68,6 +69,52 @@ export function createAutoUpdateCheckerHook(
       }, 0);
     },
   };
+}
+
+/**
+ * Ensures the companion binary matches the manifest shipped at
+ * `packageRoot`. Idempotent: {@link ensureCompanionVersion} short-circuits
+ * to 'current' when the binary is already up to date. Failures are logged
+ * here and retried on the next restart (see `companionWillRetry`).
+ */
+async function ensureCompanionForPackageRoot(
+  packageRoot: string,
+  companion: AutoUpdateCheckerOptions['companion'],
+): Promise<{ companionUpdated: boolean; companionWillRetry: boolean }> {
+  let companionUpdated = false;
+  let companionWillRetry = false;
+
+  if (companion?.enabled === true) {
+    try {
+      const manifest = loadCompanionManifestFromPackageRoot(packageRoot);
+      const companionResult = await ensureCompanionVersion({
+        config: companion,
+        manifest: manifest ?? undefined,
+      });
+      if (companionResult.status === 'installed') {
+        companionUpdated = true;
+      } else if (companionResult.status === 'failed') {
+        companionWillRetry = true;
+        log(
+          '[auto-update-checker] Companion update failed; will retry on restart:',
+          companionResult.error,
+        );
+      } else if (companionResult.status === 'skipped') {
+        log(
+          '[auto-update-checker] Companion update skipped:',
+          companionResult.reason,
+        );
+      }
+    } catch (err) {
+      companionWillRetry = true;
+      log(
+        '[auto-update-checker] Companion update failed silently; will retry on restart:',
+        err,
+      );
+    }
+  }
+
+  return { companionUpdated, companionWillRetry };
 }
 
 /**
@@ -212,36 +259,94 @@ async function runBackgroundUpdateCheck(
     return;
   }
 
-  const prepared = preparePackageUpdate(
-    latestVersion,
-    PACKAGE_NAME,
-    undefined,
-    cacheIdentity,
-  );
-  if (!prepared) {
-    showToast(
+  // Narrow guard: resolveInstallContext only returns the v1 packages-wrapper
+  // layout, whose parent is `packages`, so getTargetInstallContext always
+  // derives a target for it.
+  if (!targetContext) {
+    showSkippedUpdateToast(
       ctx,
-      `OMO-Slim ${latestVersion}`,
-      `v${latestVersion} available. Auto-update could not prepare the active install.`,
-      'info',
-      8000,
+      currentVersion,
+      latestVersion,
+      pluginInfo.isInstallerManaged,
     );
-    log('[auto-update-checker] Failed to prepare install root for auto-update');
+    log(
+      '[auto-update-checker] Skipped self-install; the active install root is not updatable in place',
+    );
     return;
   }
 
-  const installSuccess =
-    (await runPackageInstallSafe(prepared.stagingDir)) &&
-    verifyInstalledPackage(prepared.stagingDir, latestVersion);
-  const installDir = installSuccess
-    ? publishPackageUpdate(prepared, latestVersion)
-    : null;
-  if (!installSuccess) discardPreparedPackageUpdate(prepared);
+  // Cross-process mutex: parallel OpenCode server processes share the cache
+  // root, so only one may prepare→install→publish a pending version
+  // (issue #1279). The wait is async so the server thread is never blocked.
+  const releaseInstallLock = await acquirePackageUpdateLock(
+    targetContext.installDir,
+  );
+  if (!releaseInstallLock) {
+    log(
+      '[auto-update-checker] Another OpenCode process is installing the update; timed out waiting for the install lock, skipping.',
+    );
+    return;
+  }
 
-  if (installDir) {
+  // The install phase resolves to one of three outcomes:
+  // 'peer' (a peer process installed the version while we waited for the
+  // lock), 'installed' (we prepared→installed→published it), or 'failed'.
+  // 'peer' and 'installed' both continue to the shared redirect/companion/
+  // toast path below, after the lock is released.
+  let outcome:
+    | { kind: 'peer'; dir: string }
+    | { kind: 'installed'; dir: string }
+    | { kind: 'failed' };
+  try {
+    // The version may have been installed by another process while we waited
+    // for the lock.
+    if (verifyInstalledPackage(targetContext.installDir, latestVersion)) {
+      log(
+        `[auto-update-checker] v${latestVersion} already installed by another OpenCode process; skipping install.`,
+      );
+      outcome = { kind: 'peer', dir: targetContext.installDir };
+    } else {
+      const prepared = preparePackageUpdate(
+        latestVersion,
+        PACKAGE_NAME,
+        undefined,
+        cacheIdentity,
+      );
+      if (!prepared) {
+        showToast(
+          ctx,
+          `OMO-Slim ${latestVersion}`,
+          `v${latestVersion} available. Auto-update could not prepare the active install.`,
+          'info',
+          8000,
+        );
+        log(
+          '[auto-update-checker] Failed to prepare install root for auto-update',
+        );
+        return;
+      }
+
+      const installSuccess =
+        (await runPackageInstallSafe(prepared.stagingDir)) &&
+        verifyInstalledPackage(prepared.stagingDir, latestVersion);
+      const published = installSuccess
+        ? publishPackageUpdate(prepared, latestVersion)
+        : null;
+      if (!installSuccess) discardPreparedPackageUpdate(prepared);
+      outcome = published
+        ? { kind: 'installed', dir: published }
+        : { kind: 'failed' };
+    }
+  } finally {
+    releaseInstallLock();
+  }
+
+  if (outcome.kind !== 'failed') {
+    const installDir = outcome.dir;
     if (
       pluginInfo.isInstallerManaged &&
-      !updateInstallerManagedVersions(ctx.directory, latestVersion)
+      updateInstallerManagedVersions(ctx.directory, latestVersion).status ===
+        'error'
     ) {
       showToast(
         ctx,
@@ -253,39 +358,10 @@ async function runBackgroundUpdateCheck(
       return;
     }
 
-    let companionUpdated = false;
-    let companionWillRetry = false;
     const packageRoot = path.join(installDir, 'node_modules', PACKAGE_NAME);
 
-    if (companion?.enabled === true) {
-      try {
-        const manifest = loadCompanionManifestFromPackageRoot(packageRoot);
-        const companionResult = await ensureCompanionVersion({
-          config: companion,
-          manifest: manifest ?? undefined,
-        });
-        if (companionResult.status === 'installed') {
-          companionUpdated = true;
-        } else if (companionResult.status === 'failed') {
-          companionWillRetry = true;
-          log(
-            '[auto-update-checker] Companion update failed; will retry on restart:',
-            companionResult.error,
-          );
-        } else if (companionResult.status === 'skipped') {
-          log(
-            '[auto-update-checker] Companion update skipped:',
-            companionResult.reason,
-          );
-        }
-      } catch (err) {
-        companionWillRetry = true;
-        log(
-          '[auto-update-checker] Companion update failed silently; will retry on restart:',
-          err,
-        );
-      }
-    }
+    const { companionUpdated, companionWillRetry } =
+      await ensureCompanionForPackageRoot(packageRoot, companion);
 
     const messageLines = [`v${currentVersion} → v${latestVersion}`];
     if (companionUpdated) {
@@ -303,7 +379,9 @@ async function runBackgroundUpdateCheck(
       8000,
     );
     log(
-      `[auto-update-checker] Update installed: ${currentVersion} → ${latestVersion}`,
+      outcome.kind === 'peer'
+        ? `[auto-update-checker] Update already installed by another process: ${currentVersion} → ${latestVersion}`
+        : `[auto-update-checker] Update installed: ${currentVersion} → ${latestVersion}`,
     );
   } else {
     showToast(

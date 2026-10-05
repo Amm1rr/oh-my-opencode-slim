@@ -521,14 +521,22 @@ export function getCachedVersion(): string | null {
   return null;
 }
 
+export type InstallerManagedVersionsResult =
+  | { status: 'changed' }
+  | { status: 'unchanged' }
+  | { status: 'error'; error: unknown };
+
 /**
- * Safely updates a pinned version in the configuration file.
- * It attempts to replace the exact plugin string to preserve comments and formatting.
+ * Updates the pinned plugin version in installer-managed configuration
+ * files, replacing the exact managed specifier to preserve comments and
+ * formatting. 'unchanged' means no managed entry needed updating (already
+ * on newVersion); 'error' means a read/write failure — callers must not
+ * treat it like 'unchanged'.
  */
 export function updateInstallerManagedVersions(
   directory: string,
   newVersion: string,
-): boolean {
+): InstallerManagedVersionsResult {
   try {
     const paths = [
       ...getConfigPaths(directory),
@@ -559,7 +567,7 @@ export function updateInstallerManagedVersions(
           ]
         : [];
     });
-    if (updates.length === 0) return false;
+    if (updates.length === 0) return { status: 'unchanged' };
     const token = `${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`;
     for (const update of updates)
       fs.writeFileSync(`${update.configPath}.${token}.tmp`, update.updated);
@@ -577,13 +585,13 @@ export function updateInstallerManagedVersions(
       }
       throw err;
     }
-    return true;
+    return { status: 'changed' };
   } catch (err) {
     log(
       '[auto-update-checker] Failed to update installer-managed configs:',
       err,
     );
-    return false;
+    return { status: 'error', error: err };
   }
 }
 

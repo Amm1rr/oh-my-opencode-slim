@@ -342,7 +342,9 @@ describe('auto-update-checker/checker', () => {
 
       const previousTuiConfig = process.env.OPENCODE_TUI_CONFIG;
       process.env.OPENCODE_TUI_CONFIG = '/mock/config/tui.json';
-      expect(updateInstallerManagedVersions('/project', '1.2.4')).toBe(true);
+      expect(updateInstallerManagedVersions('/project', '1.2.4')).toEqual({
+        status: 'changed',
+      });
       expect(files.get('/mock/config/opencode.json')).toContain(
         'oh-my-opencode-slim@1.2.4',
       );
