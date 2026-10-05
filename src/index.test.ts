@@ -3,6 +3,7 @@ import {
   beforeEach,
   describe,
   expect,
+  jest,
   mock,
   spyOn,
   test,
@@ -4244,6 +4245,7 @@ describe('plugin foreground fallback host gating', () => {
   });
 
   afterEach(async () => {
+    jest.useRealTimers();
     process.env = originalEnv;
     await rm(projectDir, { recursive: true, force: true });
   });
@@ -4434,17 +4436,22 @@ describe('plugin foreground fallback host gating', () => {
     }
   });
 
-  test('plugin fallback chain forwards configured variants to replay prompts', async () => {
+  test('plugin fallback keeps the first duplicate variant on replay and continuation', async () => {
     await Bun.write(
       `${projectDir}/oh-my-opencode-slim.json`,
       JSON.stringify({
         companion: { enabled: false },
-        fallback: { enabled: true, maxRetries: 0 },
+        fallback: {
+          enabled: true,
+          maxRetries: 0,
+          continuationPolicy: 'stick-to-fallback',
+        },
         agents: {
           orchestrator: {
             model: [
               'openai/gpt-b',
               { id: 'openai/gpt-c', variant: 'reasoning-high' },
+              { id: 'openai/gpt-c', variant: 'reasoning-low' },
             ],
           },
         },
@@ -4466,7 +4473,16 @@ describe('plugin foreground fallback host gating', () => {
       serverUrl: new URL('http://127.0.0.1:4096'),
     } as never);
 
+    jest.useFakeTimers();
     try {
+      await hooks['chat.message']?.(
+        {
+          sessionID: 'session-variant',
+          agent: 'orchestrator',
+          model: { providerID: 'openai', modelID: 'gpt-b' },
+        } as never,
+        {} as never,
+      );
       await hooks.event?.({
         event: {
           type: 'message.updated',
@@ -4503,6 +4519,42 @@ describe('plugin foreground fallback host gating', () => {
           variant: 'reasoning-high',
         },
       });
+      await hooks.event?.({
+        event: {
+          type: 'message.updated',
+          properties: {
+            info: {
+              sessionID: 'session-variant',
+              role: 'assistant',
+              agent: 'orchestrator',
+              providerID: 'openai',
+              modelID: 'gpt-c',
+            },
+          },
+        },
+      } as never);
+      const output = {
+        message: {
+          id: 'internal-variant',
+          role: 'user',
+          sessionID: 'session-variant',
+          agent: 'orchestrator',
+          model: { providerID: 'openai', modelID: 'gpt-b' },
+        },
+        parts: [createInternalAgentTextPart('background task completed')],
+      };
+      await hooks['chat.message']?.(
+        { sessionID: 'session-variant', agent: 'orchestrator' } as never,
+        output as never,
+      );
+      expect(output.message.model).toEqual({
+        providerID: 'openai',
+        modelID: 'gpt-c',
+        variant: 'reasoning-high',
+      });
+      expect(readTuiSnapshot(projectDir).agentVariants.orchestrator).toBe(
+        'reasoning-high',
+      );
     } finally {
       await hooks.dispose?.();
     }

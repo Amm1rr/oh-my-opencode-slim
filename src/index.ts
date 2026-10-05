@@ -1566,14 +1566,10 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       typeof configEntry?.variant === 'string'
         ? configEntry.variant
         : undefined;
-    const chainMatches = runtime.modelArrays[agentName]?.filter(
-      (entry) => entry.id === model,
-    );
-    if (chainMatches) {
-      if (chainMatches.length === 1) {
-        return chainMatches[0].variant ?? defaultVariant;
-      }
-      return undefined;
+    const chain = runtime.modelArrays[agentName];
+    if (chain) {
+      const match = chain.find((entry) => entry.id === model);
+      return match ? (match.variant ?? defaultVariant) : undefined;
     }
 
     if (

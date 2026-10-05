@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
+import { afterEach, describe, expect, jest, mock, spyOn, test } from 'bun:test';
 import { BackgroundJobBoard } from '../../utils/background-job-fixture';
 import {
   type BackgroundJobTerminalGate,
@@ -156,6 +156,7 @@ function completedTranscript(
 
 afterEach(() => {
   for (const gate of gates.splice(0)) gate.dispose();
+  jest.useRealTimers();
   globalThis.setTimeout = realSetTimeout;
   globalThis.clearTimeout = realClearTimeout;
   mock.restore();
@@ -337,7 +338,8 @@ describe('revived run tracker', () => {
     });
   });
 
-  test('forwards the resolved variant as modelVariant on the notification', async () => {
+  test('forwards the resolved notification variant in the v1 body and v2 modelVariant', async () => {
+    jest.useFakeTimers();
     let probe = false;
     const harness = createHarness(
       completedTranscript(() => probe),
@@ -370,6 +372,7 @@ describe('revived run tracker', () => {
       body: {
         agent: 'plan',
         model: { providerID: 'test', modelID: 'plan-model' },
+        variant: 'max',
       },
     });
   });
