@@ -67,6 +67,14 @@ export function buildOrchestratorPrompt(
   // host, so the prompt stays byte-stable across a session (cache-safe).
   const vocab = delegationVocabulary(hostFlavor);
   const directRevive = vocab.tool !== 'subagent';
+  const liveTaskMessageInstruction =
+    hostFlavor === 'v2'
+      ? '- Live child tasks: `task_status` is read-only state inspection; `task_message` sends concise, non-interrupting communication and is not a recovery operation. `delivery: "queue"` (default) waits for idle; `delivery: "steer"` offers an in-progress update at the next supported model-step boundary, after the current step\'s tool executions finish. Both keep the same child session and context without launching, resuming, or interrupting it. A successful response confirms only transport acceptance; never claim that the child saw, read, acknowledged, or acted on it.'
+      : '- Live child tasks: `task_status` is read-only state inspection; `task_message` only queues a concise, non-interrupting communication and is not a recovery operation. A queued-message response confirms only that the message was accepted by the transport; never claim that the child saw, read, acknowledged, or acted on it. There is no safe live-prompt channel.';
+  const activeTaskAmendmentInstruction =
+    hostFlavor === 'v2'
+      ? '- For a correction or additive request to a running lane, record the amendment in the parent conversation and send `task_message(sessionID: "<existing-session-or-alias>", message: "<concise amendment>", delivery: "steer")` when the child needs it during the current run. Report acceptance without claiming consumption, and reconcile the amendment against the child\'s eventual result. Use `delivery: "queue"` for an idle-boundary follow-up. Do not resume or relaunch the running child to send the amendment; if the eventual result leaves it unaddressed, continue the same specialist by its existing session id.'
+      : "- For an additive request to a running lane, record the amendment in the parent conversation, tell the user it is queued, and wait for that lane's terminal result. Then continue the same specialist by its existing session id, even if it is not listed under Reusable Sessions.";
   // Board-aware wording: when the Background Job Board is not injected,
   // prompt lines must point at the pull channel (`task_status`) instead of
   // a panel the model can never see. Construction-time constant (cache-safe).
@@ -186,7 +194,7 @@ Balance: respect dependencies, avoid parallelizing what must be sequential, and 
 ### Background Task Discipline
 - Before dispatching a specialist, check ${boardChannel} for an existing task that already covers the objective.
 - \`task_result\` returns only a completed specialist's final assistant message. Never use \`${vocab.tool}(..., ${vocab.resumeParam}: ...)\` to fetch output, check progress, or instruct a live child: any resume starts new model work. Read a finished result when it looks missing; that read is not required before continuing an existing session.
-- Live child tasks: \`task_status\` is read-only state inspection; \`task_message\` only queues a concise, non-interrupting communication and is not a recovery operation. A queued-message response confirms only that the message was accepted by the transport; never claim that the child saw, read, acknowledged, or acted on it. There is no safe live-prompt channel.
+${liveTaskMessageInstruction}
 - Use \`task_cancel\` only when the user asks, or when a running lane is obsolete, wrong, or conflicts with a safer replacement plan. Cancellation retains the child session and rolls nothing back — inspect and reconcile partial changes before any replacement or follow-up.
 - ${continueExistingSentence} \`task_revive\` may cancel a tracked running generation and start a new generation in that same child; recovered host work is never aborted merely because it was imported. It returns a tracked continuation, not a synchronous native result. Inspect it with \`task_status\` or \`task_result\`; do not use it as a status check or claim the new prompt was seen until a result arrives.
 - Prefer \`${vocab.tool}(..., background: true)\` for delegated work that can run independently, and launch independent specialist lanes in the background so the orchestrator stays unblocked and can reconcile results when they return.${
@@ -209,7 +217,7 @@ After spawning independent background tasks and remaining non-overlapping work, 
     : ''
 }### Active Task Amendments
 - A running task cannot receive another \`${vocab.tool}\` call, even with its \`${vocab.resumeParam}\`. Do not resume, replace, or cancel it merely because the user adds to its scope. An unreconciled completed session is not running; continue it with ${directRevive ? '`task_revive`' : '`subagent` and its existing session id'}.
-- For an additive request to a running lane, record the amendment in the parent conversation, tell the user it is queued, and wait for that lane's terminal result. Then continue the same specialist by its existing session id, even if it is not listed under Reusable Sessions.
+${activeTaskAmendmentInstruction}
 - Cancel a running task only when its current objective is genuinely obsolete or must be replaced; never create-and-cancel speculative duplicate sessions. ${
     boardInjectionEnabled
       ? 'A `running [resumed]` board label'
