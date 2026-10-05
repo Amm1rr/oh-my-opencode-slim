@@ -437,15 +437,18 @@ export async function hydrateModelNames(
     return cached;
   }
   try {
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const names = await Promise.race([
       fetchModelNameMap({ client }),
-      new Promise<never>((_, reject) =>
-        setTimeout(
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
           () => reject(new Error('model names fetch timed out')),
           timeoutMs,
-        ),
-      ),
-    ]);
+        );
+      }),
+    ]).finally(() => {
+      if (timer !== undefined) clearTimeout(timer);
+    });
     cache.directory = directory;
     cache.names = new Map(Object.entries(names));
     cache.at = now();
