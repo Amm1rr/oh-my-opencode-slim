@@ -50,17 +50,128 @@ export function readPidFileOwner(
 }
 
 /**
+ * Byte-level snapshot of a lock dir, taken before any liveness judgment or
+ * rename. `raw` is the full bytes of `<lock>/owner` (null when unreadable);
+ * `dirMtimeMs` is the lock dir's mtime (null when unstattable). A rename
+ * preserves the dir mtime, so the claimed copy can be compared against the
+ * snapshot to detect a peer's takeover in between.
+ */
+interface LockSnapshot {
+  raw: string | null;
+  dirMtimeMs: number | null;
+}
+
+function readLockSnapshot(lock: string): LockSnapshot {
+  let raw: string | null = null;
+  try {
+    raw = readFileSync(path.join(lock, 'owner'), 'utf8');
+  } catch {
+    raw = null;
+  }
+  let dirMtimeMs: number | null = null;
+  try {
+    dirMtimeMs = statSync(lock).mtimeMs;
+  } catch {
+    dirMtimeMs = null;
+  }
+  return { raw, dirMtimeMs };
+}
+
+/**
+ * Judges liveness from a snapshot (same rules as
+ * {@link pidFileLockHasLiveOwner}): an unreadable owner with a young dir is
+ * live; an unstattable dir with no owner bytes is stale.
+ */
+function snapshotHasLiveOwner(
+  snapshot: LockSnapshot,
+  maxAgeMs?: number,
+): boolean {
+  if (snapshot.raw !== null) {
+    const pid = parsePidFile(snapshot.raw);
+    if (pid === null) return false;
+    if (!isProcessAlive(pid)) return false;
+    if (maxAgeMs !== undefined && snapshot.dirMtimeMs !== null) {
+      if (Date.now() - snapshot.dirMtimeMs >= maxAgeMs) {
+        log('[pid-file-lock] lock age exceeds max age; treating as stale');
+        return false;
+      }
+    }
+    // Unstattable dir: treat the live owner as authoritative.
+    return true;
+  }
+  log('[pid-file-lock] lock owner check failed: owner unreadable');
+  if (snapshot.dirMtimeMs === null) {
+    log('[pid-file-lock] lock owner check failed: lock dir unstattable');
+    return false;
+  }
+  return Date.now() - snapshot.dirMtimeMs < YOUNG_LOCK_MS;
+}
+
+/**
+ * Renames `lock` aside to a unique sibling path and deletes the claim only
+ * when its owner bytes and dir mtime still match `expected`. A peer that
+ * re-acquired the lock after our snapshot changed at least one of them, so
+ * its lock is renamed back instead of deleted. Returns 'removed' when the
+ * claim was deleted, 'restored' when a changed lock was put back (or the
+ * claim could not be taken safely), and 'gone' when the lock vanished.
+ */
+function removeLockDirIfMatches(
+  lock: string,
+  expected: LockSnapshot,
+): 'removed' | 'restored' | 'gone' {
+  const claimPath =
+    `${lock}.claim-${process.pid}-${Date.now().toString(36)}` +
+    `${Math.random().toString(36).slice(2)}`;
+  try {
+    renameSync(lock, claimPath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return 'gone';
+    log('[pid-file-lock] lock claim rename failed', String(err));
+    return 'restored';
+  }
+  const claimed = readLockSnapshot(claimPath);
+  if (
+    claimed.raw !== expected.raw ||
+    claimed.dirMtimeMs !== expected.dirMtimeMs
+  ) {
+    // A successor replaced the lock between our snapshot and the rename;
+    // put its lock back. Rename-back only ever touches our claim path.
+    try {
+      renameSync(claimPath, lock);
+    } catch (err) {
+      log('[pid-file-lock] lock restore failed', String(err));
+      try {
+        rmSync(claimPath, { recursive: true, force: true });
+      } catch (rmErr) {
+        log('[pid-file-lock] stale lock cleanup failed', String(rmErr));
+      }
+    }
+    return 'restored';
+  }
+  try {
+    rmSync(claimPath, { recursive: true, force: true });
+  } catch (err) {
+    // Cleanup of the renamed-away dir is best-effort (EACCES/EBUSY on
+    // win32); the lock path itself is already clear, so never abort.
+    log('[pid-file-lock] stale lock cleanup failed', String(err));
+  }
+  return 'removed';
+}
+
+/**
  * Attempts to take an exclusive lock by creating the `<file>.lock` directory
  * and writing this process's PID plus a unique owner token into it. Locks
  * left behind by dead processes are detected via the owner PID file and
- * taken over atomically via rename, so two waiters can never both become
- * owners. With `maxAgeMs` set, a lock older than that is treated as stale
- * even when its owner PID is alive (PID reuse or a wedged holder must not
- * wedge peers forever). Returns a release function, or null when a live
- * process holds the lock. Release only removes the lock dir when the owner
- * token it reads still matches the token this acquisition wrote, so a
- * holder that lost the lock to a takeover can never delete its successor's
- * lock.
+ * taken over via claim-verify-restore: the stale dir is snapshotted (owner
+ * bytes + dir mtime), renamed aside, and only deleted when the claimed copy
+ * still matches the snapshot — a lock a peer re-acquired in between is
+ * renamed back instead, so two waiters can never both become owners. With
+ * `maxAgeMs` set, a lock older than that is treated as stale even when its
+ * owner PID is alive (PID reuse or a wedged holder must not wedge peers
+ * forever). Returns a release function, or null when a live process holds
+ * the lock. Release applies the same claim-verify-restore to the owner
+ * bytes it just read, so a holder that lost the lock to a takeover
+ * restores (never deletes) its successor's lock.
  */
 export function acquirePidFileLock(
   file: string,
@@ -79,42 +190,48 @@ export function acquirePidFileLock(
         .slice(2)}`;
       writeFileSync(path.join(lock, 'owner'), `${process.pid}\n${token}`);
       return () => {
-        const owner = readPidFileOwner(lock);
-        if (!owner || owner.token !== token) {
+        // Single raw read: the token check and the snapshot below must see
+        // the same bytes, otherwise a successor slipping between two reads
+        // could be deleted.
+        let raw: string;
+        try {
+          raw = readFileSync(path.join(lock, 'owner'), 'utf8');
+        } catch {
           log('[pid-file-lock] lock owner changed; skipping release');
           return;
         }
-        try {
-          rmSync(lock, { recursive: true, force: true });
-        } catch (err) {
-          log('[pid-file-lock] lock release failed', String(err));
+        const seen = raw.split('\n')[1]?.trim();
+        if (parsePidFile(raw) === null || (seen ? seen : null) !== token) {
+          log('[pid-file-lock] lock owner changed; skipping release');
+          return;
         }
+        let dirMtimeMs: number | null = null;
+        try {
+          dirMtimeMs = statSync(lock).mtimeMs;
+        } catch {
+          dirMtimeMs = null;
+        }
+        const outcome = removeLockDirIfMatches(lock, { raw, dirMtimeMs });
+        if (outcome === 'restored') {
+          log('[pid-file-lock] lock owner changed; skipping release');
+        }
+        // 'removed' means our lock is gone; 'gone' means someone else
+        // removed it first — both need no further action.
       };
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code !== 'EEXIST') throw err;
-      if (pidFileLockHasLiveOwner(lock, maxAgeMs)) return null;
+      const snapshot = readLockSnapshot(lock);
+      if (snapshotHasLiveOwner(snapshot, maxAgeMs)) return null;
       log('[pid-file-lock] removing stale PID file lock for dead process');
-      // Claim the stale lock by renaming it away before deleting: only one
-      // waiter wins the rename, so a second waiter can never delete a
-      // freshly re-acquired (live) lock and leave two owners. The suffix is
-      // random so a leftover stale dir from a crashed same-PID predecessor
-      // can never make this rename fail with EEXIST.
-      const stalePath = `${lock}.stale-${process.pid}-${Date.now().toString(
-        36,
-      )}${Math.random().toString(36).slice(2)}`;
-      try {
-        renameSync(lock, stalePath);
-      } catch {
-        // Another waiter took over or removed it; retry the mkdir.
-        continue;
-      }
-      try {
-        rmSync(stalePath, { recursive: true, force: true });
-      } catch (err) {
-        // Cleanup of the renamed-away dir is best-effort (EACCES/EBUSY on
-        // win32); the lock itself is already ours, so never abort.
-        log('[pid-file-lock] stale lock cleanup failed', String(err));
+      // Only one waiter wins the rename, and verify-before-delete puts a
+      // freshly re-acquired lock back. The suffix is random so a leftover
+      // claim dir from a crashed same-PID predecessor can never make this
+      // rename fail with EEXIST.
+      if (removeLockDirIfMatches(lock, snapshot) !== 'removed') {
+        // A successor replaced the lock ('restored') or it vanished
+        // ('gone'): never acquire on top of either.
+        return null;
       }
     }
   }
@@ -181,29 +298,5 @@ export function pidFileLockHasLiveOwner(
   lock: string,
   maxAgeMs?: number,
 ): boolean {
-  try {
-    const owner = parsePidFile(readFileSync(path.join(lock, 'owner'), 'utf8'));
-    if (owner !== null) {
-      if (!isProcessAlive(owner)) return false;
-      if (maxAgeMs !== undefined) {
-        try {
-          if (Date.now() - statSync(lock).mtimeMs >= maxAgeMs) {
-            log('[pid-file-lock] lock age exceeds max age; treating as stale');
-            return false;
-          }
-        } catch {
-          // Cannot stat the lock dir; treat the live owner as authoritative.
-        }
-      }
-      return true;
-    }
-  } catch (err) {
-    log('[pid-file-lock] lock owner check failed', String(err));
-    try {
-      return Date.now() - statSync(lock).mtimeMs < YOUNG_LOCK_MS;
-    } catch (err) {
-      log('[pid-file-lock] lock owner check failed', String(err));
-    }
-  }
-  return false;
+  return snapshotHasLiveOwner(readLockSnapshot(lock), maxAgeMs);
 }

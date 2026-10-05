@@ -71,6 +71,52 @@ export function createAutoUpdateCheckerHook(
 }
 
 /**
+ * Ensures the companion binary matches the manifest shipped at
+ * `packageRoot`. Idempotent: {@link ensureCompanionVersion} short-circuits
+ * to 'current' when the binary is already up to date. Failures are logged
+ * here and retried on the next restart (see `companionWillRetry`).
+ */
+async function ensureCompanionForPackageRoot(
+  packageRoot: string,
+  companion: AutoUpdateCheckerOptions['companion'],
+): Promise<{ companionUpdated: boolean; companionWillRetry: boolean }> {
+  let companionUpdated = false;
+  let companionWillRetry = false;
+
+  if (companion?.enabled === true) {
+    try {
+      const manifest = loadCompanionManifestFromPackageRoot(packageRoot);
+      const companionResult = await ensureCompanionVersion({
+        config: companion,
+        manifest: manifest ?? undefined,
+      });
+      if (companionResult.status === 'installed') {
+        companionUpdated = true;
+      } else if (companionResult.status === 'failed') {
+        companionWillRetry = true;
+        log(
+          '[auto-update-checker] Companion update failed; will retry on restart:',
+          companionResult.error,
+        );
+      } else if (companionResult.status === 'skipped') {
+        log(
+          '[auto-update-checker] Companion update skipped:',
+          companionResult.reason,
+        );
+      }
+    } catch (err) {
+      companionWillRetry = true;
+      log(
+        '[auto-update-checker] Companion update failed silently; will retry on restart:',
+        err,
+      );
+    }
+  }
+
+  return { companionUpdated, companionWillRetry };
+}
+
+/**
  * Orchestrates the version comparison and update process in the background.
  * @param ctx The plugin input context.
  * @param autoUpdate Whether to automatically install updates.
@@ -271,6 +317,14 @@ async function runBackgroundUpdateCheck(
         'success',
         8000,
       );
+      // The package is fresh, but the companion binary may still be stale
+      // (it is otherwise only ensured on the fresh-install path below), so
+      // ensure it here too. Failures log inside the helper and retry on
+      // restart; the toast above stays unchanged.
+      await ensureCompanionForPackageRoot(
+        path.join(targetContext.installDir, 'node_modules', PACKAGE_NAME),
+        companion,
+      );
       return;
     }
 
@@ -321,39 +375,10 @@ async function runBackgroundUpdateCheck(
       return;
     }
 
-    let companionUpdated = false;
-    let companionWillRetry = false;
     const packageRoot = path.join(installDir, 'node_modules', PACKAGE_NAME);
 
-    if (companion?.enabled === true) {
-      try {
-        const manifest = loadCompanionManifestFromPackageRoot(packageRoot);
-        const companionResult = await ensureCompanionVersion({
-          config: companion,
-          manifest: manifest ?? undefined,
-        });
-        if (companionResult.status === 'installed') {
-          companionUpdated = true;
-        } else if (companionResult.status === 'failed') {
-          companionWillRetry = true;
-          log(
-            '[auto-update-checker] Companion update failed; will retry on restart:',
-            companionResult.error,
-          );
-        } else if (companionResult.status === 'skipped') {
-          log(
-            '[auto-update-checker] Companion update skipped:',
-            companionResult.reason,
-          );
-        }
-      } catch (err) {
-        companionWillRetry = true;
-        log(
-          '[auto-update-checker] Companion update failed silently; will retry on restart:',
-          err,
-        );
-      }
-    }
+    const { companionUpdated, companionWillRetry } =
+      await ensureCompanionForPackageRoot(packageRoot, companion);
 
     const messageLines = [`v${currentVersion} → v${latestVersion}`];
     if (companionUpdated) {

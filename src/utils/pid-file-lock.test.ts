@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, mock, test } from 'bun:test';
 import * as fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -135,5 +135,84 @@ describe('pid-file-lock', () => {
 
     const release = await acquirePidFileLockWithRetryAsync(lockFile, 50);
     expect(release).toBeNull();
+  });
+
+  test('stale takeover restores a lock replaced mid-claim', async () => {
+    const root = fs.mkdtempSync(join(tmpdir(), 'omo-pidlock-'));
+    roots.push(root);
+    const lockFile = join(root, 'resource');
+    const lockDir = `${lockFile}.lock`;
+
+    const deadPid = 2 ** 22;
+    try {
+      process.kill(deadPid, 0);
+      return;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EPERM') return;
+    }
+
+    fs.mkdirSync(lockDir, { recursive: true });
+    fs.writeFileSync(join(lockDir, 'owner'), String(deadPid));
+    const old = new Date(Date.now() - 60_000);
+    fs.utimesSync(lockDir, old, old);
+
+    // Deterministic peer: between our staleness snapshot and our rename, a
+    // peer re-acquires the lock (fresh owner bytes + fresh dir mtime, as a
+    // real mkdir + write would produce).
+    const freshOwner = `${process.pid}\nfresh-token`;
+    let swapped = false;
+    mock.module('node:fs', () => ({
+      ...fs,
+      renameSync: ((from: string, to: string) => {
+        if (!swapped && from === lockDir) {
+          swapped = true;
+          fs.writeFileSync(join(lockDir, 'owner'), freshOwner);
+          const now = new Date();
+          fs.utimesSync(lockDir, now, now);
+        }
+        return fs.renameSync(from, to);
+      }) as typeof fs.renameSync,
+    }));
+
+    const mod = await import('./pid-file-lock?test=takeover-race');
+    const release = mod.acquirePidFileLock(lockFile);
+
+    expect(swapped).toBe(true);
+    expect(release).toBeNull();
+    expect(fs.existsSync(lockDir)).toBe(true);
+    expect(fs.readFileSync(join(lockDir, 'owner'), 'utf8')).toBe(freshOwner);
+  });
+
+  test('release restores a successor lock that replaced ours', async () => {
+    const root = fs.mkdtempSync(join(tmpdir(), 'omo-pidlock-'));
+    roots.push(root);
+    const lockFile = join(root, 'resource');
+    const lockDir = `${lockFile}.lock`;
+
+    const successorOwner = `${process.pid}\nsuccessor-token`;
+    let swapped = false;
+    mock.module('node:fs', () => ({
+      ...fs,
+      renameSync: ((from: string, to: string) => {
+        if (!swapped && from === lockDir) {
+          swapped = true;
+          fs.writeFileSync(join(lockDir, 'owner'), successorOwner);
+          const now = new Date();
+          fs.utimesSync(lockDir, now, now);
+        }
+        return fs.renameSync(from, to);
+      }) as typeof fs.renameSync,
+    }));
+
+    const mod = await import('./pid-file-lock?test=release-race');
+    const release = mod.acquirePidFileLock(lockFile);
+    expect(release).not.toBeNull();
+    release?.();
+
+    expect(swapped).toBe(true);
+    expect(fs.existsSync(lockDir)).toBe(true);
+    expect(fs.readFileSync(join(lockDir, 'owner'), 'utf8')).toBe(
+      successorOwner,
+    );
   });
 });

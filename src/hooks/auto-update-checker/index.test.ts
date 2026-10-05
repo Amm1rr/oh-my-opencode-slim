@@ -338,6 +338,66 @@ describe('auto-update-checker/index', () => {
     });
   });
 
+  test('already-installed path ensures the companion from the installed package root', async () => {
+    checkerMocks.findPluginEntry.mockImplementation(() => ({
+      pinnedVersion: null,
+      isPinned: false,
+    }));
+    checkerMocks.getCachedVersion.mockImplementation(() => '0.9.1');
+    checkerMocks.getLatestCompatibleVersion.mockImplementation(async () => ({
+      latestVersion: '0.9.11',
+      latestMajorVersion: null,
+      blockedByMajor: false,
+    }));
+    // The post-lock re-check against the target install dir verifies, while
+    // staging (never reached) would not.
+    cacheMocks.verifyInstalledPackage.mockImplementation(
+      (dir: string) => dir !== '/tmp/opencode-staging',
+    );
+    companionUpdaterMocks.loadCompanionManifestFromPackageRoot.mockImplementation(
+      () => ({
+        version: '0.2.0',
+        tag: 'companion-v0.2.0',
+        repo: 'owner/repo',
+      }),
+    );
+
+    const { createAutoUpdateCheckerHook } = await import(
+      `./index?test=${importCounter++}`
+    );
+    const { ctx, showToast } = createCtx();
+
+    const hook = createAutoUpdateCheckerHook(ctx as never, {
+      companion: { enabled: true },
+    });
+    hook.event({ event: { type: 'session.created', properties: {} } });
+    await waitForCalls(showToast);
+
+    expect(
+      companionUpdaterMocks.loadCompanionManifestFromPackageRoot,
+    ).toHaveBeenCalledWith(
+      join('/tmp/opencode', 'node_modules', 'oh-my-opencode-slim'),
+    );
+    expect(companionUpdaterMocks.ensureCompanionVersion).toHaveBeenCalledWith({
+      config: { enabled: true },
+      manifest: {
+        version: '0.2.0',
+        tag: 'companion-v0.2.0',
+        repo: 'owner/repo',
+      },
+    });
+    expect(showToast).toHaveBeenCalledTimes(1);
+    expect(showToast).toHaveBeenCalledWith({
+      body: {
+        title: 'OMO-Slim Updated!',
+        message:
+          'v0.9.1 → v0.9.11\nRestart OpenCode to apply the plugin update.',
+        variant: 'success',
+        duration: 8000,
+      },
+    });
+  });
+
   test('skips install quietly when another process holds the install lock', async () => {
     checkerMocks.findPluginEntry.mockImplementation(() => ({
       pinnedVersion: null,
