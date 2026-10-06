@@ -9,6 +9,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { basename, extname, join } from 'node:path';
+import { asImagePart, type ImagePartView } from './image-part';
 import { isUserMessageWithParts, type MessageWithParts } from './types';
 
 /** Keep this aligned with the host read tool's MAX_MEDIA_INGEST_BYTES. */
@@ -100,81 +101,9 @@ function ensureImagesGitignore(
   }
 }
 
-interface ImagePart {
-  type: string;
-  url?: string;
-  mime?: string;
-  mediaType?: string;
-  filename?: string;
-  name?: string;
-  data?: string;
-  [key: string]: unknown;
+function isImagePart(p: unknown): boolean {
+  return asImagePart(p) !== null;
 }
-
-const IMAGE_FILE_EXTENSION_RE =
-  /\.(png|jpg|jpeg|gif|bmp|webp|svg|ico|tiff?|heic)$/i;
-
-function hasImageFileExtension(p: ImagePart): boolean {
-  const filename = p.filename as string | undefined;
-  const name = p.name as string | undefined;
-  const fileName = filename ?? name;
-  return Boolean(fileName && IMAGE_FILE_EXTENSION_RE.test(fileName));
-}
-
-function isImagePart(p: ImagePart): boolean {
-  if (p.type === 'image') return true;
-  if (p.type === 'file') {
-    const mime = p.mime as string | undefined;
-    if (mime?.startsWith('image/')) return true;
-    if (hasImageFileExtension(p)) return true;
-  }
-  if (p.type === 'media') {
-    const mediaType = p.mediaType as string | undefined;
-    if (mediaType?.startsWith('image/')) return true;
-    if (hasImageFileExtension(p)) return true;
-  }
-  return false;
-}
-
-function decodeDataUrl(url: string): { mime: string; data: Buffer } | null {
-  const match = url.match(/^data:([^;]+);base64,(.+)$/);
-  if (!match) return null;
-  return { mime: match[1], data: Buffer.from(match[2], 'base64') };
-}
-
-const MIME_EXT_BY_TYPE: Record<string, string> = {
-  'image/png': '.png',
-  'image/jpeg': '.jpg',
-  'image/gif': '.gif',
-  'image/webp': '.webp',
-  'image/svg+xml': '.svg',
-  'image/bmp': '.bmp',
-};
-
-function extFromMime(mime: string): string {
-  return MIME_EXT_BY_TYPE[mime] ?? '.png';
-}
-
-function extFromMimeFromUrl(url: string): string {
-  const match = url.match(/^data:([^;,]+)/);
-  return match ? extFromMime(match[1]) : '.png';
-}
-
-function extFromMediaPart(p: {
-  mediaType?: string;
-  filename?: string;
-}): string {
-  if (p.mediaType) {
-    const mimeExt = MIME_EXT_BY_TYPE[p.mediaType];
-    if (mimeExt) return mimeExt;
-  }
-  if (p.filename) {
-    const fileExt = extname(p.filename);
-    if (fileExt) return fileExt;
-  }
-  return '.png';
-}
-
 function sanitizeFilename(name: string): string {
   return name.replace(/[^a-zA-Z0-9._-]/g, '_');
 }
@@ -279,20 +208,36 @@ export function processImageAttachments(args: {
     return false;
   }
 
+  // One seam for every host shape: v1 file/image data URLs, flat v2 media,
+  // and v2.0.14+ Media.Asset instances (live or JSON-replayed). The view is
+  // computed once here and consumed by the save loop below, so each part is
+  // decoded exactly once per transform.
   const messagesWithImages: Array<{
     msg: MessageWithParts;
-    imageParts: ImagePart[];
+    imageParts: Array<{ part: unknown; view: ImagePartView }>;
   }> = [];
 
   for (const msg of messages) {
     if (!isUserMessageWithParts(msg)) continue;
-    const imageParts = msg.parts.filter(isImagePart);
+    const imageParts: Array<{ part: unknown; view: ImagePartView }> = [];
+    for (const part of msg.parts) {
+      const view = asImagePart(part);
+      if (view) imageParts.push({ part, view });
+    }
     if (imageParts.length > 0) {
       messagesWithImages.push({ msg, imageParts });
     }
   }
 
   if (messagesWithImages.length === 0) return false;
+
+  // Remote-only transforms (https URLs, Asset url/ref sources) carry nothing
+  // to save: skip all filesystem setup and leave the parts inline — the
+  // host's capability replacement is the backstop.
+  const hasMaterializable = messagesWithImages.some(({ imageParts }) =>
+    imageParts.some(({ view }) => view.view === 'bytes'),
+  );
+  if (!hasMaterializable) return false;
 
   const saveDir = imagesDirPath(workDir);
   if (isUnsafeImageSavePath(workDir)) {
@@ -335,16 +280,14 @@ export function processImageAttachments(args: {
 
     const savedPaths: string[] = [];
     const oversizedPaths = new Map<string, number>();
-    const savedImageParts = new Set<ImagePart>();
+    const savedImageParts = new Set<unknown>();
 
     const saveDecoded = (
-      part: ImagePart,
+      part: unknown,
       data: Buffer,
       ext: string,
       baseName: string,
     ): void => {
-      if (data.length === 0) return;
-
       const hash = createHash('sha1').update(data).digest('hex').slice(0, 8);
       const name = `${baseName}-${hash}${ext}`;
       const filePath = writeUniqueFile(targetDir, name, data, log);
@@ -357,43 +300,17 @@ export function processImageAttachments(args: {
       }
     };
 
-    for (const p of imageParts) {
-      const url = p.url as string | undefined;
-      const mediaType = p.mediaType as string | undefined;
-      const data = p.data as string | undefined;
-      const filename =
-        (p.filename as string | undefined) ?? (p.name as string | undefined);
-      const sanitizedFilename = filename
-        ? sanitizeFilename(filename)
-        : undefined;
-      const baseName = sanitizedFilename
-        ? sanitizedFilename.replace(/\.[^.]+$/, '') || 'image'
+    for (const { part, view } of imageParts) {
+      // Parts the adapter cannot materialize (remote sources, malformed
+      // carriers) are never stripped; the host's capability replacement is
+      // the backstop.
+      if (view.view !== 'bytes') continue;
+      const rawName = view.filename;
+      const sanitized = rawName ? sanitizeFilename(rawName) : undefined;
+      const baseName = sanitized
+        ? sanitized.replace(/\.[^.]+$/, '') || 'image'
         : 'image';
-
-      if (!url && data !== undefined) {
-        // Buffer.from leniently decodes invalid base64 instead of throwing;
-        // host-produced media parts are well-formed, and the fail-open
-        // contract (never throw, never block) takes precedence here.
-        const decoded = Buffer.from(data, 'base64');
-        saveDecoded(
-          p,
-          decoded,
-          extFromMediaPart({
-            mediaType,
-            filename: sanitizedFilename,
-          }),
-          baseName,
-        );
-        continue;
-      }
-
-      if (url) {
-        const ext = sanitizedFilename
-          ? extname(sanitizedFilename) || extFromMimeFromUrl(url)
-          : extFromMimeFromUrl(url);
-        const decoded = decodeDataUrl(url);
-        if (decoded) saveDecoded(p, decoded.data, ext, baseName);
-      }
+      saveDecoded(part, view.bytes, view.ext, baseName);
     }
 
     // If no image could be saved, leave every original part in place. This is
@@ -427,7 +344,7 @@ export function processImageAttachments(args: {
     );
 
     msg.parts = msg.parts
-      .filter((p) => !savedImageParts.has(p as ImagePart))
+      .filter((p) => !savedImageParts.has(p))
       .concat([
         {
           type: 'text',

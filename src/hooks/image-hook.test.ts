@@ -102,6 +102,27 @@ describe('processImageAttachments routing', () => {
     expect(existsSync(path.join(workDir, '.opencode'))).toBe(false);
   });
 
+  it('does no filesystem work when every image part is remote', () => {
+    const workDir = path.join(TEST_DIR, 'remote-only');
+    const message = makeUserMsg([
+      { type: 'image', url: 'https://example.com/a.png' },
+      {
+        type: 'media',
+        media: {
+          mediaType: 'image/png',
+          source: { type: 'url', url: 'https://example.com/b.png' },
+        },
+        filename: 'b.png',
+      },
+    ]);
+
+    expect(processAuto([message], workDir)).toBe(false);
+    expect(existsSync(path.join(workDir, '.opencode'))).toBe(false);
+    // All original parts stay inline; the host's capability replacement is
+    // the backstop for remote images.
+    expect(message.parts).toHaveLength(2);
+  });
+
   it('saves an attachment, protects the workspace, and nudges observer', () => {
     const workDir = path.join(TEST_DIR, 'auto');
     const message = makeUserMsg([IMG]);
@@ -506,6 +527,150 @@ describe('processImageAttachments routing', () => {
 
     expect(message.parts).toHaveLength(1);
     expect(message.parts[0]?.type).toBe('media');
+  });
+});
+
+describe('v2.0.14+ Media.Asset parts (#1247)', () => {
+  const ASSET_BASE64 = IMG_BYTES.toString('base64');
+
+  function assetPart(
+    source: Record<string, unknown>,
+    mediaOverrides: Record<string, unknown> = {},
+    filename = 'clipboard',
+  ) {
+    return {
+      type: 'media',
+      media: {
+        mediaType: 'image/png',
+        kind: 'image',
+        source,
+        ...mediaOverrides,
+      },
+      filename,
+    };
+  }
+
+  it('saves, strips, and nudges for a clipboard Asset with a base64 source', () => {
+    const { workDir, saveDir } = makeTestDir('asset-clipboard');
+    const message = makeUserMsg([
+      assetPart({ type: 'base64', data: ASSET_BASE64, mediaType: 'image/png' }),
+    ]);
+
+    processAuto([message], workDir);
+
+    expect(message.parts.some((part) => part.type === 'media')).toBe(false);
+    const text = nudgeText(message);
+    expect(text).toContain('@observer');
+    const files = savedFiles(path.join(saveDir, 's1'));
+    expect(files).toHaveLength(1);
+    expect(path.basename(files[0] as string)).toBe(`clipboard-${IMG_HASH}.png`);
+  });
+
+  it('saves the JSON-replayed Asset form (no top-level mediaType, bytes-as-string)', () => {
+    const { workDir, saveDir } = makeTestDir('asset-json-replay');
+    // Asset.toJSON emits { source } only; bytes sources serialize their data
+    // as base64 strings while keeping type === 'bytes'.
+    const message = makeUserMsg([
+      {
+        type: 'media',
+        media: {
+          source: { type: 'bytes', data: ASSET_BASE64, mediaType: 'image/png' },
+        },
+        filename: 'replayed.png',
+      },
+    ]);
+
+    processAuto([message], workDir);
+
+    expect(message.parts.some((part) => part.type === 'media')).toBe(false);
+    expect(
+      savedFiles(path.join(saveDir, 's1')).map((file) => path.basename(file)),
+    ).toEqual([`replayed-${IMG_HASH}.png`]);
+  });
+
+  it('keeps Asset url sources inline while stripping sibling images', () => {
+    const { workDir } = makeTestDir('asset-url');
+    const message = makeUserMsg([
+      assetPart({ type: 'url', url: 'https://example.com/a.png' }),
+      {
+        type: 'media',
+        mediaType: 'image/png',
+        data: ASSET_BASE64,
+        filename: 'flat.png',
+      },
+    ]);
+
+    processAuto([message], workDir);
+
+    const mediaParts = message.parts.filter((part) => part.type === 'media');
+    expect(mediaParts).toHaveLength(1);
+    const kept = mediaParts[0] as {
+      media: { source: { type: string } };
+    };
+    expect(kept.media.source.type).toBe('url');
+    expect(nudgeText(message)).toContain('flat-');
+  });
+
+  it('retains Asset images inline when observer is disabled', () => {
+    const message = makeUserMsg([
+      assetPart({ type: 'base64', data: ASSET_BASE64, mediaType: 'image/png' }),
+    ]);
+    const logMessages: string[] = [];
+
+    const result = processImageAttachments({
+      messages: [message],
+      workDir: path.join(TEST_DIR, 'asset-disabled'),
+      imageRouting: 'auto',
+      disabledAgents: new Set(['observer']),
+      log: (entry) => logMessages.push(entry),
+    });
+
+    expect(result).toBe(true);
+    expect(message.parts).toHaveLength(1);
+    expect(message.parts[0]?.type).toBe('media');
+    expect(logMessages.at(-1)).toContain('retained inline');
+  });
+
+  it('archives oversized Asset images without the delegation nudge', () => {
+    const huge = new Uint8Array(MAX_MEDIA_INGEST_BYTES + 1);
+    const message = makeUserMsg([
+      assetPart(
+        { type: 'bytes', data: huge, mediaType: 'image/png' },
+        {},
+        'huge.png',
+      ),
+    ]);
+
+    processAuto([message], path.join(TEST_DIR, 'asset-oversized'));
+
+    const text = nudgeText(message);
+    expect(message.parts.some((part) => part.type === 'media')).toBe(false);
+    expect(text).toContain('Too large to analyze');
+    expect(text).not.toContain('@observer');
+    expect(
+      savedFiles(
+        path.join(TEST_DIR, 'asset-oversized', '.opencode', 'images', 's1'),
+      ),
+    ).toHaveLength(1);
+  }, 30_000);
+
+  it('saves flat media with Uint8Array data (dev shape)', () => {
+    const { workDir, saveDir } = makeTestDir('flat-uint8');
+    const message = makeUserMsg([
+      {
+        type: 'media',
+        mediaType: 'image/png',
+        data: new Uint8Array(IMG_BYTES),
+        filename: 'shot.png',
+      },
+    ]);
+
+    processAuto([message], workDir);
+
+    expect(message.parts.some((part) => part.type === 'media')).toBe(false);
+    expect(
+      savedFiles(path.join(saveDir, 's1')).map((file) => path.basename(file)),
+    ).toEqual([`shot-${IMG_HASH}.png`]);
   });
 });
 
