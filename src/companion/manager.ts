@@ -517,8 +517,10 @@ export class CompanionManager {
     if (status === 'busy') {
       // Accept busy sessions even without a known agent name — Herdr
       // subagents (spawned via opencode attach) often lack the agent
-      // field, and dropping the event leaves them shown as idle.
-      this.busyAgentSessions.set(sessionId, agent ?? sessionId);
+      // field, and dropping the event leaves them shown as idle. Fall back
+      // to the generic busy name, never the raw session ID, which would
+      // reach the companion as an unrenderable agent name.
+      this.busyAgentSessions.set(sessionId, agent ?? 'orchestrator');
     } else {
       // Remove by session even when the agent name is unknown, so a
       // finished specialist can never get stuck on screen.

@@ -1000,7 +1000,21 @@ describe('CompanionManager', () => {
     m.onSessionStatus({ sessionId: 'ses_y', agent: 'fixer', status: 'retry' });
     // ses_x is now tracked because Herdr subagents often lack
     // the agent field; the session ID is used as a fallback name.
-    expect(readState().sessions[0].active_agents).toEqual(['ses_x']);
+    expect(readState().sessions[0].active_agents).toEqual(['orchestrator']);
+  });
+
+  it('never stores a raw session ID as the agent name', () => {
+    const m = make();
+    m.onLoad();
+    m.onSessionStatus({
+      sessionId: 'ses_eff272862ffe2iolrAumwxISUr',
+      agent: undefined,
+      status: 'busy',
+    });
+    const agents = readState().sessions[0].active_agents;
+    expect(agents).not.toContain('ses_eff272862ffe2iolrAumwxISUr');
+    // still shown as busy, under a name the companion has an asset for
+    expect(agents).toEqual(['orchestrator']);
   });
 
   it('accepts busy sessions from agents without a known name (Herdr subagents)', () => {
@@ -1012,7 +1026,7 @@ describe('CompanionManager', () => {
       agent: undefined,
       status: 'busy',
     });
-    expect(readState().sessions[0].active_agents).toEqual(['herdr_ses']);
+    expect(readState().sessions[0].active_agents).toEqual(['orchestrator']);
     // The overall status stays 'idle' — only the orchestrator drives
     // that field. Herdr subagents appear in active_agents.
     // When the session goes idle it is removed even without a known agent name
