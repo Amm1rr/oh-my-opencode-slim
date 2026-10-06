@@ -25,3 +25,15 @@ export function createBuiltinMcps(
     ),
   );
 }
+
+/**
+ * Returns the built-in MCP names that the user has already defined in
+ * their own config. A user-defined entry owns its key: the plugin must
+ * never inject a built-in over it (issue #1290).
+ */
+export function getOverriddenBuiltinMcpKeys(
+  builtin: Record<string, unknown>,
+  user: Record<string, unknown>,
+): string[] {
+  return Object.keys(builtin).filter((name) => Object.hasOwn(user, name));
+}

@@ -1,6 +1,7 @@
 /// <reference types="bun-types" />
 
 import {
+  afterAll,
   afterEach,
   beforeEach,
   describe,
@@ -19,6 +20,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import * as packageManagerModule from '../utils/package-manager';
 import * as pathsMod from './paths';
 
 type SpawnResult = {
@@ -44,6 +46,13 @@ const NPM_INSTALL = {
 };
 let resolvedInstall: { command: string[] } | null = BUN_INSTALL;
 
+// bun's mock.module registry is process-global and test files run in
+// filesystem readdir order, so this file's package-manager mock would
+// otherwise leak into src/utils/package-manager.test.ts when cli/ is walked
+// before utils/. Capture the real exports (before mocking) and restore them
+// once this file's tests are done.
+const realPackageExports = { ...packageManagerModule };
+
 mock.module('../utils/compat', () => ({
   crossSpawn: crossSpawnMock,
 }));
@@ -51,6 +60,10 @@ mock.module('../utils/compat', () => ({
 mock.module('../utils/package-manager', () => ({
   resolvePackageInstallCommand: () => resolvedInstall,
 }));
+
+afterAll(() => {
+  mock.module('../utils/package-manager', () => realPackageExports);
+});
 
 const nonexistentPath = '/nonexistent/opencode.json';
 

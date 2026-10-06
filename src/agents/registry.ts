@@ -526,7 +526,9 @@ export function buildResolvedAgentRegistry(
     { ceilings?: PermissionCeilings }
   > = {};
 
-  const mcpConfig = { ...(host.mcp ?? {}), ...pluginMcps };
+  // User/host entries win over plugin-injected built-ins on a key
+  // collision (issue #1290).
+  const mcpConfig = { ...pluginMcps, ...(host.mcp ?? {}) };
   const availableMcpNames = Object.keys(mcpConfig);
   const preset = resolvedPreset(runtime);
   const runtimeAgentOverrides = runtime.agents();

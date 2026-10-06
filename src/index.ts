@@ -84,7 +84,7 @@ import { createInterviewManager } from './interview';
 import { discoverPreflightSkills } from './marketplace/preflight';
 import { MarketplaceService } from './marketplace/service';
 import { resolveDesiredMarketplacePackageIds } from './marketplace/status';
-import { createBuiltinMcps } from './mcp';
+import { createBuiltinMcps, getOverriddenBuiltinMcpKeys } from './mcp';
 import {
   ast_grep_replace,
   ast_grep_search,
@@ -346,6 +346,11 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   > = {};
   let registryRetired = false;
   let mcps: ReturnType<typeof createBuiltinMcps>;
+  // MCP entries this hook itself injected on the previous config() pass.
+  // A re-invoked config() can hand back the object we already mutated
+  // (built-ins merged in); without this, those built-ins would be misread
+  // as user-authored and pruned from the live export (issue #1290).
+  let injectedMcps: Record<string, unknown> = {};
   // Host flavor ('v2' on OpenCode v2 hosts via the client shim, undefined on
   // v1). Survives the try block so prompt-assembly hooks can use it.
   let hostFlavor: string | undefined;
@@ -2007,10 +2012,34 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         opencodeConfig.mcp && typeof opencodeConfig.mcp === 'object'
           ? (opencodeConfig.mcp as Record<string, unknown>)
           : {};
-      opencodeConfig.mcp = {
-        ...currentMcpConfig,
-        ...structuredClone(registry.managedMcpConfig),
-      };
+      // Drop entries this hook injected on a previous pass: a re-invoked
+      // config() may receive back the object we already mutated, and our
+      // own built-ins must not be mistaken for user-authored entries.
+      const hostMcpConfig = Object.fromEntries(
+        Object.entries(currentMcpConfig).filter(
+          ([name, value]) =>
+            !Object.hasOwn(injectedMcps, name) ||
+            !Bun.deepEquals(injectedMcps[name], value),
+        ),
+      );
+      // User-authored MCP entries own their key (issue #1290): reconcile
+      // the live export from the built-in set (not a one-way prune) so a
+      // removed override comes back and v1/v2 registration both see it.
+      // Merge user-wins for opencodeConfig.mcp: built-ins only fill keys
+      // the user did not set.
+      const effectiveMcps: Record<string, unknown> = structuredClone(
+        registry.managedMcpConfig,
+      );
+      for (const name of getOverriddenBuiltinMcpKeys(
+        effectiveMcps,
+        hostMcpConfig,
+      )) {
+        delete effectiveMcps[name];
+      }
+      for (const key of Object.keys(mcps)) delete mcps[key];
+      Object.assign(mcps, effectiveMcps);
+      opencodeConfig.mcp = { ...effectiveMcps, ...hostMcpConfig };
+      injectedMcps = effectiveMcps;
       recordTuiAgentModels(
         {
           agentModels: registry.tuiAgentModels,
