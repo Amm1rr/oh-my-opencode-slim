@@ -105,10 +105,14 @@ oh-my-opencode-slim-companion-v0.1.3-x86_64-pc-windows-msvc.zip
 
 ## 4. Build and publish companion assets
 
-Trigger the manual workflow:
+Trigger the manual workflow from the release-prep ref that contains the
+Companion changes. Building from the prep ref lets you publish the native
+assets, copy their final digests into the manifest, and only then merge a
+self-consistent release change:
 
 ```bash
 gh workflow run companion-release.yml \
+  --ref <release-prep-branch> \
   -f version=0.1.3 \
   -f targets=macos-arm64,macos-x64,linux-x64,linux-arm64,windows-x64
 ```
@@ -141,6 +145,17 @@ Copy each asset's SHA256 digest into `src/companion/companion-manifest.json`.
 GitHub release asset metadata reports these as `digest: sha256:<hash>`; store
 only the hash value in the manifest. Then mirror the same values in the fallback
 `COMPANION_MANIFEST` constant in `src/companion/updater.ts`.
+
+Before merging the release prep or publishing the plugin, run:
+
+```bash
+bun run verify:companion-manifest
+```
+
+The verifier fails if the Rust crate version, manifest version/tag, supported
+asset names, SHA256 values, or TypeScript fallback manifest drift apart.
+`npm publish` runs the same verification through `prepublishOnly`, so a plugin
+release cannot silently ship a stale Companion manifest.
 
 ### Manual companion upload fallback
 
@@ -219,6 +234,7 @@ bun run check:ci
 bun run typecheck
 bun test
 bun run build
+bun run verify:companion-manifest
 ```
 
 CI installs the Bun version pinned by `packageManager` in `package.json` and
@@ -329,5 +345,6 @@ For the `2.0.3` / `companion-v0.1.3` release, the completed state should be:
 - GitHub release `v2.0.3` exists.
 - GitHub release `companion-v0.1.3` exists with the expected assets.
 - Working tree is clean.
-- `bun run check:ci`, `bun run typecheck`, `bun test`, and `bun run build` pass.
+- `bun run check:ci`, `bun run typecheck`, `bun test`, `bun run build`, and
+  `bun run verify:companion-manifest` pass.
 - npm publish is run only after the GitHub release and companion assets are ready.
