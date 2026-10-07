@@ -73,6 +73,14 @@ Its job is to:
 
 Specialists do the work. The orchestrator manages the work.
 
+### Children moved to worktrees
+
+Moving a child session to another directory does not move its task ownership.
+The delegating parent's plugin instance still observes that tracked child's
+lifecycle, so completion and revived-run notifications do not require polling
+`task_result`. The destination directory handles its own permissions and runtime
+profiles; unrelated sessions remain excluded from the parent's event handling.
+
 ### Unattributed sessions and restart scope
 
 A child observed before it can be attributed to a task launch is retained as a
