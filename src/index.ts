@@ -2349,10 +2349,12 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
                   'string'
               ? (rawCompanionStatus as { type: string }).type
               : undefined;
+        const job = sessionID ? backgroundJobBoard.get(sessionID) : undefined;
         companionManager.onSessionStatus({
           sessionId: sessionID,
           agent: sessionID ? sessionMetadata.getAgent(sessionID) : undefined,
           status: companionStatus,
+          jobFinished: job !== undefined && job.state !== 'running',
         });
       }
 

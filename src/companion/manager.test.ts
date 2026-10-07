@@ -733,6 +733,25 @@ describe('CompanionManager', () => {
     expect(readState().sessions[0].active_agents).toEqual(['oracle']);
   });
 
+  it('ignores a trailing busy for a child whose job already finished', () => {
+    const m = make();
+    m.onLoad();
+    m.onSessionStatus({
+      sessionId: 'ses_orch',
+      agent: 'orchestrator',
+      status: 'busy',
+    });
+    m.onSessionStatus({ sessionId: 'ses_a', agent: 'oracle', status: 'busy' });
+    m.onSessionStatus({ sessionId: 'ses_a', agent: 'oracle', status: 'idle' });
+    m.onSessionStatus({
+      sessionId: 'ses_a',
+      agent: 'oracle',
+      status: 'busy',
+      jobFinished: true,
+    });
+    expect(readState().sessions[0].active_agents).toEqual(['orchestrator']);
+  });
+
   it('publishes live model details without changing the active agent', () => {
     const m = make();
     m.onLoad();

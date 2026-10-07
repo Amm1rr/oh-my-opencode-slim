@@ -497,9 +497,11 @@ export class CompanionManager {
     sessionId?: string;
     agent?: string;
     status?: string;
+    /** True when the background job for this session already finished. */
+    jobFinished?: boolean;
   }): void {
     if (this.config?.enabled !== true) return;
-    const { sessionId, agent, status } = input;
+    const { sessionId, agent, status, jobFinished } = input;
     if (!sessionId || (status !== 'busy' && status !== 'idle')) return;
 
     if (agent === 'orchestrator') {
@@ -515,6 +517,9 @@ export class CompanionManager {
     }
 
     if (status === 'busy') {
+      // A busy event that trails a finished job would never be followed by
+      // an idle one, leaving the specialist stuck on screen.
+      if (jobFinished) return;
       // Accept busy sessions even without a known agent name — Herdr
       // subagents (spawned via opencode attach) often lack the agent
       // field, and dropping the event leaves them shown as idle. Fall back
