@@ -934,6 +934,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       observationRevisionFor: (taskID, generation) =>
         revivedRunTracker?.revisionFor(taskID, generation),
       isObservationPending: (taskID, generation) =>
+        (foregroundFallback?.isFallbackInProgress(taskID) ?? false) ||
         (taskSessionManagerHook?.hasDeferredError(taskID) ?? false) ||
         (revivedRunTracker?.isObservationPending(taskID, generation) ?? false),
       onRunning: (record) => {

@@ -355,6 +355,69 @@ test('fallback initial delay cannot replay a cancelled background child', async 
   expect(h.board.get('child')?.state).toBe('cancelled');
 });
 
+test('terminal failover during a retry-armed delay waits for replay, notice and one result', async () => {
+  const h = await fallbackAssembly();
+  h.history.pop();
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    await h.event('session.status', {
+      sessionID: 'child',
+      status: { type: 'retry', message: 'rate limit', attempt },
+    });
+  }
+  const error = {
+    name: 'APIError',
+    data: {
+      statusCode: 400,
+      isRetryable: false,
+      message: 'content_policy_violation',
+    },
+  };
+  h.history.push({
+    info: {
+      id: 'filtered',
+      role: 'assistant',
+      error,
+      time: { completed: Date.now() },
+    },
+    parts: [],
+  });
+  await h.event('session.error', { sessionID: 'child', error });
+  await h.idle();
+  await h.runtime.reconcile();
+  expect(h.board.get('child')?.state).toBe('running');
+  await h.advance(2000);
+  const prompts = () =>
+    h.promptAsync.mock.calls.map(
+      ([call]) =>
+        call as {
+          path: { id: string };
+          body: { messageID: string; parts: { text: string }[] };
+        },
+    );
+  expect(prompts().map(({ path }) => path.id)).toEqual(['child', 'parent']);
+  expect(prompts()[1].body.parts[0].text).toContain('<task_fallback>');
+  const replay = prompts()[0].body;
+  h.setBusy(true);
+  await h.busySignal();
+  h.history.push(
+    { info: { id: replay.messageID, role: 'user' }, parts: replay.parts },
+    ...transcript().data,
+  );
+  h.setBusy(false);
+  await h.idle();
+  await h.runtime.reconcile();
+  await flush();
+  expect(h.board.get('child')?.state).toBe('completed');
+  expect(prompts()).toHaveLength(3);
+  expect(prompts()[2].path.id).toBe('parent');
+  expect(prompts()[2].body.parts[0].text).toContain(
+    '<task_result>\nconfirmed result\n</task_result>',
+  );
+  await h.runtime.reconcile();
+  await flush();
+  expect(prompts()).toHaveLength(3);
+});
+
 test('production fallback wiring fences polling and announces the admitted replay before its result', async () => {
   const h = await fallbackAssembly();
   await h.fail();

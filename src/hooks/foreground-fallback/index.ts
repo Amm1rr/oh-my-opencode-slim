@@ -19,7 +19,11 @@
 
 import { randomUUID } from 'node:crypto';
 import type { PluginInput } from '@opencode-ai/plugin';
-import { responseError, stringifyError } from '../../utils/child-transcript';
+import {
+  responseError,
+  stringifyError,
+  structuredErrorMessage,
+} from '../../utils/child-transcript';
 import { isRecord } from '../../utils/guards';
 import {
   createInternalAgentTextPart,
@@ -35,7 +39,6 @@ import {
   withTimeout,
 } from '../../utils/session';
 import type { SessionLifecycle } from '../session-lifecycle';
-import { structuredErrorMessage } from '../task-session-manager/event-router';
 import type { createBackgroundFallbackHandoff } from '../task-session-manager/fallback-observation-transfer';
 import { isReplayableUserMessage, partsFromReplayMessage } from '../types';
 
