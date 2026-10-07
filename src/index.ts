@@ -1087,17 +1087,12 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       runtime.fallback.initialRetryDelayMs,
       runtime.fallback.retryDelayMs,
       backgroundFallbackHandoff,
-      // Generation fence captured BEFORE any await in the fallback
-      // preparation, and ONLY for confirmed BACKGROUND children:
-      // undefined for foreground/unmanaged sessions means "observation
-      // handoff not applicable" — never a wildcard — so a stale-
-      // generation rejection can be distinguished from a legitimate
-      // foreground fallback.
+      // Identify confirmed background children even after cancellation or
+      // termination, so handoff preparation rejects a delayed stale replay.
+      // Undefined remains exclusive to foreground/unmanaged sessions.
       (sessionID) => {
         const record = backgroundJobCoordinator.get(sessionID);
-        return record?.state === 'running' && record.background === true
-          ? record.generation
-          : undefined;
+        return record?.background === true ? record.generation : undefined;
       },
       (sessionID) => backgroundJobCoordinator.hasRunning(sessionID),
       v2RetryEnabled,

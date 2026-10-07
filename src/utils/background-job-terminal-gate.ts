@@ -843,11 +843,9 @@ export function createBackgroundJobTerminalGate(options: {
     const value = observation(run);
     if (!value) return { kind: 'stale' };
     const cancellation = value.candidate?.signal.kind === 'cancel';
-    if (
+    const fenced = () =>
       !cancellation &&
-      options.isObservationPending?.(run.taskID, run.generation)
-    )
-      return retry(run);
+      options.isObservationPending?.(run.taskID, run.generation);
     if (token.promptMessageID && !cancellation) {
       return inspectQueuedAnswer(token);
     }
@@ -990,11 +988,7 @@ export function createBackgroundJobTerminalGate(options: {
               'Runtime observation unavailable; task termination is unconfirmed.'),
       );
     }
-    if (
-      !cancellation &&
-      options.isObservationPending?.(run.taskID, run.generation)
-    )
-      return retry(run);
+    if (fenced()) return retry(run);
     if (
       job.state !== 'running' &&
       (job.state === 'reconciled' ? job.terminalState : job.state) !==
@@ -1045,11 +1039,7 @@ export function createBackgroundJobTerminalGate(options: {
     if (transcriptRead.kind === 'blocked')
       return requestRuntimeContrastAfterRead(token, transcriptRead.retryAfter);
     const response = transcriptRead.value;
-    if (
-      !cancellation &&
-      options.isObservationPending?.(run.taskID, run.generation)
-    )
-      return retry(run);
+    if (fenced()) return retry(run);
     let terminalOutcome = runtime?.terminalOutcome;
     let outcomeDiagnostic: string | undefined;
     let evidence = classifyTerminalEvidence(response, {
@@ -1088,11 +1078,7 @@ export function createBackgroundJobTerminalGate(options: {
             token,
             outcomeResponse.retryAfter,
           );
-        if (
-          !cancellation &&
-          options.isObservationPending?.(run.taskID, run.generation)
-        )
-          return retry(run);
+        if (fenced()) return retry(run);
         terminalOutcome = outcomeFromRead(
           outcomeResponse.value,
           token,

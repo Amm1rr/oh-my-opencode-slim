@@ -1,4 +1,4 @@
-import { afterEach, expect, mock, spyOn, test } from 'bun:test';
+import { afterEach, expect, jest, mock, spyOn, test } from 'bun:test';
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import * as path from 'node:path';
@@ -65,6 +65,7 @@ async function assembly(
      * config file (e.g. orchestrator-wake knobs for wake-sensitive
      * fixtures). */
     configOverrides?: Record<string, unknown>;
+    rootConfigOverrides?: Record<string, unknown>;
     /** Build the gate WITHOUT the production `hostOutcomeClock`
      * contract, pinning the #1225 dependency: no shared clock, no
      * attribution window, no host-outcome publication. */
@@ -81,6 +82,7 @@ async function assembly(
   await Bun.write(
     `${directory}/oh-my-opencode-slim.json`,
     JSON.stringify({
+      ...setup.rootConfigOverrides,
       backgroundJobs: {
         concurrency: { defaultConcurrency: 1 },
         readContextMinLines: 1,
@@ -165,8 +167,12 @@ async function assembly(
     }),
   );
   const noop = async () => ({ data: [] });
+  const abort = mock(async () => ({}));
+  const promptAsync = mock(async (_args: unknown) => ({}));
   const session = new Proxy(
     {
+      abort,
+      promptAsync,
       status,
       messages,
       get,
@@ -251,6 +257,8 @@ async function assembly(
     statusMetrics,
     messages,
     get,
+    abort,
+    promptAsync,
     directory,
     begin,
     requestTask,
@@ -270,6 +278,141 @@ async function assembly(
 }
 
 type Assembly = Awaited<ReturnType<typeof assembly>>;
+async function fallbackAssembly(hostFlavor?: string) {
+  jest.useFakeTimers();
+  jest.setSystemTime(1_000_000);
+  cleanups.push(async () => jest.useRealTimers());
+  const h = await assembly(undefined, {
+    hostFlavor,
+    rootConfigOverrides: {
+      agents: { explorer: { model: ['test/primary', 'test/fallback'] } },
+      fallback: { initialRetryDelayMs: 2000 },
+    },
+  });
+  await h.begin();
+  await h.after('running');
+  await h.hooks['chat.message']?.(
+    {
+      sessionID: 'child',
+      agent: 'explorer',
+      model: { providerID: 'test', modelID: 'primary' },
+    } as never,
+    { parts: [] } as never,
+  );
+  h.messages.mockImplementation(async () => ({
+    data: [
+      {
+        info: { id: 'request', role: 'user' },
+        parts: [{ type: 'text', text: 'work' }],
+      },
+      {
+        info: {
+          id: 'failed',
+          role: 'assistant',
+          error: 'rate limit',
+          time: { completed: Date.now() },
+        },
+        parts: [],
+      },
+    ],
+  }));
+  return {
+    ...h,
+    context: { sessionID: 'parent', agent: 'orchestrator' } as never,
+    fail: () =>
+      h.event('session.error', {
+        sessionID: 'child',
+        error: { statusCode: 429, message: 'rate limit' },
+      }),
+    advance: async (ms: number) => {
+      jest.advanceTimersByTime(ms);
+      await flush();
+    },
+  };
+}
+
+test('fallback initial delay cannot replay a cancelled background child', async () => {
+  const h = await fallbackAssembly();
+  await h.fail();
+  expect(h.promptAsync).not.toHaveBeenCalled();
+  const cancellation = h.hooks.tool?.task_cancel.execute(
+    { task_id: 'child' },
+    h.context,
+  );
+  await flush();
+  await h.advance(300);
+  await cancellation;
+  expect(h.board.get('child')?.state).toBe('cancelled');
+  await h.advance(1700);
+  expect(h.promptAsync).not.toHaveBeenCalled();
+  expect(h.board.get('child')?.state).toBe('cancelled');
+});
+
+test('production fallback wiring fences polling, labels recovery and refuses revive', async () => {
+  const h = await fallbackAssembly();
+  await h.fail();
+  await h.idle();
+  await h.runtime.reconcile();
+  expect(h.board.get('child')).toMatchObject({
+    state: 'running',
+    terminalRevision: 0,
+    statusUncertain: false,
+  });
+  expect(h.board.formatForPrompt('parent')).toContain(
+    'running [model fallback]',
+  );
+  const revival = h.hooks.tool?.task_revive
+    .execute({ task_id: 'child', prompt: 'continue' }, h.context)
+    .catch((error: Error) => error);
+  await flush();
+  await h.advance(300);
+  const refusal = await revival;
+  expect(refusal).toBeInstanceOf(Error);
+  expect((refusal as Error).message).toMatch(
+    /recovering on a fallback model.*wait for its result.*task_cancel/i,
+  );
+  expect(h.abort).not.toHaveBeenCalled();
+  expect(h.promptAsync).not.toHaveBeenCalled();
+  h.messages.mockImplementation(async () => ({ data: [] }));
+  await h.advance(1700);
+  await h.advance(2000);
+  expect(h.board.get('child')?.resultSummary).toContain(
+    'Model fallback did not recover',
+  );
+});
+
+test('v2 production wiring has no replay label or fallback revive refusal', async () => {
+  const h = await fallbackAssembly('v2');
+  await h.fail();
+  expect(h.taskHook.hasDeferredError('child')).toBe(true);
+  expect(h.board.formatForPrompt('parent')).not.toContain('[model fallback]');
+  const revival = h.hooks.tool?.task_revive.execute(
+    { sessionID: 'child', prompt: 'continue' },
+    h.context,
+  );
+  await flush();
+  await h.advance(300);
+  expect(await revival).toBeString();
+  expect(h.promptAsync).toHaveBeenCalledTimes(1);
+});
+
+test('a managed background child keeps its failover error deferred through polling', async () => {
+  const h = await fallbackAssembly();
+  await h.hooks['tool.execute.before']?.(
+    { tool: 'task', sessionID: 'child', callID: 'nested' },
+    { args: undefined },
+  );
+  await h.fail();
+  expect(h.taskHook.hasDeferredError('child')).toBe(true);
+  await h.idle();
+  await h.runtime.reconcile();
+  expect(h.board.get('child')).toMatchObject({
+    state: 'running',
+    terminalRevision: 0,
+    statusUncertain: false,
+  });
+});
+
 function publicationOf(h: Assembly) {
   const publication = h.board.get('child');
   if (publication?.completedAt === undefined)

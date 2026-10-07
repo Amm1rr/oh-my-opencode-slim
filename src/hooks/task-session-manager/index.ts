@@ -487,6 +487,10 @@ export function createTaskSessionManagerHook(
    *  failover-worthy error with an armed fallback chain), mapped to the
    *  summary the idle backstop publishes when no recovery happens. */
   const deferredInlineErrors = new Map<string, string>();
+  const withFallbackReason = (sessionID: string, text: string): string =>
+    [text, options.fallbackFailureReason?.(sessionID)]
+      .filter(Boolean)
+      .join('\n');
 
   // Forward refs for circular deps — set after corresponding managers exist.
   // These are captured by closure in createIdleReconciler and only called
@@ -517,9 +521,7 @@ export function createTaskSessionManagerHook(
       const message = deferredInlineErrors.get(sessionID);
       if (message === undefined) return;
       deferredInlineErrors.delete(sessionID);
-      return [message, options.fallbackFailureReason?.(sessionID)]
-        .filter(Boolean)
-        .join('\n');
+      return withFallbackReason(sessionID, message);
     },
   });
   const runtimeStatusReconciler = createRuntimeStatusReconciler({
@@ -577,8 +579,6 @@ export function createTaskSessionManagerHook(
         // mid-fallback is skipped entirely — release every child's slot here
         // so none is left holding capacity forever. Idempotent per taskID.
         for (const child of backgroundJobBoard.list(sessionId)) {
-          idleReconciler.clearIdleTimers(child.taskID);
-          deferredInlineErrors.delete(child.taskID);
           options.backgroundTaskConcurrency?.releaseTask(child.taskID);
         }
         options.backgroundJobSupervisor?.onSessionDeleted(sessionId);
@@ -892,6 +892,7 @@ export function createTaskSessionManagerHook(
         idleSessionTokens,
         options,
         idleReconciler,
+        withFallbackReason,
         deferredInlineErrors,
         backgroundJobBoard,
         terminalGate,

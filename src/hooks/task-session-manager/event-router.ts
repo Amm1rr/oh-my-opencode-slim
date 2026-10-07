@@ -281,7 +281,6 @@ export async function handleEvent(
       isFallbackInProgress?: (sessionID: string) => boolean;
       /** True when foreground fallback could still recover the session. */
       willAttemptFallback?: (sessionID: string) => boolean;
-      fallbackFailureReason?: (sessionID: string) => string;
       /** Test seam; production uses event-arrival wall-clock time. */
       now?: () => number;
     };
@@ -308,6 +307,7 @@ export async function handleEvent(
      *  no recovery happens (managed inline 401/410, background children
      *  with an armed fallback chain). */
     deferredInlineErrors: Map<string, string>;
+    withFallbackReason: (sessionID: string, text: string) => string;
     backgroundJobBoard: BackgroundJobStore;
     terminalGate: import('../../utils/background-job-terminal-gate').BackgroundJobTerminalGate;
     pendingCallTracker: {
@@ -616,13 +616,15 @@ export async function handleEvent(
     }
     if (sessionId && deps.options.shouldManageSession(sessionId)) {
       const props = input.event.properties as { error?: unknown } | undefined;
+      const job = observation?.job ?? deps.backgroundJobBoard.get(sessionId);
+      const inline = isInlineFailoverError(props?.error);
       // Only clear injected terminal jobs for fatal errors.
       // Rate-limit errors are recovered by ForegroundFallbackManager
       // (abort + reprompt with fallback model); clearing the injected
       // job state here would make the orchestrator lose track of
       // completed background tasks and unable to dispatch follow-ups.
-      // Persistent 401/410 (auth, model gone) may ALSO be recovered by a
-      // fallback reprompt, so defer while recovery is still possible:
+      // Defer foreground 401/410 and all background failover errors while
+      // recovery by a fallback reprompt is still possible:
       // record the deferred error in the map so an idle with no recovery
       // terminalizes the job as 'error' instead of a false completion.
       // When no chain exists, fallback is disabled, or the chain is
@@ -630,7 +632,7 @@ export async function handleEvent(
       if (
         !props?.error ||
         !isFailoverError(props.error) ||
-        (isInlineFailoverError(props.error) &&
+        ((inline || job?.background === true) &&
           !deps.options.willAttemptFallback?.(sessionId))
       ) {
         deps.deferredInlineErrors.delete(sessionId);
@@ -638,7 +640,6 @@ export async function handleEvent(
         deps.pendingInjectedTerminalJobsByParent.delete(sessionId);
         // Record non-retryable errors on the job board so the
         // orchestrator sees the failure instead of a false completion.
-        const job = observation?.job ?? deps.backgroundJobBoard.get(sessionId);
         if (job && job.state === 'running') {
           // BackgroundJobStore has no expected-generation/CAS form for
           // updateStatus. The check immediately above is the strongest
@@ -650,22 +651,29 @@ export async function handleEvent(
           ) {
             return;
           }
+          const message =
+            structuredErrorMessage(props?.error) ?? 'Session error';
           await deps.terminalGate.reconcile(job, {
             kind: 'session-error',
-            message: structuredErrorMessage(props?.error) ?? 'Session error',
+            message:
+              job.background && isFailoverError(props?.error)
+                ? deps.withFallbackReason(sessionId, message)
+                : message,
           });
         }
-      } else if (isInlineFailoverError(props.error)) {
+      } else if (inline || job?.background === true) {
         // Recovery possible: defer. The idle backstop terminalizes this
         // if the fallback fails silently; busy/deleted clears it.
         deps.deferredInlineErrors.set(
           sessionId,
-          'Session error after failed model fallback (auth/model unavailable)',
+          inline
+            ? 'Session error after failed model fallback (auth/model unavailable)'
+            : (structuredErrorMessage(props.error) ?? 'Session error'),
         );
       }
     } else if (sessionId) {
-      // Child subagent sessions are not orchestrators, so the block
-      // above never runs for them. Without this, a failed background
+      // Unmanaged child sessions have no orchestrator mapping, so the block
+      // above skips them. Without this, a failed background
       // subagent leaves its job in `running` and the idle-reconciliation
       // path (which has no shouldManageSession guard) marks it
       // `completed` — a false success. A child with no fallback chain has
@@ -709,16 +717,12 @@ export async function handleEvent(
         ) {
           return;
         }
+        const message = structuredErrorMessage(props?.error) ?? 'Session error';
         await deps.terminalGate.reconcile(job, {
           kind: 'session-error',
-          message: [
-            structuredErrorMessage(props?.error) ?? 'Session error',
-            isFailoverError(props?.error)
-              ? deps.options.fallbackFailureReason?.(sessionId)
-              : undefined,
-          ]
-            .filter(Boolean)
-            .join('\n'),
+          message: isFailoverError(props?.error)
+            ? deps.withFallbackReason(sessionId, message)
+            : message,
         });
       }
     }
@@ -761,7 +765,7 @@ export async function handleEvent(
     // recovered (FG re-prompt or continued work).
     // Note: invalidate above already cleared the parent idle-reconcile
     // timer; clearIdleTimers handles the child timer.
-    if (sessionId && statusType === 'busy') {
+    if (sessionId) {
       deps.idleReconciler.clearIdleTimers(sessionId);
       // Live busy after a deferred failover error means the fallback
       // re-prompt (or continued work) recovered the session — the error
@@ -877,25 +881,20 @@ export async function handleEvent(
     deps.backgroundJobSupervisor?.onSessionDeleted(sessionId);
   }
 
-  // A deferred failover error awaiting fallback outcome must not vanish
-  // with the session: no idle can fire for it anymore, so the backstop
-  // would never run (the token invalidation above also cancelled any
-  // pending backstop timer).
+  // Deletion may precede idle, so a deferred error may have no backstop yet.
+  // Token invalidation preserves any backstop already awaiting fallback.
   const deferredError = deps.deferredInlineErrors.get(sessionId);
   if (deferredError !== undefined) {
     if (fallbackInProgress) {
-      // Fallback teardown: the re-prompt is still coming on the recreated
-      // session. Keep the deferral and re-arm the backstop the invalidation
-      // just cancelled — a landed re-prompt clears both through live busy,
-      // a fallback that never lands still terminalizes the deferred error.
+      // Fallback teardown: keep the deferral and ensure a backstop exists,
+      // even if deletion arrived before idle. Live busy clears both;
+      // a replay that never lands leaves the bounded backstop to publish.
       if (job && job.state === 'running') {
         deps.idleReconciler.scheduleDeferredErrorBackstop(
           sessionId,
           observedAt,
           job.generation,
         );
-      } else {
-        deps.deferredInlineErrors.delete(sessionId);
       }
     } else {
       // Genuine deletion inside the deferral window: publish the deferred
@@ -907,12 +906,7 @@ export async function handleEvent(
       if (job && job.state === 'running') {
         await deps.terminalGate.reconcile(job, {
           kind: 'session-error',
-          message: [
-            deferredError,
-            deps.options.fallbackFailureReason?.(sessionId),
-          ]
-            .filter(Boolean)
-            .join('\n'),
+          message: deps.withFallbackReason(sessionId, deferredError),
         });
       }
     }

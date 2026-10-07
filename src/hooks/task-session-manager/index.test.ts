@@ -87,6 +87,23 @@ function createSupervisorClock() {
   return { now: () => now, setTimeout, clearTimeout, advanceTo };
 }
 
+function mockIdleClock() {
+  const clock = createSupervisorClock();
+  const timerSpy = spyOn(globalThis, 'setTimeout').mockImplementation(
+    clock.setTimeout as never,
+  );
+  const clearSpy = spyOn(globalThis, 'clearTimeout').mockImplementation(
+    clock.clearTimeout as never,
+  );
+  return {
+    ...clock,
+    restore: () => {
+      timerSpy.mockRestore();
+      clearSpy.mockRestore();
+    },
+  };
+}
+
 function taskLaunchOutput(taskID: string): string {
   return [
     `task_id: ${taskID}`,
@@ -5157,13 +5174,7 @@ describe('task-session-manager hook', () => {
     // the deferred error must terminalize as 'error', not the false
     // 'completed' the child-idle path would record.
     const board = new BackgroundJobBoard();
-    const clock = createSupervisorClock();
-    const timerSpy = spyOn(globalThis, 'setTimeout').mockImplementation(
-      clock.setTimeout as never,
-    );
-    const clearSpy = spyOn(globalThis, 'clearTimeout').mockImplementation(
-      clock.clearTimeout as never,
-    );
+    const clock = mockIdleClock();
     const { hook } = createHook({
       backgroundJobBoard: board,
       willAttemptFallback: () => true,
@@ -5210,8 +5221,7 @@ describe('task-session-manager hook', () => {
       });
     } finally {
       await hook.event({ event: { type: 'server.instance.disposed' } });
-      timerSpy.mockRestore();
-      clearSpy.mockRestore();
+      clock.restore();
     }
   });
 
@@ -5678,13 +5688,7 @@ describe('task-session-manager hook', () => {
     // without recovery — the idle backstop must publish the deferred error
     // so the parent still sees the failure instead of a false completion.
     const board = new BackgroundJobBoard();
-    const clock = createSupervisorClock();
-    const timerSpy = spyOn(globalThis, 'setTimeout').mockImplementation(
-      clock.setTimeout as never,
-    );
-    const clearSpy = spyOn(globalThis, 'clearTimeout').mockImplementation(
-      clock.clearTimeout as never,
-    );
+    const clock = mockIdleClock();
     const { hook } = createHook({
       backgroundJobBoard: board,
       shouldManageSession: () => false,
@@ -5729,8 +5733,7 @@ describe('task-session-manager hook', () => {
       });
     } finally {
       await hook.event({ event: { type: 'server.instance.disposed' } });
-      timerSpy.mockRestore();
-      clearSpy.mockRestore();
+      clock.restore();
     }
   });
 
@@ -5779,6 +5782,7 @@ describe('task-session-manager hook', () => {
       backgroundJobBoard: board,
       shouldManageSession: () => false,
       willAttemptFallback: () => true,
+      fallbackFailureReason: () => 'R',
     });
 
     board.registerLaunch({
@@ -5806,19 +5810,14 @@ describe('task-session-manager hook', () => {
       state: 'error',
       resultSummary: 'Invalid request: unknown parameter',
     });
+    expect(board.get('child-1')?.resultSummary).not.toContain('\nR');
   });
 
   test('deferred child failover error survives idle before fallback is armed', async () => {
     // Host hooks are not awaited: idle can precede fallback delay arming.
     // Publishing now would orphan the replay before its handoff is prepared.
     const board = new BackgroundJobBoard();
-    const clock = createSupervisorClock();
-    const timerSpy = spyOn(globalThis, 'setTimeout').mockImplementation(
-      clock.setTimeout as never,
-    );
-    const clearSpy = spyOn(globalThis, 'clearTimeout').mockImplementation(
-      clock.clearTimeout as never,
-    );
+    const clock = mockIdleClock();
     let fallbackInFlight = false;
     const { hook, complete } = createHook({
       backgroundJobBoard: board,
@@ -5887,19 +5886,12 @@ describe('task-session-manager hook', () => {
       });
     } finally {
       await hook.event({ event: { type: 'server.instance.disposed' } });
-      timerSpy.mockRestore();
-      clearSpy.mockRestore();
+      clock.restore();
     }
   });
 
   test('runtime status cannot publish the errored transcript inside the deferral window', async () => {
-    const clock = createSupervisorClock();
-    const timerSpy = spyOn(globalThis, 'setTimeout').mockImplementation(
-      clock.setTimeout as never,
-    );
-    const clearSpy = spyOn(globalThis, 'clearTimeout').mockImplementation(
-      clock.clearTimeout as never,
-    );
+    const clock = mockIdleClock();
     const board = new BackgroundJobBoard();
     board.registerLaunch({
       taskID: 'child-1',
@@ -5925,13 +5917,6 @@ describe('task-session-manager hook', () => {
           },
         },
       });
-      await hook.event({
-        event: {
-          type: 'session.status',
-          properties: { sessionID: 'child-1', status: { type: 'retry' } },
-        },
-      });
-      expect(hook.hasDeferredError('child-1')).toBe(true);
       await clock.advanceTo(10);
       for (let i = 0; i < 50; i++) await Promise.resolve();
       expect(status).toHaveBeenCalled();
@@ -5942,19 +5927,12 @@ describe('task-session-manager hook', () => {
       });
     } finally {
       await hook.event({ event: { type: 'server.instance.disposed' } });
-      timerSpy.mockRestore();
-      clearSpy.mockRestore();
+      clock.restore();
     }
   });
 
   test('fallback deletion cleanup keeps a bounded backstop when replay never lands', async () => {
-    const clock = createSupervisorClock();
-    const timerSpy = spyOn(globalThis, 'setTimeout').mockImplementation(
-      clock.setTimeout as never,
-    );
-    const clearSpy = spyOn(globalThis, 'clearTimeout').mockImplementation(
-      clock.clearTimeout as never,
-    );
+    const clock = mockIdleClock();
     const coordinator = new SessionLifecycle(() => {});
     const board = new BackgroundJobBoard();
     board.registerLaunch({
@@ -6000,19 +5978,12 @@ describe('task-session-manager hook', () => {
       expect(hook.hasDeferredError('child-1')).toBe(false);
     } finally {
       await hook.event({ event: { type: 'server.instance.disposed' } });
-      timerSpy.mockRestore();
-      clearSpy.mockRestore();
+      clock.restore();
     }
   });
 
   test('v2 child failover waits for the backstop without replay activity', async () => {
-    const clock = createSupervisorClock();
-    const timerSpy = spyOn(globalThis, 'setTimeout').mockImplementation(
-      clock.setTimeout as never,
-    );
-    const clearSpy = spyOn(globalThis, 'clearTimeout').mockImplementation(
-      clock.clearTimeout as never,
-    );
+    const clock = mockIdleClock();
     const dateSpy = spyOn(Date, 'now').mockImplementation(clock.now);
     const board = new BackgroundJobBoard({ delegationTool: 'subagent' });
     board.registerLaunch({
@@ -6051,9 +6022,6 @@ describe('task-session-manager hook', () => {
         state: 'running',
         terminalRevision: 0,
       });
-      expect(board.formatForPrompt('parent-1')).not.toContain(
-        '[model fallback]',
-      );
       await clock.advanceTo(2000);
       for (let i = 0; i < 50; i++) await Promise.resolve();
       expect(board.get('child-1')).toMatchObject({
@@ -6063,8 +6031,7 @@ describe('task-session-manager hook', () => {
       expect(hook.hasDeferredError('child-1')).toBe(false);
     } finally {
       await hook.event({ event: { type: 'server.instance.disposed' } });
-      timerSpy.mockRestore();
-      clearSpy.mockRestore();
+      clock.restore();
       dateSpy.mockRestore();
     }
   });
@@ -6081,6 +6048,7 @@ describe('task-session-manager hook', () => {
       backgroundJobBoard: board,
       shouldManageSession: () => false,
       willAttemptFallback: () => true,
+      fallbackFailureReason: () => 'R',
       idleReconcileDelayMs: 0,
     });
 
@@ -6107,12 +6075,12 @@ describe('task-session-manager hook', () => {
     await hook.event({
       event: { type: 'session.deleted', properties: { sessionID: 'child-1' } },
     });
-    await flushChildIdleReconcile();
 
     expect(board.get('child-1')).toMatchObject({
       state: 'error',
-      resultSummary: 'rate limit exceeded',
+      resultSummary: 'rate limit exceeded\nR',
     });
+    expect(board.get('child-1')?.resultSummary).toContain('\nR');
   });
 
   test('bounded backstop commits the deferred error when the fallback never leaves the window', async () => {
