@@ -5956,6 +5956,50 @@ describe('ForegroundFallbackManager session.deleted', () => {
 // ---------------------------------------------------------------------------
 
 describe('ForegroundFallbackManager willAttemptFallback', () => {
+  test('failure reason lists tried models when the chain is exhausted', () => {
+    const mgr = new ForegroundFallbackManager(makeChains(), true, {
+      directory: '/test',
+    } as any);
+    mgr.registerSessionAgent('sess-1', 'explorer');
+    (mgr as any).chainExhaustion.set('sess-1', 2);
+    (mgr as any).sessionTried.set(
+      'sess-1',
+      new Set(['openai/gpt-4o-mini', 'anthropic/claude-haiku']),
+    );
+    expect(mgr.fallbackFailureReason('sess-1')).toBe(
+      'Model fallback chain exhausted; tried: openai/gpt-4o-mini, anthropic/claude-haiku.',
+    );
+  });
+
+  test('failure reason identifies an agent with no chain', () => {
+    const mgr = new ForegroundFallbackManager(makeChains(), true, {
+      directory: '/test',
+    } as any);
+    mgr.registerSessionAgent('sess-1', 'oracle');
+    expect(mgr.fallbackFailureReason('sess-1')).toBe(
+      'No model fallback chain for oracle.',
+    );
+  });
+
+  test('failure reason identifies disabled fallback', () => {
+    const mgr = new ForegroundFallbackManager(makeChains(), false, {
+      directory: '/test',
+    } as any);
+    expect(mgr.fallbackFailureReason('sess-1')).toBe(
+      'Model fallback is disabled.',
+    );
+  });
+
+  test('failure reason names the failed model when recovery did not land', () => {
+    const mgr = new ForegroundFallbackManager(makeChains(), true, {
+      directory: '/test',
+    } as any);
+    mgr.registerSessionAgent('sess-1', 'explorer');
+    mgr.observeContinuationModel('sess-1', 'openai/gpt-4o-mini');
+    expect(mgr.fallbackFailureReason('sess-1')).toBe(
+      'Model fallback did not recover from openai/gpt-4o-mini.',
+    );
+  });
   test('returns true when the session has a chain and it is not exhausted', () => {
     const mgr = new ForegroundFallbackManager(makeChains(), true, {
       directory: '/test',

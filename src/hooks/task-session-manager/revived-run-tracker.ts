@@ -47,6 +47,7 @@ type RevivedRun = {
   admissionLease?: BackgroundJobLease;
   readonly attemptStartedAt: number;
   description: string;
+  fallback?: true;
   /** Monotonic observation identity: incremented on every
    * registration so evidence consumers can fence a snapshot against a
    * same-generation substitution. */
@@ -81,6 +82,7 @@ export interface RevivedRunTracker {
    * it no longer waits for (or fences retries on) its prompt identity. */
   discard(taskID: string, generation: number): boolean;
   isTracked(taskID: string, generation: number): boolean;
+  isFallbackRun(taskID: string, generation: number): boolean;
   /** Baseline anchor for a tracked run, so transcript-evidence consumers
    * (stop gate) can attribute the trailing answer to THIS run instead of
    * a substituted attempt. Undefined for untracked/stale generations. */
@@ -622,6 +624,7 @@ export function createRevivedRunTracker(options: {
     admissionLease?: BackgroundJobLease;
     attemptStartedAt?: number;
     description: string;
+    fallback?: true;
   }): void {
     const old = runs.get(input.taskID);
     if (old?.notification.retryTimer) clearTimeout(old.notification.retryTimer);
@@ -688,6 +691,7 @@ export function createRevivedRunTracker(options: {
       baselineMessageID: pending.baselineMessageID,
       attemptStartedAt: pending.attemptStartedAt,
       description: pending.description,
+      fallback: true,
     });
     // The re-prompt may already be persisted (admission is async): own
     // it now rather than waiting for an idle that already happened.
@@ -774,6 +778,7 @@ export function createRevivedRunTracker(options: {
       baselineMessageID: pending.baselineMessageID,
       attemptStartedAt: pending.attemptStartedAt,
       description: pending.description,
+      fallback: true,
     });
     // Immediate probe: the re-prompt admission is async — if the
     // substituted run already went idle (fast answer + delayed
@@ -816,6 +821,10 @@ export function createRevivedRunTracker(options: {
     register,
     discard,
     isTracked,
+    isFallbackRun: (taskID, generation) => {
+      const run = runs.get(taskID);
+      return run?.generation === generation && run.fallback === true;
+    },
     baselineFor,
     promptMessageIDFor: (taskID, generation) => {
       const run = runs.get(taskID);

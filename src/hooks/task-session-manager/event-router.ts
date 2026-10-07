@@ -281,6 +281,7 @@ export async function handleEvent(
       isFallbackInProgress?: (sessionID: string) => boolean;
       /** True when foreground fallback could still recover the session. */
       willAttemptFallback?: (sessionID: string) => boolean;
+      fallbackFailureReason?: (sessionID: string) => string;
       /** Test seam; production uses event-arrival wall-clock time. */
       now?: () => number;
     };
@@ -290,7 +291,6 @@ export async function handleEvent(
         sessionID: string,
         idleObservedAt: number,
         observedGeneration: number,
-        error?: string,
       ): void;
       /** Bounded deferred-error backstop for the fallback-preparation
        *  window: re-checks the fallback state on each fire and
@@ -488,6 +488,7 @@ export async function handleEvent(
     deps.retainedBoardSnapshots.clear();
     eventFenceMap(deps.backgroundJobBoard).clear();
     const idleSessionIds = deps.idleReconciler.clearAllTimers();
+    deps.deferredInlineErrors.clear();
     // Local-only: drop idle tokens. Process-global wait_for_user stays armed.
     const waitSessionIDs = new Set([
       ...idleSessionIds,
@@ -553,7 +554,11 @@ export async function handleEvent(
         runningJobForSession,
       },
     );
-    if (sessionId && deps.options.shouldManageSession(sessionId)) {
+    if (
+      sessionId &&
+      deps.options.shouldManageSession(sessionId) &&
+      !(runningJobForSession && deps.deferredInlineErrors.has(sessionId))
+    ) {
       deps.idleReconciler.scheduleIdleReconciliation(sessionId);
     }
 
@@ -564,35 +569,13 @@ export async function handleEvent(
     if (job && sessionId && job.state === 'running') {
       const deferredError = deps.deferredInlineErrors.get(sessionId);
       if (deferredError !== undefined) {
-        if (deps.options.isFallbackInProgress?.(sessionId)) {
-          // The failed prompt's idle can arrive while the fallback
-          // re-prompt is still being prepared (the host dispatches events
-          // without awaiting the plugin hook). Committing the deferred
-          // error inside that window terminalizes the record before the
-          // observation handoff can arm and orphans the retried run's
-          // result — the exact race this deferral exists to prevent.
-          // Schedule the bounded backstop instead: it re-checks the
-          // fallback state, and live busy cancels it.
-          deps.idleReconciler.scheduleDeferredErrorBackstop(
-            sessionId,
-            observedAt,
-            job.generation,
-          );
-        } else {
-          // A failover-worthy error was deferred for fallback recovery but
-          // the session ended without one: terminalize as error instead of
-          // the false completion the child-idle path would record. The
-          // entry is consumed here — the scheduled reconcile owns the
-          // error now, and a stale entry must not poison a later reuse of
-          // this session.
-          deps.deferredInlineErrors.delete(sessionId);
-          deps.idleReconciler.scheduleChildIdleReconciliation(
-            sessionId,
-            observedAt,
-            job.generation,
-            deferredError,
-          );
-        }
+        // Idle may precede the fallback manager arming its initial delay.
+        // Only the bounded backstop can decide that recovery never landed.
+        deps.idleReconciler.scheduleDeferredErrorBackstop(
+          sessionId,
+          observedAt,
+          job.generation,
+        );
       } else {
         deps.idleReconciler.scheduleChildIdleReconciliation(
           sessionId,
@@ -728,7 +711,14 @@ export async function handleEvent(
         }
         await deps.terminalGate.reconcile(job, {
           kind: 'session-error',
-          message: structuredErrorMessage(props?.error) ?? 'Session error',
+          message: [
+            structuredErrorMessage(props?.error) ?? 'Session error',
+            isFailoverError(props?.error)
+              ? deps.options.fallbackFailureReason?.(sessionId)
+              : undefined,
+          ]
+            .filter(Boolean)
+            .join('\n'),
         });
       }
     }
@@ -771,7 +761,7 @@ export async function handleEvent(
     // recovered (FG re-prompt or continued work).
     // Note: invalidate above already cleared the parent idle-reconcile
     // timer; clearIdleTimers handles the child timer.
-    if (sessionId) {
+    if (sessionId && statusType === 'busy') {
       deps.idleReconciler.clearIdleTimers(sessionId);
       // Live busy after a deferred failover error means the fallback
       // re-prompt (or continued work) recovered the session — the error
@@ -904,6 +894,8 @@ export async function handleEvent(
           observedAt,
           job.generation,
         );
+      } else {
+        deps.deferredInlineErrors.delete(sessionId);
       }
     } else {
       // Genuine deletion inside the deferral window: publish the deferred
@@ -915,7 +907,12 @@ export async function handleEvent(
       if (job && job.state === 'running') {
         await deps.terminalGate.reconcile(job, {
           kind: 'session-error',
-          message: deferredError,
+          message: [
+            deferredError,
+            deps.options.fallbackFailureReason?.(sessionId),
+          ]
+            .filter(Boolean)
+            .join('\n'),
         });
       }
     }

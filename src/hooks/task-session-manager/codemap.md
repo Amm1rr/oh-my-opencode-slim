@@ -86,6 +86,13 @@ All modules depend on `BackgroundJobBoard` from `src/utils/background-job-board.
    - Foreground-fallback replay provenance and shared fallback teardown state preserve the latch across plugin-manager recreation
    - Idle continuation remains suppressed until a distinct real user message arrives
 
+### Fallback deferral
+
+- A recoverable child `session.error` records a deferral before foreground fallback arms its delay. Both terminal-gate wiring sites include `hasDeferredError()` alongside pending handoffs, so runtime polling, result retrieval, and board injection cannot publish the failed attempt.
+- Child idle always schedules the deferred-error backstop, including for managed children; parent idle reconciliation cannot occupy that timer. It waits `idleReconcileDelayMs`, renews at most five times while fallback is in progress, then consumes the deferral before reconciliation. Pending fallback retries keep their timer without marking status uncertain.
+- Live busy clears the deferral and timer. A final error or genuine deletion clears it before publication. Fallback deletion cleanup preserves or re-arms the backstop; parent invalidation cannot cancel it. Genuine session/parent cleanup and plugin disposal remove deferrals with their timers.
+- The tracker flags admitted and unresolved-promoted fallback runs; external `register()` clears the flag. Plugin wiring uses pending/running fallback activity for the stable `running [model fallback]` board label and v1 revive refusal. Verified cancellation remains allowed. v2 has no replay label or refusal and publishes unrecovered errors through the same backstop.
+
 ### Data & Control Flow
 
 ```

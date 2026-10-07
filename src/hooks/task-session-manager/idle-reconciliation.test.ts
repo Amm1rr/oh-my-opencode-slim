@@ -31,7 +31,9 @@ test('child idle preserves event provenance and requests runtime inspection', ()
         });
         return { kind: 'deferred', record: {} };
       },
-      reconcile: async () => {
+      reconcile: async (run, signal) => {
+        expect(run).toEqual({ taskID: 'child', generation: 1 });
+        expect(signal).toEqual({ kind: 'inspect' });
         calls.push('inspect');
         return { kind: 'stale' };
       },

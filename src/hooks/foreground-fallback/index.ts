@@ -568,6 +568,17 @@ export class ForegroundFallbackManager {
     );
   }
 
+  fallbackFailureReason(sessionID: string): string {
+    if (!this.enabled && !this.v2RetryEnabled)
+      return 'Model fallback is disabled.';
+    if (!this.hasFallbackChain(sessionID))
+      return `No model fallback chain for ${this.sessionAgent.get(sessionID) ?? 'this agent'}.`;
+    if (this.chainExhaustion.get(sessionID) === 2)
+      return `Model fallback chain exhausted; tried: ${[...(this.sessionTried.get(sessionID) ?? [])].join(', ') || 'none'}.`;
+    const model = this.sessionModel.get(sessionID);
+    return `Model fallback did not recover${model ? ` from ${model}` : ''}.`;
+  }
+
   /**
    * Disable the fallback chain for a specific agent.
    * After calling this, rate-limit errors for that agent surface instead of

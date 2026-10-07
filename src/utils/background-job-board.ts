@@ -135,6 +135,7 @@ export interface BackgroundJobBoardOptions {
    * v2 hosts, `task` on v1/default. Only the two retained/recovery wording
    * lines vary; the board stays v1 by default. */
   delegationTool?: string;
+  isFallbackActive?: (taskID: string, generation: number) => boolean;
   /**
    * Production boards number only parents created while they run (see
    * noteSessionCreated); other parents' new records use the task ID as
@@ -340,6 +341,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
   private readonly readContextMinLines: number;
   private readonly readContextMaxFiles: number;
   private readonly delegationTool: string;
+  private readonly isFallbackActive?: BackgroundJobBoardOptions['isFallbackActive'];
   private readonly deferNumberedAliases: boolean;
   private readonly onEvictedSession?:
     | ((evicted: BackgroundJobEvictedSession) => void)
@@ -357,6 +359,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     this.readContextMaxFiles =
       options.readContextMaxFiles ?? DEFAULT_READ_CONTEXT_MAX_FILES;
     this.delegationTool = options.delegationTool ?? 'task';
+    this.isFallbackActive = options.isFallbackActive;
     this.deferNumberedAliases = options.deferNumberedAliases === true;
     this.onEvictedSession = options.onEvictedSession;
   }
@@ -1589,7 +1592,14 @@ export class BackgroundJobBoard implements BackgroundJobStore {
           : []),
         '',
         '#### Active / Unreconciled',
-        ...(active.length > 0 ? active.map(formatJob) : ['- none']),
+        ...(active.length > 0
+          ? active.map((job) =>
+              formatJob(
+                job,
+                this.isFallbackActive?.(job.taskID, job.generation),
+              ),
+            )
+          : ['- none']),
         '',
         '#### Reusable Sessions',
         ...(reusable.length > 0
@@ -2041,11 +2051,15 @@ function timeoutSummary(state: TaskOutputState): string {
 
 const REVIVE_ONLY = 'task_revive only';
 
-function formatJob(job: BackgroundJobRecord): string {
+function formatJob(job: BackgroundJobRecord, fallback = false): string {
   const isResume = job.lastLaunchedAt !== job.launchedAt;
   // Exclude wall-clock age labels so prompts remain stable between job-state transitions for cache reuse.
   const displayState =
-    job.state === 'running' && isResume ? 'running [resumed]' : job.state;
+    job.state === 'running' && fallback
+      ? 'running [model fallback]'
+      : job.state === 'running' && isResume
+        ? 'running [resumed]'
+        : job.state;
   const status = job.terminalUnreconciled
     ? `${job.state}, unreconciled${
         job.deadlineExceededAt !== undefined ? ', timed out' : ''
