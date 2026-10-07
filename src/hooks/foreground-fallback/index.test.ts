@@ -12,6 +12,7 @@ import { isInternalInitiatorPart } from '../../utils';
 import * as logger from '../../utils/logger';
 import { mapV2EventToV1 } from '../../v2/event-adapter';
 import { SessionLifecycle } from '../session-lifecycle';
+import type { FallbackNotice } from '../task-session-manager/revived-run-tracker';
 import {
   ForegroundFallbackManager,
   isFailoverError,
@@ -2614,7 +2615,11 @@ describe('ForegroundFallbackManager session.error', () => {
           calls.prepare.push([sessionID, generation, baseline]);
           return true;
         },
-        admit: (sessionID: string, generation: number | undefined) => {
+        admit: (
+          sessionID: string,
+          generation: number | undefined,
+          _notice?: FallbackNotice,
+        ) => {
           calls.admit.push([sessionID, generation]);
         },
         reject: (sessionID: string, generation: number | undefined) => {
@@ -2689,6 +2694,49 @@ describe('ForegroundFallbackManager session.error', () => {
       parts: [{ type: 'text', text: 'task prompt' }],
     },
   ];
+
+  test('retry-path fallback admits silently while the next terminal failure carries a notice', async () => {
+    jest.useFakeTimers();
+    const { handoff } = handoffMock();
+    const admit = spyOn(handoff, 'admit');
+    ({ mocks } = createMockClient({ messagesData: taskPrompt }));
+    mgr = new ForegroundFallbackManager(
+      { orchestrator: ['test/a', 'test/b', 'test/c'] },
+      true,
+      { directory: '/test' } as never,
+      0,
+      undefined,
+      undefined,
+      0,
+      0,
+      handoff,
+      () => 1,
+    );
+    try {
+      await mgr.handleEvent(redoEvents.assistant('retry-notice'));
+      await mgr.handleEvent(redoEvents.retry('retry-notice'));
+      expect(mocks.abort).toHaveBeenCalledTimes(1);
+      expect(admit.mock.calls[0]?.[2]).toBeUndefined();
+      await mgr.handleEvent(redoEvents.assistant('retry-notice', 'b'));
+      await mgr.handleEvent(
+        redoEvents.error(
+          'retry-notice',
+          { data: { message: 'provider outage' } },
+          'failed-b',
+        ),
+      );
+      expect(admit).toHaveBeenCalledTimes(2);
+      expect(admit.mock.calls[1]?.[2]).toEqual({
+        from: 'test/b',
+        to: 'test/c',
+        error: 'provider outage',
+      });
+    } finally {
+      mgr.dispose();
+      admit.mockRestore();
+      jest.useRealTimers();
+    }
+  });
 
   test('arms the handoff before the admission await and admits after acceptance', async () => {
     // False-stop incident: for a background child the fallback PREPARES

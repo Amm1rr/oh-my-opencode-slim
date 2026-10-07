@@ -13,6 +13,11 @@ import type { BackgroundJobRecord } from './utils/background-job-board';
 import type { BackgroundJobCoordinator } from './utils/background-job-coordinator';
 import * as gateFactories from './utils/background-job-terminal-gate';
 import { BackgroundTaskConcurrency } from './utils/background-task-concurrency';
+import {
+  type createInternalAgentTextPart,
+  isInternalInitiatorPart,
+  isNativeBackgroundTaskNotification,
+} from './utils/internal-initiator';
 import * as loggerModule from './utils/logger';
 import { buildPluginInput } from './v2/client-shim';
 import { mapV2EventToV1 } from './v2/event-adapter';
@@ -285,7 +290,9 @@ async function fallbackAssembly(hostFlavor?: string) {
   const h = await assembly(undefined, {
     hostFlavor,
     rootConfigOverrides: {
-      agents: { explorer: { model: ['test/primary', 'test/fallback'] } },
+      agents: {
+        explorer: { model: ['test/primary', 'test/fallback', 'test/final'] },
+      },
       fallback: { initialRetryDelayMs: 2000 },
     },
   });
@@ -299,25 +306,25 @@ async function fallbackAssembly(hostFlavor?: string) {
     } as never,
     { parts: [] } as never,
   );
-  h.messages.mockImplementation(async () => ({
-    data: [
-      {
-        info: { id: 'request', role: 'user' },
-        parts: [{ type: 'text', text: 'work' }],
+  const history: unknown[] = [
+    {
+      info: { id: 'request', role: 'user' },
+      parts: [{ type: 'text', text: 'work' }],
+    },
+    {
+      info: {
+        id: 'failed',
+        role: 'assistant',
+        error: 'rate limit',
+        time: { completed: Date.now() },
       },
-      {
-        info: {
-          id: 'failed',
-          role: 'assistant',
-          error: 'rate limit',
-          time: { completed: Date.now() },
-        },
-        parts: [],
-      },
-    ],
-  }));
+      parts: [],
+    },
+  ];
+  h.messages.mockImplementation(async () => ({ data: history }));
   return {
     ...h,
+    history,
     context: { sessionID: 'parent', agent: 'orchestrator' } as never,
     fail: () =>
       h.event('session.error', {
@@ -348,7 +355,7 @@ test('fallback initial delay cannot replay a cancelled background child', async 
   expect(h.board.get('child')?.state).toBe('cancelled');
 });
 
-test('production fallback wiring fences polling, labels recovery and refuses revive', async () => {
+test('production fallback wiring fences polling and announces each admitted hop before the result', async () => {
   const h = await fallbackAssembly();
   await h.fail();
   await h.idle();
@@ -358,9 +365,6 @@ test('production fallback wiring fences polling, labels recovery and refuses rev
     terminalRevision: 0,
     statusUncertain: false,
   });
-  expect(h.board.formatForPrompt('parent')).toContain(
-    'running [model fallback]',
-  );
   const revival = h.hooks.tool?.task_revive
     .execute({ task_id: 'child', prompt: 'continue' }, h.context)
     .catch((error: Error) => error);
@@ -373,19 +377,121 @@ test('production fallback wiring fences polling, labels recovery and refuses rev
   );
   expect(h.abort).not.toHaveBeenCalled();
   expect(h.promptAsync).not.toHaveBeenCalled();
-  h.messages.mockImplementation(async () => ({ data: [] }));
   await h.advance(1700);
-  await h.advance(2000);
-  expect(h.board.get('child')?.resultSummary).toContain(
-    'Model fallback did not recover',
+  const prompts = () =>
+    h.promptAsync.mock.calls.map(
+      ([call]) =>
+        call as {
+          path: { id: string };
+          body: {
+            messageID: string;
+            parts: ReturnType<typeof createInternalAgentTextPart>[];
+          };
+        },
+    );
+  const parentParts = () =>
+    prompts()
+      .filter(({ path }) => path.id === 'parent')
+      .map(({ body }) => body.parts[0]);
+  expect(parentParts()).toHaveLength(1);
+  const notice = parentParts()[0];
+  expect(notice.text).toContain(
+    'test/primary failed: rate limit\nContinuing on test/fallback. Do not revive or cancel; wait for the result.',
   );
+  expect(notice.text).toContain('<task id="child" state="running">');
+  expect(notice.text).toContain(
+    'Background task continues on a fallback model: ordinary task',
+  );
+  expect(isInternalInitiatorPart(notice)).toBe(true);
+  expect(isNativeBackgroundTaskNotification(notice)).toBe(false);
+  expect(h.board.get('child')).toMatchObject({
+    state: 'running',
+    terminalRevision: 0,
+  });
+  h.setBusy(true);
+  await h.busySignal();
+  const reconcile = spyOn(h.gate, 'reconcile');
+  cleanups.push(async () => {
+    reconcile.mockRestore();
+  });
+  await h.hooks['chat.message']?.(
+    {
+      sessionID: 'parent',
+      agent: 'orchestrator',
+      messageID: 'notice',
+    } as never,
+    { parts: [notice] } as never,
+  );
+  await h.hooks['experimental.chat.messages.transform']?.({}, {
+    messages: [
+      {
+        info: {
+          id: 'notice',
+          role: 'user',
+          agent: 'orchestrator',
+          sessionID: 'parent',
+        },
+        parts: [notice],
+      },
+    ],
+  } as never);
+  expect(reconcile).not.toHaveBeenCalled();
+  expect(h.board.get('child')).toMatchObject({
+    state: 'running',
+    terminalRevision: 0,
+  });
+  const replayB = prompts().filter(({ path }) => path.id === 'child')[0].body;
+  h.history.push(
+    { info: { id: replayB.messageID, role: 'user' }, parts: replayB.parts },
+    {
+      info: { id: 'failed-b', role: 'assistant', error: 'rate limit' },
+      parts: [],
+    },
+  );
+  h.setBusy(false);
+  const failureB = h.fail();
+  await flush();
+  await h.idle();
+  await h.advance(500);
+  await failureB;
+  await flush();
+  expect(parentParts()).toHaveLength(2);
+  expect(parentParts()[1].text).toContain(
+    'test/fallback failed: rate limit\nContinuing on test/final. Do not revive or cancel; wait for the result.',
+  );
+  h.setBusy(true);
+  await h.busySignal();
+  const replayC = prompts().filter(({ path }) => path.id === 'child')[1].body;
+  h.history.push(
+    { info: { id: replayC.messageID, role: 'user' }, parts: replayC.parts },
+    ...transcript().data,
+  );
+  h.setBusy(false);
+  await h.idle();
+  await h.runtime.reconcile();
+  await flush();
+  expect(h.board.get('child')).toMatchObject({
+    state: 'completed',
+    terminalRevision: 1,
+  });
+  expect(parentParts()).toHaveLength(3);
+  expect(parentParts()[2].text).toContain(
+    '<task_result>\nconfirmed result\n</task_result>',
+  );
+  expect(
+    parentParts().every(
+      ({ text }) => !text.includes('Background task failed:'),
+    ),
+  ).toBe(true);
+  await h.runtime.reconcile();
+  await flush();
+  expect(parentParts()).toHaveLength(3);
 });
 
-test('v2 production wiring has no replay label or fallback revive refusal', async () => {
+test('v2 production wiring has no replay notice or fallback revive refusal', async () => {
   const h = await fallbackAssembly('v2');
   await h.fail();
   expect(h.taskHook.hasDeferredError('child')).toBe(true);
-  expect(h.board.formatForPrompt('parent')).not.toContain('[model fallback]');
   const revival = h.hooks.tool?.task_revive.execute(
     { sessionID: 'child', prompt: 'continue' },
     h.context,
@@ -394,6 +500,9 @@ test('v2 production wiring has no replay label or fallback revive refusal', asyn
   await h.advance(300);
   expect(await revival).toBeString();
   expect(h.promptAsync).toHaveBeenCalledTimes(1);
+  expect(JSON.stringify(h.promptAsync.mock.calls)).not.toContain(
+    '<task_fallback>',
+  );
 });
 
 test('a managed background child keeps its failover error deferred through polling', async () => {
@@ -411,6 +520,12 @@ test('a managed background child keeps its failover error deferred through polli
     terminalRevision: 0,
     statusUncertain: false,
   });
+  h.messages.mockImplementation(async () => ({ data: [] }));
+  await h.advance(2000);
+  await h.advance(2000);
+  expect(h.board.get('child')?.resultSummary).toContain(
+    'Model fallback did not recover',
+  );
 });
 
 function publicationOf(h: Assembly) {

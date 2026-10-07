@@ -1,5 +1,5 @@
 import type { BackgroundJobStore } from '../../utils/background-job-store';
-import type { RevivedRunTracker } from './revived-run-tracker';
+import type { FallbackNotice, RevivedRunTracker } from './revived-run-tracker';
 
 /**
  * Terminal-observation handoff for background children re-prompted by
@@ -46,7 +46,11 @@ export function createBackgroundFallbackHandoff(options: {
     preparedGeneration: number | undefined,
     baselineMessageID: string | undefined,
   ) => boolean;
-  admit: (sessionID: string, preparedGeneration: number | undefined) => void;
+  admit: (
+    sessionID: string,
+    preparedGeneration: number | undefined,
+    notice?: FallbackNotice,
+  ) => void;
   /** Explicit host refusal (error envelope / typed capability
    * rejection): nothing was admitted, ownership is released. */
   reject: (sessionID: string, preparedGeneration: number | undefined) => void;
@@ -86,7 +90,7 @@ export function createBackgroundFallbackHandoff(options: {
         description: record.description,
       });
     },
-    admit: (sessionID, preparedGeneration) => {
+    admit: (sessionID, preparedGeneration, notice) => {
       if (preparedGeneration === undefined) return;
       // Resolve the preparation for the SAME generation idempotently
       // even when the board record already left 'running' — a promoted
@@ -94,7 +98,11 @@ export function createBackgroundFallbackHandoff(options: {
       // arrived; the entry must still be cleaned (no reinstall, no
       // notification reset — that is the tracker's promoted-admit
       // contract).
-      options.revivedRunTracker.admitObservation(sessionID, preparedGeneration);
+      options.revivedRunTracker.admitObservation(
+        sessionID,
+        preparedGeneration,
+        notice,
+      );
     },
     reject: (sessionID, preparedGeneration) => {
       if (preparedGeneration === undefined) return;

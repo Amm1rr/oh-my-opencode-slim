@@ -4,7 +4,12 @@ import {
   type BackgroundJobTerminalGate,
   createBackgroundJobTerminalGate,
 } from '../../utils/background-job-terminal-gate';
-import { SLIM_INTERNAL_INITIATOR_MARKER } from '../../utils/internal-initiator';
+import {
+  createInternalAgentTextPart,
+  isInternalInitiatorPart,
+  isNativeBackgroundTaskNotification,
+  SLIM_INTERNAL_INITIATOR_MARKER,
+} from '../../utils/internal-initiator';
 import * as loggerModule from '../../utils/logger';
 import * as opencodeClient from '../../utils/opencode-client';
 import { createRevivedRunTracker } from './revived-run-tracker';
@@ -163,6 +168,92 @@ afterEach(() => {
 });
 
 describe('revived run tracker', () => {
+  test('confirmed fallback admission sends one queued internal continuation notice', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(0);
+    const h = createHarness(
+      completedTranscript(() => false),
+      undefined,
+      true,
+    );
+    const notice = { from: 'test/a', to: 'test/b', error: 'rate limit' };
+    h.tracker.prepareObservation({ ...h.run, baselineMessageID: 'baseline' });
+    expect(
+      h.tracker.admitObservation(h.run.taskID, h.run.generation, notice),
+    ).toBe(true);
+    await flushNotify();
+    expect(h.prompt).toHaveBeenCalledTimes(1);
+    const part = createInternalAgentTextPart(
+      [
+        '<task id="ses_child" state="running">',
+        '<summary>Background task continues on a fallback model: inspect the change</summary>',
+        '<task_fallback>',
+        'test/a failed: rate limit',
+        'Continuing on test/b. Do not revive or cancel; wait for the result.',
+        '</task_fallback>',
+        '</task>',
+      ].join('\n'),
+    );
+    expect(h.prompt.mock.calls[0]?.[0]).toMatchObject({
+      path: { id: 'parent' },
+      delivery: 'queue',
+      modelSelection: 'inherit',
+      body: { agent: 'orchestrator', parts: [part] },
+    });
+    expect(isInternalInitiatorPart(part)).toBe(true);
+    expect(isNativeBackgroundTaskNotification(part)).toBe(false);
+    expect(h.board.get(h.run.taskID)).toMatchObject({
+      state: 'running',
+      terminalRevision: 0,
+    });
+    expect(h.settled).not.toHaveBeenCalled();
+    expect(
+      h.tracker.admitObservation(h.run.taskID, h.run.generation, notice),
+    ).toBe(false);
+    await flushNotify();
+    expect(h.prompt).toHaveBeenCalledTimes(1);
+    h.tracker.dispose();
+  });
+
+  test('terminal result waits for the pending fallback notice transport', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(0);
+    let resultReady = false;
+    let release!: (value: unknown) => void;
+    const h = createHarness(completedTranscript(() => resultReady));
+    h.prompt.mockImplementationOnce(
+      () =>
+        new Promise((done) => {
+          release = done;
+        }),
+    );
+    h.tracker.prepareObservation({ ...h.run, baselineMessageID: 'baseline' });
+    h.tracker.admitObservation(h.run.taskID, h.run.generation, {
+      from: 'test/a',
+      to: 'test/b',
+      error: 'rate limit',
+    });
+    await flushNotify();
+    resultReady = true;
+    jest.setSystemTime(10);
+    await h.tracker.probe(h.run.taskID, h.run.generation);
+    await flushNotify();
+    expect(h.prompt).toHaveBeenCalledTimes(1);
+    expect(h.prompt.mock.calls[0]?.[0].body.parts[0].text).toContain(
+      '<task_fallback>',
+    );
+    release({});
+    await flushNotify();
+    expect(h.prompt).toHaveBeenCalledTimes(2);
+    expect(h.prompt.mock.calls[1]?.[0].body.parts[0].text).toContain(
+      '<task_result>\nnew result\n</task_result>',
+    );
+    await h.tracker.probe(h.run.taskID, h.run.generation);
+    await flushNotify();
+    expect(h.prompt).toHaveBeenCalledTimes(2);
+    h.tracker.dispose();
+  });
+
   test('admitted fallback is flagged until external registration replaces it', () => {
     const h = createHarness(completedTranscript(() => false));
     const input = {

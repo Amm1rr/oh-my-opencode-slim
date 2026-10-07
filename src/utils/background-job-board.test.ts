@@ -10,35 +10,6 @@ import { BackgroundJobCoordinator } from './background-job-coordinator';
 import { BackgroundJobBoard } from './background-job-fixture';
 
 describe('BackgroundJobBoard', () => {
-  test('labels only active fallback jobs and restores the unchanged board when released', () => {
-    let active = false;
-    const board = new BackgroundJobBoard({
-      isFallbackActive: (taskID) => active && taskID === 'ses_1',
-    });
-    board.registerLaunch({
-      taskID: 'ses_1',
-      parentSessionID: 'parent-1',
-      agent: 'fixer',
-      background: true,
-    });
-    const original = board.formatForPrompt('parent-1');
-    active = true;
-    const fallback = board.formatForPrompt('parent-1');
-    expect(fallback).toContain(
-      'fix-1 / ses_1 / fixer / running [model fallback]',
-    );
-    expect(fallback).not.toContain('status uncertain');
-    expect(board.formatForPrompt('parent-1', Date.now() + 1000)).toBe(fallback);
-    active = false;
-    expect(board.formatForPrompt('parent-1')).toBe(original);
-    active = true;
-    board.updateStatus({
-      taskID: 'ses_1',
-      state: 'completed',
-      resultSummary: 'done',
-    });
-    expect(board.formatForPrompt('parent-1')).not.toContain('[model fallback]');
-  });
   test('T-B: silent adoption does not outrank known F2 sessions', () => {
     const clock = spyOn(Date, 'now').mockReturnValue(1000);
     const board = new BackgroundJobBoard({ maxReusablePerAgent: 2 });

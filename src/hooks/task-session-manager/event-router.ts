@@ -46,7 +46,7 @@ type BackgroundJobRecord = NonNullable<ReturnType<BackgroundJobStore['get']>>;
  * diagnostics). Plain `{ message }` shapes are still honored for
  * non-NamedError payloads.
  */
-function structuredErrorMessage(error: unknown): string | undefined {
+export function structuredErrorMessage(error: unknown): string | undefined {
   if (!isRecord(error)) return undefined;
   const data = error.data;
   if (isRecord(data)) {

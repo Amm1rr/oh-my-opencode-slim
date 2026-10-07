@@ -35,7 +35,13 @@ import {
   withTimeout,
 } from '../../utils/session';
 import type { SessionLifecycle } from '../session-lifecycle';
+import { structuredErrorMessage } from '../task-session-manager/event-router';
+import type { createBackgroundFallbackHandoff } from '../task-session-manager/fallback-observation-transfer';
 import { isReplayableUserMessage, partsFromReplayMessage } from '../types';
+
+type BackgroundFallbackHandoff = ReturnType<
+  typeof createBackgroundFallbackHandoff
+>;
 
 // ---------------------------------------------------------------------------
 // Retryable error detection
@@ -520,19 +526,7 @@ export class ForegroundFallbackManager {
    *  is already persisted (false-stop incident). The pre-await generation
    *  fences relaunches: a generation change during the admission must not
    *  enroll the new run under the stale attempt's baseline. */
-  private readonly backgroundFallbackHandoff?: {
-    prepare: (
-      sessionID: string,
-      preparedGeneration: number | undefined,
-      baselineMessageID: string | undefined,
-    ) => boolean;
-    admit: (sessionID: string, preparedGeneration: number | undefined) => void;
-    reject: (sessionID: string, preparedGeneration: number | undefined) => void;
-    settleUnresolved: (
-      sessionID: string,
-      preparedGeneration: number | undefined,
-    ) => void;
-  };
+  private readonly backgroundFallbackHandoff?: BackgroundFallbackHandoff;
   /** Synchronous board read returning the tracked generation for a
    *  confirmed BACKGROUND child only — undefined for foreground or
    *  unmanaged sessions (that undefined means "handoff not
@@ -849,25 +843,7 @@ export class ForegroundFallbackManager {
      *  baseline from the same transcript read that produced the replay);
      *  admit() converts it into a tracked run once the host accepts the
      *  re-prompt; reject() withdraws it on any non-admitted outcome. */
-    backgroundFallbackHandoff?: {
-      prepare: (
-        sessionID: string,
-        preparedGeneration: number | undefined,
-        baselineMessageID: string | undefined,
-      ) => boolean;
-      admit: (
-        sessionID: string,
-        preparedGeneration: number | undefined,
-      ) => void;
-      reject: (
-        sessionID: string,
-        preparedGeneration: number | undefined,
-      ) => void;
-      settleUnresolved: (
-        sessionID: string,
-        preparedGeneration: number | undefined,
-      ) => void;
-    },
+    backgroundFallbackHandoff?: BackgroundFallbackHandoff,
     /** Synchronous board read returning the tracked generation for a
      *  confirmed BACKGROUND child only (undefined = foreground or
      *  unmanaged — the handoff is not applicable, never a wildcard).
@@ -1583,7 +1559,7 @@ export class ForegroundFallbackManager {
       }
 
       if (!this.isCurrentTurn(sessionID, epoch)) return;
-      await this.execFallback(sessionID, error, epoch);
+      await this.execFallback(sessionID, error, epoch, true);
       if (this.isCurrentTurn(sessionID, epoch)) {
         this.lastFallbackTime.set(sessionID, Date.now());
       }
@@ -1866,6 +1842,7 @@ export class ForegroundFallbackManager {
     sessionID: string,
     error?: unknown,
     expectedEpoch = this.turnEpoch.get(sessionID) ?? 0,
+    announce = false,
   ): Promise<void> {
     // Reload fence at entry: execFallback is reached after suspension
     // points in the tryFallback* callers; a disposed generation must not
@@ -2169,7 +2146,17 @@ export class ForegroundFallbackManager {
       // probe) so the substituted run's result is observed and
       // delivered to the parent.
       if (handoffArmed) {
-        this.backgroundFallbackHandoff?.admit(sessionID, preparedGeneration);
+        this.backgroundFallbackHandoff?.admit(
+          sessionID,
+          preparedGeneration,
+          announce
+            ? {
+                from: currentModel,
+                to: deliveredWithoutSwitch ? currentModel : nextModel,
+                error: structuredErrorMessage(error) ?? 'Session error',
+              }
+            : undefined,
+        );
       }
       if (deliveredWithoutSwitch) return;
       log('[foreground-fallback] switched to fallback model', {

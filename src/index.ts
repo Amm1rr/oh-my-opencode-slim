@@ -840,11 +840,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       readContextMinLines: runtime.backgroundJobs.readContextMinLines,
       readContextMaxFiles: runtime.backgroundJobs.readContextMaxFiles,
       delegationTool: delegation.tool,
-      isFallbackActive: (taskID, generation) =>
-        isFallbackPending(taskID) ||
-        (revivedRunTracker?.isObservationPending(taskID, generation) ??
-          false) ||
-        (revivedRunTracker?.isFallbackRun(taskID, generation) ?? false),
       deferNumberedAliases: true,
       // Terminal-session GC (#1387 P2): when a retention trim evicts a
       // terminal or retained-stopped record, remove the underlying host
