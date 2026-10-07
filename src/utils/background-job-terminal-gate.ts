@@ -1134,7 +1134,10 @@ export function createBackgroundJobTerminalGate(options: {
           `Foreground task ended with state ${guarded.state}.`,
       );
     }
-    const stable = now() - (value.quiescentSince ?? now()) >= graceMs;
+    const stable =
+      now() -
+        Math.max(value.quiescentSince ?? now(), token.attemptStartedAt ?? 0) >=
+      graceMs;
     // Stop-family host outcomes are not failures: the host stopped the
     // run (user interrupt/abort) without a plugin-verified cancel
     // lease — the same stop policy as the absent-evidence branch below.

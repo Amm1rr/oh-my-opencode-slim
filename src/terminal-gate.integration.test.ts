@@ -283,7 +283,7 @@ async function assembly(
 }
 
 type Assembly = Awaited<ReturnType<typeof assembly>>;
-async function fallbackAssembly(hostFlavor?: string) {
+async function fallbackAssembly(hostFlavor?: string, delayMs = 2000) {
   jest.useFakeTimers();
   jest.setSystemTime(1_000_000);
   cleanups.push(async () => jest.useRealTimers());
@@ -293,7 +293,7 @@ async function fallbackAssembly(hostFlavor?: string) {
       agents: {
         explorer: { model: ['test/primary', 'test/fallback'] },
       },
-      fallback: { initialRetryDelayMs: 2000 },
+      fallback: { initialRetryDelayMs: delayMs },
     },
   });
   await h.begin();
@@ -356,7 +356,29 @@ test('fallback initial delay cannot replay a cancelled background child', async 
 });
 
 test('terminal failover during a retry-armed delay waits for replay, notice and one result', async () => {
-  const h = await fallbackAssembly();
+  const h = await fallbackAssembly(undefined, 8000);
+  const prompts = () =>
+    h.promptAsync.mock.calls.map(
+      ([call]) =>
+        call as {
+          path: { id: string };
+          body: { messageID: string; parts: { text: string }[] };
+        },
+    );
+  h.promptAsync.mockImplementation(async (call: unknown) => {
+    const { path, body } = call as ReturnType<typeof prompts>[number];
+    if (path.id === 'child') {
+      setTimeout(() => {
+        h.history.push({
+          info: { id: body.messageID, role: 'user' },
+          parts: body.parts,
+        });
+        h.setBusy(true);
+        void h.busySignal();
+      }, 50);
+    }
+    return {};
+  });
   h.history.pop();
   for (let attempt = 1; attempt <= 4; attempt++) {
     await h.event('session.status', {
@@ -385,30 +407,19 @@ test('terminal failover during a retry-armed delay waits for replay, notice and 
   await h.idle();
   await h.runtime.reconcile();
   expect(h.board.get('child')?.state).toBe('running');
-  await h.advance(2000);
-  const prompts = () =>
-    h.promptAsync.mock.calls.map(
-      ([call]) =>
-        call as {
-          path: { id: string };
-          body: { messageID: string; parts: { text: string }[] };
-        },
-    );
+  await h.advance(8000);
   expect(prompts().map(({ path }) => path.id)).toEqual(['child', 'parent']);
   expect(prompts()[1].body.parts[0].text).toContain('<task_fallback>');
-  const replay = prompts()[0].body;
-  h.setBusy(true);
-  await h.busySignal();
-  h.history.push(
-    { info: { id: replay.messageID, role: 'user' }, parts: replay.parts },
-    ...transcript().data,
-  );
+  await h.advance(50);
+  h.history.push(...transcript().data);
   h.setBusy(false);
   await h.idle();
   await h.runtime.reconcile();
   await flush();
   expect(h.board.get('child')?.state).toBe('completed');
+  expect(h.board.get('child')?.terminalRevision).toBe(1);
   expect(prompts()).toHaveLength(3);
+  expect(prompts().filter(({ path }) => path.id === 'parent')).toHaveLength(2);
   expect(prompts()[2].path.id).toBe('parent');
   expect(prompts()[2].body.parts[0].text).toContain(
     '<task_result>\nconfirmed result\n</task_result>',
