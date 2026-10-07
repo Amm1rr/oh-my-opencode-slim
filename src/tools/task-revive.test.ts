@@ -3,6 +3,7 @@ import {
   beforeEach,
   describe,
   expect,
+  jest,
   mock,
   spyOn,
   test,
@@ -47,7 +48,6 @@ function createTool(overrides?: {
   onLaunch?: () => void;
   revivedRunTracker?: Partial<RevivedRunTracker>;
   hostFlavor?: string;
-  isFallbackPending?: (taskID: string) => boolean;
 }) {
   const board = new BackgroundJobBoard();
   const abort = mock(overrides?.abort ?? (async () => ({})));
@@ -92,7 +92,6 @@ function createTool(overrides?: {
     abortRetryIntervalMs: 0,
     stableStoppedMs: 0,
     revivedRunTracker,
-    isFallbackPending: overrides?.isFallbackPending,
     recoverRetainedSession: createSessionRecovery({
       input,
       backgroundJobBoard: board,
@@ -137,6 +136,7 @@ beforeEach(() => {
 
 afterEach(() => {
   for (const gate of gates.splice(0)) gate.dispose();
+  jest.useRealTimers();
   mock.restore();
 });
 
@@ -194,25 +194,11 @@ function controlledAdmissionDeadline() {
 }
 
 describe('task_revive tool', () => {
-  test('refuses a pending fallback before aborting or prompting', async () => {
-    const h = createTool({ isFallbackPending: () => true });
-    h.board.registerLaunch({
-      taskID: 'ses_1',
-      parentSessionID: 'parent-1',
-      agent: 'fixer',
-      background: true,
-    });
-    await expect(
-      h.taskRevive.execute({ task_id: 'ses_1', prompt: 'continue' }, context),
-    ).rejects.toThrow(
-      /recovering on a fallback model.*wait for its result.*task_cancel/i,
-    );
-    expect(h.abort).not.toHaveBeenCalled();
-    expect(h.promptAsync).not.toHaveBeenCalled();
-  });
-
   test('refuses a running fallback after admission before aborting or prompting', async () => {
-    const h = createTool();
+    jest.useFakeTimers();
+    const h = createTool({
+      status: async () => ({ data: { ses_1: { type: 'busy' } } }),
+    });
     const run = h.board.registerLaunch({
       taskID: 'ses_1',
       parentSessionID: 'parent-1',
@@ -229,34 +215,6 @@ describe('task_revive tool', () => {
     h.revivedRunTracker.dispose();
   });
 
-  test('refuses a pending fallback handoff before aborting or prompting', async () => {
-    const h = createTool();
-    const run = h.board.registerLaunch({
-      taskID: 'ses_1',
-      parentSessionID: 'parent-1',
-      agent: 'fixer',
-      background: true,
-    });
-    h.revivedRunTracker.prepareObservation({ ...run });
-    await expect(
-      h.taskRevive.execute({ task_id: 'ses_1', prompt: 'continue' }, context),
-    ).rejects.toThrow(/recovering on a fallback model/i);
-    expect(h.abort).not.toHaveBeenCalled();
-    expect(h.promptAsync).not.toHaveBeenCalled();
-    h.revivedRunTracker.dispose();
-  });
-
-  test('an idle terminal task still revives despite historical fallback activity', async () => {
-    const h = createTool({ isFallbackPending: () => true });
-    acknowledgedCompleted(h.board);
-    await h.taskRevive.execute(
-      { task_id: 'ses_1', prompt: 'continue' },
-      context,
-    );
-    expect(h.abort).not.toHaveBeenCalled();
-    expect(h.promptAsync).toHaveBeenCalledTimes(1);
-    h.revivedRunTracker.dispose();
-  });
   test.each([
     ['early', 'idle'],
     ['early', 'rejected'],

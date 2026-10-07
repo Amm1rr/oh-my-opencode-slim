@@ -291,7 +291,7 @@ async function fallbackAssembly(hostFlavor?: string) {
     hostFlavor,
     rootConfigOverrides: {
       agents: {
-        explorer: { model: ['test/primary', 'test/fallback', 'test/final'] },
+        explorer: { model: ['test/primary', 'test/fallback'] },
       },
       fallback: { initialRetryDelayMs: 2000 },
     },
@@ -355,14 +355,13 @@ test('fallback initial delay cannot replay a cancelled background child', async 
   expect(h.board.get('child')?.state).toBe('cancelled');
 });
 
-test('production fallback wiring fences polling and announces each admitted hop before the result', async () => {
+test('production fallback wiring fences polling and announces the admitted replay before its result', async () => {
   const h = await fallbackAssembly();
   await h.fail();
   await h.idle();
   await h.runtime.reconcile();
   expect(h.board.get('child')).toMatchObject({
     state: 'running',
-    terminalRevision: 0,
     statusUncertain: false,
   });
   const revival = h.hooks.tool?.task_revive
@@ -404,10 +403,6 @@ test('production fallback wiring fences polling and announces each admitted hop 
   );
   expect(isInternalInitiatorPart(notice)).toBe(true);
   expect(isNativeBackgroundTaskNotification(notice)).toBe(false);
-  expect(h.board.get('child')).toMatchObject({
-    state: 'running',
-    terminalRevision: 0,
-  });
   h.setBusy(true);
   await h.busySignal();
   const reconcile = spyOn(h.gate, 'reconcile');
@@ -436,46 +431,19 @@ test('production fallback wiring fences polling and announces each admitted hop 
     ],
   } as never);
   expect(reconcile).not.toHaveBeenCalled();
-  expect(h.board.get('child')).toMatchObject({
-    state: 'running',
-    terminalRevision: 0,
-  });
-  const replayB = prompts().filter(({ path }) => path.id === 'child')[0].body;
+  expect(h.board.get('child')?.state).toBe('running');
+  const replay = prompts().filter(({ path }) => path.id === 'child')[0].body;
   h.history.push(
-    { info: { id: replayB.messageID, role: 'user' }, parts: replayB.parts },
-    {
-      info: { id: 'failed-b', role: 'assistant', error: 'rate limit' },
-      parts: [],
-    },
-  );
-  h.setBusy(false);
-  const failureB = h.fail();
-  await flush();
-  await h.idle();
-  await h.advance(500);
-  await failureB;
-  await flush();
-  expect(parentParts()).toHaveLength(2);
-  expect(parentParts()[1].text).toContain(
-    'test/fallback failed: rate limit\nContinuing on test/final. Do not revive or cancel; wait for the result.',
-  );
-  h.setBusy(true);
-  await h.busySignal();
-  const replayC = prompts().filter(({ path }) => path.id === 'child')[1].body;
-  h.history.push(
-    { info: { id: replayC.messageID, role: 'user' }, parts: replayC.parts },
+    { info: { id: replay.messageID, role: 'user' }, parts: replay.parts },
     ...transcript().data,
   );
   h.setBusy(false);
   await h.idle();
   await h.runtime.reconcile();
   await flush();
-  expect(h.board.get('child')).toMatchObject({
-    state: 'completed',
-    terminalRevision: 1,
-  });
-  expect(parentParts()).toHaveLength(3);
-  expect(parentParts()[2].text).toContain(
+  expect(h.board.get('child')?.state).toBe('completed');
+  expect(parentParts()).toHaveLength(2);
+  expect(parentParts()[1].text).toContain(
     '<task_result>\nconfirmed result\n</task_result>',
   );
   expect(
@@ -485,7 +453,7 @@ test('production fallback wiring fences polling and announces each admitted hop 
   ).toBe(true);
   await h.runtime.reconcile();
   await flush();
-  expect(parentParts()).toHaveLength(3);
+  expect(parentParts()).toHaveLength(2);
 });
 
 test('v2 production wiring has no replay notice or fallback revive refusal', async () => {

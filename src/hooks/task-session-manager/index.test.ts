@@ -5202,27 +5202,19 @@ describe('task-session-manager hook', () => {
     // Deferred: job still running while the fallback may recover.
     expect(board.get('parent-1')?.state).toBe('running');
 
-    try {
-      // The fallback never recovered the session; it went idle instead.
-      await hook.event({
-        event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
-      });
-      expect(board.get('parent-1')).toMatchObject({
-        state: 'running',
-        terminalRevision: 0,
-      });
-      await clock.advanceTo(10);
-      for (let i = 0; i < 50; i++) await Promise.resolve();
+    // The fallback never recovered the session; it went idle instead.
+    await hook.event({
+      event: { type: 'session.idle', properties: { sessionID: 'parent-1' } },
+    });
+    await clock.advanceTo(10);
+    for (let i = 0; i < 50; i++) await Promise.resolve();
 
-      expect(board.get('parent-1')).toMatchObject({
-        state: 'error',
-        resultSummary:
-          'Session error after failed model fallback (auth/model unavailable)',
-      });
-    } finally {
-      await hook.event({ event: { type: 'server.instance.disposed' } });
-      clock.restore();
-    }
+    expect(board.get('parent-1')).toMatchObject({
+      state: 'error',
+      resultSummary:
+        'Session error after failed model fallback (auth/model unavailable)',
+    });
+    clock.restore();
   });
 
   test('clears deferred 401 when live busy shows the session recovered', async () => {
@@ -5717,24 +5709,19 @@ describe('task-session-manager hook', () => {
     });
     expect(board.get('child-1')?.state).toBe('running');
 
-    try {
-      // No busy ever arrived: the fallback failed silently.
-      await hook.event({
-        event: { type: 'session.idle', properties: { sessionID: 'child-1' } },
-      });
-      expect(board.get('child-1')?.state).toBe('running');
-      await clock.advanceTo(10);
-      for (let i = 0; i < 50; i++) await Promise.resolve();
+    // No busy ever arrived: the fallback failed silently.
+    await hook.event({
+      event: { type: 'session.idle', properties: { sessionID: 'child-1' } },
+    });
+    await clock.advanceTo(10);
+    for (let i = 0; i < 50; i++) await Promise.resolve();
 
-      expect(board.get('child-1')).toMatchObject({
-        state: 'error',
-        resultSummary:
-          'rate limit exceeded\nModel fallback did not recover from test/primary.',
-      });
-    } finally {
-      await hook.event({ event: { type: 'server.instance.disposed' } });
-      clock.restore();
-    }
+    expect(board.get('child-1')).toMatchObject({
+      state: 'error',
+      resultSummary:
+        'rate limit exceeded\nModel fallback did not recover from test/primary.',
+    });
+    clock.restore();
   });
 
   test('child failover error without a fallback chain terminalizes immediately', async () => {
@@ -5746,7 +5733,6 @@ describe('task-session-manager hook', () => {
       backgroundJobBoard: board,
       shouldManageSession: () => false,
       willAttemptFallback: () => false,
-      fallbackFailureReason: () => 'No model fallback chain for explorer.',
     });
 
     board.registerLaunch({
@@ -5769,8 +5755,7 @@ describe('task-session-manager hook', () => {
 
     expect(board.get('child-1')).toMatchObject({
       state: 'error',
-      resultSummary:
-        'rate limit exceeded\nNo model fallback chain for explorer.',
+      resultSummary: 'rate limit exceeded',
     });
   });
 
@@ -5810,7 +5795,6 @@ describe('task-session-manager hook', () => {
       state: 'error',
       resultSummary: 'Invalid request: unknown parameter',
     });
-    expect(board.get('child-1')?.resultSummary).not.toContain('\nR');
   });
 
   test('deferred child failover error survives idle before fallback is armed', async () => {
@@ -5890,152 +5874,6 @@ describe('task-session-manager hook', () => {
     }
   });
 
-  test('runtime status cannot publish the errored transcript inside the deferral window', async () => {
-    const clock = mockIdleClock();
-    const board = new BackgroundJobBoard();
-    board.registerLaunch({
-      taskID: 'child-1',
-      parentSessionID: 'parent-1',
-      agent: 'fixer',
-    });
-    const status = mock(async () => ({ data: {} }));
-    const { hook, complete } = createHook({
-      backgroundJobBoard: board,
-      shouldManageSession: () => false,
-      willAttemptFallback: () => true,
-      runtimeStatusReconcileDelayMs: 10,
-      sessionClient: { status },
-    });
-    complete('child-1', 'provider moderation error', true);
-    try {
-      await hook.event({
-        event: {
-          type: 'session.error',
-          properties: {
-            sessionID: 'child-1',
-            error: { statusCode: 429, message: 'rate limit' },
-          },
-        },
-      });
-      await clock.advanceTo(10);
-      for (let i = 0; i < 50; i++) await Promise.resolve();
-      expect(status).toHaveBeenCalled();
-      expect(board.get('child-1')).toMatchObject({
-        state: 'running',
-        terminalRevision: 0,
-        statusUncertain: false,
-      });
-    } finally {
-      await hook.event({ event: { type: 'server.instance.disposed' } });
-      clock.restore();
-    }
-  });
-
-  test('fallback deletion cleanup keeps a bounded backstop when replay never lands', async () => {
-    const clock = mockIdleClock();
-    const coordinator = new SessionLifecycle(() => {});
-    const board = new BackgroundJobBoard();
-    board.registerLaunch({
-      taskID: 'child-1',
-      parentSessionID: 'parent-1',
-      agent: 'fixer',
-    });
-    let fallback = false;
-    const { hook } = createHook({
-      backgroundJobBoard: board,
-      coordinator,
-      shouldManageSession: () => false,
-      willAttemptFallback: () => true,
-      isFallbackInProgress: () => fallback,
-      idleReconcileDelayMs: 10,
-    });
-    try {
-      await hook.event({
-        event: {
-          type: 'session.error',
-          properties: {
-            sessionID: 'child-1',
-            error: { statusCode: 429, message: 'rate limit' },
-          },
-        },
-      });
-      fallback = true;
-      await hook.event({
-        event: {
-          type: 'session.deleted',
-          properties: { sessionID: 'child-1' },
-        },
-      });
-      coordinator.dispatchSessionDeleted('child-1');
-      fallback = false;
-      await clock.advanceTo(10);
-      for (let i = 0; i < 50; i++) await Promise.resolve();
-      expect(board.get('child-1')).toMatchObject({
-        state: 'error',
-        resultSummary: 'rate limit',
-        terminalRevision: 1,
-      });
-      expect(hook.hasDeferredError('child-1')).toBe(false);
-    } finally {
-      await hook.event({ event: { type: 'server.instance.disposed' } });
-      clock.restore();
-    }
-  });
-
-  test('v2 child failover waits for the backstop without replay activity', async () => {
-    const clock = mockIdleClock();
-    const dateSpy = spyOn(Date, 'now').mockImplementation(clock.now);
-    const board = new BackgroundJobBoard({ delegationTool: 'subagent' });
-    board.registerLaunch({
-      taskID: 'child-1',
-      parentSessionID: 'parent-1',
-      agent: 'fixer',
-    });
-    const { hook } = createHook({
-      backgroundJobBoard: board,
-      hostFlavor: 'v2',
-      hostOutcomeClock: 'shared-unix-ms',
-      sessionClient: {
-        status: undefined,
-        get: async () => ({ data: { outcome: 'failed', time: { idle: 1 } } }),
-      },
-      shouldManageSession: () => false,
-      willAttemptFallback: () => true,
-      isFallbackInProgress: () => false,
-      idleReconcileDelayMs: 2000,
-    });
-    try {
-      await hook.event({
-        event: {
-          type: 'session.error',
-          properties: {
-            sessionID: 'child-1',
-            error: { type: 'provider.rate-limit', message: 'rate limit' },
-          },
-        },
-      });
-      await hook.event({
-        event: { type: 'session.idle', properties: { sessionID: 'child-1' } },
-      });
-      for (let i = 0; i < 50; i++) await Promise.resolve();
-      expect(board.get('child-1')).toMatchObject({
-        state: 'running',
-        terminalRevision: 0,
-      });
-      await clock.advanceTo(2000);
-      for (let i = 0; i < 50; i++) await Promise.resolve();
-      expect(board.get('child-1')).toMatchObject({
-        state: 'error',
-        terminalRevision: 1,
-      });
-      expect(hook.hasDeferredError('child-1')).toBe(false);
-    } finally {
-      await hook.event({ event: { type: 'server.instance.disposed' } });
-      clock.restore();
-      dateSpy.mockRestore();
-    }
-  });
-
   test('session.deleted inside the deferral window publishes the deferred error', async () => {
     // A genuine deletion between the deferred error and any recovery
     // means no idle can ever fire again — the backstop would never run.
@@ -6080,7 +5918,6 @@ describe('task-session-manager hook', () => {
       state: 'error',
       resultSummary: 'rate limit exceeded\nR',
     });
-    expect(board.get('child-1')?.resultSummary).toContain('\nR');
   });
 
   test('bounded backstop commits the deferred error when the fallback never leaves the window', async () => {

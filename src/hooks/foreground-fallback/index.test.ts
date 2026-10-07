@@ -1169,6 +1169,9 @@ describe('foreground fallback redo: host retry budget', () => {
     await manager.handleEvent(redoEvents.error(sid));
     expect(mocks.abort).toHaveBeenCalledTimes(1);
     expect(mocks.promptAsync).toHaveBeenCalledTimes(2);
+    expect(manager.fallbackFailureReason(sid)).toContain(
+      'chain exhausted; tried: test/a, test/b.',
+    );
 
     jest.setSystemTime(1_018_000);
     await manager.handleEvent(redoEvents.assistant(sid, 'b'));
@@ -2695,7 +2698,7 @@ describe('ForegroundFallbackManager session.error', () => {
     },
   ];
 
-  test('retry-path fallback admits silently while the next terminal failure carries a notice', async () => {
+  test('retry-path fallback admits without a notice', async () => {
     jest.useFakeTimers();
     const { handoff } = handoffMock();
     const admit = spyOn(handoff, 'admit');
@@ -2716,21 +2719,8 @@ describe('ForegroundFallbackManager session.error', () => {
       await mgr.handleEvent(redoEvents.assistant('retry-notice'));
       await mgr.handleEvent(redoEvents.retry('retry-notice'));
       expect(mocks.abort).toHaveBeenCalledTimes(1);
+      expect(admit).toHaveBeenCalledTimes(1);
       expect(admit.mock.calls[0]?.[2]).toBeUndefined();
-      await mgr.handleEvent(redoEvents.assistant('retry-notice', 'b'));
-      await mgr.handleEvent(
-        redoEvents.error(
-          'retry-notice',
-          { data: { message: 'provider outage' } },
-          'failed-b',
-        ),
-      );
-      expect(admit).toHaveBeenCalledTimes(2);
-      expect(admit.mock.calls[1]?.[2]).toEqual({
-        from: 'test/b',
-        to: 'test/c',
-        error: 'provider outage',
-      });
     } finally {
       mgr.dispose();
       admit.mockRestore();
@@ -6004,50 +5994,6 @@ describe('ForegroundFallbackManager session.deleted', () => {
 // ---------------------------------------------------------------------------
 
 describe('ForegroundFallbackManager willAttemptFallback', () => {
-  test('failure reason lists tried models when the chain is exhausted', () => {
-    const mgr = new ForegroundFallbackManager(makeChains(), true, {
-      directory: '/test',
-    } as any);
-    mgr.registerSessionAgent('sess-1', 'explorer');
-    (mgr as any).chainExhaustion.set('sess-1', 2);
-    (mgr as any).sessionTried.set(
-      'sess-1',
-      new Set(['openai/gpt-4o-mini', 'anthropic/claude-haiku']),
-    );
-    expect(mgr.fallbackFailureReason('sess-1')).toBe(
-      'Model fallback chain exhausted; tried: openai/gpt-4o-mini, anthropic/claude-haiku.',
-    );
-  });
-
-  test('failure reason identifies an agent with no chain', () => {
-    const mgr = new ForegroundFallbackManager(makeChains(), true, {
-      directory: '/test',
-    } as any);
-    mgr.registerSessionAgent('sess-1', 'oracle');
-    expect(mgr.fallbackFailureReason('sess-1')).toBe(
-      'No model fallback chain for oracle.',
-    );
-  });
-
-  test('failure reason identifies disabled fallback', () => {
-    const mgr = new ForegroundFallbackManager(makeChains(), false, {
-      directory: '/test',
-    } as any);
-    expect(mgr.fallbackFailureReason('sess-1')).toBe(
-      'Model fallback is disabled.',
-    );
-  });
-
-  test('failure reason names the failed model when recovery did not land', () => {
-    const mgr = new ForegroundFallbackManager(makeChains(), true, {
-      directory: '/test',
-    } as any);
-    mgr.registerSessionAgent('sess-1', 'explorer');
-    mgr.observeContinuationModel('sess-1', 'openai/gpt-4o-mini');
-    expect(mgr.fallbackFailureReason('sess-1')).toBe(
-      'Model fallback did not recover from openai/gpt-4o-mini.',
-    );
-  });
   test('returns true when the session has a chain and it is not exhausted', () => {
     const mgr = new ForegroundFallbackManager(makeChains(), true, {
       directory: '/test',

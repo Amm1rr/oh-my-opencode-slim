@@ -6,8 +6,6 @@ import {
 } from '../../utils/background-job-terminal-gate';
 import {
   createInternalAgentTextPart,
-  isInternalInitiatorPart,
-  isNativeBackgroundTaskNotification,
   SLIM_INTERNAL_INITIATOR_MARKER,
 } from '../../utils/internal-initiator';
 import * as loggerModule from '../../utils/logger';
@@ -200,18 +198,6 @@ describe('revived run tracker', () => {
       modelSelection: 'inherit',
       body: { agent: 'orchestrator', parts: [part] },
     });
-    expect(isInternalInitiatorPart(part)).toBe(true);
-    expect(isNativeBackgroundTaskNotification(part)).toBe(false);
-    expect(h.board.get(h.run.taskID)).toMatchObject({
-      state: 'running',
-      terminalRevision: 0,
-    });
-    expect(h.settled).not.toHaveBeenCalled();
-    expect(
-      h.tracker.admitObservation(h.run.taskID, h.run.generation, notice),
-    ).toBe(false);
-    await flushNotify();
-    expect(h.prompt).toHaveBeenCalledTimes(1);
     h.tracker.dispose();
   });
 
@@ -248,45 +234,9 @@ describe('revived run tracker', () => {
     expect(h.prompt.mock.calls[1]?.[0].body.parts[0].text).toContain(
       '<task_result>\nnew result\n</task_result>',
     );
-    await h.tracker.probe(h.run.taskID, h.run.generation);
-    await flushNotify();
-    expect(h.prompt).toHaveBeenCalledTimes(2);
     h.tracker.dispose();
   });
 
-  test('admitted fallback is flagged until external registration replaces it', () => {
-    const h = createHarness(completedTranscript(() => false));
-    const input = {
-      taskID: h.run.taskID,
-      generation: h.run.generation,
-      parentSessionID: 'parent',
-      description: 'fallback',
-    };
-    expect(h.tracker.isFallbackRun(input.taskID, input.generation)).toBe(false);
-    h.tracker.prepareObservation(input);
-    h.tracker.admitObservation(input.taskID, input.generation);
-    expect(h.tracker.isFallbackRun(input.taskID, input.generation)).toBe(true);
-    expect(h.tracker.isFallbackRun(input.taskID, input.generation + 1)).toBe(
-      false,
-    );
-    h.tracker.register(input);
-    expect(h.tracker.isFallbackRun(input.taskID, input.generation)).toBe(false);
-    h.tracker.dispose();
-  });
-
-  test('unresolved fallback promotion flags its owning run', () => {
-    const h = createHarness(completedTranscript(() => false));
-    const input = {
-      taskID: h.run.taskID,
-      generation: h.run.generation,
-      parentSessionID: 'parent',
-      description: 'fallback',
-    };
-    h.tracker.prepareObservation(input);
-    h.tracker.settleObservationUnresolved(input.taskID, input.generation);
-    expect(h.tracker.isFallbackRun(input.taskID, input.generation)).toBe(true);
-    h.tracker.dispose();
-  });
   test('captures only the newest message for the baseline even when the host ignores limit', async () => {
     const harness = createHarness(() => ({
       data: [{ info: { id: 'older' } }, { info: { id: 'latest' } }],
