@@ -286,7 +286,6 @@ async function assembly(
 type Assembly = Awaited<ReturnType<typeof assembly>>;
 async function fallbackAssembly(hostFlavor?: string, delayMs = 2000) {
   jest.useFakeTimers();
-  jest.setSystemTime(1_000_000);
   cleanups.push(async () => jest.useRealTimers());
   const h = await assembly(undefined, {
     hostFlavor,
