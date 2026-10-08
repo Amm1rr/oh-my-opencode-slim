@@ -3567,6 +3567,205 @@ describe('ForegroundFallbackManager message.updated', () => {
     expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
     expect((mgr as any).sessionModel.get(sessionID)).toBe('openai/gpt-4o');
   });
+
+  describe('unknown finish streak', () => {
+    beforeEach(() => {
+      jest.useFakeTimers();
+      jest.setSystemTime(1_015_000);
+    });
+    afterEach(() => jest.useRealTimers());
+
+    const info = {
+      id: 'msgUnknownFinish',
+      sessionID: 'sess-unknown-finish',
+      parentID: 'msgUser',
+      role: 'assistant',
+      agent: 'orchestrator',
+      providerID: 'anthropic',
+      modelID: 'claude-opus-4-5',
+      finish: 'unknown',
+      tokens: {
+        input: 30_000,
+        output: 0,
+        reasoning: 0,
+        cache: { read: 0, write: 0 },
+      },
+      time: { created: 1_000_000, completed: 1_015_000 },
+    };
+    const message = {
+      info,
+      parts: [
+        { type: 'step-start' },
+        {
+          type: 'reasoning',
+          text: '',
+          time: { start: info.time.created, end: info.time.completed },
+        },
+        { type: 'text', text: 'Gateway notice.' },
+        {
+          type: 'step-finish',
+          reason: 'unknown',
+          cost: 0,
+          tokens: info.tokens,
+        },
+      ].map((part, index) => ({
+        ...part,
+        id: `prtUnknown${index}`,
+        sessionID: info.sessionID,
+        messageID: info.id,
+      })),
+    };
+
+    async function update(
+      mgr: ForegroundFallbackManager,
+      mocks: ReturnType<typeof createMockClient>['mocks'],
+      id: string,
+      finish: 'unknown' | 'stop' = 'unknown',
+      parts: Array<{ type: string } & Record<string, unknown>> = message.parts,
+    ) {
+      const updatedInfo = { ...info, id, finish };
+      mocks.message.mockImplementation(async () => ({
+        data: {
+          info: updatedInfo,
+          parts: parts.map((part, index) => ({
+            ...part,
+            id: `prt${id}${index}`,
+            sessionID: info.sessionID,
+            messageID: id,
+            ...(part.type === 'step-finish' ? { reason: finish } : {}),
+          })),
+        },
+      }));
+      await mgr.handleEvent({
+        type: 'message.updated',
+        properties: { info: updatedInfo },
+      });
+    }
+
+    test('three distinct tool-free messages abort once and preserve retries', async () => {
+      const calls: string[] = [];
+      const { mocks } = createMockClient({
+        abortImpl: async () => {
+          calls.push('abort');
+          return { data: true };
+        },
+        promptAsyncImpl: async () => {
+          calls.push('replay');
+          return {};
+        },
+      });
+      const mgr = new ForegroundFallbackManager(makeChains(), true, {
+        directory: '/test',
+      } as never);
+      await mgr.handleEvent(redoEvents.retry(info.sessionID));
+      expect((mgr as any).sessionRetries.get(info.sessionID)).toBe(1);
+
+      await update(mgr, mocks, 'msgUnknown1');
+      await update(mgr, mocks, 'msgUnknown1');
+      expect(mocks.abort).not.toHaveBeenCalled();
+      expect(mocks.promptAsync).not.toHaveBeenCalled();
+      expect((mgr as any).sessionRetries.get(info.sessionID)).toBe(1);
+
+      jest.setSystemTime(1_030_000);
+      await update(mgr, mocks, 'msgUnknown2');
+      mocks.message.mockImplementation(async () => ({
+        error: { name: 'NotFoundError' },
+      }));
+      await mgr.handleEvent({
+        type: 'message.updated',
+        properties: { info: { ...info, id: 'msgUnreadable' } },
+      });
+      expect(mocks.abort).not.toHaveBeenCalled();
+      expect(mocks.promptAsync).not.toHaveBeenCalled();
+
+      jest.setSystemTime(1_045_000);
+      await update(mgr, mocks, 'msgUnknown3');
+      jest.setSystemTime(1_060_000);
+      await mgr.handleEvent({
+        type: 'message.updated',
+        properties: {
+          info: {
+            ...info,
+            id: 'msgUnknown4',
+            providerID: 'openai',
+            modelID: 'gpt-4o',
+          },
+        },
+      });
+
+      expect((mgr as any).sessionRetries.get(info.sessionID)).toBe(1);
+      expect(calls).toEqual(['abort', 'replay']);
+      expect(mocks.abort).toHaveBeenCalledTimes(1);
+      expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+      expect(mocks.message).toHaveBeenCalledWith({
+        path: { id: info.sessionID, messageID: 'msgUnknown3' },
+      });
+      expect(mocks.promptAsync.mock.calls[0]?.[0]).toMatchObject({
+        body: { model: { providerID: 'openai', modelID: 'gpt-4o' } },
+      });
+      expect(mgr.getActiveFallback(info.sessionID)).toEqual({
+        model: 'openai/gpt-4o',
+        downProviders: new Set(),
+      });
+      expect((mgr as any).sessionTried.get(info.sessionID)).toEqual(
+        new Set(['anthropic/claude-opus-4-5', 'openai/gpt-4o']),
+      );
+      expect((mgr as any).sessionModel.get(info.sessionID)).toBe(
+        'openai/gpt-4o',
+      );
+    });
+
+    test('a tool-bearing message breaks the streak', async () => {
+      const { mocks } = createMockClient();
+      const mgr = new ForegroundFallbackManager(makeChains(), true, {
+        directory: '/test',
+      } as never);
+
+      await update(mgr, mocks, 'msgUnknown0');
+      await update(mgr, mocks, 'msgUnknown1');
+      await update(mgr, mocks, 'msgUnknown2', 'unknown', [
+        ...message.parts.slice(0, -1),
+        {
+          type: 'tool',
+          callID: 'callUnknown',
+          tool: 'read',
+          state: {
+            status: 'completed',
+            input: { filePath: 'README.md' },
+            output: 'README',
+            title: 'README.md',
+            metadata: {},
+            time: { start: 1_002_000, end: 1_005_000 },
+          },
+        },
+        ...message.parts.slice(-1),
+      ]);
+      await update(mgr, mocks, 'msgUnknown3');
+
+      expect(mocks.abort).not.toHaveBeenCalled();
+      expect(mocks.promptAsync).not.toHaveBeenCalled();
+      expect(mgr.getActiveFallback(info.sessionID)).toBeUndefined();
+    });
+
+    test('a normal completed message breaks the streak', async () => {
+      const { mocks } = createMockClient();
+      const mgr = new ForegroundFallbackManager(makeChains(), true, {
+        directory: '/test',
+      } as never);
+
+      await update(mgr, mocks, 'msgUnknown1');
+      await update(mgr, mocks, 'msgUnknown2');
+      await update(mgr, mocks, 'msgStop', 'stop');
+      await update(mgr, mocks, 'msgUnknown3');
+      await update(mgr, mocks, 'msgUnknown4');
+      await mgr.handleEvent(redoEvents.user(info.sessionID, 'msgUser2'));
+      await update(mgr, mocks, 'msgUnknown5');
+
+      expect(mocks.abort).not.toHaveBeenCalled();
+      expect(mocks.promptAsync).not.toHaveBeenCalled();
+      expect(mgr.getActiveFallback(info.sessionID)).toBeUndefined();
+    });
+  });
 });
 
 describe('ForegroundFallbackManager v1 abort protection for live children', () => {

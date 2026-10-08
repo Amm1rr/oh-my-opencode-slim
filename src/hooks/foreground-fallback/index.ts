@@ -5,9 +5,9 @@
  * event containing a transient error (rate-limit, 403/Forbidden, etc.), this
  * manager:
  *   1. Looks up the next untried model in the agent's configured chain
- *   2. Aborts the rate-limited prompt via client.session.abort() on the
- *      session.status retry path; session.error and message.updated paths
- *      re-prompt directly without abort.
+ *   2. Aborts host retry or unknown-finish loops via client.session.abort();
+ *      other session.error and message.updated paths re-prompt directly
+ *      without abort.
  *   3. Re-queues the last user message via client.session.promptAsync()
  *      with the new model - promptAsync returns immediately so we never
  *      block the event handler waiting for a full LLM response.
@@ -145,6 +145,7 @@ const REQUEST_ERROR_PATTERNS = [
   /flagged for possible cybersecurity risk/i,
   /rejected as a result of our safety system/i,
   /response was blocked by the provider's content filter/i,
+  /consecutive unknown assistant finishes without tool calls/i,
   /"1301"/,
   /potentially unsafe or sensitive content/i,
   /rejected because it was considered high risk/i,
@@ -174,6 +175,10 @@ const REQUEST_ERROR_PATTERNS = [
 const CONTENT_FILTER_ERROR = {
   name: 'ContentFilterError',
   message: "The response was blocked by the provider's content filter",
+};
+const UNKNOWN_FINISH_LOOP_ERROR = {
+  name: 'UnknownFinishLoopError',
+  message: 'Consecutive unknown assistant finishes without tool calls',
 };
 
 function asHttpStatus(value: unknown): number | undefined {
@@ -436,6 +441,11 @@ export class ForegroundFallbackManager {
   /** sessionID -> absorbed host retries in the current fallback descent.
    *  Reset on recovery, fresh primary descent, or session deletion. */
   private readonly sessionRetries = new Map<string, number>();
+  /** Completed unknown IDs stay deduped until the next external user turn. */
+  private readonly unknownFinishStreak = new Map<
+    string,
+    { count: number; seen: Set<string> }
+  >();
   /** sessionID -> pending initial delay and latest trigger mode.
    *  Cleared on recovery or session deletion. */
   private readonly pendingInitialDelay = new Map<
@@ -598,6 +608,7 @@ export class ForegroundFallbackManager {
     this.lastFallbackTime.delete(sessionID);
     this.initialDelayUsed.delete(sessionID);
     this.sessionRetries.delete(sessionID);
+    this.unknownFinishStreak.delete(sessionID);
     this.retryAttempt.delete(sessionID);
     this.v2RetryNotices.delete(sessionID);
     this.cancelInitialDelay(sessionID);
@@ -719,6 +730,27 @@ export class ForegroundFallbackManager {
       this.replayMessageIds.set(sessionID, ids);
     }
     ids.add(messageID);
+  }
+
+  private async messageHasNoTools(
+    sessionID: string,
+    messageID: string | undefined,
+  ): Promise<boolean | undefined> {
+    if (!messageID || this.disposed) return;
+    try {
+      const result = await withTimeout(
+        getClient(this.input).session.message({
+          path: { id: sessionID, messageID },
+        }),
+        HOST_CALL_TIMEOUT_MS,
+        'foreground message parts lookup timed out',
+      );
+      const parts = result.data?.parts;
+      if (!Array.isArray(parts)) return;
+      return !parts.some((part) => part.type === 'tool');
+    } catch {
+      return;
+    }
   }
 
   private async isInternalReplayUserMessage(
@@ -852,6 +884,7 @@ export class ForegroundFallbackManager {
         this.activeFallback.delete(id);
         this.sessionAgent.delete(id);
         this.sessionTried.delete(id);
+        this.unknownFinishStreak.delete(id);
         this.v2RetryNotices.delete(id);
         // NOTE: inProgress is intentionally NOT cleared here —
         // the finally blocks in tryFallback() and tryFallbackWithAbort()
@@ -1019,21 +1052,46 @@ export class ForegroundFallbackManager {
           );
         }
         const messageTime = info.time;
-        const isCompletedSuccessfulAssistant =
+        const isCompletedAssistant =
           info.role === 'assistant' &&
+          isRecord(messageTime) &&
+          typeof messageTime.completed === 'number';
+        const isCompletedSuccessfulAssistant =
+          isCompletedAssistant &&
           !info.error &&
           // OpenCode v1 publishes a content-filter turn as completed before it
           // attaches the ContentFilterError: a failure, not a recovery.
-          info.finish !== 'content-filter' &&
-          typeof messageTime === 'object' &&
-          messageTime !== null &&
-          'completed' in messageTime &&
-          typeof messageTime.completed === 'number';
+          info.finish !== 'content-filter';
+        const epoch = this.turnEpoch.get(sessionID) ?? 0;
+        const noTools =
+          this.enabled &&
+          isCompletedSuccessfulAssistant &&
+          info.finish === 'unknown'
+            ? await this.messageHasNoTools(sessionID, messageID)
+            : false;
+        if (!this.isCurrentTurn(sessionID, epoch)) break;
+        let isUnknownLoop = false;
+        if (noTools && messageID !== undefined) {
+          const streak = this.unknownFinishStreak.get(sessionID) ?? {
+            count: 0,
+            seen: new Set<string>(),
+          };
+          this.unknownFinishStreak.set(sessionID, streak);
+          if (!streak.seen.has(messageID)) {
+            streak.seen.add(messageID);
+            isUnknownLoop = ++streak.count >= 3;
+            if (isUnknownLoop) streak.count = 0;
+          }
+        } else if (isCompletedAssistant && noTools === false) {
+          const streak = this.unknownFinishStreak.get(sessionID);
+          if (streak) streak.count = 0;
+        }
         // OpenCode v1 can publish `finish: 'content-filter'` before attaching
         // its ContentFilterError. Treat that terminal finish as the error
         // event itself; the later message/session error is deduped by ID.
-        const messageError =
-          info.finish === 'content-filter' && !isFailoverError(info.error)
+        const messageError = isUnknownLoop
+          ? UNKNOWN_FINISH_LOOP_ERROR
+          : info.finish === 'content-filter' && !isFailoverError(info.error)
             ? CONTENT_FILTER_ERROR
             : info.error;
         if (this.enabled && messageError && isFailoverError(messageError)) {
@@ -1042,20 +1100,28 @@ export class ForegroundFallbackManager {
             messageID,
             messageError,
           );
-          if (this.bypassInitialFallbackDelay(sessionID, messageError)) {
-            await this.tryFallback(sessionID, messageError, incidentID);
-          } else if (
+          if (
+            this.bypassInitialFallbackDelay(sessionID, messageError) ||
             !this.delayInitialFallback(
               sessionID,
-              false,
+              isUnknownLoop,
               undefined,
               messageError,
               incidentID,
             )
           ) {
-            await this.tryFallback(sessionID, messageError, incidentID);
+            if (isUnknownLoop) {
+              await this.tryFallbackWithAbort(
+                sessionID,
+                messageError,
+                undefined,
+                incidentID,
+              );
+            } else {
+              await this.tryFallback(sessionID, messageError, incidentID);
+            }
           }
-        } else if (isCompletedSuccessfulAssistant) {
+        } else if (isCompletedSuccessfulAssistant && noTools === false) {
           // Only a completed, successful assistant response proves recovery.
           this.sessionRetries.delete(sessionID);
           this.retryAttempt.delete(sessionID);
@@ -1478,7 +1544,7 @@ export class ForegroundFallbackManager {
         this.initialDelayUsed.add(sessionID);
         // Background fallback is fail-soft: a failure must be logged
         // and swallowed, never escape as an unhandled rejection.
-        // Call tryFallbackWithAbort for session.status retry path
+        // Abort the host loop when the delayed trigger requires it.
         const trigger = latest.needsAbort
           ? this.tryFallbackWithAbort(
               sessionID,
