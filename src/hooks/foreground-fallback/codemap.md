@@ -20,7 +20,7 @@ Runtime model fallback system for foreground (interactive) agent sessions. When 
     source provider only for provider-scoped failures and removes the target
     provider, including same-provider and sticky switches. Synthetic admissions
     cannot overwrite it implicitly. Continuations and external turns retain it
-    only when they select its model: v1 normally returns to the primary, while
+    when their model is unknown or matches: v1 normally returns to the primary, while
     v2's persistent switch keeps the record live across turns.
     OpenCode v1 internal continuation and lifecycle selection consults
     `fallback.continuationPolicy`: retry the primary by default or retain this

@@ -2204,6 +2204,8 @@ describe('ForegroundFallbackManager session.error', () => {
     };
     expect(mgr.getActiveFallback('sess-1')).toEqual(activeFallback);
 
+    mgr.observeExternalTurn('sess-1', undefined);
+    expect(mgr.getActiveFallback('sess-1')).toEqual(activeFallback);
     mgr.observeExternalTurn('sess-1', 'openai/gpt-4o');
     expect(mgr.getActiveFallback('sess-1')).toEqual(activeFallback);
     mgr.observeExternalTurn('sess-1', 'anthropic/claude-opus-4-5');
@@ -2229,9 +2231,13 @@ describe('ForegroundFallbackManager session.error', () => {
       properties: {
         sessionID: 'sess-1',
         error: {
-          statusCode: 403,
-          message:
-            'This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber',
+          name: 'APIError',
+          data: {
+            statusCode: 403,
+            message: 'Forbidden',
+            responseBody:
+              '{"error":{"code":403,"message":"This content was flagged for possible cybersecurity risk."}}',
+          },
         },
       },
     });
