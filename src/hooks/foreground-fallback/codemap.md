@@ -132,8 +132,11 @@ Log fallback event
 
 ### Consumers
 - **Primary**: Main plugin initialization (`src/index.ts`) creates ForegroundFallbackManager instance
-- **Delegation routing**: Main plugin reads the confirmed active fallback so
-  newly delegated children avoid a provider the parent already escaped
+- **Delegation routing**: Main plugin reads `getActiveFallback`. Independent
+  children move only if their primary provider is in `downProviders`, taking
+  their first chain entry outside that set. Inherited children follow the
+  record's live model even after request-scoped failures. Manual model choices
+  do not create a fallback record.
 - **Event source**: OpenCode plugin event system provides `message.updated`, `session.error`, `session.status`, `session.deleted` events
 
 ### Dependencies

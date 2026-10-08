@@ -673,10 +673,11 @@ starting on a stale primary and waiting for an avoidable provider failure.
 Their own configured model array remains the ordered fallback chain after the
 inherited active model.
 
-Independent specialist chains follow the parent only on its own chain fallbacks.
-A shared primary is not an active fallback. When the parent's active fallback is
-in the child's chain, that exact entry is used. Otherwise Slim prefers the first
-entry on the working parent provider, then the first outside exhausted providers.
+Independent specialists move only when a confirmed parent fallback abandoned
+their primary provider after a provider-level failure. Slim picks the first
+entry in the child's own chain outside those providers, with no preference for
+the parent's model/provider. Policy/content-filter failures and manual selections
+leave independent children unchanged; so does a chain with no healthy provider.
 OpenCode v2 uses the native per-call subagent model override. On v1, the child's
 first prompt claims a delegation intention using the host's parent link and empty
 transcript; a `task_id` resume instead targets that child's next prompt. Slim
