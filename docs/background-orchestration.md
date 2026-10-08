@@ -573,6 +573,12 @@ on v2, set the keys explicitly:
 }
 ```
 
+Child-input wakes wait 250 ms before notifying the parent, on both host
+versions. Requests answered during that window by the host, a UI auto-replier,
+or another caller are discarded. Requests still open are checked again before
+delivery. Duplicate events enrich the queued notice without restarting the
+deadline. Stopped-job recovery and terminal-publication wakes are not delayed.
+
 With the board off, the plugin still retires natively delivered results: on
 the parent's next real user turn they are registered, and once the prompt
 advances they are reconciled. Stopped jobs are **not** retired that way,

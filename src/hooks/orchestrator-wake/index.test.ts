@@ -14,6 +14,7 @@ import { resetUserWaitGateForTests } from '../task-session-manager/user-wait-gat
 import {
   buildChildrenWakeFingerprint,
   buildOrchestratorWakeFingerprint,
+  CHILD_INPUT_WAKE_SETTLE_MS,
   CHILD_STALENESS_INTERVALS,
   childUpdateEvidenceMs,
   createOrchestratorWakeScheduler,
@@ -159,6 +160,7 @@ function createScheduler(options?: {
   hasInputWait?: (id: string) => boolean;
   isFallbackInProgress?: (id: string) => boolean;
   isStoppedJobRecoveryCurrent?: (taskID: string, generation: number) => boolean;
+  isChildInputWaitCurrent?: (taskID: string, requestID: string) => boolean;
   hasPendingDelegatedWork?: (id: string) => boolean;
   resolveSelection?: (sessionID: string) => Promise<{
     agent?: string;
@@ -192,6 +194,7 @@ function createScheduler(options?: {
     hasInputWait: options?.hasInputWait ?? (() => false),
     isFallbackInProgress: options?.isFallbackInProgress,
     isStoppedJobRecoveryCurrent: options?.isStoppedJobRecoveryCurrent,
+    isChildInputWaitCurrent: options?.isChildInputWaitCurrent,
     hasPendingDelegatedWork: options?.hasPendingDelegatedWork,
     resolveSelection: options?.resolveSelection,
     coordinator: options?.coordinator,
@@ -230,6 +233,71 @@ beforeEach(() => {
   clock = createClock();
   globalThis.setTimeout = clock.setTimeout;
   globalThis.clearTimeout = clock.clearTimeout;
+});
+
+describe('child-input settling across host versions', () => {
+  test.each(['v1', 'v2'])(
+    '%s discards an auto-replied ask and still delivers a later pending ask',
+    async (hostFlavor) => {
+      const promptAsync = mock(async () => ({}));
+      let current = true;
+      const { scheduler } = createScheduler({
+        hostFlavor,
+        periodicWakeEnabled: false,
+        sessionClient:
+          hostFlavor === 'v2'
+            ? makeV2Client({
+                promptAsync,
+                listChildren: [{ id: 'ses_child1' }],
+              })
+            : makeClient({ promptAsync, todos: [] }),
+        isChildInputWaitCurrent: () => current,
+      });
+      const ask = (requestID: string) =>
+        scheduler.triggerChildInputWaitWake(
+          'p1',
+          formatChildInputWaitDelta({
+            alias: 'fix-1',
+            taskID: 'ses_child1',
+            kind: 'permission',
+            requestID,
+            detail: 'permission: external_directory\npatterns: /approved/*',
+          }),
+          `ses_child1:${requestID}`,
+        );
+
+      ask('per_auto');
+      await clock.advance(39);
+      current = false;
+      await scheduler.event({
+        event: {
+          type: 'permission.replied',
+          data: { sessionID: 'ses_child1', requestID: 'per_auto' },
+        },
+      });
+      await clock.advance(CHILD_INPUT_WAKE_SETTLE_MS);
+      expect(promptAsync).not.toHaveBeenCalled();
+      expect(clock.pendingCount()).toBe(0);
+
+      current = true;
+      ask('per_pending');
+      await clock.advance(CHILD_INPUT_WAKE_SETTLE_MS - 1);
+      expect(promptAsync).not.toHaveBeenCalled();
+      // Parent idle events must not bypass or restart the first deadline.
+      await scheduler.event({
+        event: { type: 'session.idle', properties: { sessionID: 'p1' } },
+      });
+      await clock.advance(1);
+      expect(promptAsync).toHaveBeenCalledTimes(1);
+      const call = promptAsync.mock.calls[0]?.[0] as {
+        delivery?: string;
+        body: { parts: Array<{ text: string }> };
+      };
+      expect(call.body.parts[0]?.text).toContain('per_pending');
+      expect(call.body.parts[0]?.text).not.toContain('per_auto');
+      if (hostFlavor === 'v2') expect(call.delivery).toBe('queue');
+    },
+  );
 });
 
 describe('forced wake blocker diagnostics', () => {
@@ -3845,7 +3913,7 @@ describe('#1411 wake body dedupe', () => {
       }),
       'ses_child1:que_1',
     );
-    await clock.advance(0);
+    await clock.advance(CHILD_INPUT_WAKE_SETTLE_MS);
 
     expect(promptAsync).toHaveBeenCalledTimes(1);
     const text = partText(promptAsync, 0);
