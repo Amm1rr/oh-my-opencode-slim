@@ -279,6 +279,40 @@ describe('child input-wait wake', () => {
     expect(promptAsync).not.toHaveBeenCalled();
   });
 
+  test('a duplicate followed by a reply during a host read cancels the older wake too', async () => {
+    resetOrchestratorWakeGateForTests();
+    const promptAsync = mock(async () => ({}));
+    const session = v1Session(promptAsync);
+    let current = true;
+    const scheduler = makeScheduler(session, {
+      isChildInputWaitCurrent: () => current,
+    });
+    const ask = () =>
+      scheduler.triggerChildInputWaitWake(
+        'parent-1',
+        delta('ses_child1', 'per_1'),
+        'ses_child1:per_1',
+      );
+    session.get = mock(async () => {
+      if (current) {
+        ask();
+        current = false;
+        await scheduler.event({
+          event: {
+            type: 'permission.replied',
+            properties: { sessionID: 'ses_child1', requestID: 'per_1' },
+          },
+        });
+      }
+      return { data: {} };
+    });
+    ask();
+    await flush();
+    await flush();
+    expect(session.get).toHaveBeenCalled();
+    expect(promptAsync).not.toHaveBeenCalled();
+  });
+
   test('resolving one ask keeps a different pending ask in the same batch', async () => {
     resetOrchestratorWakeGateForTests();
     const promptAsync = mock(async () => ({}));

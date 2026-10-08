@@ -236,6 +236,88 @@ beforeEach(() => {
 });
 
 describe('child-input settling across host versions', () => {
+  test.each(
+    ['v1', 'v2'].flatMap((hostFlavor) =>
+      ['host read', 'selection'].flatMap((blockedAt) =>
+        ['duplicate', 'new ask'].map((arrival) => ({
+          hostFlavor,
+          blockedAt,
+          arrival,
+        })),
+      ),
+    ),
+  )(
+    '$hostFlavor defers a $arrival arriving during $blockedAt without a false stopped notice',
+    async ({ hostFlavor, blockedAt, arrival }) => {
+      const promptAsync = mock(async () => ({}));
+      let release!: () => void;
+      const pendingRead = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let blocked = false;
+      const get = mock(async () => {
+        if (blockedAt === 'host read' && !blocked) {
+          blocked = true;
+          await pendingRead;
+        }
+        return { data: {} };
+      });
+      const { scheduler } = createScheduler({
+        hostFlavor,
+        periodicWakeEnabled: false,
+        sessionClient:
+          hostFlavor === 'v2'
+            ? makeV2Client({
+                promptAsync,
+                get,
+                listChildren: [{ id: 'ses_child1' }],
+              })
+            : makeClient({ promptAsync, get, todos: [] }),
+        isChildInputWaitCurrent: () => true,
+        resolveSelection: async () => {
+          if (blockedAt === 'selection' && !blocked) {
+            blocked = true;
+            await pendingRead;
+          }
+          return { provenance: 'unknown' };
+        },
+      });
+      const ask = (requestID: string) =>
+        scheduler.triggerChildInputWaitWake(
+          'p1',
+          formatChildInputWaitDelta({
+            alias: 'fix-1',
+            taskID: 'ses_child1',
+            kind: 'permission',
+            requestID,
+            detail: 'permission: external_directory\npatterns: /approved/*',
+          }),
+          `ses_child1:${requestID}`,
+        );
+
+      ask('per_first');
+      await clock.advance(CHILD_INPUT_WAKE_SETTLE_MS);
+      expect(blocked).toBe(true);
+      expect(promptAsync).not.toHaveBeenCalled();
+      ask(arrival === 'duplicate' ? 'per_first' : 'per_second');
+      release();
+      await clock.advance(0);
+      expect(promptAsync).not.toHaveBeenCalled();
+      expect(getWakeProgress('p1').unchangedWakeCount).toBe(0);
+
+      await clock.advance(CHILD_INPUT_WAKE_SETTLE_MS);
+      expect(promptAsync).toHaveBeenCalledTimes(1);
+      const call = promptAsync.mock.calls[0]?.[0] as {
+        body: { parts: Array<{ text: string }> };
+      };
+      const text = call.body.parts[0]?.text ?? '';
+      expect(text).toContain(ORCHESTRATOR_CHILD_INPUT_WAKE_TEXT);
+      expect(text).toContain('per_first');
+      if (arrival === 'new ask') expect(text).toContain('per_second');
+      expect(text).not.toContain(ORCHESTRATOR_STOPPED_JOB_WAKE_TEXT);
+    },
+  );
+
   test.each(['v1', 'v2'])(
     '%s discards an auto-replied ask and still delivers a later pending ask',
     async (hostFlavor) => {

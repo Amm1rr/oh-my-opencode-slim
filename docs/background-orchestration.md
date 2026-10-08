@@ -578,6 +578,9 @@ versions. Requests answered during that window by the host, a UI auto-replier,
 or another caller are discarded. Requests still open are checked again before
 delivery. Duplicate events enrich the queued notice without restarting the
 deadline. Stopped-job recovery and terminal-publication wakes are not delayed.
+An ask arriving during a host read or model-selection lookup defers a
+child-input-only wake until settling completes, without sending a stopped-job
+notice in its place.
 
 With the board off, the plugin still retires natively delivered results: on
 the parent's next real user turn they are registered, and once the prompt

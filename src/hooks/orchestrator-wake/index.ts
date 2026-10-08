@@ -1946,6 +1946,18 @@ export function createOrchestratorWakeScheduler(
         ? selection.variant
         : modelSelection?.variant;
 
+      // A new ask or duplicate can start another settling timer during
+      // either host read or selection resolution without changing generation.
+      // A subsequent reply can also remove that timer and the entire batch.
+      // Defer child-only recovery before reserving or choosing a stop notice.
+      if (
+        recoveryWake &&
+        !recoveryBatch &&
+        (childInputTimers.has(sessionID) || !liveChildInputDeltas)
+      ) {
+        return false;
+      }
+
       // Reserve before promptAsync so a failed call cannot storm retries and
       // concurrent hook instances cannot double-wake.
       if (!commitWakeReservation(sessionID, owner, latestFingerprint)) {
