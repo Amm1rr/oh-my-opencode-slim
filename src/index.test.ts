@@ -3568,7 +3568,6 @@ describe('plugin config model inheritance', () => {
   async function assertInheritedRevive(
     operator: Record<string, unknown>,
     parentFallsBack = true,
-    childModel = primary,
   ) {
     const hooks = await loadConfiguredPlugin({
       agents: { orchestrator: { model: delegatedChain }, operator },
@@ -3579,7 +3578,7 @@ describe('plugin config model inheritance', () => {
         hooks,
         'parent',
         'inherited',
-        childModel,
+        primary,
       );
       const sessionID = childOutput.message.sessionID;
       await hooks['tool.execute.after']?.(
@@ -3589,6 +3588,7 @@ describe('plugin config model inheritance', () => {
         } as never,
       );
       if (parentFallsBack) await fallbackParent(hooks, 'parent');
+      else await selectParent(hooks, fallback);
       client.session.promptAsync = async () => {
         await hooks['chat.message']?.(
           { sessionID, agent: 'operator' } as never,
@@ -3600,9 +3600,7 @@ describe('plugin config model inheritance', () => {
         { task_id: sessionID, prompt: 'continue' },
         { sessionID: 'parent', agent: 'orchestrator' } as never,
       );
-      expect(childOutput.message.model).toEqual(
-        parentFallsBack ? fallback : childModel,
-      );
+      expect(childOutput.message.model).toEqual(fallback);
     } finally {
       await hooks.dispose?.();
     }
@@ -3612,14 +3610,13 @@ describe('plugin config model inheritance', () => {
     await assertInheritedRevive({ inheritModelFrom: 'orchestrator' });
   });
 
-  test('v1 inherited revive does not route a parent primary', async () => {
+  test('v1 inherited revive follows a manual parent selection', async () => {
     await assertInheritedRevive(
       {
         inheritModelFrom: 'session',
         model: ['other/primary', 'openrouter/openrouter/auto'],
       },
       false,
-      fallback,
     );
   });
 

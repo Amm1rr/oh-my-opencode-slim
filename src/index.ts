@@ -207,7 +207,7 @@ type ModelChainEntry = { id: string; variant?: string };
 type DelegatedModelSelection = {
   agentName: string;
   entry: ModelChainEntry;
-  /** The parent runs a real fallback that should move this child. */
+  /** The child should route to the parent's live model. */
   route: boolean;
   /** Inherited children already start on the parent's live model. */
   inherited?: true;
@@ -233,7 +233,7 @@ function selectDelegatedModel(input: {
       entry: childChain?.find((entry) => entry.id === parentModel) ?? {
         id: parentModel,
       },
-      route: activeFallback !== undefined,
+      route: true,
       inherited: true,
     };
   }
@@ -2669,7 +2669,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
             ? { variant: routedChild.entry.variant }
             : {}),
         };
-        log('[delegation] routed v1 child to active fallback model', {
+        log("[delegation] routed v1 child to the parent's live model", {
           sessionID: input.sessionID,
           parentSessionID: childRoute?.parentID,
           agent: routedChild.agentName,
