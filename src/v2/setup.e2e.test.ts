@@ -550,11 +550,16 @@ describe('createV2Setup e2e', () => {
       }),
     );
 
-    const { ctx, calls } = makeMockV2Context(projectDir);
+    const { ctx, calls, events } = makeMockV2Context(projectDir);
     const cleanup = await createV2Setup()(ctx);
 
     try {
       expect(calls.contextHookCb).toBeFunction();
+      events.push({
+        type: 'session.execution.started',
+        data: { sessionID: 'ses_companion_variant' },
+      });
+      await settlePump();
       await calls.contextHookCb?.({
         sessionID: 'ses_companion_variant',
         agent: 'fixer',
