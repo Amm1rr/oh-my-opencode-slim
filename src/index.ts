@@ -1918,6 +1918,22 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     }
   };
 
+  // A child can move to another live location while its task board stays
+  // with the delegating parent. Only task observation crosses that boundary;
+  // the destination retains ownership of permissions, profiles and tools.
+  const observeForeignTaskEvent: NonNullable<Hooks['event']> = async (
+    input,
+  ) => {
+    if (instanceDisposed) return;
+    const taskEvent = input as Parameters<
+      typeof taskSessionManagerHook.event
+    >[0];
+    const sessionID = resolveEventSessionID(taskEvent.event);
+    if (sessionID && backgroundJobBoard.isTracked(sessionID)) {
+      await taskSessionManagerHook.event(taskEvent);
+    }
+  };
+
   const hooks = {
     registryBridge,
     name: 'oh-my-opencode-slim',
@@ -1925,6 +1941,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // inference/runtime profiles for new child sessions + the sidebar.
     // Unknown to v1 hosts, consumed by src/v2/setup.ts.
     'v2.refreshProfiles': refreshProfilesFromDisk,
+    'v2.foreignTaskEvent': observeForeignTaskEvent,
     // v2's native override accepts provider/model#variant. Follow the parent's
     // real fallback using the child's chain, including its configured variant.
     // Explicit inheritance stays live; only the v2 bridge consumes this override.
@@ -2078,10 +2095,13 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         return;
       }
 
-      // Directory scope (multi-instance): process only this location's
-      // events. Unresolved events fall through (fail-open).
+      // Directory-local handling stays scoped; moved children still reach
+      // their task owner. Unresolved events fall through (fail-open).
       eventDirectoryScope?.note(input.event);
-      if (eventDirectoryScope?.isForeign(input.event)) return;
+      if (eventDirectoryScope?.isForeign(input.event)) {
+        await observeForeignTaskEvent(input);
+        return;
+      }
 
       const event = input.event as {
         type: string;
@@ -3032,6 +3052,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       await taskSessionManagerAfter(input, output);
     },
   } as Hooks & {
+    'v2.foreignTaskEvent': typeof observeForeignTaskEvent;
     'v2.refreshProfiles': typeof refreshProfilesFromDisk;
     'v2.resolveDelegatedModel': (input: {
       agentType: string;
