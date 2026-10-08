@@ -76,6 +76,7 @@ Runtime model fallback system for foreground (interactive) agent sessions. When 
   clears.
 - **Session cleanup**: `session.deleted` event handler removes all per-session state to prevent memory leaks
 - **In-progress tracking**: Prevents concurrent fallback attempts on the same session across plugin-manager recreation
+- Host calls within `inProgress` have bounded timeouts because the terminal gate's fallback fence depends on that window ending; a replay send timeout retains unresolved ownership without aborting or resending.
 
 ### Retry Budget and Exhaustion
 - The v2 in-place retry hook (`handleV2Retry`) is gated by the separate `v2RetryEnabled` constructor flag — the replay path's `enabled` stays false on v2 hosts, so only steering runs there. It shares the chain-global budget and quota policy. Absorbed retries, recoverable failures, missing chains and unsuccessful model switches leave the host decision unchanged. Once `selectFallbackModel` returns `exhausted` the hook returns without touching the decision: the host's own retry verdict stands, so a spent chain never forces a retry. A first ordinary exhaustion still takes the sticky re-fallback (only the second lands here).

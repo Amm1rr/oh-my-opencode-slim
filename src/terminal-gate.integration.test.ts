@@ -355,6 +355,78 @@ test('fallback initial delay cannot replay a cancelled background child', async 
   expect(h.board.get('child')?.state).toBe('cancelled');
 });
 
+test('a hung fallback replay transcript read publishes the unrecovered error', async () => {
+  const h = await fallbackAssembly();
+  h.messages.mockImplementation(async (args: unknown) => {
+    const { query } = args as {
+      query?: { limit?: number; directory?: string };
+    };
+    if (query?.limit !== undefined && query.directory === undefined)
+      return new Promise(() => {});
+    return { data: h.history };
+  });
+  await h.fail();
+  await h.idle();
+  await h.runtime.reconcile();
+  await h.advance(2000);
+  await h.advance(2000);
+  await h.advance(2000);
+  expect(h.board.get('child')?.state).toBe('error');
+  expect(h.board.get('child')?.resultSummary).toContain(
+    'Model fallback did not recover',
+  );
+});
+
+test('task_cancel during fallback resend backoff prevents a second replay', async () => {
+  const h = await fallbackAssembly();
+  let childSends = 0;
+  h.promptAsync.mockImplementation(async (call: unknown) => {
+    const { path } = call as { path: { id: string } };
+    if (path.id === 'child') {
+      if (childSends++ === 0) throw new Error('socket hang up');
+      h.setBusy(true);
+      await h.busySignal();
+    }
+    return {};
+  });
+  await h.fail();
+  await h.idle();
+  await h.advance(2000);
+  const cancellation = h.hooks.tool?.task_cancel.execute(
+    { task_id: 'child' },
+    h.context,
+  );
+  await flush();
+  await h.advance(300);
+  await cancellation;
+  expect(h.board.get('child')?.state).toBe('cancelled');
+  await h.advance(300);
+  expect(childSends).toBe(1);
+  expect(h.board.get('child')?.state).toBe('cancelled');
+  expect(
+    h.revivedTracker?.isObservationPending(
+      'child',
+      h.board.get('child')?.generation ?? 0,
+    ),
+  ).toBe(false);
+});
+
+test('a timed-out fallback replay retains its owner without aborting or resending', async () => {
+  const h = await fallbackAssembly();
+  h.promptAsync.mockImplementation(async () => new Promise(() => {}));
+  await h.fail();
+  await h.idle();
+  for (let i = 0; i < 38; i++) await h.advance(1000);
+  expect(h.abort).not.toHaveBeenCalled();
+  expect(h.promptAsync).toHaveBeenCalledTimes(1);
+  expect(
+    h.revivedTracker?.isTracked('child', h.board.get('child')?.generation ?? 0),
+  ).toBe(true);
+  expect(h.board.get('child')?.state).toBe('running');
+  for (let i = 0; i < 12; i++) await h.advance(1000);
+  expect(h.board.get('child')?.state).toBe('stopped');
+});
+
 test('terminal failover during a retry-armed delay waits for replay, notice and one result', async () => {
   const h = await fallbackAssembly(undefined, 8000);
   const prompts = () =>

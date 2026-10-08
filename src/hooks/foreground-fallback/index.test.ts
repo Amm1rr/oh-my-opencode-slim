@@ -2610,6 +2610,7 @@ describe('ForegroundFallbackManager session.error', () => {
     return {
       calls,
       handoff: {
+        isEligible: () => true,
         prepare: (
           sessionID: string,
           generation: number | undefined,
@@ -2841,6 +2842,7 @@ describe('ForegroundFallbackManager session.error', () => {
     const mocks = await runFallbackScenario({
       messagesData: taskPrompt,
       handoff: {
+        isEligible: () => false,
         prepare: (
           sessionID: string,
           generation: number | undefined,
@@ -3530,16 +3532,7 @@ describe('ForegroundFallbackManager v1 abort protection for live children', () =
   const manager = (
     hostFlavor?: string,
     chain = makeChains(),
-    handoff?: {
-      prepare: (
-        id: string,
-        generation: number | undefined,
-        baseline: string | undefined,
-      ) => boolean;
-      admit: (id: string, generation: number | undefined) => void;
-      reject: (id: string, generation: number | undefined) => void;
-      settleUnresolved: (id: string, generation: number | undefined) => void;
-    },
+    handoff?: ConstructorParameters<typeof ForegroundFallbackManager>[8],
     readGeneration?: (id: string) => number | undefined,
   ) =>
     new ForegroundFallbackManager(
@@ -3695,6 +3688,7 @@ describe('ForegroundFallbackManager v1 abort protection for live children', () =
       undefined,
       makeChains(),
       {
+        isEligible: () => true,
         prepare,
         admit: mock(() => {}),
         reject,
@@ -3779,6 +3773,7 @@ describe('ForegroundFallbackManager v1 abort protection for live children', () =
       undefined,
       makeChains(),
       {
+        isEligible: () => true,
         prepare: mock(() => true),
         admit: mock(() => {}),
         reject,

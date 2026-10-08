@@ -384,6 +384,9 @@ const DEDUP_WINDOW_MS = 5_000;
 const REPROMPT_DELAY_MS = 500;
 /** Ceiling on host calls: a hung transport must not stall fallback. */
 const HOST_CALL_TIMEOUT_MS = 2_000;
+/** The replay send's ack can lag after the host admitted it: wait as long as
+ *  the tracker's own `promptAsync`, so a slow ack is not read as a refusal. */
+const REPLAY_SEND_TIMEOUT_MS = 10_000;
 /** Transcript tail size for the fallback replay read: the replay only needs
  *  the last replayable user message plus the trailing message id (handoff
  *  baseline), never the full history. */
@@ -1882,10 +1885,14 @@ export class ForegroundFallbackManager {
       // ~20 s. The `limit` query keeps the hot path O(tail). A tail without a
       // user message is one long turn: read only the user message its last
       // entry answers (v1 `parentID`); shapes without that id read it all.
-      const tailResult = await session.messages({
-        path: { id: sessionID },
-        query: { limit: FALLBACK_REPLAY_TAIL_MESSAGES },
-      });
+      const tailResult = await withTimeout(
+        session.messages({
+          path: { id: sessionID },
+          query: { limit: FALLBACK_REPLAY_TAIL_MESSAGES },
+        }),
+        HOST_CALL_TIMEOUT_MS,
+        'fallback replay transcript read timed out',
+      );
       // Transcript read suspended across a dispose(): everything from
       // here on — handoff arming, replay prompt, switch claim — would
       // run through the destroyed generation's client. Abandon before
@@ -1901,9 +1908,16 @@ export class ForegroundFallbackManager {
       if (!lastUser) {
         const parentID = (messages.at(-1) as { info?: { parentID?: unknown } })
           ?.info?.parentID;
-        const deepResult = await (typeof parentID === 'string'
-          ? session.message({ path: { id: sessionID, messageID: parentID } })
-          : session.messages({ path: { id: sessionID } }));
+        const deepResult = await withTimeout<{
+          data?: unknown;
+          error?: unknown;
+        }>(
+          typeof parentID === 'string'
+            ? session.message({ path: { id: sessionID, messageID: parentID } })
+            : session.messages({ path: { id: sessionID } }),
+          HOST_CALL_TIMEOUT_MS,
+          'fallback replay user message read timed out',
+        );
         if (!this.isCurrentTurn(sessionID, expectedEpoch)) return;
         lastUser = [deepResult.data ?? []]
           .flat()
@@ -2021,11 +2035,20 @@ export class ForegroundFallbackManager {
       };
       const sendReplayPrompt = (): Promise<unknown> => {
         this.rememberReplayMessage(sessionID, promptBody.body.messageID);
-        return promptAsync(promptBody);
+        return withTimeout(
+          promptAsync(promptBody),
+          REPLAY_SEND_TIMEOUT_MS,
+          'fallback replay prompt timed out',
+        );
       };
       try {
         promptResult = await sendReplayPrompt();
       } catch (promptErr) {
+        if (promptErr instanceof OperationTimeoutError) {
+          // A timeout cannot prove refusal; never abort or duplicate the replay.
+          settleUnresolvedHandoff();
+          throw promptErr;
+        }
         if (!this.isCurrentTurn(sessionID, expectedEpoch)) {
           withdrawHandoff();
           return;
@@ -2079,12 +2102,16 @@ export class ForegroundFallbackManager {
           return;
         }
         await new Promise((r) => setTimeout(r, REPROMPT_DELAY_MS));
-        // The abort/re-prompt-delay suspended across a dispose(): the
-        // second replay must not go through the old client. The first
-        // prompt's transport failed with an unknown outcome, so convert
-        // (never drop) the armed handoff exactly like the retry-failure
-        // path below.
-        if (!this.isCurrentTurn(sessionID, expectedEpoch)) {
+        // Recheck after the abort/backoff: a cancelled or superseded child
+        // admits no second replay, so withdraw its prepared handoff.
+        if (
+          !this.isCurrentTurn(sessionID, expectedEpoch) ||
+          (handoffArmed &&
+            !this.backgroundFallbackHandoff?.isEligible(
+              sessionID,
+              preparedGeneration,
+            ))
+        ) {
           withdrawHandoff();
           return;
         }
