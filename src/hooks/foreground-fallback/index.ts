@@ -41,8 +41,9 @@ import { isReplayableUserMessage, partsFromReplayMessage } from '../types';
 // Retryable error detection
 // ---------------------------------------------------------------------------
 
+// Match quota/billing codes and phrases, not generic credits/billing text.
 const QUOTA_BILLING_PATTERNS = [
-  /\bpersonal-team-blocked\b/,
+  /\bpersonal-team-blocked\b/i,
   /\bspending.?limit\b/i,
   /\b(?:ran|run) out of credits\b/i,
   // Quoted Zhipu codes also cover non-English JSON error bodies.
@@ -138,8 +139,7 @@ const PROVIDER_OUTAGE_PATTERNS = [
   /\bno available channel/i,
 ];
 const REQUEST_ERROR_PATTERNS = [
-  // Policy and content-filter rejections concern this request/model, not
-  // provider availability. Keep matching only the existing narrow signatures.
+  // Match policy/filter signatures, not generic flagged/policy error text.
   /\bcyber_policy\b/,
   /\bcontent_policy_violation\b/,
   /flagged for possible cybersecurity risk/i,
@@ -221,6 +221,7 @@ function failoverScope(error: unknown): 'provider' | 'request' | undefined {
   const messages = errorMessages(error);
   const text = messages.join(' ');
   const statusCode = extractStatusCode(error);
+  // Recognizable failover bodies count under HTTP 400; other 400s stay hard.
   // OpenRouter can wrap policy rejections in HTTP 403. The request-specific
   // reason must win over provider status/type/transport signals.
   if (
@@ -287,10 +288,7 @@ export function isPermanentQuotaBillingError(error: unknown): boolean {
             .map(String)
             .join(' ')
         : '';
-  const normalizedText = text.toLowerCase();
-  return PERMANENT_QUOTA_BILLING_PATTERNS.some((pattern) =>
-    pattern.test(normalizedText),
-  );
+  return PERMANENT_QUOTA_BILLING_PATTERNS.some((pattern) => pattern.test(text));
 }
 
 /**
@@ -918,6 +916,7 @@ export class ForegroundFallbackManager {
 
   /** v1 overrides are per-message; v2 switches persist across external turns. */
   observeExternalTurn(sessionID: string, model: string | undefined): void {
+    if (model === undefined) return;
     if (this.activeFallback.get(sessionID)?.model !== model) {
       this.activeFallback.delete(sessionID);
     }

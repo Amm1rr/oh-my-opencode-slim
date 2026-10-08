@@ -676,8 +676,9 @@ inherited active model.
 Independent specialists move only when a confirmed parent fallback abandoned
 their primary provider after a provider-level failure. Slim picks the first
 entry in the child's own chain outside those providers, with no preference for
-the parent's model/provider. Policy/content-filter failures and manual selections
-leave independent children unchanged; so does a chain with no healthy provider.
+the parent's model/provider. Policy/content-filter failures, retired or unknown
+models, and manual selections leave independent children unchanged; so does a
+chain with no healthy provider.
 OpenCode v2 uses the native per-call subagent model override. On v1, the child's
 first prompt claims a delegation intention using the host's parent link and empty
 transcript; a `task_id` resume instead targets that child's next prompt. Slim

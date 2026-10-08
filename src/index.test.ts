@@ -3071,9 +3071,9 @@ describe('plugin config model inheritance', () => {
     { parentID: string; prompted: boolean }
   >();
   const transcripts = new Map<string, unknown[]>();
-  const primary = { providerID: 'openrouter', modelID: 'auto' };
+  const primary = { providerID: 'openrouter', modelID: 'openrouter/auto' };
   const fallback = { providerID: 'openai', modelID: 'gpt-6-luna' };
-  const delegatedChain = ['openrouter/auto', 'openai/gpt-6-luna'];
+  const delegatedChain = ['openrouter/openrouter/auto', 'openai/gpt-6-luna'];
   const delegatedFallbackConfig = {
     agents: {
       orchestrator: { model: delegatedChain },
@@ -3089,7 +3089,6 @@ describe('plugin config model inheritance', () => {
   });
 
   afterEach(async () => {
-    jest.useRealTimers();
     process.env = originalEnv;
     while (configDirs.length > 0) {
       const configDir = configDirs.pop();
@@ -3343,7 +3342,6 @@ describe('plugin config model inheritance', () => {
   }
 
   test('v2 provider fallback routes to the first healthy child entry with its variant', async () => {
-    jest.useFakeTimers();
     const hooks = await loadConfiguredPlugin(
       {
         fallback: { maxRetries: 0 },
@@ -3475,7 +3473,6 @@ describe('plugin config model inheritance', () => {
   });
 
   test('v1 content-filter fallback leaves an independent child on its primary', async () => {
-    jest.useFakeTimers();
     const hooks = await loadConfiguredPlugin(delegatedFallbackConfig);
     try {
       await fallbackParent(hooks, 'parent', 'content-filter');
@@ -3487,7 +3484,6 @@ describe('plugin config model inheritance', () => {
   });
 
   test('v1 provider fallback moves only children whose primary provider is down', async () => {
-    jest.useFakeTimers();
     const google = { providerID: 'google', modelID: 'gemini-2.5-pro' };
     const hooks = await loadConfiguredPlugin({
       agents: {
@@ -3615,7 +3611,7 @@ describe('plugin config model inheritance', () => {
     await assertInheritedRevive(
       {
         inheritModelFrom: 'session',
-        model: ['other/primary', 'openrouter/auto'],
+        model: ['other/primary', 'openrouter/openrouter/auto'],
       },
       false,
       fallback,
@@ -3777,7 +3773,7 @@ describe('plugin config model inheritance', () => {
   });
 
   test.each([
-    ['retry-primary', 'openrouter', 'auto'],
+    ['retry-primary', 'openrouter', 'openrouter/auto'],
     ['stick-to-fallback', 'openai', 'gpt-6-luna'],
   ] as const)(
     'v1 %s policy selects the completion model after a confirmed fallback',

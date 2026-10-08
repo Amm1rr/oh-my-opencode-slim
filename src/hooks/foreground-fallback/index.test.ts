@@ -274,6 +274,7 @@ describe('foreground fallback redo harness', () => {
     expect(mocks.promptAsync.mock.calls[0]?.[0]).toMatchObject({
       body: { model: { providerID: 'test', modelID: 'b' } },
     });
+    expect(manager.getActiveFallback('harness')?.downProviders.size).toBe(0);
     expect(mocks.abort).not.toHaveBeenCalled();
   });
 
@@ -2210,9 +2211,7 @@ describe('ForegroundFallbackManager session.error', () => {
   });
 
   test('triggers fallback on content-policy moderation session.error', async () => {
-    // End-to-end regression: a cyber_policy rejection (HTTP 400
-    // invalid_request in production) must advance the fallback chain to the
-    // next model instead of failing the session outright.
+    // Policy wording wins over HTTP 403 without marking the provider down.
     await mgr.handleEvent({
       type: 'message.updated',
       properties: {
@@ -2230,6 +2229,7 @@ describe('ForegroundFallbackManager session.error', () => {
       properties: {
         sessionID: 'sess-1',
         error: {
+          statusCode: 403,
           message:
             'This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber',
         },
