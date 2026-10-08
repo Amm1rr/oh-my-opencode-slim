@@ -15,7 +15,7 @@
   </p>
 
   <p>
-    <a href="https://svgdiagram.ai"><img src="img/svgdiagram.svg" alt="svgdiagram.ai" width="20" height="20" align="absmiddle"></a>&nbsp;
+    <a href="https://svgdiagram.ai"><img src="img/svgdiagram.svg" alt="svgdiagram.ai" width="40" height="28" align="absmiddle"></a>&nbsp;
     <a href="https://svgdiagram.ai"><b>svgdiagram.ai</b></a> <sub>· 메모를 깔끔하고 편집 가능한 SVG 다이어그램으로</sub>
   </p>
 

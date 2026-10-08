@@ -15,7 +15,7 @@
   </p>
 
   <p>
-    <a href="https://svgdiagram.ai"><img src="img/svgdiagram.svg" alt="svgdiagram.ai" width="20" height="20" align="absmiddle"></a>&nbsp;
+    <a href="https://svgdiagram.ai"><img src="img/svgdiagram.svg" alt="svgdiagram.ai" width="40" height="28" align="absmiddle"></a>&nbsp;
     <a href="https://svgdiagram.ai"><b>svgdiagram.ai</b></a> <sub>· 将你的笔记变成清晰、可编辑的 SVG 图表</sub>
   </p>
 

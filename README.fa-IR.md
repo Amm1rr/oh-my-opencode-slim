@@ -15,7 +15,7 @@
   </p>
 
   <p>
-    <a href="https://svgdiagram.ai"><img src="img/svgdiagram.svg" alt="svgdiagram.ai" width="20" height="20" align="absmiddle"></a>&nbsp;
+    <a href="https://svgdiagram.ai"><img src="img/svgdiagram.svg" alt="svgdiagram.ai" width="40" height="28" align="absmiddle"></a>&nbsp;
     <a href="https://svgdiagram.ai"><b>svgdiagram.ai</b></a> <sub>· یادداشت‌هایتان را به نمودارهای SVG تمیز و قابل‌ویرایش تبدیل کنید</sub>
   </p>
 
