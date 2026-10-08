@@ -20,7 +20,11 @@ import {
   type ResolvedAgentRegistry,
 } from './agents/registry';
 import type { RegistryFactoryBridge } from './agents/registry-bridge';
-import { CompanionManager } from './companion/manager';
+import {
+  CompanionManager,
+  companionSessionIdForDirectory,
+  normalizeCompanionSessionStatus,
+} from './companion/manager';
 import { ensureCompanionVersion } from './companion/updater';
 import { deepMerge, loadPluginConfig, type Preset } from './config';
 import {
@@ -1354,7 +1358,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     );
     interviewManager = createInterviewManager(ctx, config);
     companionManager = new CompanionManager(
-      `proc_${process.pid}`,
+      companionSessionIdForDirectory(ctx.directory),
       ctx.directory,
       runtime.companion,
       hostFlavor,
@@ -1891,6 +1895,22 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     return entry?.variant ? `${entry.id}#${entry.variant}` : entry?.id;
   };
 
+  // A child can move to another live location while its task board stays
+  // with the delegating parent. Only task observation crosses that boundary;
+  // the destination retains ownership of permissions, profiles and tools.
+  const observeForeignTaskEvent: NonNullable<Hooks['event']> = async (
+    input,
+  ) => {
+    if (instanceDisposed) return;
+    const taskEvent = input as Parameters<
+      typeof taskSessionManagerHook.event
+    >[0];
+    const sessionID = resolveEventSessionID(taskEvent.event);
+    if (sessionID && backgroundJobBoard.isTracked(sessionID)) {
+      await taskSessionManagerHook.event(taskEvent);
+    }
+  };
+
   const hooks = {
     registryBridge,
     name: 'oh-my-opencode-slim',
@@ -1898,6 +1918,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // inference/runtime profiles for new child sessions + the sidebar.
     // Unknown to v1 hosts, consumed by src/v2/setup.ts.
     'v2.refreshProfiles': refreshProfilesFromDisk,
+    'v2.foreignTaskEvent': observeForeignTaskEvent,
     'v2.resolveDelegatedModel': resolveV2DelegatedModel,
     'v2.session.retry':
       foregroundFallback.handleV2Retry.bind(foregroundFallback),
@@ -2036,10 +2057,13 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         return;
       }
 
-      // Directory scope (multi-instance): process only this location's
-      // events. Unresolved events fall through (fail-open).
+      // Directory-local handling stays scoped; moved children still reach
+      // their task owner. Unresolved events fall through (fail-open).
       eventDirectoryScope?.note(input.event);
-      if (eventDirectoryScope?.isForeign(input.event)) return;
+      if (eventDirectoryScope?.isForeign(input.event)) {
+        await observeForeignTaskEvent(input);
+        return;
+      }
 
       const event = input.event as {
         type: string;
@@ -2295,26 +2319,15 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         companionManager.onInputResolved();
       }
 
-      if (input.event.type === 'session.status') {
-        const props = input.event.properties as
-          | { sessionID?: string; status?: { type?: string } | string }
-          | undefined;
-        const sessionID = props?.sessionID;
-        const rawCompanionStatus = props?.status;
-        const companionStatus =
-          typeof rawCompanionStatus === 'string'
-            ? rawCompanionStatus
-            : typeof rawCompanionStatus === 'object' &&
-                rawCompanionStatus !== null &&
-                'type' in rawCompanionStatus &&
-                typeof (rawCompanionStatus as { type?: unknown }).type ===
-                  'string'
-              ? (rawCompanionStatus as { type: string }).type
-              : undefined;
-        const job = sessionID ? backgroundJobBoard.get(sessionID) : undefined;
+      const companionStatus = normalizeCompanionSessionStatus(
+        event.type,
+        statusType,
+      );
+      if (eventSessionID && companionStatus) {
+        const job = backgroundJobBoard.get(eventSessionID);
         companionManager.onSessionStatus({
-          sessionId: sessionID,
-          agent: sessionID ? sessionMetadata.getAgent(sessionID) : undefined,
+          sessionId: eventSessionID,
+          agent: sessionMetadata.getAgent(eventSessionID),
           status: companionStatus,
           jobFinished: job !== undefined && job.state !== 'running',
         });
@@ -2771,12 +2784,12 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           const pendingStatus = pendingTuiBusySessions.get(input.sessionID);
           pendingTuiBusySessions.delete(input.sessionID);
           markTuiAgentActive(input.sessionID, agent, pendingStatus);
+          companionManager.onSessionStatus({
+            sessionId: input.sessionID,
+            agent,
+            status: 'busy',
+          });
         }
-        companionManager.onSessionStatus({
-          sessionId: input.sessionID,
-          agent,
-          status: 'busy',
-        });
       }
 
       // chat.message carries the model selected for this message, and it
@@ -3004,6 +3017,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       await taskSessionManagerAfter(input, output);
     },
   } as Hooks & {
+    'v2.foreignTaskEvent': typeof observeForeignTaskEvent;
     'v2.refreshProfiles': typeof refreshProfilesFromDisk;
     'v2.resolveDelegatedModel': typeof resolveV2DelegatedModel;
   };
