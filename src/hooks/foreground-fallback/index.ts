@@ -365,11 +365,14 @@ export class ForegroundFallbackManager {
   > = {};
   /** sessionID → last observed model string ("providerID/modelID") */
   private readonly sessionModel = new Map<string, string>();
-  /** sessionID → model selected by a confirmed fallback replay.
+  /** sessionID → confirmed fallback and providers abandoned by its failures.
    *  Kept separate from sessionModel because synthetic admissions may emit
    *  message.updated events for another model without changing the model
    *  serving the user's active turn. */
-  private readonly activeFallbackModel = new Map<string, string>();
+  private readonly activeFallback = new Map<
+    string,
+    { model: string; downProviders: ReadonlySet<string> }
+  >();
   /** sessionID → agent name (populated from message.updated info.agent field) */
   private readonly sessionAgent = new Map<string, string>();
   /** child sessionID → parent sessionID (from session.created info).
@@ -837,7 +840,7 @@ export class ForegroundFallbackManager {
     if (coordinator) {
       coordinator.onSessionDeleted((id) => {
         this.sessionModel.delete(id);
-        this.activeFallbackModel.delete(id);
+        this.activeFallback.delete(id);
         this.sessionAgent.delete(id);
         this.sessionTried.delete(id);
         this.v2RetryNotices.delete(id);
@@ -867,9 +870,36 @@ export class ForegroundFallbackManager {
     }
   }
 
-  /** Confirmed fallback model serving this session's active user turn. */
-  getActiveFallbackModel(sessionID: string): string | undefined {
-    return this.activeFallbackModel.get(sessionID);
+  /** Confirmed fallback serving this session, including provider failures. */
+  getActiveFallback(sessionID: string) {
+    return this.activeFallback.get(sessionID);
+  }
+
+  private commitSwitch(
+    sessionID: string,
+    from: string | undefined,
+    model: string,
+    error: unknown,
+  ): void {
+    const downProviders = new Set(
+      this.activeFallback.get(sessionID)?.downProviders,
+    );
+    const fromProvider = from
+      ? parseModelReference(from)?.providerID
+      : undefined;
+    if (fromProvider && failoverScope(error) === 'provider') {
+      downProviders.add(fromProvider);
+    }
+    const toProvider = parseModelReference(model)?.providerID;
+    if (toProvider) downProviders.delete(toProvider);
+    this.activeFallback.set(sessionID, { model, downProviders });
+    this.sessionModel.set(sessionID, model);
+    this.onSessionModelChanged?.(sessionID, model);
+    log('[foreground-fallback] active fallback committed', {
+      sessionID,
+      model,
+      downProviders: [...downProviders].sort(),
+    });
   }
 
   /** Reconcile an internal continuation that explicitly selected a model.
@@ -878,18 +908,19 @@ export class ForegroundFallbackManager {
   observeContinuationModel(sessionID: string, model: string): void {
     const previousModel = this.sessionModel.get(sessionID);
     this.sessionModel.set(sessionID, model);
-    if (this.activeFallbackModel.get(sessionID) !== model) {
-      this.activeFallbackModel.delete(sessionID);
+    if (this.activeFallback.get(sessionID)?.model !== model) {
+      this.activeFallback.delete(sessionID);
     }
     if (previousModel !== model) {
       this.onSessionModelChanged?.(sessionID, model);
     }
   }
 
-  /** A genuine external turn starts from the host-selected model again;
-   *  promptAsync model overrides are per-message and do not persist. */
-  observeExternalTurn(sessionID: string): void {
-    this.activeFallbackModel.delete(sessionID);
+  /** v1 overrides are per-message; v2 switches persist across external turns. */
+  observeExternalTurn(sessionID: string, model: string | undefined): void {
+    if (this.activeFallback.get(sessionID)?.model !== model) {
+      this.activeFallback.delete(sessionID);
+    }
   }
 
   /**
@@ -1324,9 +1355,7 @@ export class ForegroundFallbackManager {
       );
       if (this.disposed) return;
       event.decision = { retry: true, delay: this.retryDelayMs };
-      this.sessionModel.set(sessionID, nextModel);
-      this.activeFallbackModel.set(sessionID, nextModel);
-      this.onSessionModelChanged?.(sessionID, nextModel);
+      this.commitSwitch(sessionID, from, nextModel, event.error);
       this.showFallbackToast(agentName, nextModel, event.error);
       log('[foreground-fallback] retry hook switched model in place', {
         sessionID,
@@ -1353,9 +1382,7 @@ export class ForegroundFallbackManager {
               this.sessionModel.get(event.sessionID) !== from
             )
               return;
-            this.sessionModel.set(event.sessionID, target);
-            this.activeFallbackModel.set(event.sessionID, target);
-            this.onSessionModelChanged?.(event.sessionID, target);
+            this.commitSwitch(event.sessionID, from, target, event.error);
             log('[foreground-fallback] retry hook reconciled a late switch', {
               sessionID: event.sessionID,
               from,
@@ -2095,9 +2122,7 @@ export class ForegroundFallbackManager {
           { sessionID, agentName, from: currentModel, intended: nextModel },
         );
       } else {
-        this.sessionModel.set(sessionID, nextModel);
-        this.activeFallbackModel.set(sessionID, nextModel);
-        this.onSessionModelChanged?.(sessionID, nextModel);
+        this.commitSwitch(sessionID, currentModel, nextModel, error);
       }
       // Admission accepted (with or without the switch): convert the
       // prepared handoff into a tracked run (register + immediate

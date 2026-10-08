@@ -684,6 +684,10 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     return readModel(finalAgentConfig?.[resolvedName]);
   };
 
+  const liveSessionModel = (sessionID: string): string | undefined =>
+    foregroundFallback?.getActiveFallback(sessionID)?.model ??
+    sessionMetadata.getModel(sessionID);
+
   const resolveDelegatedModelForParent = (
     agentType: string,
     parentSessionID?: string,
@@ -705,9 +709,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       // replays (#1079). Delegation needs the opposite view: the model
       // actually executing this parent turn, or children will be launched
       // back onto the provider the parent just escaped.
-      parentModel:
-        foregroundFallback?.getActiveFallbackModel(parentSessionID) ??
-        sessionMetadata.getModel(parentSessionID),
+      parentModel: liveSessionModel(parentSessionID),
       parentChain: parentAgent ? runtime.modelArrays[parentAgent] : undefined,
     });
   };
@@ -1135,9 +1137,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         );
       },
       sameProviderPolicy: runtime.backgroundJobs.sameProviderPolicy,
-      getSessionModel: (sessionID) =>
-        foregroundFallback.getActiveFallbackModel(sessionID) ??
-        sessionMetadata.getModel(sessionID),
+      getSessionModel: liveSessionModel,
       hostFlavor,
       recoverRetainedSession,
       resolveCanonicalTaskRef: aliasAuthority.resolveCanonical,
@@ -2607,7 +2607,11 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         (typeof messageID === 'string' &&
           isInternalAdmission(input.sessionID, messageID));
       if (!internalAdmission) {
-        foregroundFallback.observeExternalTurn(input.sessionID);
+        const model = input.model ?? output?.message?.model;
+        foregroundFallback.observeExternalTurn(
+          input.sessionID,
+          model ? `${model.providerID}/${model.modelID}` : undefined,
+        );
       }
 
       // v1 confirms the session before publishing it, but saves this user
@@ -2712,8 +2716,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         : undefined;
       const trackedModelText = unpinnedV1InternalContinuation
         ? runtime.fallback.continuationPolicy === 'stick-to-fallback'
-          ? (foregroundFallback.getActiveFallbackModel(input.sessionID) ??
-            sessionMetadata.getModel(input.sessionID))
+          ? liveSessionModel(input.sessionID)
           : sessionMetadata.getModel(input.sessionID)
         : undefined;
       const trackedModel = modelFromMetadataString(trackedModelText);

@@ -2197,10 +2197,16 @@ describe('ForegroundFallbackManager session.error', () => {
     // Should have picked the next model after anthropic/claude-opus-4-5
     expect(call[0].body.model.providerID).toBe('openai');
     expect(call[0].body.model.modelID).toBe('gpt-4o');
-    expect(mgr.getActiveFallbackModel('sess-1')).toBe('openai/gpt-4o');
+    const activeFallback = {
+      model: 'openai/gpt-4o',
+      downProviders: new Set(['anthropic']),
+    };
+    expect(mgr.getActiveFallback('sess-1')).toEqual(activeFallback);
 
-    mgr.observeExternalTurn('sess-1');
-    expect(mgr.getActiveFallbackModel('sess-1')).toBeUndefined();
+    mgr.observeExternalTurn('sess-1', 'openai/gpt-4o');
+    expect(mgr.getActiveFallback('sess-1')).toEqual(activeFallback);
+    mgr.observeExternalTurn('sess-1', 'anthropic/claude-opus-4-5');
+    expect(mgr.getActiveFallback('sess-1')).toBeUndefined();
   });
 
   test('triggers fallback on content-policy moderation session.error', async () => {
@@ -2242,6 +2248,7 @@ describe('ForegroundFallbackManager session.error', () => {
     expect(call[0].path.id).toBe('sess-1');
     expect(call[0].body.model.providerID).toBe('openai');
     expect(call[0].body.model.modelID).toBe('gpt-4o');
+    expect(mgr.getActiveFallback('sess-1')?.downProviders).toEqual(new Set());
   });
 
   test('triggers fallback on unavailable provider channel session.error', async () => {
