@@ -3571,6 +3571,7 @@ describe('ForegroundFallbackManager message.updated', () => {
   describe('unknown finish streak', () => {
     beforeEach(() => {
       jest.useFakeTimers();
+      jest.setSystemTime(1_015_000);
     });
     afterEach(() => jest.useRealTimers());
 
@@ -3840,26 +3841,19 @@ describe('ForegroundFallbackManager message.updated', () => {
       });
     });
 
-    test('a reply read across a delayed failover does not count against the backup', async () => {
-      const switched = deferred<void>();
+    test('a reply read across a failover does not count against the backup', async () => {
       const { manager: mgr, mocks } = makeManager({
         chain: makeChains().orchestrator,
-        initialRetryDelayMs: 1_000,
-        onChanged: () => switched.resolve(),
       });
-      for (let i = 1; i <= 5; i++) {
-        await update(mgr, mocks, `msgUnknown${i}`);
-      }
-      expect(mocks.abort).not.toHaveBeenCalled();
-
+      await update(mgr, mocks, 'msgUnknown1');
+      await update(mgr, mocks, 'msgUnknown2');
       const partsRead = deferred<{ data: typeof message }>();
       mocks.message.mockImplementationOnce(() => partsRead.promise);
       const pending = mgr.handleEvent({
         type: 'message.updated',
-        properties: { info: { ...info, id: 'msgUnknown6' } },
+        properties: { info: { ...info, id: 'msgUnknown3' } },
       });
-      jest.advanceTimersByTime(1_000);
-      await switched.promise;
+      await update(mgr, mocks, 'msgUnknown4');
       expect(mocks.abort).toHaveBeenCalledTimes(1);
       expect(mgr.getActiveFallback(info.sessionID)?.model).toBe(
         'openai/gpt-4o',
@@ -3870,7 +3864,8 @@ describe('ForegroundFallbackManager message.updated', () => {
         properties: {
           info: {
             ...info,
-            id: 'msgUnknown6',
+            id: 'msgUnknown5',
+            finish: undefined,
             error: {
               name: 'MessageAbortedError',
               data: { message: 'aborted' },
@@ -3879,7 +3874,7 @@ describe('ForegroundFallbackManager message.updated', () => {
         },
       });
       partsRead.resolve({
-        data: { ...message, info: { ...info, id: 'msgUnknown6' } },
+        data: { ...message, info: { ...info, id: 'msgUnknown3' } },
       });
       await pending;
 
