@@ -1,4 +1,4 @@
-import { afterEach, expect, mock, spyOn, test } from 'bun:test';
+import { afterEach, expect, jest, mock, spyOn, test } from 'bun:test';
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import * as path from 'node:path';
@@ -14,6 +14,11 @@ import type { BackgroundJobCoordinator } from './utils/background-job-coordinato
 import * as gateFactories from './utils/background-job-terminal-gate';
 import { BackgroundTaskConcurrency } from './utils/background-task-concurrency';
 import { createEventDirectoryScope } from './utils/event-directory-scope';
+import {
+  type createInternalAgentTextPart,
+  isInternalInitiatorPart,
+  isNativeBackgroundTaskNotification,
+} from './utils/internal-initiator';
 import * as loggerModule from './utils/logger';
 import { buildPluginInput } from './v2/client-shim';
 import { mapV2EventToV1 } from './v2/event-adapter';
@@ -66,6 +71,7 @@ async function assembly(
      * config file (e.g. orchestrator-wake knobs for wake-sensitive
      * fixtures). */
     configOverrides?: Record<string, unknown>;
+    rootConfigOverrides?: Record<string, unknown>;
     /** Build the gate WITHOUT the production `hostOutcomeClock`
      * contract, pinning the #1225 dependency: no shared clock, no
      * attribution window, no host-outcome publication. */
@@ -82,6 +88,7 @@ async function assembly(
   await Bun.write(
     `${directory}/oh-my-opencode-slim.json`,
     JSON.stringify({
+      ...setup.rootConfigOverrides,
       backgroundJobs: {
         concurrency: { defaultConcurrency: 1 },
         readContextMinLines: 1,
@@ -166,8 +173,12 @@ async function assembly(
     }),
   );
   const noop = async () => ({ data: [] });
+  const abort = mock(async () => ({}));
+  const promptAsync = mock(async (_args: unknown) => ({}));
   const session = new Proxy(
     {
+      abort,
+      promptAsync,
       status,
       messages,
       get,
@@ -252,6 +263,8 @@ async function assembly(
     statusMetrics,
     messages,
     get,
+    abort,
+    promptAsync,
     directory,
     begin,
     requestTask,
@@ -271,6 +284,364 @@ async function assembly(
 }
 
 type Assembly = Awaited<ReturnType<typeof assembly>>;
+async function fallbackAssembly(hostFlavor?: string, delayMs = 2000) {
+  jest.useFakeTimers();
+  cleanups.push(async () => jest.useRealTimers());
+  const h = await assembly(undefined, {
+    hostFlavor,
+    rootConfigOverrides: {
+      agents: {
+        explorer: { model: ['test/primary', 'test/fallback'] },
+      },
+      fallback: { initialRetryDelayMs: delayMs },
+    },
+  });
+  await h.begin();
+  await h.after('running');
+  await h.hooks['chat.message']?.(
+    {
+      sessionID: 'child',
+      agent: 'explorer',
+      model: { providerID: 'test', modelID: 'primary' },
+    } as never,
+    { parts: [] } as never,
+  );
+  const history: unknown[] = [
+    {
+      info: { id: 'request', role: 'user' },
+      parts: [{ type: 'text', text: 'work' }],
+    },
+    {
+      info: {
+        id: 'failed',
+        role: 'assistant',
+        error: 'rate limit',
+        time: { completed: Date.now() },
+      },
+      parts: [],
+    },
+  ];
+  h.messages.mockImplementation(async () => ({ data: history }));
+  return {
+    ...h,
+    history,
+    context: { sessionID: 'parent', agent: 'orchestrator' } as never,
+    fail: () =>
+      h.event('session.error', {
+        sessionID: 'child',
+        error: { statusCode: 429, message: 'rate limit' },
+      }),
+    advance: async (ms: number) => {
+      jest.advanceTimersByTime(ms);
+      await flush();
+    },
+  };
+}
+
+test('fallback initial delay cannot replay a cancelled background child', async () => {
+  const h = await fallbackAssembly();
+  await h.fail();
+  expect(h.promptAsync).not.toHaveBeenCalled();
+  const cancellation = h.hooks.tool?.task_cancel.execute(
+    { task_id: 'child' },
+    h.context,
+  );
+  await flush();
+  await h.advance(300);
+  await cancellation;
+  expect(h.board.get('child')?.state).toBe('cancelled');
+  await h.advance(1700);
+  expect(h.promptAsync).not.toHaveBeenCalled();
+  expect(h.board.get('child')?.state).toBe('cancelled');
+});
+
+test('a hung fallback replay transcript read publishes the unrecovered error', async () => {
+  const h = await fallbackAssembly();
+  h.messages.mockImplementation(async (args: unknown) => {
+    const { query } = args as {
+      query?: { limit?: number; directory?: string };
+    };
+    if (query?.limit !== undefined && query.directory === undefined)
+      return new Promise(() => {});
+    return { data: h.history };
+  });
+  await h.fail();
+  await h.idle();
+  await h.runtime.reconcile();
+  await h.advance(2000);
+  await h.advance(2000);
+  await h.advance(2000);
+  expect(h.board.get('child')?.state).toBe('error');
+  expect(h.board.get('child')?.resultSummary).toContain(
+    'Model fallback did not recover',
+  );
+});
+
+test('task_cancel during fallback resend backoff prevents a second replay', async () => {
+  const h = await fallbackAssembly();
+  let childSends = 0;
+  h.promptAsync.mockImplementation(async (call: unknown) => {
+    const { path } = call as { path: { id: string } };
+    if (path.id === 'child') {
+      if (childSends++ === 0) throw new Error('socket hang up');
+      h.setBusy(true);
+      await h.busySignal();
+    }
+    return {};
+  });
+  await h.fail();
+  await h.idle();
+  await h.advance(2000);
+  const cancellation = h.hooks.tool?.task_cancel.execute(
+    { task_id: 'child' },
+    h.context,
+  );
+  await flush();
+  await h.advance(300);
+  await cancellation;
+  expect(h.board.get('child')?.state).toBe('cancelled');
+  await h.advance(300);
+  expect(childSends).toBe(1);
+  expect(h.board.get('child')?.state).toBe('cancelled');
+  expect(
+    h.revivedTracker?.isObservationPending(
+      'child',
+      h.board.get('child')?.generation ?? 0,
+    ),
+  ).toBe(false);
+});
+
+test('a timed-out fallback replay retains its owner without aborting or resending', async () => {
+  const h = await fallbackAssembly();
+  h.promptAsync.mockImplementation(async () => new Promise(() => {}));
+  await h.fail();
+  await h.idle();
+  for (let i = 0; i < 38; i++) await h.advance(1000);
+  expect(h.abort).not.toHaveBeenCalled();
+  expect(h.promptAsync).toHaveBeenCalledTimes(1);
+  expect(
+    h.revivedTracker?.isTracked('child', h.board.get('child')?.generation ?? 0),
+  ).toBe(true);
+  expect(h.board.get('child')?.state).toBe('running');
+  for (let i = 0; i < 12; i++) await h.advance(1000);
+  expect(h.board.get('child')?.state).toBe('stopped');
+});
+
+test('terminal failover during a retry-armed delay waits for replay, notice and one result', async () => {
+  const h = await fallbackAssembly(undefined, 8000);
+  const prompts = () =>
+    h.promptAsync.mock.calls.map(
+      ([call]) =>
+        call as {
+          path: { id: string };
+          body: { messageID: string; parts: { text: string }[] };
+        },
+    );
+  h.promptAsync.mockImplementation(async (call: unknown) => {
+    const { path, body } = call as ReturnType<typeof prompts>[number];
+    if (path.id === 'child') {
+      setTimeout(() => {
+        h.history.push({
+          info: { id: body.messageID, role: 'user' },
+          parts: body.parts,
+        });
+        h.setBusy(true);
+        void h.busySignal();
+      }, 50);
+    }
+    return {};
+  });
+  h.history.pop();
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    await h.event('session.status', {
+      sessionID: 'child',
+      status: { type: 'retry', message: 'rate limit', attempt },
+    });
+  }
+  const error = {
+    name: 'APIError',
+    data: {
+      statusCode: 400,
+      isRetryable: false,
+      message: 'content_policy_violation',
+    },
+  };
+  h.history.push({
+    info: {
+      id: 'filtered',
+      role: 'assistant',
+      error,
+      time: { completed: Date.now() },
+    },
+    parts: [],
+  });
+  await h.event('session.error', { sessionID: 'child', error });
+  await h.idle();
+  await h.runtime.reconcile();
+  expect(h.board.get('child')?.state).toBe('running');
+  await h.advance(8000);
+  expect(prompts().map(({ path }) => path.id)).toEqual(['child', 'parent']);
+  expect(prompts()[1].body.parts[0].text).toContain('<task_fallback>');
+  await h.advance(50);
+  h.history.push(...transcript().data);
+  h.setBusy(false);
+  await h.idle();
+  await h.runtime.reconcile();
+  await flush();
+  expect(h.board.get('child')?.state).toBe('completed');
+  expect(h.board.get('child')?.terminalRevision).toBe(1);
+  expect(prompts()).toHaveLength(3);
+  expect(prompts().filter(({ path }) => path.id === 'parent')).toHaveLength(2);
+  expect(prompts()[2].path.id).toBe('parent');
+  expect(prompts()[2].body.parts[0].text).toContain(
+    '<task_result>\nconfirmed result\n</task_result>',
+  );
+  await h.runtime.reconcile();
+  await flush();
+  expect(prompts()).toHaveLength(3);
+});
+
+test('production fallback wiring fences polling and announces the admitted replay before its result', async () => {
+  const h = await fallbackAssembly();
+  await h.fail();
+  await h.idle();
+  await h.runtime.reconcile();
+  expect(h.board.get('child')).toMatchObject({
+    state: 'running',
+    statusUncertain: false,
+  });
+  const revival = h.hooks.tool?.task_revive
+    .execute({ task_id: 'child', prompt: 'continue' }, h.context)
+    .catch((error: Error) => error);
+  await flush();
+  await h.advance(300);
+  const refusal = await revival;
+  expect(refusal).toBeInstanceOf(Error);
+  expect((refusal as Error).message).toMatch(
+    /recovering on a fallback model.*wait for its result.*task_cancel/i,
+  );
+  expect(h.abort).not.toHaveBeenCalled();
+  expect(h.promptAsync).not.toHaveBeenCalled();
+  await h.advance(1700);
+  const prompts = () =>
+    h.promptAsync.mock.calls.map(
+      ([call]) =>
+        call as {
+          path: { id: string };
+          body: {
+            messageID: string;
+            parts: ReturnType<typeof createInternalAgentTextPart>[];
+          };
+        },
+    );
+  const parentParts = () =>
+    prompts()
+      .filter(({ path }) => path.id === 'parent')
+      .map(({ body }) => body.parts[0]);
+  expect(parentParts()).toHaveLength(1);
+  const notice = parentParts()[0];
+  expect(notice.text).toContain(
+    'test/primary failed: rate limit\nContinuing on test/fallback. Do not revive or cancel; wait for the result.',
+  );
+  expect(notice.text).toContain('<task id="child" state="running">');
+  expect(notice.text).toContain(
+    'Background task continues on a fallback model: ordinary task',
+  );
+  expect(isInternalInitiatorPart(notice)).toBe(true);
+  expect(isNativeBackgroundTaskNotification(notice)).toBe(false);
+  h.setBusy(true);
+  await h.busySignal();
+  const reconcile = spyOn(h.gate, 'reconcile');
+  cleanups.push(async () => {
+    reconcile.mockRestore();
+  });
+  await h.hooks['chat.message']?.(
+    {
+      sessionID: 'parent',
+      agent: 'orchestrator',
+      messageID: 'notice',
+    } as never,
+    { parts: [notice] } as never,
+  );
+  await h.hooks['experimental.chat.messages.transform']?.({}, {
+    messages: [
+      {
+        info: {
+          id: 'notice',
+          role: 'user',
+          agent: 'orchestrator',
+          sessionID: 'parent',
+        },
+        parts: [notice],
+      },
+    ],
+  } as never);
+  expect(reconcile).not.toHaveBeenCalled();
+  expect(h.board.get('child')?.state).toBe('running');
+  const replay = prompts().filter(({ path }) => path.id === 'child')[0].body;
+  h.history.push(
+    { info: { id: replay.messageID, role: 'user' }, parts: replay.parts },
+    ...transcript().data,
+  );
+  h.setBusy(false);
+  await h.idle();
+  await h.runtime.reconcile();
+  await flush();
+  expect(h.board.get('child')?.state).toBe('completed');
+  expect(parentParts()).toHaveLength(2);
+  expect(parentParts()[1].text).toContain(
+    '<task_result>\nconfirmed result\n</task_result>',
+  );
+  expect(
+    parentParts().every(
+      ({ text }) => !text.includes('Background task failed:'),
+    ),
+  ).toBe(true);
+  await h.runtime.reconcile();
+  await flush();
+  expect(parentParts()).toHaveLength(2);
+});
+
+test('v2 production wiring has no replay notice or fallback revive refusal', async () => {
+  const h = await fallbackAssembly('v2');
+  await h.fail();
+  expect(h.taskHook.hasDeferredError('child')).toBe(true);
+  const revival = h.hooks.tool?.task_revive.execute(
+    { sessionID: 'child', prompt: 'continue' },
+    h.context,
+  );
+  await flush();
+  await h.advance(300);
+  expect(await revival).toBeString();
+  expect(h.promptAsync).toHaveBeenCalledTimes(1);
+  expect(JSON.stringify(h.promptAsync.mock.calls)).not.toContain(
+    '<task_fallback>',
+  );
+});
+
+test('a managed background child keeps its failover error deferred through polling', async () => {
+  const h = await fallbackAssembly();
+  await h.hooks['tool.execute.before']?.(
+    { tool: 'task', sessionID: 'child', callID: 'nested' },
+    { args: undefined },
+  );
+  await h.fail();
+  expect(h.taskHook.hasDeferredError('child')).toBe(true);
+  await h.idle();
+  await h.runtime.reconcile();
+  expect(h.board.get('child')).toMatchObject({
+    state: 'running',
+    terminalRevision: 0,
+    statusUncertain: false,
+  });
+  h.messages.mockImplementation(async () => ({ data: [] }));
+  await h.advance(2000);
+  await h.advance(2000);
+  expect(h.board.get('child')?.resultSummary).toContain(
+    'Model fallback did not recover',
+  );
+});
+
 function publicationOf(h: Assembly) {
   const publication = h.board.get('child');
   if (publication?.completedAt === undefined)

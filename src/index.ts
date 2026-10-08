@@ -566,6 +566,12 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   let waitForUserTools: ReturnType<typeof createWaitForUserTool>;
   let acpRunTools: Record<string, ReturnType<typeof createAcpRunTool>>;
   let webfetch: ReturnType<typeof createWebfetchTool>;
+  const isFallbackPending = (taskID: string): boolean =>
+    hostFlavor !== 'v2' &&
+    !!(
+      foregroundFallback?.isFallbackInProgress(taskID) ||
+      taskSessionManagerHook?.hasDeferredError(taskID)
+    );
   let tools: Record<string, ToolDefinition>;
   let rewriteDisplayNameMentions: ReturnType<
     typeof createDisplayNameMentionRewriter
@@ -893,7 +899,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       observationRevisionFor: (taskID, generation) =>
         revivedRunTracker?.revisionFor(taskID, generation),
       isObservationPending: (taskID, generation) =>
-        revivedRunTracker?.isObservationPending(taskID, generation) ?? false,
+        (foregroundFallback?.isFallbackInProgress(taskID) ?? false) ||
+        (taskSessionManagerHook?.hasDeferredError(taskID) ?? false) ||
+        (revivedRunTracker?.isObservationPending(taskID, generation) ?? false),
       onRunning: (record) => {
         if (record.background)
           backgroundTaskConcurrency.restoreTask(
@@ -1040,17 +1048,12 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       runtime.fallback.initialRetryDelayMs,
       runtime.fallback.retryDelayMs,
       backgroundFallbackHandoff,
-      // Generation fence captured BEFORE any await in the fallback
-      // preparation, and ONLY for confirmed BACKGROUND children:
-      // undefined for foreground/unmanaged sessions means "observation
-      // handoff not applicable" — never a wildcard — so a stale-
-      // generation rejection can be distinguished from a legitimate
-      // foreground fallback.
+      // Identify confirmed background children even after cancellation or
+      // termination, so handoff preparation rejects a delayed stale replay.
+      // Undefined remains exclusive to foreground/unmanaged sessions.
       (sessionID) => {
         const record = backgroundJobCoordinator.get(sessionID);
-        return record?.state === 'running' && record.background === true
-          ? record.generation
-          : undefined;
+        return record?.background === true ? record.generation : undefined;
       },
       (sessionID) => backgroundJobCoordinator.hasRunning(sessionID),
       v2RetryEnabled,
@@ -1116,6 +1119,8 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         foregroundFallback.isFallbackInProgress(sessionID),
       willAttemptFallback: (sessionID) =>
         foregroundFallback.willAttemptFallback(sessionID),
+      fallbackFailureReason: (sessionID) =>
+        foregroundFallback.fallbackFailureReason(sessionID),
       coordinator: sessionLifecycle,
       revivedRunTracker,
       onChildInputWait: (notification) => {
@@ -1393,6 +1398,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       isDisposed: () => instanceDisposed,
     });
     taskReviveTools = createTaskReviveTool({
+      isFallbackPending,
       ...(hostFlavor !== 'v2' && { registerIntent: registerV1DelegatedIntent }),
       terminalGate,
       input: ctx,

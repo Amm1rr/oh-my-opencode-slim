@@ -12,6 +12,7 @@ import { isInternalInitiatorPart } from '../../utils';
 import * as logger from '../../utils/logger';
 import { mapV2EventToV1 } from '../../v2/event-adapter';
 import { SessionLifecycle } from '../session-lifecycle';
+import type { FallbackNotice } from '../task-session-manager/revived-run-tracker';
 import {
   ForegroundFallbackManager,
   isFailoverError,
@@ -1169,6 +1170,9 @@ describe('foreground fallback redo: host retry budget', () => {
     await manager.handleEvent(redoEvents.error(sid));
     expect(mocks.abort).toHaveBeenCalledTimes(1);
     expect(mocks.promptAsync).toHaveBeenCalledTimes(2);
+    expect(manager.fallbackFailureReason(sid)).toContain(
+      'chain exhausted; tried: test/a, test/b.',
+    );
 
     jest.setSystemTime(1_018_000);
     await manager.handleEvent(redoEvents.assistant(sid, 'b'));
@@ -2704,6 +2708,7 @@ describe('ForegroundFallbackManager session.error', () => {
     return {
       calls,
       handoff: {
+        isEligible: () => true,
         prepare: (
           sessionID: string,
           generation: number | undefined,
@@ -2712,7 +2717,11 @@ describe('ForegroundFallbackManager session.error', () => {
           calls.prepare.push([sessionID, generation, baseline]);
           return true;
         },
-        admit: (sessionID: string, generation: number | undefined) => {
+        admit: (
+          sessionID: string,
+          generation: number | undefined,
+          _notice?: FallbackNotice,
+        ) => {
           calls.admit.push([sessionID, generation]);
         },
         reject: (sessionID: string, generation: number | undefined) => {
@@ -2787,6 +2796,36 @@ describe('ForegroundFallbackManager session.error', () => {
       parts: [{ type: 'text', text: 'task prompt' }],
     },
   ];
+
+  test('retry-path fallback admits without a notice', async () => {
+    jest.useFakeTimers();
+    const { handoff } = handoffMock();
+    const admit = spyOn(handoff, 'admit');
+    ({ mocks } = createMockClient({ messagesData: taskPrompt }));
+    mgr = new ForegroundFallbackManager(
+      { orchestrator: ['test/a', 'test/b', 'test/c'] },
+      true,
+      { directory: '/test' } as never,
+      0,
+      undefined,
+      undefined,
+      0,
+      0,
+      handoff,
+      () => 1,
+    );
+    try {
+      await mgr.handleEvent(redoEvents.assistant('retry-notice'));
+      await mgr.handleEvent(redoEvents.retry('retry-notice'));
+      expect(mocks.abort).toHaveBeenCalledTimes(1);
+      expect(admit).toHaveBeenCalledTimes(1);
+      expect(admit.mock.calls[0]?.[2]).toBeUndefined();
+    } finally {
+      mgr.dispose();
+      admit.mockRestore();
+      jest.useRealTimers();
+    }
+  });
 
   test('arms the handoff before the admission await and admits after acceptance', async () => {
     // False-stop incident: for a background child the fallback PREPARES
@@ -2901,6 +2940,7 @@ describe('ForegroundFallbackManager session.error', () => {
     const mocks = await runFallbackScenario({
       messagesData: taskPrompt,
       handoff: {
+        isEligible: () => false,
         prepare: (
           sessionID: string,
           generation: number | undefined,
@@ -3909,16 +3949,7 @@ describe('ForegroundFallbackManager v1 abort protection for live children', () =
   const manager = (
     hostFlavor?: string,
     chain = makeChains(),
-    handoff?: {
-      prepare: (
-        id: string,
-        generation: number | undefined,
-        baseline: string | undefined,
-      ) => boolean;
-      admit: (id: string, generation: number | undefined) => void;
-      reject: (id: string, generation: number | undefined) => void;
-      settleUnresolved: (id: string, generation: number | undefined) => void;
-    },
+    handoff?: ConstructorParameters<typeof ForegroundFallbackManager>[8],
     readGeneration?: (id: string) => number | undefined,
   ) =>
     new ForegroundFallbackManager(
@@ -4074,6 +4105,7 @@ describe('ForegroundFallbackManager v1 abort protection for live children', () =
       undefined,
       makeChains(),
       {
+        isEligible: () => true,
         prepare,
         admit: mock(() => {}),
         reject,
@@ -4158,6 +4190,7 @@ describe('ForegroundFallbackManager v1 abort protection for live children', () =
       undefined,
       makeChains(),
       {
+        isEligible: () => true,
         prepare: mock(() => true),
         admit: mock(() => {}),
         reject,
