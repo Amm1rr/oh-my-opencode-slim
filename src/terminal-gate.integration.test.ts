@@ -13,6 +13,7 @@ import type { BackgroundJobRecord } from './utils/background-job-board';
 import type { BackgroundJobCoordinator } from './utils/background-job-coordinator';
 import * as gateFactories from './utils/background-job-terminal-gate';
 import { BackgroundTaskConcurrency } from './utils/background-task-concurrency';
+import { createEventDirectoryScope } from './utils/event-directory-scope';
 import {
   type createInternalAgentTextPart,
   isInternalInitiatorPart,
@@ -2161,7 +2162,7 @@ test('reopen-after-reconcile: child self-continuation republishes, wakes the idl
 // deliver for that exact (taskID, generation); non-revived publications
 // keep waking exactly once (regression pin below).
 
-test('revived-run completion on an idle parent queues exactly one admission: the tracker delivery, no publication wake', async () => {
+async function verifyRevivedDelivery(moved: boolean) {
   resetOrchestratorWakeGateForTests();
   const capture = captureGateLogs();
   try {
@@ -2189,6 +2190,11 @@ test('revived-run completion on an idle parent queues exactly one admission: the
     if (!tracker) {
       throw new Error('assembly did not expose the revived-run tracker');
     }
+    const worktreeDir = path.join(h.directory, 'worktree');
+    const worktreeScope = moved
+      ? createEventDirectoryScope(worktreeDir)
+      : undefined;
+    cleanups.push(async () => worktreeScope?.release());
 
     // Run 1 (non-revived): the original launch the parent spawned.
     await h.requestTask('native', 'v2 revived-run double-admission probe');
@@ -2196,10 +2202,30 @@ test('revived-run completion on an idle parent queues exactly one admission: the
       type: 'session.created',
       data: { sessionID: 'child', parentID: 'parent', agent: 'explorer' },
     });
-    await pump({
-      type: 'session.execution.started',
-      data: { sessionID: 'child' },
-    });
+    const childEvent = async (type: string) => {
+      if (!moved) {
+        await pump({ type, data: { sessionID: 'child' } });
+        return;
+      }
+      await Bun.sleep(2);
+      if (type === 'session.execution.succeeded') {
+        probe.commitTerminalOutcome(Date.now());
+      }
+      for (const event of mapV2EventToV1({
+        type,
+        created: Date.now(),
+        location: { directory: worktreeDir },
+        data: { sessionID: 'child' },
+      })) {
+        // Keep the foreign directory visible even on synthesized events,
+        // exercising the factory's filter independently of the V2 pump.
+        await h.hooks.event?.({
+          event: { ...event, location: { directory: worktreeDir } },
+        } as never);
+      }
+      await flush();
+    };
+    await childEvent('session.execution.started');
     hostChildren = [
       {
         id: 'child',
@@ -2208,10 +2234,7 @@ test('revived-run completion on an idle parent queues exactly one admission: the
         time: { updated: Date.now() },
       },
     ];
-    await pump({
-      type: 'session.execution.succeeded',
-      data: { sessionID: 'child' },
-    });
+    await childEvent('session.execution.succeeded');
     const first = await awaitPublication('child', 0);
     expect(first).toMatchObject({ state: 'completed' });
     // Run 1 (non-revived): publication #1 is the lineage's first —
@@ -2259,10 +2282,7 @@ test('revived-run completion on an idle parent queues exactly one admission: the
     hostChildren = [
       { id: 'child', parentID: 'parent', time: { updated: Date.now() } },
     ];
-    await pump({
-      type: 'session.execution.started',
-      data: { sessionID: 'child' },
-    });
+    await childEvent('session.execution.started');
     hostChildren = [
       {
         id: 'child',
@@ -2271,10 +2291,7 @@ test('revived-run completion on an idle parent queues exactly one admission: the
         time: { updated: Date.now() },
       },
     ];
-    await pump({
-      type: 'session.execution.succeeded',
-      data: { sessionID: 'child' },
-    });
+    await childEvent('session.execution.succeeded');
     // A fresh generation resets terminalRevision to 0; await the
     // terminal publication of the REVIVED generation explicitly.
     let second: BackgroundJobRecord | undefined;
@@ -2329,7 +2346,12 @@ test('revived-run completion on an idle parent queues exactly one admission: the
   } finally {
     capture.restore();
   }
-});
+}
+
+test.each([false, true])(
+  'revived-run completion queues exactly one tracker delivery, moved=%s',
+  verifyRevivedDelivery,
+);
 
 // ── Exhausted revived-run tracker: the suppressed publication is
 // re-emitted exactly once as the degraded fallback ──

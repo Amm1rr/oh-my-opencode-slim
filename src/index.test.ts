@@ -12,7 +12,10 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import path from 'node:path';
 import type { RegistryFactoryBridge } from './agents/registry-bridge';
-import { stateFilePath } from './companion/manager';
+import {
+  companionSessionIdForDirectory,
+  stateFilePath,
+} from './companion/manager';
 import { RuntimeConfig } from './config/runtime';
 import * as wakeHooks from './hooks';
 import { isTaggedPart, stripTaggedContent } from './hooks/cache-safe-injection';
@@ -1921,14 +1924,16 @@ describe('plugin reload generation cleanup', () => {
       return state.sessions.map((s) => s.session_id);
     };
 
-    // onLoad registered this generation's manager in the state file.
-    expect(readSessionIds()).toContain(`proc_${process.pid}`);
+    const companionSessionId = companionSessionIdForDirectory(projectDir);
+
+    // onLoad registered this generation's project-scoped manager in the state file.
+    expect(readSessionIds()).toContain(companionSessionId);
 
     await hooks.dispose?.();
 
     // dispose must call companionManager.onExit(): the session entry is
     // withdrawn even if the next generation fails before its own onLoad.
-    expect(readSessionIds()).not.toContain(`proc_${process.pid}`);
+    expect(readSessionIds()).not.toContain(companionSessionId);
   });
 });
 

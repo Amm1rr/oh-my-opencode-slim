@@ -181,6 +181,7 @@ jobs:
           tag="companion-v${VERSION}"
           if ! gh release view "$tag" >/dev/null 2>&1; then
             gh release create "$tag" \
+              --target "$GITHUB_SHA" \
               --title "Companion v${VERSION}" \
               --notes "Manual companion binary release for oh-my-opencode-slim."
           fi
