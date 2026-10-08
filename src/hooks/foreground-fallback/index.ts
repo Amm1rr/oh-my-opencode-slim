@@ -1065,6 +1065,7 @@ export class ForegroundFallbackManager {
           // attaches the ContentFilterError: a failure, not a recovery.
           info.finish !== 'content-filter';
         const epoch = this.turnEpoch.get(sessionID) ?? 0;
+        const activeFallback = this.activeFallback.get(sessionID);
         const noTools =
           this.enabled &&
           isCompletedSuccessfulAssistant &&
@@ -1073,7 +1074,11 @@ export class ForegroundFallbackManager {
             : false;
         if (!this.isCurrentTurn(sessionID, epoch)) break;
         let isUnknownLoop = false;
-        if (noTools && messageID !== undefined) {
+        if (
+          noTools &&
+          messageID !== undefined &&
+          this.activeFallback.get(sessionID) === activeFallback
+        ) {
           const streak = this.unknownFinishStreak.get(sessionID) ?? {
             count: 0,
             seen: new Set<string>(),

@@ -3571,7 +3571,6 @@ describe('ForegroundFallbackManager message.updated', () => {
   describe('unknown finish streak', () => {
     beforeEach(() => {
       jest.useFakeTimers();
-      jest.setSystemTime(1_015_000);
     });
     afterEach(() => jest.useRealTimers());
 
@@ -3637,6 +3636,26 @@ describe('ForegroundFallbackManager message.updated', () => {
         },
       }));
       await mgr.handleEvent({
+        type: 'message.updated',
+        properties: { info: updatedInfo },
+      });
+    }
+
+    function updateBackup(
+      mgr: ForegroundFallbackManager,
+      mocks: ReturnType<typeof createMockClient>['mocks'],
+      id: string,
+    ) {
+      const updatedInfo = {
+        ...info,
+        id,
+        providerID: 'openai',
+        modelID: 'gpt-4o',
+      };
+      mocks.message.mockImplementation(async () => ({
+        data: { ...message, info: updatedInfo },
+      }));
+      return mgr.handleEvent({
         type: 'message.updated',
         properties: { info: updatedInfo },
       });
@@ -3807,33 +3826,69 @@ describe('ForegroundFallbackManager message.updated', () => {
       expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
       expect(mocks.abort).not.toHaveBeenCalled();
 
-      const updateBackup = (id: string) => {
-        const updatedInfo = {
-          ...info,
-          id,
-          providerID: 'openai',
-          modelID: 'gpt-4o',
-        };
-        mocks.message.mockImplementation(async () => ({
-          data: { ...message, info: updatedInfo },
-        }));
-        return mgr.handleEvent({
-          type: 'message.updated',
-          properties: { info: updatedInfo },
-        });
-      };
-      await updateBackup('msgBackup1');
+      await updateBackup(mgr, mocks, 'msgBackup1');
       expect(mocks.abort).not.toHaveBeenCalled();
       expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
-      await updateBackup('msgBackup2');
+      await updateBackup(mgr, mocks, 'msgBackup2');
       expect(mocks.abort).not.toHaveBeenCalled();
       expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
-      await updateBackup('msgBackup3');
+      await updateBackup(mgr, mocks, 'msgBackup3');
       expect(mocks.abort).toHaveBeenCalledTimes(1);
       expect(mocks.promptAsync).toHaveBeenCalledTimes(2);
       expect(mocks.promptAsync.mock.calls[1]?.[0]).toMatchObject({
         body: { model: { providerID: 'google', modelID: 'gemini-2.5-pro' } },
       });
+    });
+
+    test('a reply read across a delayed failover does not count against the backup', async () => {
+      const switched = deferred<void>();
+      const { manager: mgr, mocks } = makeManager({
+        chain: makeChains().orchestrator,
+        initialRetryDelayMs: 1_000,
+        onChanged: () => switched.resolve(),
+      });
+      for (let i = 1; i <= 5; i++) {
+        await update(mgr, mocks, `msgUnknown${i}`);
+      }
+      expect(mocks.abort).not.toHaveBeenCalled();
+
+      const partsRead = deferred<{ data: typeof message }>();
+      mocks.message.mockImplementationOnce(() => partsRead.promise);
+      const pending = mgr.handleEvent({
+        type: 'message.updated',
+        properties: { info: { ...info, id: 'msgUnknown6' } },
+      });
+      jest.advanceTimersByTime(1_000);
+      await switched.promise;
+      expect(mocks.abort).toHaveBeenCalledTimes(1);
+      expect(mgr.getActiveFallback(info.sessionID)?.model).toBe(
+        'openai/gpt-4o',
+      );
+
+      await mgr.handleEvent({
+        type: 'message.updated',
+        properties: {
+          info: {
+            ...info,
+            id: 'msgUnknown6',
+            error: {
+              name: 'MessageAbortedError',
+              data: { message: 'aborted' },
+            },
+          },
+        },
+      });
+      partsRead.resolve({
+        data: { ...message, info: { ...info, id: 'msgUnknown6' } },
+      });
+      await pending;
+
+      await updateBackup(mgr, mocks, 'msgBackup1');
+      await updateBackup(mgr, mocks, 'msgBackup2');
+      expect(mocks.abort).toHaveBeenCalledTimes(1);
+      await updateBackup(mgr, mocks, 'msgBackup3');
+      expect(mocks.abort).toHaveBeenCalledTimes(2);
+      expect(mocks.promptAsync).toHaveBeenCalledTimes(2);
     });
   });
 });
