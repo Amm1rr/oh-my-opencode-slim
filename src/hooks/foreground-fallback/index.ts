@@ -910,6 +910,18 @@ export class ForegroundFallbackManager {
     return this.activeFallback.get(sessionID);
   }
 
+  /** Restart the count with a new record so replies still being read are
+   *  dropped; the seen IDs stay deduped until the next user turn. */
+  private resetUnknownFinishStreak(sessionID: string): void {
+    const streak = this.unknownFinishStreak.get(sessionID);
+    if (streak) {
+      this.unknownFinishStreak.set(sessionID, {
+        count: 0,
+        seen: streak.seen,
+      });
+    }
+  }
+
   private commitSwitch(
     sessionID: string,
     from: string | undefined,
@@ -929,8 +941,7 @@ export class ForegroundFallbackManager {
     if (toProvider) downProviders.delete(toProvider);
     this.activeFallback.set(sessionID, { model, downProviders });
     this.sessionModel.set(sessionID, model);
-    const streak = this.unknownFinishStreak.get(sessionID);
-    if (streak) streak.count = 0;
+    this.resetUnknownFinishStreak(sessionID);
     this.onSessionModelChanged?.(sessionID, model);
     log('[foreground-fallback] active fallback committed', {
       sessionID,
@@ -1058,33 +1069,35 @@ export class ForegroundFallbackManager {
           // attaches the ContentFilterError: a failure, not a recovery.
           info.finish !== 'content-filter';
         const epoch = this.turnEpoch.get(sessionID) ?? 0;
-        const activeFallback = this.activeFallback.get(sessionID);
-        const noTools =
+        const readsParts =
           this.enabled &&
           isCompletedSuccessfulAssistant &&
-          info.finish === 'unknown'
-            ? await this.messageHasNoTools(sessionID, messageID)
-            : false;
+          info.finish === 'unknown';
+        // Every reset swaps this record, so a reply whose parts were still
+        // being read when the count was reset is not counted afterwards.
+        let streak = this.unknownFinishStreak.get(sessionID);
+        if (readsParts && !streak) {
+          streak = { count: 0, seen: new Set<string>() };
+          this.unknownFinishStreak.set(sessionID, streak);
+        }
+        const noTools = readsParts
+          ? await this.messageHasNoTools(sessionID, messageID)
+          : false;
         if (!this.isCurrentTurn(sessionID, epoch)) break;
         let isUnknownLoop = false;
         if (
           noTools &&
           messageID !== undefined &&
-          this.activeFallback.get(sessionID) === activeFallback
+          streak &&
+          this.unknownFinishStreak.get(sessionID) === streak
         ) {
-          const streak = this.unknownFinishStreak.get(sessionID) ?? {
-            count: 0,
-            seen: new Set<string>(),
-          };
-          this.unknownFinishStreak.set(sessionID, streak);
           if (!streak.seen.has(messageID)) {
             streak.seen.add(messageID);
             isUnknownLoop = ++streak.count >= 3;
             if (isUnknownLoop) streak.count = 0;
           }
         } else if (isCompletedAssistant && noTools === false) {
-          const streak = this.unknownFinishStreak.get(sessionID);
-          if (streak) streak.count = 0;
+          this.resetUnknownFinishStreak(sessionID);
         }
         // OpenCode v1 can publish `finish: 'content-filter'` before attaching
         // its ContentFilterError. Treat that terminal finish as the error

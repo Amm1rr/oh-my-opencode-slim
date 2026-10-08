@@ -3782,7 +3782,12 @@ describe('ForegroundFallbackManager message.updated', () => {
       } as never);
 
       await update(mgr, mocks, 'msgUnknown0');
-      await update(mgr, mocks, 'msgUnknown1');
+      const partsRead = deferred<{ data: typeof message }>();
+      mocks.message.mockImplementationOnce(() => partsRead.promise);
+      const pending = mgr.handleEvent({
+        type: 'message.updated',
+        properties: { info: { ...info, id: 'msgUnknown1' } },
+      });
       await update(mgr, mocks, 'msgUnknown2', 'unknown', [
         ...message.parts.slice(0, -1),
         {
@@ -3800,7 +3805,12 @@ describe('ForegroundFallbackManager message.updated', () => {
         },
         ...message.parts.slice(-1),
       ]);
+      partsRead.resolve({
+        data: { ...message, info: { ...info, id: 'msgUnknown1' } },
+      });
+      await pending;
       await update(mgr, mocks, 'msgUnknown3');
+      await update(mgr, mocks, 'msgUnknown4');
 
       expect(mocks.abort).not.toHaveBeenCalled();
       expect(mocks.promptAsync).not.toHaveBeenCalled();
