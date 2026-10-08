@@ -63,7 +63,7 @@ import {
 } from './hooks';
 import { stripTaggedContent } from './hooks/cache-safe-injection';
 import { isCommandEnabled } from './hooks/command-hook-utils';
-import { processImageAttachments } from './hooks/image-hook';
+import { isImagePart, processImageAttachments } from './hooks/image-hook';
 import { clearAllWakeSessions } from './hooks/orchestrator-wake/wake-gate';
 import { PHASE_REMINDER_METADATA_KEY } from './hooks/phase-reminder';
 import type { ChildInputWaitRecord } from './hooks/task-session-manager/child-input-wait';
@@ -82,6 +82,7 @@ import type { ToolLoopGuardHook } from './hooks/tool-loop-guard/hook';
 import {
   findLatestUserMessage,
   isMessageWithParts,
+  isUserMessageWithParts,
   type MessageWithParts,
 } from './hooks/types';
 import { createInterviewManager } from './interview';
@@ -153,6 +154,11 @@ import {
 } from './utils/internal-initiator';
 import { probeJSDOM } from './utils/jsdom';
 import { initLogger, log } from './utils/logger';
+import {
+  type ModelImageCapabilityCache,
+  type ModelImageCapabilityDeps,
+  modelAcceptsImageInput,
+} from './utils/model-image-capability';
 import { registerPendingSessionPrune } from './utils/pending-session-prunes';
 import { withTimeout } from './utils/session';
 import { SessionMetadataStore } from './utils/session-metadata';
@@ -168,6 +174,7 @@ import {
 } from './utils/system-collapse';
 import { createTuiReusableProjection } from './utils/tui-reusable-projection';
 import { createV2Setup } from './v2';
+import { parseModelRef } from './v2/adapters';
 import { delegationWording } from './v2/delegation';
 import {
   isInternalAdmission,
@@ -340,6 +347,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   // closure. These are set inside the try block.
   let config: ReturnType<typeof loadPluginConfig>;
   let runtime: RuntimeConfig;
+  // Per-generation image capability cache; the config hook drops the
+  // cached promise on config changes and each factory run starts fresh.
+  const imageCapabilityCache: ModelImageCapabilityCache = {};
   let agentDefs: ReturnType<typeof createAgents>;
   let agents: ReturnType<typeof getAgentConfigsFromDefinitions>;
   let resolvedAgentRegistry: ResolvedAgentRegistry | undefined;
@@ -1974,6 +1984,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     mcp: mcps,
 
     config: async (opencodeConfig: Record<string, unknown>) => {
+      // Host config may change model capability declarations; drop the
+      // cached capability catalog so the next lookup re-resolves it.
+      imageCapabilityCache.promise = undefined;
       const preMutationHostSnapshot = resolvedAgentRegistry
         ? undefined
         : (structuredClone(opencodeConfig) as RegistryHostSnapshot);
@@ -2989,11 +3002,41 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       // input, the API call fails before the LLM can respond. We replace
       // image bytes with a text nudge so the orchestrator delegates to
       // @observer instead.
+      // auto routing keys on the turn's model: vision-capable models keep
+      // image parts inline (native read); only non-vision chains fall back
+      // to the observer relay. chat.message records the turn's model just
+      // before this handler runs; the fallback chain covers mid-session
+      // model switches.
+      // `input` is an empty shell in this handler; use the sessionID
+      // extracted from the messages above.
+      const turnModelRef = sessionID
+        ? parseModelRef(
+            foregroundFallback.getActiveFallbackModel(sessionID) ??
+              sessionMetadata.getModel(sessionID),
+          )
+        : undefined;
+      const hasImageParts = typedOutput.messages.some(
+        (message) =>
+          isUserMessageWithParts(message) && message.parts.some(isImagePart),
+      );
+      const acceptsImages =
+        turnModelRef && hasImageParts
+          ? await modelAcceptsImageInput(turnModelRef, {
+              client: ctx.client,
+              modelDomain: (
+                ctx as {
+                  experimental_v2?: ModelImageCapabilityDeps;
+                }
+              ).experimental_v2?.modelDomain,
+              cache: imageCapabilityCache,
+            })
+          : undefined;
       const imageResult = processImageAttachments({
         messages: typedOutput.messages,
         workDir: ctx.directory,
         imageRouting: runtime.imageRouting,
         disabledAgents: runtime.disabledAgents,
+        modelAcceptsImages: acceptsImages,
         log,
       });
       if (imageResult) {
