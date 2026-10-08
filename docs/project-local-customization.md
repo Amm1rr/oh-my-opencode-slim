@@ -129,16 +129,16 @@ When a repository carries several project skills under `.opencode/skills` or `.a
 
 The flag behaves like automatically adding every valid skill discovered under
 the current and ancestor `.opencode/skills/**/SKILL.md` and
-`.agents/skills/**/SKILL.md` trees within the host's discovery boundary. Duplicate names are included once; sibling trees are not
-searched. The existing Slim skill format is unchanged: identity comes from the
-`name` frontmatter field, not the directory name. Duplicate names across
-both roots are granted once; OpenCode selects which actual skill is loaded.
+`.agents/skills/**/SKILL.md` trees within the host's discovery boundary.
+Duplicate names across both roots are granted once; sibling trees are not
+searched. OpenCode selects which actual skill is loaded. Skill identity comes
+from the `name` frontmatter field, not the directory name.
 The option works in global user config and may be overridden per project.
-This change matches OpenCode's ancestor directory discovery, not every
-host-specific skill format. OpenCode
-v2 uses path-derived IDs, so keep the frontmatter name equal to the skill
-directory name when using this flag on v2. If another local `SKILL.md` is added
-later, it is picked up on reload without another config edit.
+This matches OpenCode's ancestor directory discovery, not every host-specific
+skill format. OpenCode v2 uses path-derived IDs, so keep the frontmatter name
+equal to the skill directory name when using this flag on v2. If another local
+`SKILL.md` is added later, it is picked up on reload without another config
+edit.
 
 It composes with the existing directives. For example, include all project-local skills but exclude one from `fixer`:
 
