@@ -145,6 +145,14 @@ const REQUEST_ERROR_PATTERNS = [
   /flagged for possible cybersecurity risk/i,
   /rejected as a result of our safety system/i,
   /response was blocked by the provider's content filter/i,
+  /"1301"/,
+  /potentially unsafe or sensitive content/i,
+  /rejected because it was considered high risk/i,
+  /\b(?:DataInspectionFailed|data_inspection_failed)\b/,
+  /may contain inappropriate content/i,
+  /Content blocked by guardrail/i,
+  /\bflagged_input\b/,
+  /"error_type"\s*:\s*"refusal"/,
   /\bmodel\b.*\bnot available\b/i,
   /\bmodel is not available\b/i,
   /\bunsupported model\b/i,
@@ -223,9 +231,12 @@ function failoverScope(error: unknown): 'provider' | 'request' | undefined {
   const statusCode = extractStatusCode(error);
   // Recognizable failover bodies count under HTTP 400; other 400s stay hard.
   // OpenRouter can wrap policy rejections in HTTP 403. The request-specific
-  // reason must win over provider status/type/transport signals.
+  // reason must win over provider status/type/transport signals. 421 and 451
+  // are request rejections (content filter / legal), not provider outages.
   if (
     statusCode === 410 ||
+    statusCode === 421 ||
+    statusCode === 451 ||
     REQUEST_ERROR_PATTERNS.some((pattern) => pattern.test(text))
   ) {
     return 'request';

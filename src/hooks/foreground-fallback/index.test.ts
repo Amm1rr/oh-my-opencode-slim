@@ -2212,8 +2212,12 @@ describe('ForegroundFallbackManager session.error', () => {
     expect(mgr.getActiveFallback('sess-1')).toBeUndefined();
   });
 
-  test('triggers fallback on content-policy moderation session.error', async () => {
-    // Policy wording wins over HTTP 403 without marking the provider down.
+  async function expectErrorFallback(
+    statusCode: number,
+    message: string,
+    responseBody: string,
+    downProviders: string[] = [],
+  ) {
     await mgr.handleEvent({
       type: 'message.updated',
       properties: {
@@ -2232,12 +2236,7 @@ describe('ForegroundFallbackManager session.error', () => {
         sessionID: 'sess-1',
         error: {
           name: 'APIError',
-          data: {
-            statusCode: 403,
-            message: 'Forbidden',
-            responseBody:
-              '{"error":{"code":403,"message":"This content was flagged for possible cybersecurity risk."}}',
-          },
+          data: { statusCode, message, responseBody },
         },
       },
     });
@@ -2254,8 +2253,94 @@ describe('ForegroundFallbackManager session.error', () => {
     expect(call[0].path.id).toBe('sess-1');
     expect(call[0].body.model.providerID).toBe('openai');
     expect(call[0].body.model.modelID).toBe('gpt-4o');
-    expect(mgr.getActiveFallback('sess-1')?.downProviders).toEqual(new Set());
-  });
+    expect(mgr.getActiveFallback('sess-1')?.downProviders).toEqual(
+      new Set(downProviders),
+    );
+  }
+
+  test('triggers fallback on content-policy moderation session.error', () =>
+    expectErrorFallback(
+      403,
+      'Forbidden',
+      '{"error":{"code":403,"message":"This content was flagged for possible cybersecurity risk."}}',
+    ));
+
+  test('routes the documented Z.ai quoted 1301 code as a request rejection', () =>
+    expectErrorFallback(400, 'Bad Request', '{"error":{"code":"1301"}}'));
+
+  test('routes the documented Z.ai rejection wording as a request rejection', () =>
+    expectErrorFallback(
+      400,
+      'Bad Request',
+      '{"error":{"message":"System detected potentially unsafe or sensitive content in input or generation. Please avoid using prompts that may generate sensitive content. Thank you for your cooperation."}}',
+    ));
+
+  test('routes the documented Kimi content filter as a request rejection', () =>
+    expectErrorFallback(
+      400,
+      'Bad Request',
+      '{"error":{"type":"content_filter","message":"The request was rejected because it was considered high risk"}}',
+    ));
+
+  test('routes the documented Qwen DataInspectionFailed code as a request rejection', () =>
+    expectErrorFallback(400, 'Bad Request', '{"code":"DataInspectionFailed"}'));
+
+  test('routes the documented Qwen data_inspection_failed code as a request rejection', () =>
+    expectErrorFallback(
+      400,
+      'Bad Request',
+      '{"code":"data_inspection_failed"}',
+    ));
+
+  test('routes the documented Qwen rejection wording as a request rejection', () =>
+    expectErrorFallback(
+      400,
+      'Bad Request',
+      '{"message":"Input or output data may contain inappropriate content."}',
+    ));
+
+  test('routes the documented Mistral guardrail block as a request rejection', () =>
+    expectErrorFallback(
+      403,
+      'Forbidden',
+      '{"error":{"message":"Content blocked by guardrail","status":403}}',
+    ));
+
+  test('routes the documented OpenRouter flagged_input as a request rejection', () =>
+    expectErrorFallback(
+      403,
+      'Forbidden',
+      '{"error":{"code":403,"message":"Forbidden","metadata":{"flagged_input":"input"}}}',
+    ));
+
+  test('routes the documented OpenRouter error_type refusal as a request rejection', () =>
+    expectErrorFallback(
+      403,
+      'Forbidden',
+      '{"error":{"code":403,"message":"The provider refused to respond","metadata":{"error_type": "refusal"}}}',
+    ));
+
+  test('routes the documented Xiaomi HTTP 421 as a request rejection', () =>
+    expectErrorFallback(
+      421,
+      'Misdirected Request',
+      '{"error":{"message":"Content moderation and blocking"}}',
+    ));
+
+  test('routes the documented StepFun HTTP 451 as a request rejection', () =>
+    expectErrorFallback(
+      451,
+      'Unavailable For Legal Reasons',
+      '{"error":{"message":"请求内容或者响应内容未审核通过"}}',
+    ));
+
+  test('keeps the documented Qwen moderation service failure provider-scoped', () =>
+    expectErrorFallback(
+      500,
+      'Internal Server Error',
+      '{"code":"InternalError.DataInspection","message":"Content moderation service unavailable."}',
+      ['anthropic'],
+    ));
 
   test('triggers fallback on unavailable provider channel session.error', async () => {
     await mgr.handleEvent({
