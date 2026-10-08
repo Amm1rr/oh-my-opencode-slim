@@ -207,8 +207,6 @@ type ModelChainEntry = { id: string; variant?: string };
 type DelegatedModelSelection = {
   agentName: string;
   entry: ModelChainEntry;
-  /** The child should route to the parent's live model. */
-  route: boolean;
   /** Inherited children already start on the parent's live model. */
   inherited?: true;
 };
@@ -233,7 +231,6 @@ function selectDelegatedModel(input: {
       entry: childChain?.find((entry) => entry.id === parentModel) ?? {
         id: parentModel,
       },
-      route: true,
       inherited: true,
     };
   }
@@ -246,7 +243,7 @@ function selectDelegatedModel(input: {
     const provider = parseModelReference(entry.id)?.providerID;
     return provider !== undefined && !downProviders.has(provider);
   });
-  return entry ? { agentName, entry, route: true } : undefined;
+  return entry ? { agentName, entry } : undefined;
 }
 
 // Module-level runtime preset tracking. Survives plugin re-inits triggered
@@ -686,7 +683,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     agentType: string,
   ) => {
     const selected = resolveDelegatedModelForParent(agentType, parentID);
-    if (selected?.route && (childID || !selected.inherited)) {
+    if (selected && (childID || !selected.inherited)) {
       // A resume retry replaces its own unclaimed intention.
       const stale = v1DelegatedIntents.findIndex(
         (intent) => childID && intent.childID === childID,
@@ -2651,7 +2648,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           childRoute.agentName,
           childRoute.parentID,
         );
-      const routedChildModel = routedChild?.route
+      const routedChildModel = routedChild
         ? modelFromMetadataString(routedChild.entry.id)
         : undefined;
       // A child already on the routed model (inherited from the parent)
@@ -2669,7 +2666,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
             ? { variant: routedChild.entry.variant }
             : {}),
         };
-        log("[delegation] routed v1 child to the parent's live model", {
+        log('[delegation] routed v1 child model', {
           sessionID: input.sessionID,
           parentSessionID: childRoute?.parentID,
           agent: routedChild.agentName,
