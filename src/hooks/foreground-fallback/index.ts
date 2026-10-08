@@ -936,6 +936,8 @@ export class ForegroundFallbackManager {
     if (toProvider) downProviders.delete(toProvider);
     this.activeFallback.set(sessionID, { model, downProviders });
     this.sessionModel.set(sessionID, model);
+    const streak = this.unknownFinishStreak.get(sessionID);
+    if (streak) streak.count = 0;
     this.onSessionModelChanged?.(sessionID, model);
     log('[foreground-fallback] active fallback committed', {
       sessionID,

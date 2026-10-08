@@ -3747,7 +3747,7 @@ describe('ForegroundFallbackManager message.updated', () => {
       expect(mgr.getActiveFallback(info.sessionID)).toBeUndefined();
     });
 
-    test('a normal completed message breaks the streak', async () => {
+    test('completed or errored messages and new turns break the streak', async () => {
       const { mocks } = createMockClient();
       const mgr = new ForegroundFallbackManager(makeChains(), true, {
         directory: '/test',
@@ -3755,6 +3755,25 @@ describe('ForegroundFallbackManager message.updated', () => {
 
       await update(mgr, mocks, 'msgUnknown1');
       await update(mgr, mocks, 'msgUnknown2');
+      await mgr.handleEvent({
+        type: 'message.updated',
+        properties: {
+          info: {
+            id: 'msgErrored',
+            sessionID: info.sessionID,
+            role: 'assistant',
+            error: {
+              name: 'APIError',
+              data: { statusCode: 400, message: 'Bad Request' },
+            },
+            time: { created: 1_015_000, completed: 1_016_000 },
+          },
+        },
+      });
+      await update(mgr, mocks, 'msgUnknownAfterError');
+      expect(mocks.abort).not.toHaveBeenCalled();
+      expect(mocks.promptAsync).not.toHaveBeenCalled();
+
       await update(mgr, mocks, 'msgStop', 'stop');
       await update(mgr, mocks, 'msgUnknown3');
       await update(mgr, mocks, 'msgUnknown4');
@@ -3764,6 +3783,57 @@ describe('ForegroundFallbackManager message.updated', () => {
       expect(mocks.abort).not.toHaveBeenCalled();
       expect(mocks.promptAsync).not.toHaveBeenCalled();
       expect(mgr.getActiveFallback(info.sessionID)).toBeUndefined();
+    });
+
+    test('a failover without an errored message starts a fresh streak on the backup', async () => {
+      const { manager: mgr, mocks } = makeManager({
+        chain: makeChains().orchestrator,
+      });
+      await update(mgr, mocks, 'msgUnknown1');
+      await update(mgr, mocks, 'msgUnknown2');
+      await mgr.handleEvent({
+        type: 'session.error',
+        properties: {
+          sessionID: info.sessionID,
+          error: {
+            name: 'UnknownError',
+            data: { message: 'Model not found: anthropic/claude-opus-4-5.' },
+          },
+        },
+      });
+      expect(mgr.getActiveFallback(info.sessionID)?.model).toBe(
+        'openai/gpt-4o',
+      );
+      expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+      expect(mocks.abort).not.toHaveBeenCalled();
+
+      const updateBackup = (id: string) => {
+        const updatedInfo = {
+          ...info,
+          id,
+          providerID: 'openai',
+          modelID: 'gpt-4o',
+        };
+        mocks.message.mockImplementation(async () => ({
+          data: { ...message, info: updatedInfo },
+        }));
+        return mgr.handleEvent({
+          type: 'message.updated',
+          properties: { info: updatedInfo },
+        });
+      };
+      await updateBackup('msgBackup1');
+      expect(mocks.abort).not.toHaveBeenCalled();
+      expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+      await updateBackup('msgBackup2');
+      expect(mocks.abort).not.toHaveBeenCalled();
+      expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+      await updateBackup('msgBackup3');
+      expect(mocks.abort).toHaveBeenCalledTimes(1);
+      expect(mocks.promptAsync).toHaveBeenCalledTimes(2);
+      expect(mocks.promptAsync.mock.calls[1]?.[0]).toMatchObject({
+        body: { model: { providerID: 'google', modelID: 'gemini-2.5-pro' } },
+      });
     });
   });
 });
