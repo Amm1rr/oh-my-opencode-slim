@@ -41,7 +41,20 @@ import { isReplayableUserMessage, partsFromReplayMessage } from '../types';
 // Retryable error detection
 // ---------------------------------------------------------------------------
 
-const RETRYABLE_ERROR_PATTERNS = [
+const QUOTA_BILLING_PATTERNS = [
+  /\bpersonal-team-blocked\b/,
+  /\bspending.?limit\b/i,
+  /\b(?:ran|run) out of credits\b/i,
+  // Quoted Zhipu codes also cover non-English JSON error bodies.
+  /"1113"/,
+  /"1308"/,
+  /"1309"/,
+  /"1310"/,
+  /\bcoding plan package has expired\b/i,
+  /\b(?:weekly|monthly) limit exhausted\b/i,
+];
+
+const PROVIDER_ERROR_PATTERNS = [
   /\b429\b/,
   /rate.?limit/i,
   /too many requests/i,
@@ -77,46 +90,10 @@ const RETRYABLE_ERROR_PATTERNS = [
   // "provider returned error" wording, which wraps any provider 4xx (e.g. a
   // genuine 400 the next model would reproduce) and must stay a hard error.
   /\b401\b/,
-  // Content-policy moderation rejections (e.g. OpenAI "cyber_policy",
-  // "content_policy_violation") arrive as HTTP 400 invalid_request with a
-  // provider-specific policy code in the body. They are deterministic per
-  // provider — retrying the same model will fail again, but a different
-  // provider in the chain does not share the policy, so the next model
-  // should be tried. Match the structured codes and the exact provider
-  // wording; do NOT match generic "flagged"/"policy" words that could
-  // appear in ordinary error text.
-  /\bcyber_policy\b/,
-  /\bcontent_policy_violation\b/,
-  /flagged for possible cybersecurity risk/i,
-  /rejected as a result of our safety system/i,
-  // OpenCode v1's ContentFilterError, raised when a turn ends with a
-  // `content-filter` finish reason (no HTTP status, no response body). The
-  // block can be intermittent, so it uses the normal retry budget before the
-  // chain advances.
-  /response was blocked by the provider's content filter/i,
-  // Billing/quota exhaustion (e.g. xAI "personal-team-blocked:spending-limit")
-  // arrives as HTTP 400/402 with a provider-specific billing code. It is
-  // deterministic for the same account — retrying the same model will fail
-  // again, but a different provider in the chain does not share the balance,
-  // so the next model should be tried. Match the structured code and the
-  // exact provider wording; do NOT match generic "credits"/"billing" words
-  // that can appear in ordinary error text.
-  /\bpersonal-team-blocked\b/,
-  /\bspending.?limit\b/i,
-  /\b(?:ran|run) out of credits\b/i,
-  // Zhipu GLM quota/billing (docs.z.ai error codes 1113/1308/1309/1310):
-  // the English messages already match the quota wording above, so the
-  // quoted JSON codes cover the Chinese wire variants and the Anthropic
-  // -style {"type":"1113"} envelopes where no English text survives.
-  /"1113"/,
-  /"1308"/,
-  /"1309"/,
-  /"1310"/,
-  /\bcoding plan package has expired\b/i,
-  /\b(?:weekly|monthly) limit exhausted\b/i,
+  ...QUOTA_BILLING_PATTERNS,
 ];
 
-const OUTAGE_STATUS_CODES = new Set([500, 502, 503, 504]);
+const PROVIDER_STATUS_CODES = new Set([401, 402, 403, 429, 500, 502, 503, 504]);
 // v2 host classification ({type, message, status?}); status is omitted when
 // the failure carried no HTTP status (e.g. stream-level provider errors).
 const FAILOVER_ERROR_TYPES = new Set([
@@ -159,13 +136,21 @@ const PROVIDER_OUTAGE_PATTERNS = [
   /\bprovider outage\b/i,
   /\bprovider unavailable\b/i,
   /\bno available channel/i,
+];
+const REQUEST_ERROR_PATTERNS = [
+  // Policy and content-filter rejections concern this request/model, not
+  // provider availability. Keep matching only the existing narrow signatures.
+  /\bcyber_policy\b/,
+  /\bcontent_policy_violation\b/,
+  /flagged for possible cybersecurity risk/i,
+  /rejected as a result of our safety system/i,
+  /response was blocked by the provider's content filter/i,
   /\bmodel\b.*\bnot available\b/i,
   /\bmodel is not available\b/i,
   /\bunsupported model\b/i,
   /\bunknown model\b/i,
   // OpenCode's ProviderModelNotFoundError uses "Model not found" wording; the
-  // model may exist on a later entry in the configured chain, so treat it as a
-  // provider outage and advance the fallback chain.
+  // model may exist on a later entry in the configured chain.
   /\bmodel not found\b/i,
   // Model retired/end-of-life (HTTP 410 Gone) — the model no longer exists,
   // so the next model must be tried instead of retrying the dead one.
@@ -178,6 +163,10 @@ const PROVIDER_OUTAGE_PATTERNS = [
   /\bHTTP 410\b/i,
   /\bstatus.?410\b/i,
 ];
+const CONTENT_FILTER_ERROR = {
+  name: 'ContentFilterError',
+  message: "The response was blocked by the provider's content filter",
+};
 
 function asHttpStatus(value: unknown): number | undefined {
   if (typeof value === 'number' && Number.isInteger(value)) {
@@ -219,83 +208,58 @@ function eventSessionID(props: {
   return props.sessionID ?? props.info?.id;
 }
 
-export function isFailoverError(error: unknown): boolean {
-  if (!error) return false;
-  if (typeof error === 'string') {
-    return (
-      RETRYABLE_ERROR_PATTERNS.some((pattern) => pattern.test(error)) ||
-      PROVIDER_OUTAGE_PATTERNS.some((pattern) => pattern.test(error)) ||
-      TRANSPORT_MESSAGE_PATTERNS.some((pattern) => pattern.test(error))
-    );
-  }
-  if (typeof error !== 'object') return false;
-  const err = error as {
-    code?: unknown;
-    cause?: { code?: unknown };
-    message?: string;
-    statusCode?: unknown;
-    type?: unknown;
-    data?: {
-      code?: unknown;
-      statusCode?: unknown;
-      message?: string;
-      responseBody?: string;
-    };
-  };
-  const statusCode = extractStatusCode(err);
+function errorMessages(error: unknown): string[] {
+  if (typeof error === 'string') return [error];
+  return [
+    nestedField(error, 'message'),
+    nestedField(nestedField(error, 'data'), 'message'),
+    nestedField(nestedField(error, 'data'), 'responseBody'),
+  ].map((value) => (typeof value === 'string' ? value : ''));
+}
+
+function failoverScope(error: unknown): 'provider' | 'request' | undefined {
+  const messages = errorMessages(error);
+  const text = messages.join(' ');
+  const statusCode = extractStatusCode(error);
+  // OpenRouter can wrap policy rejections in HTTP 403. The request-specific
+  // reason must win over provider status/type/transport signals.
   if (
-    statusCode === 429 ||
-    statusCode === 401 ||
-    statusCode === 402 ||
-    statusCode === 403 ||
     statusCode === 410 ||
-    (statusCode !== undefined && OUTAGE_STATUS_CODES.has(statusCode)) ||
-    (typeof err.type === 'string' && FAILOVER_ERROR_TYPES.has(err.type))
+    REQUEST_ERROR_PATTERNS.some((pattern) => pattern.test(text))
   ) {
-    return true;
+    return 'request';
   }
   if (
-    [err.code, err.cause?.code, err.data?.code].some(
-      (code) => typeof code === 'string' && TRANSPORT_CODES.has(code),
-    )
-  ) {
-    return true;
-  }
-
-  const messages = [
-    err.message ?? '',
-    err.data?.message ?? '',
-    err.data?.responseBody ?? '',
-  ];
-  if (
+    PROVIDER_ERROR_PATTERNS.some((pattern) => pattern.test(text)) ||
+    PROVIDER_OUTAGE_PATTERNS.some((pattern) => pattern.test(text)) ||
     messages.some((message) =>
-      TRANSPORT_MESSAGE_PATTERNS.some((p) => p.test(message)),
+      TRANSPORT_MESSAGE_PATTERNS.some((pattern) => pattern.test(message)),
     )
   ) {
-    return true;
+    return 'provider';
   }
+  if (!isRecord(error)) return undefined;
+  if (
+    (statusCode !== undefined && PROVIDER_STATUS_CODES.has(statusCode)) ||
+    (typeof error.type === 'string' && FAILOVER_ERROR_TYPES.has(error.type)) ||
+    [
+      error.code,
+      nestedField(error.cause, 'code'),
+      nestedField(error.data, 'code'),
+    ].some((code) => typeof code === 'string' && TRANSPORT_CODES.has(code))
+  ) {
+    return 'provider';
+  }
+  return undefined;
+}
 
-  const text = [
-    err.message ?? '',
-    err.data?.message ?? '',
-    err.data?.responseBody ?? '',
-  ].join(' ');
-  const hasFailoverReason =
-    RETRYABLE_ERROR_PATTERNS.some((p) => p.test(text)) ||
-    PROVIDER_OUTAGE_PATTERNS.some((p) => p.test(text));
-  // Providers sometimes return recoverable rate-limit/outage payloads with
-  // an HTTP 400 wrapper. Preserve application-level 400 failures, but let a
-  // recognizable failover body continue through the fallback path.
-  return hasFailoverReason;
+export function isFailoverError(error: unknown): boolean {
+  return failoverScope(error) !== undefined;
 }
 
 const INLINE_STATUS_CODES = new Set([401, 410]);
 const PERMANENT_QUOTA_BILLING_PATTERNS = [
-  /\bpersonal-team-blocked\b/i,
-  /\bspending.?limit\b/i,
-  /\b(?:ran|run) out of credits\b/i,
-  /\bcoding plan package has expired\b/i,
-  /\b(?:weekly|monthly) limit exhausted\b/i,
+  ...QUOTA_BILLING_PATTERNS,
   /\b(?:1113|1308|1309|1310)\b/,
 ];
 
@@ -323,7 +287,10 @@ export function isPermanentQuotaBillingError(error: unknown): boolean {
             .map(String)
             .join(' ')
         : '';
-  return PERMANENT_QUOTA_BILLING_PATTERNS.some((pattern) => pattern.test(text));
+  const normalizedText = text.toLowerCase();
+  return PERMANENT_QUOTA_BILLING_PATTERNS.some((pattern) =>
+    pattern.test(normalizedText),
+  );
 }
 
 /**
@@ -333,30 +300,13 @@ export function isPermanentQuotaBillingError(error: unknown): boolean {
  * Other failover errors (429 rate-limit, outage, etc.) get a toast instead.
  */
 export function isInlineFailoverError(error: unknown): boolean {
-  if (!error) return false;
   // The AI SDK surfaces 401/410 as bare strings ("Gone",
   // "AI_APICallError: Gone"); match those directly so they stay inline too.
-  if (typeof error === 'string') {
-    return (
-      /(?:^|\s)Gone(?:$|\s)/i.test(error) ||
-      /\b401\b/i.test(error) ||
-      /\b410\b/i.test(error) ||
-      /\bend of life\b/i.test(error) ||
-      /\bno longer available\b/i.test(error)
-    );
-  }
-  if (typeof error !== 'object') return false;
-  const err = error as Record<string, unknown>;
-  const statusCode = extractStatusCode(err);
+  const statusCode = extractStatusCode(error);
   if (statusCode !== undefined && INLINE_STATUS_CODES.has(statusCode)) {
     return true;
   }
-  const data = isRecord(err.data) ? err.data : {};
-  const text = [
-    typeof err.message === 'string' ? err.message : '',
-    typeof data.message === 'string' ? data.message : '',
-    typeof data.responseBody === 'string' ? data.responseBody : '',
-  ].join(' ');
+  const text = errorMessages(error).join(' ');
   return (
     /(?:^|\s)Gone(?:$|\s)/i.test(text) ||
     /\b401\b/i.test(text) ||
@@ -1041,13 +991,9 @@ export class ForegroundFallbackManager {
         // OpenCode v1 can publish `finish: 'content-filter'` before attaching
         // its ContentFilterError. Treat that terminal finish as the error
         // event itself; the later message/session error is deduped by ID.
-        const contentFilterError = {
-          name: 'ContentFilterError',
-          message: "The response was blocked by the provider's content filter",
-        };
         const messageError =
           info.finish === 'content-filter' && !isFailoverError(info.error)
-            ? contentFilterError
+            ? CONTENT_FILTER_ERROR
             : info.error;
         if (this.enabled && messageError && isFailoverError(messageError)) {
           const incidentID = this.incidentForMessageError(
