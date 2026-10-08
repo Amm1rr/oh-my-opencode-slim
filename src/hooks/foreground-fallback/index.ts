@@ -916,12 +916,8 @@ export class ForegroundFallbackManager {
    *  dropped; the seen IDs stay deduped until the next user turn. */
   private resetUnknownFinishStreak(sessionID: string): void {
     const streak = this.unknownFinishStreak.get(sessionID);
-    if (streak) {
-      this.unknownFinishStreak.set(sessionID, {
-        count: 0,
-        seen: streak.seen,
-      });
-    }
+    if (streak)
+      this.unknownFinishStreak.set(sessionID, { ...streak, count: 0 });
   }
 
   private commitSwitch(
