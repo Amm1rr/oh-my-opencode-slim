@@ -16,6 +16,7 @@ import {
   ForegroundFallbackManager,
   isFailoverError,
   isInlineFailoverError,
+  isPermanentQuotaBillingError,
 } from './index';
 
 // ACCEPTANCE GAP: config() hook behaviour is not covered by CI — verify live.
@@ -1600,6 +1601,23 @@ describe('ForegroundFallbackManager v2 retry hook', () => {
     },
   );
 
+  test('permanent quota error skips the host retry budget', async () => {
+    const { manager } = makeManager({ maxRetries: 3 });
+    const switchModel = mock(async () => {});
+    const event = {
+      sessionID: 'v2-permanent',
+      agent: 'orchestrator',
+      model: { providerID: 'test', id: 'a' },
+      error: { message: 'Free usage exceeded, subscribe to Go' },
+      decision: { retry: true, delay: 77 },
+    };
+    await manager.handleV2Retry(event, switchModel);
+    expect(switchModel).toHaveBeenCalledWith('v2-permanent', {
+      providerID: 'test',
+      id: 'b',
+    });
+  });
+
   test.each([
     ['B', 'C'],
     ['C', 'D'],
@@ -2118,6 +2136,26 @@ describe('isFailoverError', () => {
     expect(isFailoverError({ message: 'invalid model configuration' })).toBe(
       false,
     );
+  });
+});
+
+describe('isPermanentQuotaBillingError', () => {
+  test('returns true for free-tier usage exhaustion', () => {
+    expect(
+      isPermanentQuotaBillingError('Free usage exceeded, subscribe to Go'),
+    ).toBe(true);
+    expect(
+      isPermanentQuotaBillingError({
+        message: 'Free usage exceeded, subscribe to Go',
+      }),
+    ).toBe(true);
+  });
+
+  test('returns false for transient rate limits', () => {
+    expect(isPermanentQuotaBillingError('rate limit, retrying...')).toBe(false);
+    expect(
+      isPermanentQuotaBillingError({ message: '429 Too Many Requests' }),
+    ).toBe(false);
   });
 });
 
@@ -4345,6 +4383,40 @@ describe('ForegroundFallbackManager session.status', () => {
       type: 'session.status',
       properties: {
         sessionID: 'sess-retry',
+        status: {
+          type: 'retry',
+          attempt: 1,
+          message: 'Free usage exceeded, subscribe to Go',
+        },
+      },
+    });
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+  });
+
+  test('permanent quota error skips the host retry budget', async () => {
+    const { mocks } = createMockClient();
+    const mgr = new ForegroundFallbackManager(
+      makeChains(),
+      true,
+      { directory: '/test' } as any,
+      3,
+    );
+
+    await mgr.handleEvent({
+      type: 'message.updated',
+      properties: {
+        info: {
+          sessionID: 'sess-retry-permanent',
+          providerID: 'anthropic',
+          modelID: 'claude-opus-4-5',
+        },
+      },
+    });
+
+    await mgr.handleEvent({
+      type: 'session.status',
+      properties: {
+        sessionID: 'sess-retry-permanent',
         status: {
           type: 'retry',
           attempt: 1,

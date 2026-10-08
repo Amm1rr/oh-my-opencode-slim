@@ -296,6 +296,8 @@ const PERMANENT_QUOTA_BILLING_PATTERNS = [
   /\b(?:ran|run) out of credits\b/i,
   /\bcoding plan package has expired\b/i,
   /\b(?:weekly|monthly) limit exhausted\b/i,
+  /\bfree usage exceeded\b/i,
+  /\bsubscribe to go\b/i,
   /\b(?:1113|1308|1309|1310)\b/,
 ];
 
@@ -1190,17 +1192,22 @@ export class ForegroundFallbackManager {
           if (this.inProgress.has(sessionID)) break;
           this.rearmIfFreshDescent(sessionID);
           if (this.retryAlreadyObserved(sessionID, attempt)) break;
-          // Otherwise (attempt === 1, or model didn't change, or outside
-          // dedup window): process as genuine retry for current model.
-          if (this.absorbHostRetry(sessionID)) {
-            this.recordRetryAttempt(sessionID, attempt);
-            this.cancelInitialDelay(sessionID);
-            break;
-          }
           const incidentID = `retry:${curModel ?? 'unknown'}:${attempt}`;
           const retryError = props.error ?? {
             message: props.status?.message ?? '',
           };
+          // Permanent quota/billing exhaustion never recovers by waiting on
+          // this model — skip the host-retry budget and fall back at once.
+          // Otherwise (attempt === 1, or model didn't change, or outside
+          // dedup window): process as genuine retry for current model.
+          if (
+            !isPermanentQuotaBillingError(retryError) &&
+            this.absorbHostRetry(sessionID)
+          ) {
+            this.recordRetryAttempt(sessionID, attempt);
+            this.cancelInitialDelay(sessionID);
+            break;
+          }
           if (this.bypassInitialFallbackDelay(sessionID, retryError)) {
             await this.tryFallbackWithAbort(
               sessionID,
@@ -1360,7 +1367,13 @@ export class ForegroundFallbackManager {
       this.sessionModel.set(sessionID, from);
       if (event.decision?.retry === true) {
         this.rearmIfFreshDescent(sessionID);
-        if (this.absorbHostRetry(sessionID)) return;
+        // Permanent quota/billing exhaustion never recovers by waiting on
+        // this model — skip the host-retry budget and steer at once.
+        if (
+          !isPermanentQuotaBillingError(event.error) &&
+          this.absorbHostRetry(sessionID)
+        )
+          return;
       }
       const selected = this.selectFallbackModel(sessionID);
       if (!selected || selected === 'exhausted') return;
