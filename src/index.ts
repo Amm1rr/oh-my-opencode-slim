@@ -20,6 +20,7 @@ import {
   type ResolvedAgentRegistry,
 } from './agents/registry';
 import type { RegistryFactoryBridge } from './agents/registry-bridge';
+import { roleHasWriteCapability } from './agents/role-definitions';
 import {
   CompanionManager,
   companionSessionIdForDirectory,
@@ -61,6 +62,7 @@ import {
   formatChildInputWaitDelta,
   formatStoppedJobDelta,
   GOAL_POINTER_METADATA_KEY,
+  HOST_ATTRIBUTED_STOP_OUTCOME,
   SessionLifecycle,
   stoppedJobRecoveryReason,
 } from './hooks';
@@ -181,7 +183,11 @@ import {
 import { createTuiReusableProjection } from './utils/tui-reusable-projection';
 import { createV2Setup } from './v2';
 import { parseModelRef } from './v2/adapters';
-import { delegationWording } from './v2/delegation';
+import {
+  type BackgroundDefaultFlipState,
+  createBackgroundDefaultFlipState,
+  delegationWording,
+} from './v2/delegation';
 import {
   isInternalAdmission,
   recordInternalAdmission,
@@ -696,6 +702,11 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     }
   };
 
+  // Per-instance pairing state for the background-default flip (v2): the
+  // setup arms it only after its description rewrite verifiably landed,
+  // so prose and mechanism state one contract per location. Inert on v1
+  // (hostFlavor gate) and until armed.
+  const backgroundDefaultFlip = createBackgroundDefaultFlipState();
   try {
     // Directory scope (multi-instance): the host loads this plugin once per
     // location and broadcasts every event to every instance in the process.
@@ -1066,6 +1077,8 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     });
     taskSessionManagerHook = createTaskSessionManagerHook(ctx, {
       terminalGate,
+      // Flip mechanism half reads the per-instance box declared above.
+      isBackgroundDefaultFlipArmed: backgroundDefaultFlip.isArmed,
       strategy: runtime.backgroundJobs.strategy,
       maxSessionsPerAgent: runtime.backgroundJobs.maxSessionsPerAgent,
       maxRetainedSnapshots: runtime.backgroundJobs.maxRetainedSnapshots,
@@ -1143,6 +1156,12 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       isFallbackInProgress: (sessionID) =>
         foregroundFallback.isFallbackInProgress(sessionID),
       resolveSelection: lifecycleSelectionResolver,
+      // C2 writer-lane predicate: the queued child's agent from the board
+      // record, graded by its role's write permission data. A missing
+      // record/agent reads as writer (fail-safe, verdict defaults to
+      // attaching the verification sentence).
+      isWriterLaneTask: (taskID) =>
+        roleHasWriteCapability(backgroundJobCoordinator.get(taskID)?.agent),
       isStoppedJobRecoveryCurrent: (taskID, generation) => {
         const record = backgroundJobCoordinator.get(taskID);
         return (
@@ -1190,6 +1209,43 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           trigger: 'stopped-job-recovery',
           verdict: 'skipped',
           reason: 'revived-tracker-owns-delivery',
+        });
+        return;
+      }
+      // Host-attributed double-delivery gate: a stop the host itself
+      // reported (interrupted/cancelled — the terminal gate's own result
+      // summary, same anchor as stoppedJobRecoveryReason) is already
+      // delivered to the parent by the host's native notifier for a
+      // tool-launched generation, so a recovery wake beside it would
+      // queue a second admission for one stop. The revived-run tracker is
+      // the complementary view: when it owns this generation's delivery
+      // (task_revive lineage), omos stays the wake's author and the skip
+      // does not apply. Tracker without a record for this (taskID,
+      // generation) reads as false → only host-attributed stops fall to
+      // the native side (error-safe: at worst a redundant wake is
+      // dropped); every other stop keeps its recovery wake.
+      // First-publication only (terminalRevision === 1): the native
+      // observer is armed per tool-launched run, and every
+      // tool-launched relaunch resets the revision (board recordLaunch
+      // bumps the generation and zeroes terminalRevision), so a
+      // revision-1 host-attributed stop is always a fresh tool-launched
+      // run the native notifier covers. A later publication (rev > 1)
+      // means the child ran again WITHOUT a tool launch — e.g. a direct
+      // prompt after completion — where no native observer exists for
+      // the new run and this recovery wake is the only notification the
+      // parent gets. Skipping there would lose the stop entirely.
+      if (
+        record.terminalRevision === 1 &&
+        HOST_ATTRIBUTED_STOP_OUTCOME.test(record.resultSummary ?? '') &&
+        !revivedRunTracker.willNotifyParent(record.taskID, record.generation)
+      ) {
+        log('[orchestrator-wake] stopped-job recovery wake skipped', {
+          sessionID: record.parentSessionID,
+          taskID: record.taskID,
+          generation: record.generation,
+          trigger: 'stopped-job-recovery',
+          verdict: 'skipped',
+          reason: 'native-delivers-host-attributed-stop',
         });
         return;
       }
@@ -1943,6 +1999,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     'v2.refreshProfiles': refreshProfilesFromDisk,
     'v2.foreignTaskEvent': observeForeignTaskEvent,
     'v2.resolveDelegatedModel': resolveV2DelegatedModel,
+    // Per-instance background-default flip handle: v2 setup arms it after
+    // its description rewrite verifies and disarms it with its teardown.
+    'v2.backgroundDefaultFlip': backgroundDefaultFlip,
     'v2.session.retry':
       foregroundFallback.handleV2Retry.bind(foregroundFallback),
     // v2 owns its own interview bridge/service; point the submit tool and
@@ -3118,6 +3177,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     'v2.foreignTaskEvent': typeof observeForeignTaskEvent;
     'v2.refreshProfiles': typeof refreshProfilesFromDisk;
     'v2.resolveDelegatedModel': typeof resolveV2DelegatedModel;
+    'v2.backgroundDefaultFlip': BackgroundDefaultFlipState;
   };
 
   return hooks;

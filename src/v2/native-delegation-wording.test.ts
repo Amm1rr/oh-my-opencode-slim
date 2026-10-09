@@ -94,15 +94,13 @@ describe('buildOrchestratorPrompt delegation vocabulary', () => {
       'v2',
     );
 
-    expect(prompt).toContain('`subagent(..., sessionID: ...)`');
-    expect(prompt).toContain('Prefer `subagent(..., background: true)`');
-    expect(prompt).toContain('cannot receive another `subagent` call');
-    expect(prompt).toContain("in the subagent tool's `sessionID` argument");
-    expect(prompt).toContain('call subagent with `agent: "fixer"`');
-    expect(prompt).toContain('`sessionID: "fix-1"` or `sessionID: "ses_abc"`');
-    expect(prompt).toContain(
-      'The subagent tool also accepts an optional `model` argument ("providerID/modelID")',
-    );
+    expect(prompt).toContain('`subagent(agent, sessionID, prompt)`');
+    // Background-default flip: the Prefer-background line is gone — the
+    // flipped subagent description owns the default; the slim prompt keeps
+    // only the post-dispatch discipline.
+    expect(prompt).not.toContain('Prefer `subagent(..., background: true)`');
+    expect(prompt).toContain('After dispatching, do non-overlapping work');
+    expect(prompt).toContain('multiple `subagent` calls in one message');
     expect(prompt).not.toContain('subagent_type');
     expect(prompt).not.toContain('task(');
     expect(prompt).not.toContain('task_id');
@@ -141,6 +139,11 @@ describe('buildOrchestratorPrompt delegation vocabulary', () => {
  * subagent tool supports the optional `model` parameter. */
 const MODEL_PARAM_SENTENCE = ` The subagent tool also accepts an optional \`model\` argument ("providerID/modelID"). Only set it when the user explicitly asks for a specific model or variant; never guess the ID — look it up with the models tool first, filtering to your own provider.`;
 
+/** Slim v2 model-param guidance (buildOrchestratorPromptV2): the optional
+ * `model` parameter note compressed to one routing line. */
+const SLIM_MODEL_PARAM_SENTENCE =
+  'Set `model` only when the user asks; look up IDs with the models tool first.';
+
 describe('createAgents council seat pointer vocabulary', () => {
   test('v2 hostFlavor emits a subagent() seat pointer, not the full procedure', () => {
     const prompt = orchestratorPromptFor('v2');
@@ -153,9 +156,8 @@ describe('createAgents council seat pointer vocabulary', () => {
     expect(prompt).toContain('dispatch via subagent()');
     expect(prompt).not.toContain('## Council Mode');
     expect(prompt).not.toContain('in PARALLEL');
-    // The model-param guidance survives only in the orchestrator base
-    // prompt now that the block no longer restates it.
-    expect(prompt).toContain(MODEL_PARAM_SENTENCE);
+    // The slim base prompt carries the compressed model-param guidance.
+    expect(prompt).toContain(SLIM_MODEL_PARAM_SENTENCE);
     expect(prompt).not.toContain('subagent_type');
     expect(prompt).not.toContain('task(');
   });
@@ -169,19 +171,17 @@ describe('createAgents council seat pointer vocabulary', () => {
     expect(prompt).not.toContain('## Council Mode');
     expect(prompt).not.toContain('subagent(');
     expect(prompt).not.toContain(MODEL_PARAM_SENTENCE);
+    expect(prompt).not.toContain(SLIM_MODEL_PARAM_SENTENCE);
   });
 
   test('v2 keeps native resume guidance and does not adopt the v1 task_revive-first rule', () => {
     const v2 = orchestratorPromptFor('v2');
 
     expect(v2).toContain(
-      'Never use `subagent(..., sessionID: ...)` to fetch output',
+      '`task_status` is read-only inspection; `task_result` reads a finished result; neither launches, resumes, or instructs a child.',
     );
     expect(v2).toContain(
-      'A completed session continues with `subagent(agent: "<agent>", sessionID: "<task-id>", prompt: "...")` even when it is not listed under Reusable Sessions.',
-    );
-    expect(v2).toContain(
-      'Cancelled, errored, and stopped sessions continue with task_revive.',
+      'Continue a completed session with `subagent(agent, sessionID, prompt)` by exact id even when unlisted; cancelled/errored/stopped sessions use `task_revive`.',
     );
     expect(v2).not.toContain(
       'Only sessions listed under Reusable Sessions may be resumed with `subagent()`.',

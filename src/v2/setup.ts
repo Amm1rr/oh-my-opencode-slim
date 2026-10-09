@@ -66,7 +66,14 @@ import {
   createProfileRefreshRunner,
   watchPluginConfigFiles,
 } from './config-watch';
-import { subagentArgsToV1, toolNameToV1, v1ArgsToSubagent } from './delegation';
+import {
+  type BackgroundDefaultFlipState,
+  DELEGATION_TOOL_V2,
+  SUBAGENT_BACKGROUND_DEFAULT_DESCRIPTION,
+  subagentArgsToV1,
+  toolNameToV1,
+  v1ArgsToSubagent,
+} from './delegation';
 import { mapV2EventToV1 } from './event-adapter';
 import {
   INTERNAL_SYNTHETIC_MESSAGE_PREFIX,
@@ -1953,6 +1960,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
     let stopPermissionEventIntake: (() => Promise<void>) | undefined;
     let v1Hooks: Record<string, unknown> | undefined;
     let registryBridge: RegistryFactoryBridge | undefined;
+    let backgroundFlip: BackgroundDefaultFlipState | undefined;
 
     const boundedPermissionStop = (
       stop: () => Promise<void> | void,
@@ -2046,6 +2054,11 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
         pluginInput as never,
       )) as unknown as Record<string, unknown>;
       registryBridge = v1Hooks.registryBridge as RegistryFactoryBridge;
+      // Per-instance flip handle (the factory threads its isArmed getter
+      // into the execute.before deps; this side owns arm/disarm).
+      backgroundFlip = v1Hooks['v2.backgroundDefaultFlip'] as
+        | BackgroundDefaultFlipState
+        | undefined;
       log('[v2] v1 factory initialized', {
         agents: Object.keys((v1Hooks as { agent?: object }).agent ?? {}).length,
         tools: Object.keys((v1Hooks as { tool?: object }).tool ?? {}).length,
@@ -2798,6 +2811,44 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
               }
             });
             disposers.push(() => reg.dispose());
+          }
+          // Background-default flip, wording half: rewrite the native
+          // `subagent` description to state the default the execute.before
+          // rewrite applies, so prose and mechanism declare one contract.
+          // Pairing: the per-instance mechanism half (the args rewrite in
+          // tool-execute-hooks) reads this setup's flip handle, armed only
+          // after this description rewrite verifiably landed (draft.get
+          // probe). Any failure on either path (transform throws, native
+          // tool absent, hook registration failed, handle missing from the
+          // factory) leaves BOTH halves off and the native foreground
+          // default keeps operating end-to-end with its native wording —
+          // no semantic mismatch is possible. Per-instance state: disposing
+          // one location's setup disarms only its own flip.
+          if (before && backgroundFlip) {
+            try {
+              let flipVerified = false;
+              const reg = await ctx.tool.transform((draft) => {
+                draft.update(DELEGATION_TOOL_V2, (tool) => {
+                  tool.description = SUBAGENT_BACKGROUND_DEFAULT_DESCRIPTION;
+                });
+                const flipped = draft.get(DELEGATION_TOOL_V2);
+                flipVerified =
+                  flipped?.description ===
+                  SUBAGENT_BACKGROUND_DEFAULT_DESCRIPTION;
+                if (!flipVerified) {
+                  log('[v2] subagent description flip missed (tool absent)');
+                }
+              });
+              if (flipVerified) backgroundFlip.arm();
+              disposers.push(() => {
+                // Disarm first: a throwing reg.dispose() must never leave a
+                // stale armed mechanism behind (fail-safe direction).
+                backgroundFlip.disarm();
+                reg.dispose();
+              });
+            } catch (err) {
+              log('[v2] subagent description flip failed', String(err));
+            }
           }
           log('[v2] tool hooks registered', {
             before: !!before,

@@ -417,16 +417,25 @@ describe('task_reply', () => {
     expect(task_reply.description).toMatch(/host UI/i);
     expect(task_reply.description).toContain('task_cancel');
 
-    const viaNative = await task_reply.execute(
-      { sessionID: 'ses_child1', request_id: 'que_1', answers: ['yes'] },
-      { sessionID: 'parent-1' } as never,
-    );
-    expect(viaNative).toContain('Answered pending question que_1');
-    const viaAlias = await task_reply.execute(
-      { task_id: 'ses_child1', request_id: 'que_2', answers: ['yes'] },
-      { sessionID: 'parent-1' } as never,
-    );
-    expect(viaAlias).toContain('Answered pending question que_2');
+    // C4: both identifier forms still resolve the task and its open ask on
+    // v2, but the question path refuses before any transport attempt — the
+    // ask stays open for the host UI to answer.
+    const refusal = 'Question replies are not supported on this host';
+    await expect(
+      task_reply.execute(
+        { sessionID: 'ses_child1', request_id: 'que_1', answers: ['yes'] },
+        { sessionID: 'parent-1' } as never,
+      ),
+    ).rejects.toThrow(refusal);
+    await expect(
+      task_reply.execute(
+        { task_id: 'ses_child1', request_id: 'que_2', answers: ['yes'] },
+        { sessionID: 'parent-1' } as never,
+      ),
+    ).rejects.toThrow(refusal);
+    expect(reply).not.toHaveBeenCalled();
+    expect(getChildInputWait('ses_child1', 'que_1')).toBeDefined();
+    expect(getChildInputWait('ses_child1', 'que_2')).toBeDefined();
   });
 
   test('omitted answers rejects the open question', async () => {
@@ -811,6 +820,82 @@ describe('task_reply', () => {
 
     expect(getChildInputWait('ses_child1', 'que_1')).not.toBeUndefined();
   });
+
+  test('C4: v2 question reply and reject both fail fast before any transport', async () => {
+    resetChildInputWaitForTests();
+    const board = new BackgroundJobBoard();
+    registerBackgroundChild(board);
+    noteChildInputWait({
+      taskID: 'ses_child1',
+      parentSessionID: 'parent-1',
+      kind: 'question',
+      requestID: 'que_1',
+      questions: [],
+    });
+    const reply = mock(async () => ({ data: true }));
+    const reject = mock(async () => ({ data: true }));
+    const client = { question: { reply, reject } };
+    const { task_reply } = createTaskReplyTool({
+      input: { directory: '/test', client, hostFlavor: 'v2' } as never,
+      backgroundJobBoard: board,
+    });
+    const expected =
+      "Question replies are not supported on this host — answer the child's question in the host UI, or cancel the child with task_cancel instead.";
+    // reply path (answers supplied) AND reject path (answers omitted)
+    await expect(
+      task_reply.execute(
+        {
+          task_id: 'ses_child1',
+          request_id: 'que_1',
+          answers: ['yes'],
+        },
+        { sessionID: 'parent-1' } as never,
+      ),
+    ).rejects.toThrow(expected);
+    await expect(
+      task_reply.execute({ task_id: 'ses_child1', request_id: 'que_1' }, {
+        sessionID: 'parent-1',
+      } as never),
+    ).rejects.toThrow(expected);
+    // Neither transport path ran, and the wait was never cleared: the
+    // host UI can still answer the form.
+    expect(reply).not.toHaveBeenCalled();
+    expect(reject).not.toHaveBeenCalled();
+    expect(getChildInputWait('ses_child1', 'que_1')).toBeDefined();
+    expect(listChildInputWaits('ses_child1')).toHaveLength(1);
+  });
+
+  test('C4: v2 permission replies keep the full transport path', async () => {
+    resetChildInputWaitForTests();
+    const board = new BackgroundJobBoard();
+    registerBackgroundChild(board);
+    noteChildInputWait({
+      taskID: 'ses_child1',
+      parentSessionID: 'parent-1',
+      kind: 'permission',
+      requestID: 'per_1',
+      permission: 'bash',
+      patterns: ['docker *'],
+    });
+    const reply = mock(async () => ({ data: true }));
+    const { task_reply } = createTaskReplyTool({
+      input: {
+        directory: '/test',
+        client: { permission: { reply } },
+        hostFlavor: 'v2',
+      } as never,
+      backgroundJobBoard: board,
+    });
+
+    const output = await task_reply.execute(
+      { task_id: 'ses_child1', request_id: 'per_1', reply: 'once' },
+      { sessionID: 'parent-1' } as never,
+    );
+
+    expect(reply).toHaveBeenCalledTimes(1);
+    expect(output).toContain('Replied once to pending permission per_1');
+    expect(getChildInputWait('ses_child1', 'per_1')).toBeUndefined();
+  });
 });
 
 describe('task_reply on a v1-shaped host client', () => {
@@ -1049,12 +1134,16 @@ describe('task_reply v2 event transport integration', () => {
         kind: 'question',
         requestID: 'form_1',
       });
+      // C4: the v2 gate refuses before any transport attempt with the
+      // honest alternatives; the wait stays open for the host UI.
       await expect(
         task_reply.execute(
           { task_id: 'ses_child1', request_id: 'form_1', answers: ['staging'] },
           { sessionID: 'parent-1' } as never,
         ),
-      ).rejects.toThrow('no question.reply API');
+      ).rejects.toThrow(
+        "Question replies are not supported on this host — answer the child's question in the host UI, or cancel the child with task_cancel instead.",
+      );
       expect(getChildInputWait('ses_child1', 'form_1')).not.toBeUndefined();
     } finally {
       await hook.event({

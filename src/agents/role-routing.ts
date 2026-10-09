@@ -90,3 +90,23 @@ export function renderRoleRoutingBlock(
     `@${runtimeName}`,
   );
 }
+
+/**
+ * v2 slim one-line routing verdicts (council-final §1), keyed by the same
+ * agent ids as ROLE_ROUTING_BLOCKS: the slim <Agents> block keeps the
+ * routing criteria, while the agents' `description` fields (consumed by
+ * the native dynamic subagent list) stay non-duplicating one-liners. Not a
+ * new name list — keys mirror the routing data, and the renderer iterates
+ * ROLE_ROUTING_BLOCKS so a role added there is filtered identically and
+ * only skipped from the slim block until its line lands here.
+ */
+export const ROLE_ROUTING_SLIM_LINES: Readonly<Record<string, string>> =
+  Object.freeze({
+    explorer: `@explorer — read-only codebase recon (glob/grep/AST). Delegate: discovery, parallel searches, summarized maps. Don't: known path / need full contents / about to edit.`,
+    librarian: `@librarian — external docs & web research. Delegate: changing APIs, version-specific behavior, official examples, tricky bugs. Don't: stable standard usage or facts already in context.`,
+    oracle: `@oracle — architecture, risk, debugging strategy, review; an escalation, not a default verification step. Delegate: major long-term decisions, problems persisting after 2+ fix attempts, high-risk trade-offs, simplification. Don't: routine or time-sensitive calls.`,
+    designer: `@designer — owns all UI/UX: layout, hierarchy, spacing, motion, responsive feel. Never do UI/design work yourself. Weak at copy: review and fix user-facing copy afterward without altering visuals; purely mechanical follow-ups go to @fixer.`,
+    fixer: `@fixer — bounded, well-defined implementation. Delegate: multi-file or mechanical changes, parallel per-area lanes. Don't: discovery/decisions, one small (<20-line) change, anything needing design judgment.`,
+    council: `@council — multi-model consensus for high-stakes decisions. Send the full question plus context; preserve its structured report. Don't: routine work or single-specialist tasks; @council is never the only lane on a task.`,
+    observer: `@observer — analyzes images/PDFs/diagrams, keeping media bytes out of your context. Always pass the full file path. Don't: plain-text files.`,
+  });

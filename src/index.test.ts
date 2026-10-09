@@ -32,6 +32,7 @@ import {
   noteChildInputWait,
   resetChildInputWaitForTests,
 } from './hooks/task-session-manager/child-input-wait';
+import * as trackerModule from './hooks/task-session-manager/revived-run-tracker';
 import { LOOP_GUARD_WARNING } from './hooks/tool-loop-guard/hook';
 import type { MessageWithParts } from './hooks/types';
 import pluginModuleDefault, { OhMyOpenCodeLite as plugin } from './index';
@@ -1902,6 +1903,235 @@ describe('plugin reload generation cleanup', () => {
       }
     },
   );
+
+  // ── C3 host-attributed double-delivery gate ─────────────────────────────
+  // A stop the host itself reported (`Host reported outcome:
+  // interrupted|cancelled.`) is delivered to the parent by the host's
+  // native notifier on a tool-launched generation: the omos recovery wake
+  // beside it would queue a second admission for one stop. The skip
+  // requires BOTH views of the same fact — host-attributed summary AND
+  // the revived-run tracker not owning this generation's delivery. Tracker
+  // with no record for the (taskID, generation) reads false, so the
+  // fallback skips exactly the host-attributed stops; every other stop
+  // keeps its wake. v1 stop shapes (no host-attributed summary is ever
+  // committed on a v1 host — the terminal gate reads the v2-only Session
+  // Info `outcome`) are byte-for-byte unchanged.
+
+  const HOST_INTERRUPTED_SUMMARY = 'Host reported outcome: interrupted.';
+
+  /** Drive the real stopped-recovery listener chain with a fixture record
+   * and capture the wake trigger plus the skip log. Installs every spy
+   * BEFORE plugin setup, mirroring the provenance test above. */
+  async function emitStoppedRecovery(record: {
+    resultSummary: string;
+    pluginConfig?: Record<string, unknown>;
+    forceWillNotifyParent?: boolean;
+    /** Simulate a direct (non-tool) prompt re-running the child after its
+     * first terminal publication: the board record goes back to running
+     * (terminalRevision bumps, generation unchanged — no recordLaunch, no
+     * fresh native observer) and the next stop publishes a later
+     * revision. */
+    republishAfterDirectPrompt?: boolean;
+  }) {
+    const wake = mock(() => {});
+    const createScheduler = wakeHooks.createOrchestratorWakeScheduler;
+    const scheduler = spyOn(
+      wakeHooks,
+      'createOrchestratorWakeScheduler',
+    ).mockImplementation((...args: Parameters<typeof createScheduler>) => ({
+      ...createScheduler(...args),
+      triggerStoppedJobRecovery: wake,
+    }));
+    const subscriptions = spyOn(
+      BackgroundJobCoordinator.prototype,
+      'addTerminalOutcomeListener',
+    );
+    const realCreateTracker = trackerModule.createRevivedRunTracker;
+    const trackerSpy = record.forceWillNotifyParent
+      ? spyOn(trackerModule, 'createRevivedRunTracker').mockImplementation(
+          (...args: Parameters<typeof realCreateTracker>) => ({
+            ...realCreateTracker(...args),
+            willNotifyParent: () => true,
+          }),
+        )
+      : undefined;
+    const logSpy = spyOn(loggerModule, 'log').mockImplementation(() => {});
+    let hooks: Awaited<ReturnType<typeof plugin>> | undefined;
+    try {
+      hooks = await createHooks(record.pluginConfig ?? {});
+      const board = new BackgroundJobBoard();
+      const launch = {
+        taskID: 'child-host-stop',
+        parentSessionID: 'parent-1',
+        agent: 'fixer',
+        description: 'host-attributed stop probe',
+        now: 100,
+      };
+      board.registerLaunch(launch);
+      const stopped = board.markStopped(
+        launch.taskID,
+        record.resultSummary,
+        200,
+      );
+      if (!stopped) throw new Error('missing stopped record');
+      expect(stopped).toMatchObject({
+        state: 'stopped',
+        terminalUnreconciled: true,
+      });
+      let terminal = stopped;
+      if (record.republishAfterDirectPrompt) {
+        // Observed revision must match the record's current revision for the
+        // live-busy observation to restart the record (the undefined
+        // default reads as a stale observation and only bumps lastLiveBusyAt).
+        const rerunning = board.markRunningFromLiveSession(
+          launch.taskID,
+          300,
+          undefined,
+          stopped.terminalRevision,
+        );
+        expect(rerunning?.state).toBe('running');
+        const restopped = board.markStopped(
+          launch.taskID,
+          record.resultSummary,
+          400,
+        );
+        if (!restopped) throw new Error('missing restopped record');
+        expect(restopped.terminalRevision).toBeGreaterThan(1);
+        terminal = restopped;
+      }
+      for (const [listener] of subscriptions.mock.calls) listener(terminal);
+      const skipLogs = logSpy.mock.calls.filter(
+        ([message]) =>
+          message === '[orchestrator-wake] stopped-job recovery wake skipped',
+      );
+      return { wake, skipLogs };
+    } finally {
+      await hooks?.dispose?.();
+      scheduler.mockRestore();
+      subscriptions.mockRestore();
+      trackerSpy?.mockRestore();
+      logSpy.mockRestore();
+    }
+  }
+
+  test('C3: tool-launched host-attributed stop suppresses the recovery wake (native delivers once)', async () => {
+    const { wake, skipLogs } = await emitStoppedRecovery({
+      resultSummary: HOST_INTERRUPTED_SUMMARY,
+      pluginConfig: { hostFlavor: 'v2' },
+    });
+
+    expect(wake).not.toHaveBeenCalled();
+    expect(skipLogs).toHaveLength(1);
+    expect(skipLogs[0]?.[1]).toMatchObject({
+      verdict: 'skipped',
+      reason: 'native-delivers-host-attributed-stop',
+      taskID: 'child-host-stop',
+    });
+  });
+
+  test('C3: revived generation (tracker owns delivery) still wakes beside its host-attributed stop', async () => {
+    const { wake, skipLogs } = await emitStoppedRecovery({
+      resultSummary: HOST_INTERRUPTED_SUMMARY,
+      pluginConfig: { hostFlavor: 'v2' },
+      forceWillNotifyParent: true,
+    });
+
+    expect(wake).toHaveBeenCalledTimes(1);
+    expect(wake.mock.calls[0]?.[0]).toBe('parent-1');
+    expect(String(wake.mock.calls[0]?.[1])).toContain('<stopped-job>');
+    expect(skipLogs).toHaveLength(0);
+  });
+
+  test('C3: tracker with no record falls back to skipping ONLY host-attributed stops (v2)', async () => {
+    const { wake, skipLogs } = await emitStoppedRecovery({
+      resultSummary: 'no outcome',
+      pluginConfig: { hostFlavor: 'v2' },
+    });
+
+    expect(wake).toHaveBeenCalledTimes(1);
+    expect(wake.mock.calls[0]?.[0]).toBe('parent-1');
+    const delta = String(wake.mock.calls[0]?.[1]);
+    expect(delta).toContain('<stopped-job>');
+    expect(delta).toContain('stopped without a terminal result');
+    expect(skipLogs).toHaveLength(0);
+  });
+
+  test('C3: later publication after a direct prompt keeps its recovery wake (no native observer for the re-run)', async () => {
+    const { wake, skipLogs } = await emitStoppedRecovery({
+      resultSummary: HOST_INTERRUPTED_SUMMARY,
+      pluginConfig: { hostFlavor: 'v2' },
+      republishAfterDirectPrompt: true,
+    });
+
+    // rev > 1: the child ran again WITHOUT a tool launch, so no native
+    // observer covers the re-run's stop — this recovery wake is the only
+    // notification the parent gets and must not be skipped.
+    expect(wake).toHaveBeenCalledTimes(1);
+    expect(wake.mock.calls[0]?.[0]).toBe('parent-1');
+    expect(String(wake.mock.calls[0]?.[1])).toContain('<stopped-job>');
+    expect(skipLogs).toHaveLength(0);
+  });
+
+  test('C3: v1 host stop behavior is unchanged — the wake fires with its original delta', async () => {
+    const { wake, skipLogs } = await emitStoppedRecovery({
+      resultSummary: 'no outcome',
+    });
+
+    expect(wake).toHaveBeenCalledTimes(1);
+    expect(wake.mock.calls[0]?.[0]).toBe('parent-1');
+    expect(String(wake.mock.calls[0]?.[1])).toBe(
+      '<stopped-job>\nalias: fix-1\ntask: child-host-stop\ngeneration: 1\nstate: stopped\nreason: stopped without a terminal result\n</stopped-job>',
+    );
+    expect(String(wake.mock.calls[0]?.[2])).toBe('child-host-stop:1');
+    expect(skipLogs).toHaveLength(0);
+  });
+
+  // ── C2 writer-lane predicate wiring ────────────────────────────────────
+  // The scheduler's `isWriterLaneTask` is built from the board record's
+  // agent graded through the role write-permission data; a missing record
+  // (or unknown agent) fails safe to writer so the verification sentence
+  // is attached rather than omitted.
+
+  test('C2: isWriterLaneTask grades the board record agent and fails safe to writer', async () => {
+    const createScheduler = wakeHooks.createOrchestratorWakeScheduler;
+    let captured:
+      | { isWriterLaneTask?: (taskID: string) => boolean }
+      | undefined;
+    const scheduler = spyOn(
+      wakeHooks,
+      'createOrchestratorWakeScheduler',
+    ).mockImplementation((...args: Parameters<typeof createScheduler>) => {
+      captured = args[1] as unknown as typeof captured;
+      return createScheduler(...args);
+    });
+    const getSpy = spyOn(BackgroundJobCoordinator.prototype, 'get');
+    let hooks: Awaited<ReturnType<typeof plugin>> | undefined;
+    try {
+      hooks = await createHooks();
+      const predicate = captured?.isWriterLaneTask;
+      expect(typeof predicate).toBe('function');
+
+      getSpy.mockReturnValue({ agent: 'explorer' } as never);
+      expect(predicate?.('any-task')).toBe(false);
+      getSpy.mockReturnValue({ agent: 'oracle' } as never);
+      expect(predicate?.('any-task')).toBe(false);
+      getSpy.mockReturnValue({ agent: 'designer' } as never);
+      expect(predicate?.('any-task')).toBe(true);
+      getSpy.mockReturnValue({ agent: 'fixer' } as never);
+      expect(predicate?.('any-task')).toBe(true);
+      // Unknown agent / missing record / missing agent → writer (fail-safe).
+      getSpy.mockReturnValue({ agent: 'custom-unknown' } as never);
+      expect(predicate?.('any-task')).toBe(true);
+      getSpy.mockReturnValue(undefined as never);
+      expect(predicate?.('missing-task')).toBe(true);
+      getSpy.mockReturnValue({ agent: undefined } as never);
+      expect(predicate?.('agentless-task')).toBe(true);
+    } finally {
+      await hooks?.dispose?.();
+      scheduler.mockRestore();
+      getSpy.mockRestore();
+    }
+  });
 
   test('v1 dispose releases this generation companion manager', async () => {
     // Enabled with a custom (missing) binaryPath: registration and state

@@ -190,6 +190,21 @@ export function createTaskReplyTool(options: {
       // narrowed (non-undefined) types.
       const openWait = wait;
       const targetJob = job;
+      // v2 gate (C4): the pinned v2 plugin context exposes no supported
+      // form-reply API — question reply AND reject would both dead-end in
+      // transport attempts. Fail honestly BEFORE either path, with the
+      // alternatives the parent still has (host UI, steer, cancel). Early
+      // exit here never reaches clearChildInputWait: the ask stays open
+      // and answerable where it actually is. Permission requests are not
+      // gated; v1 hosts (no hostFlavor) keep the full path untouched.
+      if (
+        openWait.kind === 'question' &&
+        (options.input as { hostFlavor?: string }).hostFlavor === 'v2'
+      ) {
+        throw new Error(
+          "Question replies are not supported on this host — answer the child's question in the host UI, or cancel the child with task_cancel instead.",
+        );
+      }
 
       /**
        * Answer/reject through the host. Clients exposing `question` /

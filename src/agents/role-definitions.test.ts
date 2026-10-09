@@ -7,7 +7,11 @@ import { createLibrarianAgent } from './librarian';
 import { createObserverAgent } from './observer';
 import { createOracleAgent } from './oracle';
 import { buildOrchestratorPrompt } from './orchestrator';
-import { ROLE_DEFINITIONS, SPECIALIST_ROLES } from './role-definitions';
+import {
+  ROLE_DEFINITIONS,
+  roleHasWriteCapability,
+  SPECIALIST_ROLES,
+} from './role-definitions';
 import { ROLE_ROUTING_BLOCKS } from './role-routing';
 
 const FACTORIES = {
@@ -86,6 +90,29 @@ describe('specialist role definitions', () => {
     expect(ROLE_ROUTING_BLOCKS.oracle).toContain(
       'materially reduces risk or uncertainty',
     );
+  });
+});
+
+describe('roleHasWriteCapability', () => {
+  test('derives the verdict from the routing permission rows, not a name list', () => {
+    // Read-only rows (read_files / Read files / Synthesis only) are not writers.
+    expect(roleHasWriteCapability('explorer')).toBe(false);
+    expect(roleHasWriteCapability('oracle')).toBe(false);
+    expect(roleHasWriteCapability('observer')).toBe(false);
+    expect(roleHasWriteCapability('council')).toBe(false);
+    // Write rows are writers.
+    expect(roleHasWriteCapability('designer')).toBe(true);
+    expect(roleHasWriteCapability('fixer')).toBe(true);
+  });
+
+  test('fails safe to writer on undeterminable input', () => {
+    // No permission row in the routing data (librarian): undeterminable.
+    expect(ROLE_ROUTING_BLOCKS.librarian).not.toContain('Permissions:');
+    expect(roleHasWriteCapability('librarian')).toBe(true);
+    // Unknown/custom agents and missing agents.
+    expect(roleHasWriteCapability('custom-unknown')).toBe(true);
+    expect(roleHasWriteCapability(undefined)).toBe(true);
+    expect(roleHasWriteCapability('')).toBe(true);
   });
 });
 

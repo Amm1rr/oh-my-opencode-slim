@@ -211,6 +211,9 @@ export function createTaskSessionManagerHook(
     /** Host flavor marker ('v2' on OpenCode v2 hosts); selects the native
      *  delegation vocabulary in model-visible tool guidance. Defaults v1. */
     hostFlavor?: string;
+    /** Per-instance pairing flag for the background-default flip (v2 only);
+     *  see BackgroundDefaultFlipState in v2/delegation. */
+    isBackgroundDefaultFlipArmed?: () => boolean;
     recoverRetainedSession?: (request: {
       parentSessionID: string;
       requested: string;
@@ -735,6 +738,7 @@ export function createTaskSessionManagerHook(
         taskContextTracker,
         getLifecycleEpoch: () => rehydrateState.nextEpoch,
         hostFlavor: options.hostFlavor,
+        isBackgroundDefaultFlipArmed: options.isBackgroundDefaultFlipArmed,
         recoverRetainedSession: options.recoverRetainedSession,
         resolveCanonicalTaskRef: options.resolveCanonicalTaskRef,
         isDisposed: options.isDisposed,

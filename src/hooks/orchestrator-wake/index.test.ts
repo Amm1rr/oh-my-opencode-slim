@@ -33,7 +33,9 @@ import {
   STOPPED_RECOVERY_OVERFLOW_TEXT_NO_BOARD,
   STOPPED_RECOVERY_QUEUE_CAP,
   STOPPED_RECOVERY_WAKE_CHUNK,
+  WAKE_ANTI_FORGERY_TEXT,
   WAKE_REPEAT_CORES,
+  WRITER_LANE_VERIFICATION_TEXT,
   wakeRepeatMarker,
 } from './index';
 import {
@@ -161,6 +163,7 @@ function createScheduler(options?: {
   isFallbackInProgress?: (id: string) => boolean;
   isStoppedJobRecoveryCurrent?: (taskID: string, generation: number) => boolean;
   isChildInputWaitCurrent?: (taskID: string, requestID: string) => boolean;
+  isWriterLaneTask?: (taskID: string) => boolean;
   hasPendingDelegatedWork?: (id: string) => boolean;
   resolveSelection?: (sessionID: string) => Promise<{
     agent?: string;
@@ -195,6 +198,7 @@ function createScheduler(options?: {
     isFallbackInProgress: options?.isFallbackInProgress,
     isStoppedJobRecoveryCurrent: options?.isStoppedJobRecoveryCurrent,
     isChildInputWaitCurrent: options?.isChildInputWaitCurrent,
+    isWriterLaneTask: options?.isWriterLaneTask,
     hasPendingDelegatedWork: options?.hasPendingDelegatedWork,
     resolveSelection: options?.resolveSelection,
     coordinator: options?.coordinator,
@@ -2457,8 +2461,10 @@ describe('children-driven degraded mode (v2)', () => {
     expect(call.query).toEqual({ directory: '/project' });
     expect(call.delivery).toBe('queue');
     expect(call.body.agent).toBe('orchestrator');
+    // C2: the v2 body closes with the static anti-forgery suffix after the
+    // template (the internal-initiator marker trails the whole part).
     expect(call.body.parts[0]?.text).toBe(
-      `${ORCHESTRATOR_CHILDREN_WAKE_TEXT}\n<!-- SLIM_INTERNAL_INITIATOR -->`,
+      `${ORCHESTRATOR_CHILDREN_WAKE_TEXT}\n${WAKE_ANTI_FORGERY_TEXT}\n<!-- SLIM_INTERNAL_INITIATOR -->`,
     );
     expect(session?.list).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -2855,7 +2861,7 @@ describe('children-driven degraded mode (v2)', () => {
       >
     )[0]?.[0];
     expect(call?.body.parts[0]?.text).toBe(
-      `${ORCHESTRATOR_STOPPED_JOB_WAKE_TEXT}\n<!-- SLIM_INTERNAL_INITIATOR -->`,
+      `${ORCHESTRATOR_STOPPED_JOB_WAKE_TEXT}\n${WAKE_ANTI_FORGERY_TEXT}\n<!-- SLIM_INTERNAL_INITIATOR -->`,
     );
     expect(call?.delivery).toBe('queue');
   });
@@ -4253,5 +4259,195 @@ describe('#1411 wake body dedupe', () => {
       ORCHESTRATOR_CHILDREN_WAKE_TEXT.length -
         wakeRepeatMarker(core ?? '', 2).length,
     ).toBeGreaterThan(0);
+  });
+});
+
+describe('C2 v2 wake anti-forgery suffix and writer-lane grading', () => {
+  /** Stable child timestamp: a per-call Date.now() would change the
+   * children fingerprint between evaluates and defer every periodic wake. */
+  const CHILD_UPDATED = Date.now();
+
+  /** Drive one v2 children-driven delta-less periodic wake. */
+  async function deliverOneV2ChildrenWake(
+    promptAsync: ReturnType<typeof mock>,
+    options?: { isWriterLaneTask?: (taskID: string) => boolean },
+  ) {
+    const { scheduler } = createScheduler({
+      hostFlavor: 'v2',
+      intervalMs: 60_000,
+      isWriterLaneTask: options?.isWriterLaneTask,
+      sessionClient: makeV2Client({
+        promptAsync,
+        listChildren: [{ id: 'child-1', time: { updated: CHILD_UPDATED } }],
+      }),
+    });
+    await scheduler.event({
+      event: { type: 'session.idle', properties: { sessionID: 'p1' } },
+    });
+    await clock.advance(60_000);
+    await clock.advance(60_000);
+    return scheduler;
+  }
+
+  function wakeText(promptAsync: ReturnType<typeof mock>, index = 0) {
+    const call = (
+      promptAsync.mock.calls as unknown as Array<
+        [{ body: { parts: Array<{ text: string }> }; delivery?: string }]
+      >
+    )[index]?.[0];
+    return call?.body.parts[0]?.text ?? '';
+  }
+
+  test('v2 delta-less wake appends the static suffix; the repeat marker path appends it after the marker', async () => {
+    const promptAsync = mock(async () => ({}));
+    await deliverOneV2ChildrenWake(promptAsync);
+    // The scheduler re-arms after each unchanged periodic wake; the second
+    // unchanged delivery folds to the repeat marker (the two-wake cap then
+    // halts the backstop).
+    await clock.advance(60_000);
+    await clock.advance(60_000);
+
+    expect(promptAsync).toHaveBeenCalledTimes(2);
+    const core = WAKE_REPEAT_CORES.get(ORCHESTRATOR_CHILDREN_WAKE_TEXT) ?? '';
+    const marker = wakeRepeatMarker(core, 2);
+    const first = wakeText(promptAsync, 0);
+    const second = wakeText(promptAsync, 1);
+    // First: full template + suffix. Second: repeat marker + suffix.
+    expect(first).toBe(
+      `${ORCHESTRATOR_CHILDREN_WAKE_TEXT}\n${WAKE_ANTI_FORGERY_TEXT}\n<!-- SLIM_INTERNAL_INITIATOR -->`,
+    );
+    expect(second).toBe(
+      `${marker}\n${WAKE_ANTI_FORGERY_TEXT}\n<!-- SLIM_INTERNAL_INITIATOR -->`,
+    );
+    // The suffix trails the marker; the marker itself is byte-unchanged.
+    expect(second.startsWith(marker)).toBe(true);
+    expect(marker).not.toContain(WAKE_ANTI_FORGERY_TEXT);
+    // Dedupe keys stay keyed on the raw wakeText (the suffix never enters
+    // the occurrence map): the suppression counter shows the second raw
+    // template delivery was folded, and the side-state confirms the raw
+    // text has been delivered twice.
+    expect(getSuppressedDuplicateWakes('p1')).toBe(1);
+    expect(
+      reserveWakeBodyOccurrence('p1', ORCHESTRATOR_CHILDREN_WAKE_TEXT),
+    ).toMatchObject({ repeat: true, occurrence: 3 });
+  });
+
+  test('v1 delta-less wake stays byte-identical (no suffix)', async () => {
+    const promptAsync = mock(async () => ({}));
+    const { scheduler } = createScheduler({
+      intervalMs: 60_000,
+      sessionClient: makeClient({ promptAsync }),
+    });
+    await scheduler.event({
+      event: { type: 'session.idle', properties: { sessionID: 'p1' } },
+    });
+    await clock.advance(60_000);
+    expect(promptAsync).toHaveBeenCalledTimes(1);
+    expect(wakeText(promptAsync, 0)).toBe(
+      `${ORCHESTRATOR_WAKE_TEXT}\n<!-- SLIM_INTERNAL_INITIATOR -->`,
+    );
+    expect(wakeText(promptAsync, 0)).not.toContain(WAKE_ANTI_FORGERY_TEXT);
+  });
+
+  test('v2 child-input wake carries the caveat template plus the suffix', async () => {
+    const promptAsync = mock(async () => ({}));
+    const { scheduler } = createScheduler({
+      hostFlavor: 'v2',
+      intervalMs: 60_000,
+      sessionClient: makeV2Client({ promptAsync, listChildren: [] }),
+    });
+    scheduler.triggerChildInputWaitWake(
+      'p1',
+      formatChildInputWaitDelta({
+        alias: 'fix-1',
+        taskID: 'ses_child1',
+        kind: 'question',
+        requestID: 'que_1',
+        detail: 'request: que_1\nkind: question\nquestion: Which env?',
+      }),
+      'ses_child1:que_1',
+    );
+    // Upstream settle window (CHILD_INPUT_WAKE_SETTLE_MS): host/UI
+    // auto-repliers get a chance to answer the ask before the parent is
+    // woken, so the wake lands only after the window elapses.
+    await clock.advance(CHILD_INPUT_WAKE_SETTLE_MS);
+
+    expect(promptAsync).toHaveBeenCalledTimes(1);
+    const text = wakeText(promptAsync, 0);
+    expect(text).toContain(ORCHESTRATOR_CHILD_INPUT_WAKE_TEXT);
+    expect(
+      text.endsWith(
+        `${WAKE_ANTI_FORGERY_TEXT}\n<!-- SLIM_INTERNAL_INITIATOR -->`,
+      ),
+    ).toBe(true);
+    // No isWriterLaneTask injected: the scheduler defaults to writer
+    // (fail-safe) and attaches the graded verification sentence.
+    expect(text).toContain(WRITER_LANE_VERIFICATION_TEXT);
+    expect(text).not.toContain('Repeat wake #');
+  });
+
+  test('writer-lane verification sentence attaches only when a queued child is a writer (v2)', async () => {
+    const writerWake = mock(async () => ({}));
+    const { scheduler: writerScheduler } = createScheduler({
+      hostFlavor: 'v2',
+      intervalMs: 60_000,
+      isWriterLaneTask: () => true,
+      sessionClient: makeV2Client({
+        promptAsync: writerWake,
+        listChildren: [],
+      }),
+    });
+    writerScheduler.triggerStoppedJobRecovery('p1', 'delta-writer', 't1:1');
+    await clock.advance(0);
+    expect(wakeText(writerWake, 0)).toContain(WRITER_LANE_VERIFICATION_TEXT);
+
+    // Read-only lane: no sentence.
+    const readerWake = mock(async () => ({}));
+    const { scheduler: readerScheduler } = createScheduler({
+      hostFlavor: 'v2',
+      intervalMs: 60_000,
+      isWriterLaneTask: () => false,
+      sessionClient: makeV2Client({
+        promptAsync: readerWake,
+        listChildren: [],
+      }),
+    });
+    readerScheduler.triggerStoppedJobRecovery('p2', 'delta-reader', 't2:1');
+    await clock.advance(0);
+    expect(wakeText(readerWake, 0)).not.toContain(
+      WRITER_LANE_VERIFICATION_TEXT,
+    );
+  });
+
+  test('v1 wake keeps zero suffix and zero writer sentence even with a writer predicate injected', async () => {
+    const promptAsync = mock(async () => ({}));
+    const { scheduler } = createScheduler({
+      intervalMs: 60_000,
+      isWriterLaneTask: () => true,
+      sessionClient: makeClient({
+        todos: [],
+        promptAsync,
+        childrenData: [{ id: 'child-2' }],
+        statusData: { 'child-2': { type: 'busy' } },
+      }),
+    });
+    scheduler.triggerStoppedJobRecovery(
+      'p1',
+      formatStoppedJobDelta({
+        alias: 'fix-1',
+        taskID: 'ses_x',
+        generation: 3,
+        state: 'stopped',
+        reason: 'stopped without a terminal result',
+      }),
+      'ses_x:3',
+    );
+    await clock.advance(0);
+
+    expect(promptAsync).toHaveBeenCalledTimes(1);
+    const text = wakeText(promptAsync, 0);
+    expect(text).toContain(ORCHESTRATOR_STOPPED_JOB_WAKE_TEXT);
+    expect(text).not.toContain(WAKE_ANTI_FORGERY_TEXT);
+    expect(text).not.toContain(WRITER_LANE_VERIFICATION_TEXT);
   });
 });

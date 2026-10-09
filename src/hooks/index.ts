@@ -26,6 +26,7 @@ export {
   createOrchestratorWakeScheduler,
   formatChildInputWaitDelta,
   formatStoppedJobDelta,
+  HOST_ATTRIBUTED_STOP_OUTCOME,
   ORCHESTRATOR_CHILD_INPUT_WAKE_TEXT,
   ORCHESTRATOR_CHILDREN_WAKE_TEXT,
   ORCHESTRATOR_STOPPED_JOB_WAKE_TEXT,
