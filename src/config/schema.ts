@@ -946,6 +946,7 @@ export const DISABLED_HOOKS_VALUES = [
   'phase-reminder',
   'foreground-fallback',
   'deepwork-guard',
+  'deepwork-goal',
   'chat-headers',
   'cache-monitor',
   'json-error-recovery',

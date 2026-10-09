@@ -112,6 +112,7 @@ export function isGenuineOperatorMessage(
       if (
         metadata['oh-my-opencode-slim.backgroundJobBoard'] === true ||
         metadata['oh-my-opencode-slim.phaseReminder'] === true ||
+        metadata['oh-my-opencode-slim.deepworkGoal'] === true ||
         metadata['oh-my-opencode-slim.internalInitiator'] === true
       ) {
         return false;

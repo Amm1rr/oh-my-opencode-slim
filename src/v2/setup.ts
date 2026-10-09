@@ -36,6 +36,7 @@ import {
 } from '../hooks/chat-headers';
 import { isCommandEnabled } from '../hooks/command-hook-utils';
 import { COUNCIL_INJECT_METADATA_KEY } from '../hooks/council-inject';
+import { GOAL_POINTER_METADATA_KEY } from '../hooks/deepwork-goal';
 import type { ForegroundFallbackManager } from '../hooks/foreground-fallback';
 import { PHASE_REMINDER_METADATA_KEY } from '../hooks/phase-reminder';
 import { BACKGROUND_JOB_BOARD_METADATA_KEY } from '../hooks/task-session-manager/board-injection';
@@ -671,16 +672,17 @@ export function createChatHeadersBridge(
 
 /**
  * Metadata keys whose tagged synthetic parts the compaction bridge
- * strips: phase reminders and the keyword-triggered Council Mode block
- * are regenerated on the next turn (pure-function re-derivation over the
- * surviving message history). Background job boards must survive to tell
- * the summary which jobs are running; internal wakes do not receive fresh
- * boards. Untagged synthetic parts (e.g. command-marker expansions) are
- * also conversation content.
+ * strips: phase reminders, the keyword-triggered Council Mode block, and
+ * the deepwork goal pointer are regenerated on the next turn
+ * (pure-function re-derivation over the surviving message history).
+ * Background job boards must survive to tell the summary which jobs are
+ * running; internal wakes do not receive fresh boards. Untagged synthetic
+ * parts (e.g. command-marker expansions) are also conversation content.
  */
 const COMPACTION_STRIP_METADATA_KEYS: readonly string[] = [
   PHASE_REMINDER_METADATA_KEY,
   COUNCIL_INJECT_METADATA_KEY,
+  GOAL_POINTER_METADATA_KEY,
 ];
 
 /**

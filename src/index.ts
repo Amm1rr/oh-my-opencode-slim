@@ -45,7 +45,9 @@ import {
   createChatHeadersHook,
   createCouncilInjectHook,
   createDeepworkCommandHook,
+  createDeepworkGoalHook,
   createDeepworkGuardHook,
+  createDeepworkHeadGate,
   createJsonErrorRecoveryHook,
   createLoopCommandHook,
   createOrchestratorWakeScheduler,
@@ -58,6 +60,7 @@ import {
   type ForegroundFallbackModel,
   formatChildInputWaitDelta,
   formatStoppedJobDelta,
+  GOAL_POINTER_METADATA_KEY,
   SessionLifecycle,
   stoppedJobRecoveryReason,
 } from './hooks';
@@ -531,6 +534,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   let loopCommandHook: ReturnType<typeof createLoopCommandHook>;
   let taskSessionManagerHook: ReturnType<typeof createTaskSessionManagerHook>;
   let phaseReminder: ReturnType<typeof createPhaseReminderHook> | undefined;
+  let deepworkGoal: ReturnType<typeof createDeepworkGoalHook> | undefined;
   let councilInject: ReturnType<typeof createCouncilInjectHook> | undefined;
   let applyPatch: ReturnType<typeof createApplyPatchHook>;
   let searchPathGuard: ReturnType<typeof createSearchPathGuardHook>;
@@ -1318,6 +1322,20 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     if (!runtime.disabledHooks.has('phase-reminder')) {
       phaseReminder = createPhaseReminderHook({
         shouldInject: shouldInjectOrchestratorReminder,
+      });
+    }
+
+    // Deepwork goal pointer: re-derives one state-neutral pointer from disk
+    // truth every request so the session's router-head path survives
+    // compaction. Gate: orchestrator session with an active head on disk.
+    // Switch: list "deepwork-goal" in disabled_hooks (disabled = never
+    // injected).
+    if (!runtime.disabledHooks.has('deepwork-goal')) {
+      const headGate = createDeepworkHeadGate(ctx.directory);
+      deepworkGoal = createDeepworkGoalHook({
+        isEligible: (sessionID) =>
+          sessionMetadata.getAgent(sessionID) === 'orchestrator' &&
+          headGate(sessionID),
       });
     }
 
@@ -3000,9 +3018,19 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         );
       }
       await taskSessionManagerHook.injectBackgroundJobBoard(input, typedOutput);
+      // Ordering contract: the goal pointer is the trailing-most volatile
+      // message — nothing appends after it, so re-entered transforms and the
+      // board's own trailing-zone strip stay ordered.
+      if (deepworkGoal) {
+        await deepworkGoal['experimental.chat.messages.transform'](
+          input as never,
+          typedOutput as never,
+        );
+      }
       if (compacting) {
         stripTaggedContent(typedOutput.messages, PHASE_REMINDER_METADATA_KEY);
         stripTaggedContent(typedOutput.messages, COUNCIL_INJECT_METADATA_KEY);
+        stripTaggedContent(typedOutput.messages, GOAL_POINTER_METADATA_KEY);
       }
     },
 
