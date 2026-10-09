@@ -69,6 +69,16 @@ export function createRuntimeStatusReconciler(options: {
       timeoutMs: options.statusTimeoutMs,
     });
     if (disposed) return;
+    if (snapshot.retryAfter) {
+      // A collision is not an observation: rerun the whole pass once the open
+      // read settles, instead of one full-map read per task through the gate.
+      void snapshot.retryAfter
+        .then(() => reconcile())
+        .catch((err) => {
+          log('[runtime-status-reconciliation] rerun failed', String(err));
+        });
+      return;
+    }
     const pending: Promise<unknown>[] = [];
     for (const token of tokens) {
       const result = options.terminalGate.observe(
