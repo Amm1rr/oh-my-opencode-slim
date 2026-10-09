@@ -5120,6 +5120,7 @@ describe('plugin command registration gating', () => {
     await writeConfig({});
     expect(Object.keys(await prepareCommands()).sort()).toEqual([
       'deepwork',
+      'implement',
       'interview',
       'loop',
       'reflect',
@@ -5130,6 +5131,17 @@ describe('plugin command registration gating', () => {
     await writeConfig({ disabled_commands: ['interview', 'loop'] });
     expect(Object.keys(await prepareCommands()).sort()).toEqual([
       'deepwork',
+      'implement',
+      'reflect',
+    ]);
+  });
+
+  test('disabled implement command is not registered', async () => {
+    await writeConfig({ disabled_commands: ['implement'] });
+    expect(Object.keys(await prepareCommands()).sort()).toEqual([
+      'deepwork',
+      'interview',
+      'loop',
       'reflect',
     ]);
   });
@@ -5138,6 +5150,7 @@ describe('plugin command registration gating', () => {
     await writeConfig({ disabled_skills: ['reflect'] });
     expect(Object.keys(await prepareCommands()).sort()).toEqual([
       'deepwork',
+      'implement',
       'interview',
       'loop',
     ]);

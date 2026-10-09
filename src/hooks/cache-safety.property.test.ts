@@ -183,6 +183,32 @@ describe.each(BOARD_STRATEGIES)(
   },
 );
 
+describe('cache-safety: active interview history', () => {
+  test('re-rendering a new turn preserves the collapsed prefix', async () => {
+    const history = [
+      assistantTurn(
+        'i01',
+        '<interview_state>{"summary":"full","questions":[]}</interview_state>',
+      ),
+      assistantTurn(
+        'i02',
+        '<interview_state>{"summary":"status","patch":"x","questions":[]}</interview_state>',
+      ),
+    ];
+    const pipeline = createPipeline({ activeInterview: true });
+    const oldTurn = await renderTurn(pipeline, history, history.length - 1);
+    const nextTurn = await renderTurn(
+      pipeline,
+      [...history, userTurn('i03', 'continue')],
+      history.length,
+    );
+
+    expect(nextTurn.messages.slice(0, oldTurn.messages.length)).toEqual(
+      oldTurn.messages,
+    );
+  });
+});
+
 describe.each(BOARD_STRATEGIES)(
   'cache-safety: specialist sessions (%s)',
   (strategy) => {
@@ -428,6 +454,7 @@ describe('cache-safety: pipeline drift guard', () => {
       'councilInject',
       'deepworkGoal',
     ]);
+    expect(source).toContain('collapseInterviewHistory(typedOutput.messages);');
     expect(source).toContain(
       'await taskSessionManagerHook.injectBackgroundJobBoard(',
     );

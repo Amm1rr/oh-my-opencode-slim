@@ -12,6 +12,7 @@ import {
   resolveImageRouting,
 } from '../config/constants';
 import { RuntimeConfig } from '../config/runtime';
+import { collapseInterviewHistory } from '../interview/history';
 import { BackgroundJobBoard, createInternalAgentTextPart } from '../utils';
 import { createDisplayNameMentionRewriter } from '../utils/agent-variant';
 import { isTaggedPart } from './cache-safe-injection';
@@ -37,6 +38,7 @@ export type BoardStrategy = 'latest' | 'checkpoint-compatible';
 export interface PipelineOptions {
   /** Board injection strategy under test; defaults to the production default. */
   strategy?: BoardStrategy;
+  activeInterview?: boolean;
   /**
    * Enable the deepwork goal pointer for the fixture session. Off by
    * default: the pointer is a trailing volatile message that changes
@@ -112,6 +114,9 @@ export function createPipeline(options: PipelineOptions = {}): Pipeline {
   });
 
   const run = async (output: TransformOutput): Promise<void> => {
+    if (options.activeInterview) {
+      collapseInterviewHistory(output.messages as never);
+    }
     for (const message of output.messages as MessageWithParts[]) {
       if (message.info.role !== 'user') continue;
       for (const part of message.parts) {

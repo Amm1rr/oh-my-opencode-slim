@@ -89,6 +89,7 @@ import {
   type MessageWithParts,
 } from './hooks/types';
 import { createInterviewManager } from './interview';
+import { collapseInterviewHistory } from './interview/history';
 import { discoverPreflightSkills } from './marketplace/preflight';
 import { MarketplaceService } from './marketplace/service';
 import { resolveDesiredMarketplacePackageIds } from './marketplace/status';
@@ -98,6 +99,7 @@ import {
   ast_grep_search,
   createAcpRunTool,
   createCancelTaskTool,
+  createInterviewSubmitStateTool,
   createMarketplaceTools,
   createTaskMessageTool,
   createTaskReplyTool,
@@ -578,6 +580,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   let taskStatusTools: ReturnType<typeof createTaskStatusTool>;
   const taskActivityTracker = new TaskActivityTracker();
   let waitForUserTools: ReturnType<typeof createWaitForUserTool>;
+  let interviewSubmitService: ReturnType<
+    typeof createInterviewManager
+  >['service'];
   let acpRunTools: Record<string, ReturnType<typeof createAcpRunTool>>;
   let webfetch: ReturnType<typeof createWebfetchTool>;
   const isFallbackPending = (taskID: string): boolean =>
@@ -1387,6 +1392,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       taskSessionManagerHook['tool.execute.after'](i as never, o as never),
     );
     interviewManager = createInterviewManager(ctx, config);
+    interviewSubmitService = interviewManager.service;
     companionManager = new CompanionManager(
       companionSessionIdForDirectory(ctx.directory),
       ctx.directory,
@@ -1466,6 +1472,13 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     });
 
     const shouldRegisterWebfetch = runtime.webfetch.enabled !== false;
+    const shouldRegisterInterview = !runtime.disabledCommands.has('interview');
+    const interviewTools = shouldRegisterInterview
+      ? createInterviewSubmitStateTool({
+          service: () => interviewSubmitService,
+          maxQuestions: config.interview?.maxQuestions,
+        })
+      : {};
     tools = {
       ...taskCancelTools,
       ...taskMessageTools,
@@ -1474,6 +1487,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       ...taskReviveTools,
       ...taskStatusTools,
       ...waitForUserTools,
+      ...interviewTools,
       ...acpRunTools,
       ...(shouldRegisterWebfetch ? { webfetch } : {}),
       ast_grep_search,
@@ -1763,8 +1777,14 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         disabledCommands: runtime.disabledCommands,
         disabledSkills: runtime.disabledSkills,
       };
-      if (isCommandEnabled('interview', commandGate)) {
-        interviewManager.registerCommand(opencodeConfig);
+      if (
+        isCommandEnabled('interview', commandGate) ||
+        isCommandEnabled('implement', commandGate)
+      ) {
+        interviewManager.registerCommand(opencodeConfig, {
+          interview: isCommandEnabled('interview', commandGate),
+          implement: isCommandEnabled('implement', commandGate),
+        });
       }
       if (isCommandEnabled('deepwork', commandGate)) {
         deepworkCommandHook.registerCommand(opencodeConfig);
@@ -1953,6 +1973,14 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     'v2.resolveDelegatedModel': resolveV2DelegatedModel,
     'v2.session.retry':
       foregroundFallback.handleV2Retry.bind(foregroundFallback),
+    // v2 owns its own interview bridge/service; point the submit tool and
+    // text-complete fallback at it so `/interview` state lands in the same
+    // service that captured the session transcript.
+    'v2.setInterviewService': (
+      service: ReturnType<typeof createInterviewManager>['service'],
+    ) => {
+      interviewSubmitService = service;
+    },
 
     agent: agents,
 
@@ -2492,7 +2520,11 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           disabledSkills: runtime.disabledSkills,
         });
 
-      if (commandEnabled('interview')) {
+      const slashCommand = (input as { command?: string }).command;
+      if (
+        (slashCommand === 'interview' && commandEnabled('interview')) ||
+        (slashCommand === 'implement' && commandEnabled('implement'))
+      ) {
         await interviewManager.handleCommandExecuteBefore(
           input as {
             command: string;
@@ -2545,6 +2577,21 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // v2 handles compaction in its separate session.compaction bridge.
     'experimental.session.compacting': async ({ sessionID }) => {
       compactingSessionIds.add(sessionID);
+    },
+
+    // v1-only interview fallback: capture a printed <interview_state> block
+    // through the shared apply step, then strip it from the saved/visible
+    // text. v2 has no equivalent hook.
+    'experimental.text.complete': async (input, output) => {
+      try {
+        output.text = await interviewSubmitService.completeInterviewText(
+          input.sessionID,
+          output.text,
+          input.messageID,
+        );
+      } catch (err) {
+        log('[plugin] interview text completion failed', String(err));
+      }
     },
 
     // Track which agent each session uses (needed for serve-mode prompt
@@ -2953,11 +3000,16 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       output: { messages: unknown[] },
     ): Promise<void> => {
       const typedOutput = output as { messages: MessageWithParts[] };
-      // Claim the mark synchronously: overlapping requests for this session
-      // must not both strip reminders after their first asynchronous step.
       const sessionID =
         findLatestUserMessage(typedOutput.messages)?.info.sessionID ??
         typedOutput.messages.find(isMessageWithParts)?.info.sessionID;
+      if (sessionID && interviewSubmitService.getActiveInterviewId(sessionID)) {
+        // The kickoff is the one deliberate rewrite; later turns must remain
+        // byte-stable so each request can reuse the provider cache prefix.
+        collapseInterviewHistory(typedOutput.messages);
+      }
+      // Claim the mark synchronously: overlapping requests for this session
+      // must not both strip reminders after their first asynchronous step.
       const compacting = sessionID
         ? compactingSessionIds.delete(sessionID)
         : false;
@@ -2991,7 +3043,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       // extracted from the messages above.
       const turnModelRef = sessionID
         ? parseModelRef(
-            foregroundFallback.getActiveFallbackModel(sessionID) ??
+            foregroundFallback.getActiveFallback(sessionID)?.model ??
               sessionMetadata.getModel(sessionID),
           )
         : undefined;

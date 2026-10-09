@@ -659,6 +659,7 @@ function applyDefaultPermissions(
   configuredSkills?: readonly string[],
   disabledSkills?: readonly string[],
   nestedDispatchEnabled = false,
+  isPrimaryAgent = false,
 ): void {
   // A shorthand string is a user-level rule for every tool. Keep its original
   // form; marketplace tools independently fail closed through their caller
@@ -687,6 +688,10 @@ function applyDefaultPermissions(
       existing[toolName] ?? (agent.name === 'orchestrator' ? 'allow' : 'deny'),
     ]),
   );
+  // Primary agents get allow because quiet interview prompts forbid printing
+  // the state block; subagents never run interviews.
+  const interviewSubmitPermission =
+    existing.interview_submit_state ?? (isPrimaryAgent ? 'allow' : 'deny');
   const waitForUserPerm =
     agent.name === 'orchestrator'
       ? (existing.wait_for_user ?? 'allow')
@@ -720,6 +725,7 @@ function applyDefaultPermissions(
       : {}),
     question: questionPerm,
     ...orchestratorDefaultPermissions,
+    interview_submit_state: interviewSubmitPermission,
     wait_for_user: waitForUserPerm,
     ...marketplacePermissions,
     // Apply skill permissions as nested object under 'skill' key
@@ -1089,6 +1095,8 @@ export function createAgents(
     orchestrator,
     orchestratorOverride?.skills,
     runtime.disabledSkills,
+    nestedDispatchEnabled,
+    true,
   );
 
   // Collect all display names from orchestrator and all subagents
