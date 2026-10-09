@@ -333,12 +333,12 @@ export function processImageAttachments(args: {
     const nudgeSections: string[] = [];
     if (readablePaths.length > 0) {
       nudgeSections.push(
-        `Saved to:\n${readablePaths.map((p) => `- ${p}`).join('\n')}\nYour model may not support image input. Delegate to @observer with these file path(s) and your goal so it can read the files with its read tool.`,
+        `Image saved to:\n${readablePaths.map((p) => `- ${p}`).join('\n')}\nDelegate to @observer with the path(s) and your goal — @observer reads images with its read tool.`,
       );
     }
     if (oversizedPaths.size > 0) {
       nudgeSections.push(
-        `Too large to analyze (host read limit 20 MiB) — do not delegate these; ask the user to compress or crop them first:\n${[
+        `Too large for the read tool (20 MiB) — do not delegate; ask the user to compress or crop:\n${[
           ...oversizedPaths.entries(),
         ]
           .map(([p, size]) => `- ${p} (${formatMiB(size)})`)
@@ -355,7 +355,7 @@ export function processImageAttachments(args: {
       .concat([
         {
           type: 'text',
-          text: `[Image attachment detected. ${nudgeSections.join('\n')}]`,
+          text: `[${nudgeSections.join('\n')}]`,
         },
       ]);
   }
