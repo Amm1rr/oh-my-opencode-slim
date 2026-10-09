@@ -2021,7 +2021,18 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       log('[v2] ctx.generate.text', {
         available: typeof generateText === 'function',
       });
-      const pluginInput = buildPluginInput(ctx, generateChannel);
+      // Capability probe: the v2 model registry (`ctx.model`) resolves the
+      // catalog ⊕ config view the host itself uses for media gating. Powers
+      // capability-aware image routing; hosts without the domain keep the
+      // conservative default.
+      const modelDomain = (ctx as V2Context).model?.list
+        ? (ctx as V2Context).model
+        : undefined;
+      log('[v2] ctx.model', { available: Boolean(modelDomain) });
+      const pluginInput = buildPluginInput(ctx, {
+        ...(generateChannel ?? {}),
+        ...(modelDomain ? { modelDomain } : {}),
+      });
       log('[v2] calling OhMyOpenCodeLite...');
       v1Hooks = (await OhMyOpenCodeLite(
         pluginInput as never,
