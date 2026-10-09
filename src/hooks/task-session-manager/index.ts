@@ -29,7 +29,7 @@ import { getClient } from '../../utils/opencode-client';
 import { withTimeout } from '../../utils/session';
 import {
   DEFAULT_RUNTIME_SESSION_STATUS_TIMEOUT_MS,
-  getRuntimeSessionStatusSnapshot,
+  readLiveSession,
 } from '../../utils/session-runtime-status';
 import { isGenuineOperatorMessage } from '../orchestrator-wake/index';
 import type { SessionLifecycle } from '../session-lifecycle';
@@ -285,7 +285,7 @@ export function createTaskSessionManagerHook(
             query: { ...query, limit: 1 },
             throwOnError: true,
           }),
-          getRuntimeSessionStatusSnapshot(_ctx),
+          readLiveSession(_ctx, requested),
         ]),
         DEFAULT_RUNTIME_SESSION_STATUS_TIMEOUT_MS,
         'Host child adoption timed out',
@@ -300,20 +300,16 @@ export function createTaskSessionManagerHook(
       //  3. its title suffix names the requested agent;
       //  4. its last message is a terminal result (completed or error) per
       //     classifyTerminalEvidence, the terminal gate's own classifier;
-      //  5. the runtime status read succeeded;
-      //  6. the child's status entry is well-formed;
-      //  7. the child is idle (no entry counts as idle);
-      //  8. no foreground fallback is pending for the child;
-      //  9. the parent's boundary did not change during the reads;
-      // 10. no deletion tombstone suppresses the child.
+      //  5. fresh live status confirms quiescence (idle or valid absence);
+      //  6. no foreground fallback is pending for the child;
+      //  7. the parent's boundary did not change during the reads;
+      //  8. no deletion tombstone suppresses the child.
       if (
         info.parentID !== parent ||
         !(info.time.created < boundary) ||
         suffix?.[1] !== agent ||
         (evidence.verdict !== 'completed' && evidence.verdict !== 'error') ||
-        live.error !== undefined ||
-        live.malformedSessionIDs.has(requested) ||
-        (live.statuses.get(requested) ?? 'idle') !== 'idle' ||
+        (live.kind !== 'idle' && live.kind !== 'absent') ||
         options.isFallbackInProgress?.(requested) ||
         historyBoundaries.get(parent) !== boundary ||
         options.isDisposed?.() ||

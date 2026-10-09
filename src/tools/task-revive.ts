@@ -13,7 +13,7 @@ import {
   SESSION_ID_PATTERN,
   withTimeout,
 } from '../utils/session';
-import { getRuntimeSessionStatusSnapshot } from '../utils/session-runtime-status';
+import { readLiveSession } from '../utils/session-runtime-status';
 import type { ExperimentalV2 } from '../v2/client-shim';
 import {
   assertOrchestrator,
@@ -235,21 +235,15 @@ export function createTaskReviveTool(
             );
           }
         } else if (!queueContinuation) {
-          const liveSnapshot = await getRuntimeSessionStatusSnapshot(
-            options.input,
-          );
-          const liveStatus = liveSnapshot.statuses.get(current.taskID);
-          if (liveStatus === 'busy' || liveStatus === 'retry') {
+          const live = await readLiveSession(options.input, current.taskID);
+          if (live.kind === 'busy' || live.kind === 'retry') {
             throw new Error(
-              `Task ${requested} is executing at the host (live status: ${liveStatus}); the revive prompt was NOT sent and no duplicate was launched. Use task_status to inspect it.`,
+              `Task ${requested} is executing at the host (live status: ${live.kind}); the revive prompt was NOT sent and no duplicate was launched. Use task_status to inspect it.`,
             );
           }
-          if (
-            liveSnapshot.error !== undefined ||
-            liveSnapshot.malformedSessionIDs.has(current.taskID)
-          ) {
+          if (live.kind === 'unknown') {
             throw new Error(
-              `Task ${requested} could not be verified against the live session map (${liveSnapshot.error ?? 'malformed entry'}); the revive prompt was NOT sent. Retry task_revive.`,
+              `Task ${requested} could not be verified against the live session map (${live.reason}); the revive prompt was NOT sent. Retry task_revive.`,
             );
           }
         }
@@ -563,19 +557,13 @@ async function ownInvalidatedAdmission(
 
     // Historical session.get outcomes cannot prove the accepted run stopped.
     // Take fresh live evidence after abort settlement, with a bounded budget.
-    const snapshot = await getRuntimeSessionStatusSnapshot(options.input, {
+    const live = await readLiveSession(options.input, taskID, {
       timeoutMs: options.verifyAbortMs ?? 1_500,
     });
     if (!stillOwns()) return;
-    const status = snapshot.statuses.get(taskID);
-    if (
-      snapshot.error !== undefined ||
-      snapshot.malformedSessionIDs.has(taskID) ||
-      status === 'busy' ||
-      status === 'retry'
-    ) {
+    if (live.kind !== 'idle' && live.kind !== 'absent') {
       throw new Error(
-        `live quiescence not verified: ${snapshot.error ?? status ?? 'malformed entry'}`,
+        `live quiescence not verified: ${live.kind === 'unknown' ? live.reason : live.kind}`,
       );
     }
 
