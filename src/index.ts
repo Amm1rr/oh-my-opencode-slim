@@ -72,6 +72,7 @@ import { PHASE_REMINDER_METADATA_KEY } from './hooks/phase-reminder';
 import type { ChildInputWaitRecord } from './hooks/task-session-manager/child-input-wait';
 import {
   clearChildInputWaitsForSession,
+  formatChildInputWaitDetail,
   getChildInputWait,
   listChildInputWaits,
 } from './hooks/task-session-manager/child-input-wait';
@@ -620,39 +621,10 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         taskID: record.taskID,
         kind: wait.kind,
         requestID: wait.requestID,
-        detail: formatChildInputWaitDetail(wait),
+        detail: formatChildInputWaitDetail(wait, hostFlavor),
       }),
       `${record.taskID}:${wait.requestID}`,
     );
-  }
-
-  /**
-   * Inline detail lines for a child input-wait wake delta: the ask content
-   * the parent needs to answer (question text + options, or permission
-   * summary).
-   */
-  function formatChildInputWaitDetail(wait: ChildInputWaitRecord): string {
-    const lines = [`request: ${wait.requestID}`, `kind: ${wait.kind}`];
-    if (wait.kind === 'permission') {
-      lines.push(`permission: ${wait.permission ?? 'unknown'}`);
-      if (wait.patterns && wait.patterns.length > 0) {
-        lines.push(`patterns: ${wait.patterns.join(', ')}`);
-      }
-      return lines.join('\n');
-    }
-    if (!wait.questions || wait.questions.length === 0) {
-      lines.push('(no question text captured)');
-      return lines.join('\n');
-    }
-    for (const entry of wait.questions) {
-      lines.push(`question: ${entry.question || entry.header}`);
-      for (const option of entry.options) {
-        lines.push(
-          `option: ${option.label}${option.description ? ` — ${option.description}` : ''}`,
-        );
-      }
-    }
-    return lines.join('\n');
   }
 
   const resolvePrimaryModelFromFinalHostConfig = (

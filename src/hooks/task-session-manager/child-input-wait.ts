@@ -4,9 +4,9 @@ import { getGlobalStore } from '../../utils/global-store';
  * Pending input waits (question / permission) on background child sessions.
  *
  * The per-session `input-wait-tracker` arms a wait for the *asking* session,
- * but a background child's `question.asked` never reaches its parent: the
- * parent's turn already ended, so nothing wakes it (19.7h hang: child parked
- * on `que_…`, parent idle with finish=stop, no notification anywhere).
+ * but a background child's ask does not wake its parent model. Host UIs may
+ * surface the request independently; headless orchestration still needs the
+ * parent to learn about the parked child.
  *
  * This sidecar closes that hole: it records the open asks of board-tracked
  * RUNNING background children (keyed by taskID + request id, idempotent per
@@ -184,6 +184,47 @@ export function noteChildInputWait(input: {
   }
   store.waits.set(key, record);
   return record;
+}
+
+/** Request details and only the guidance applicable to this host/request. */
+export function formatChildInputWaitDetail(
+  wait: ChildInputWaitRecord,
+  hostFlavor: unknown,
+): string {
+  const lines: string[] = [];
+  if (wait.kind === 'permission') {
+    lines.push(`permission: ${wait.permission || 'unknown'}`);
+    if (wait.patterns?.length) {
+      lines.push(`patterns: ${wait.patterns.join(', ')}`);
+    }
+  } else if (wait.questions?.length) {
+    for (const entry of wait.questions) {
+      lines.push(
+        `question: ${entry.header && entry.question ? `${entry.header}: ` : ''}${entry.question || entry.header}`,
+      );
+      if (hostFlavor === 'v2') {
+        if (entry.options.length) {
+          lines.push(
+            `options: ${entry.options.map((o) => o.label).join(' / ')}`,
+          );
+        }
+      } else {
+        for (const option of entry.options) {
+          lines.push(
+            `option: ${option.label}${option.description ? ` — ${option.description}` : ''}`,
+          );
+        }
+      }
+    }
+  } else {
+    lines.push('(no question text captured)');
+  }
+  lines.push(
+    wait.kind === 'question' && hostFlavor === 'v2'
+      ? 'next: task_reply cannot answer v2 forms; use host UI, wait, or task_cancel.'
+      : 'next: task_reply',
+  );
+  return lines.join('\n');
 }
 
 /** Clear the wait for an answered/rejected request. Idempotent. */

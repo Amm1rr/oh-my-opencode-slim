@@ -234,8 +234,68 @@ describe('task_status with a waiting child', () => {
       sessionID: 'parent-1',
     } as never);
 
-    expect(output).toContain('OpenCode v2 form request');
-    expect(output).toContain('task_reply cannot answer it');
+    // Short cue: task_reply cannot resolve a v2 form; the parent is
+    // redirected to the host UI or the cancel path instead.
+    expect(output).toMatch(/cannot answer/i);
+    expect(output).toMatch(/host UI/i);
+    expect(output).toContain('task_cancel');
+    // Request ID surfaces exactly once (the waiting_input envelope); the
+    // shared detail renderer must not re-render it.
+    expect(output.match(/form_1/g)).toHaveLength(1);
+    // No contradictory "await completion" advice while parked on input.
+    expect(output).not.toContain('await the completion event');
+  });
+
+  test('a live-busy child with an open ask does not suggest awaiting completion', async () => {
+    resetChildInputWaitForTests();
+    const board = new BackgroundJobBoard();
+    registerBackgroundChild(board);
+    noteChildInputWait({
+      taskID: 'ses_child1',
+      parentSessionID: 'parent-1',
+      kind: 'question',
+      requestID: 'que_1',
+      questions: [
+        {
+          question: 'Pick environment',
+          header: 'Environment',
+          options: [
+            { label: 'staging', description: 'Use <staging> & shared' },
+          ],
+        },
+      ],
+    });
+    // Live-confirmed busy: the await-completion branch is genuinely
+    // reachable here, so an open ask must be what suppresses it.
+    const { task_status } = createTaskStatusTool({
+      input: {
+        directory: '/test',
+        client: {
+          session: {
+            status: mock(async () => ({
+              data: { ses_child1: { type: 'busy' } },
+            })),
+          },
+        },
+      } as never,
+      backgroundJobBoard: board,
+      now: () => 120_000,
+    });
+
+    const output = await task_status.execute({ task_id: 'ses_child1' }, {
+      sessionID: 'parent-1',
+    } as never);
+
+    expect(output).toContain('state: busy');
+    expect(output).not.toContain('await the completion event');
+    // Request ID once, from the waiting_input envelope; no duplicate
+    // renderer restating it.
+    expect(output.match(/que_1/g)).toHaveLength(1);
+    // The stored option description stays escaped — present, not raw and
+    // not double-escaped.
+    expect(output).toContain('Use &lt;staging&gt; &amp; shared');
+    expect(output).not.toContain('Use <staging> & shared');
+    expect(output).not.toContain('&amp;amp;');
   });
 
   test('task_status renders child-supplied ask text escaped', async () => {
@@ -350,6 +410,12 @@ describe('task_reply', () => {
     });
 
     expect(Object.keys(task_reply.args)).toContain('sessionID');
+    // The tool description must keep the v2-form caveat: forms are not
+    // answerable here, and callers are redirected to the host UI/cancel.
+    expect(task_reply.description).toMatch(/v2 forms?/i);
+    expect(task_reply.description).toMatch(/cannot be answered/i);
+    expect(task_reply.description).toMatch(/host UI/i);
+    expect(task_reply.description).toContain('task_cancel');
 
     const viaNative = await task_reply.execute(
       { sessionID: 'ses_child1', request_id: 'que_1', answers: ['yes'] },

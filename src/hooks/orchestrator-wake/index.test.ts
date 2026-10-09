@@ -382,6 +382,47 @@ describe('child-input settling across host versions', () => {
   );
 });
 
+describe('overflow input requests across host versions', () => {
+  test.each(['v1', 'v2'])(
+    '%s drops resolved overflow but preserves unretained requests',
+    async (hostFlavor) => {
+      const promptAsync = mock(async () => ({}));
+      let pending = true;
+      const { scheduler } = createScheduler({
+        hostFlavor,
+        periodicWakeEnabled: false,
+        boardInjectionEnabled: false,
+        sessionClient:
+          hostFlavor === 'v2'
+            ? makeV2Client({ promptAsync })
+            : makeClient({ promptAsync, todos: [] }),
+        isChildInputWaitCurrent: () => pending,
+      });
+      // 32 inline + 64 retained overflow IDs + one unretained request.
+      for (let i = 0; i < 97; i++) {
+        scheduler.triggerChildInputWaitWake(
+          'p1',
+          `input ${i}`,
+          `ses_${i}:per_${i}`,
+        );
+      }
+      pending = false;
+      await clock.advance(CHILD_INPUT_WAKE_SETTLE_MS);
+      expect(promptAsync).toHaveBeenCalledTimes(1);
+      const text = promptAsync.mock.calls[0]?.[0]?.body.parts[0]?.text ?? '';
+      expect(text).toContain('Handle the pending request below');
+      expect(text).toContain('(+1 more overflowed entries were not retained)');
+      expect(text).not.toContain('ses_0');
+      expect(text).not.toContain('stopped without a terminal result');
+      await scheduler.event({
+        event: { type: 'session.idle', properties: { sessionID: 'p1' } },
+      });
+      await clock.advance(CHILD_INPUT_WAKE_SETTLE_MS);
+      expect(promptAsync).toHaveBeenCalledTimes(1);
+    },
+  );
+});
+
 describe('forced wake blocker diagnostics', () => {
   function captureBlockers() {
     const entries: Array<{ message: string; data: unknown }> = [];

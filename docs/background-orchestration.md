@@ -588,7 +588,18 @@ delivery. Duplicate events enrich the queued notice without restarting the
 deadline. Stopped-job recovery and terminal-publication wakes are not delayed.
 An ask arriving during a host read or model-selection lookup defers a
 child-input-only wake until settling completes, without sending a stopped-job
-notice in its place.
+notice in its place. Overflowed request IDs are also revalidated: resolved
+requests cannot keep an overflow-only wake alive. Remaining overflow notices
+carry task IDs for `task_status`, and delivery retires only the overflow IDs
+actually sent, preserving requests added while a send is in flight. Entries
+beyond the retained-ID cap stay counted because their state cannot be checked.
+
+Wake and `task_status` share compact request details and reply guidance.
+V1 questions and permission requests use `task_reply`; v2 forms require the
+host UI, waiting, or `task_cancel`. V2 notices keep question summaries and option
+labels; full option descriptions stay in the host UI. A pending request
+suppresses the generic “await completion” status guidance. Shorter notices do not skip the host's
+normal model step after a tool result or guarantee that a model emits no filler.
 
 With the board off, the plugin still retires natively delivered results: on
 the parent's next real user turn they are registered, and once the prompt

@@ -11,7 +11,9 @@ import { BackgroundJobBoard } from '../../utils/background-job-board';
 import { mapV2EventToV1 } from '../../v2/event-adapter';
 import { createTaskSessionManagerHook } from '../task-session-manager';
 import {
+  formatChildInputWaitDetail,
   getChildInputWait,
+  noteChildInputWait,
   resetChildInputWaitForTests,
 } from '../task-session-manager/child-input-wait';
 import { resetUserWaitGateForTests } from '../task-session-manager/user-wait-gate';
@@ -86,26 +88,13 @@ afterEach(() => {
   jest.useRealTimers();
 });
 
-function formatTestChildInputWaitDetail(taskID: string, requestID: string) {
-  const wait = getChildInputWait(taskID, requestID);
-  if (!wait) return `request: ${requestID}\nkind: unknown`;
-  const lines = [`request: ${wait.requestID}`, `kind: ${wait.kind}`];
-  if (wait.kind === 'permission') {
-    lines.push(`permission: ${wait.permission ?? 'unknown'}`);
-    if (wait.patterns && wait.patterns.length > 0) {
-      lines.push(`patterns: ${wait.patterns.join(', ')}`);
-    }
-  }
-  return lines.join('\n');
-}
-
 const delta = (taskID = 'ses_child1', requestID = 'que_1') =>
   formatChildInputWaitDelta({
     alias: 'fix-1',
     taskID,
     kind: 'question',
     requestID,
-    detail: `request: ${requestID}\nkind: question\nquestion: Which env?`,
+    detail: 'question: Which env?',
   });
 
 describe('child input-wait wake', () => {
@@ -132,34 +121,51 @@ describe('child input-wait wake', () => {
     expect(text).toContain('ses_child1');
     expect(text).toContain('que_1');
     expect(text).toContain('Which env?');
-    expect(text).toContain('task_reply');
   });
 
-  test('child-input wake text carries the v2-form caveat (negative invariant pin)', async () => {
-    resetOrchestratorWakeGateForTests();
-    const promptAsync = mock(async () => ({}));
-    const session = v1Session(promptAsync);
-    const scheduler = makeScheduler(session);
+  test.each(['question', 'permission'] as const)(
+    'v2 %s wakes carry only the applicable reply guidance',
+    async (kind) => {
+      resetOrchestratorWakeGateForTests();
+      resetChildInputWaitForTests();
+      const promptAsync = mock(async () => ({}));
+      const session = v1Session(promptAsync);
+      const scheduler = makeScheduler(session);
+      const wait = noteChildInputWait({
+        taskID: 'ses_child1',
+        parentSessionID: 'parent-1',
+        kind,
+        requestID: kind === 'question' ? 'form_1' : 'per_1',
+        questions: [{ question: 'Which env?', header: 'Env', options: [] }],
+        permission: 'bash',
+        patterns: ['git status'],
+      });
+      if (!wait) throw new Error('missing test request');
+      scheduler.triggerChildInputWaitWake(
+        'parent-1',
+        formatChildInputWaitDelta({
+          alias: 'fix-1',
+          ...wait,
+          detail: formatChildInputWaitDetail(wait, 'v2'),
+        }),
+        `${wait.taskID}:${wait.requestID}`,
+      );
+      await flush();
 
-    scheduler.triggerChildInputWaitWake(
-      'parent-1',
-      delta(),
-      'ses_child1:que_1',
-    );
-    await flush();
-
-    expect(promptAsync).toHaveBeenCalledTimes(1);
-    const call = promptAsync.mock.calls[0]?.[0] as {
-      body: { parts: Array<{ text: string }> };
-    };
-    const text = call.body.parts[0]?.text ?? '';
-    // Negative invariant: a wake delivering a child-input ask always uses
-    // ORCHESTRATOR_CHILD_INPUT_WAKE_TEXT, which carries the v2-form caveat.
-    // If a new delta-send branch ever bypasses it, this pin goes red.
-    expect(text).toContain(
-      'form-created question requests are observable but not answerable',
-    );
-  });
+      const text = promptAsync.mock.calls[0]?.[0]?.body.parts[0]?.text ?? '';
+      expect(promptAsync).toHaveBeenCalledTimes(1);
+      expect(text.match(/\nrequest:/g)).toHaveLength(1);
+      expect(text.match(/\nkind:/g)).toHaveLength(1);
+      expect(text).not.toContain('Do not respond');
+      if (kind === 'question') {
+        expect(text).toContain('task_reply cannot answer v2 forms');
+        expect(text).toContain('host UI');
+      } else {
+        expect(text).toContain('next: task_reply');
+        expect(text).not.toContain('forms');
+      }
+    },
+  );
 
   test('duplicate asks do not double-wake', async () => {
     resetOrchestratorWakeGateForTests();
@@ -483,34 +489,86 @@ describe('child input-wait wake', () => {
     );
   });
 
-  test('the overflow marker keeps waking when retained details go stale', async () => {
-    resetOrchestratorWakeGateForTests();
-    const promptAsync = mock(async () => ({}));
-    const session = v1Session(promptAsync);
-    let current = true;
-    const scheduler = makeScheduler(session, {
-      isChildInputWaitCurrent: () => current,
-    });
+  test.each([false, true])(
+    'overflow-only requests wake only while still pending (%s)',
+    async (overflowPending) => {
+      resetOrchestratorWakeGateForTests();
+      const promptAsync = mock(async () => ({}));
+      const session = v1Session(promptAsync);
+      let current = true;
+      const scheduler = makeScheduler(session, {
+        isChildInputWaitCurrent: (taskID) =>
+          current || (overflowPending && taskID === 'ses_child0'),
+      });
+      for (let i = 0; i < CHILD_INPUT_QUEUE_CAP + 1; i++) {
+        scheduler.triggerChildInputWaitWake(
+          'parent-1',
+          delta(`ses_child${i}`, `que_${i}`),
+          `ses_child${i}:que_${i}`,
+        );
+      }
+      current = false;
+      await flush();
 
-    for (let i = 0; i < CHILD_INPUT_QUEUE_CAP + 1; i++) {
+      expect(promptAsync).toHaveBeenCalledTimes(overflowPending ? 1 : 0);
+      if (overflowPending) {
+        const text = promptAsync.mock.calls[0]?.[0]?.body.parts[0]?.text ?? '';
+        expect(text).toContain('Handle the pending request below');
+        expect(text).toContain(CHILD_INPUT_OVERFLOW_TEXT);
+        expect(text).toContain('ses_child0');
+        expect(text).not.toContain('stopped without a terminal result');
+      } else {
+        expect(session.get).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  test('pruning during delivery preserves new overflow requests', async () => {
+    resetOrchestratorWakeGateForTests();
+    let release: (() => void) | undefined;
+    const promptAsync = mock(
+      () =>
+        new Promise<void>((resolve) => {
+          if (!release) release = resolve;
+          else resolve();
+        }),
+    );
+    let current = true;
+    const scheduler = makeScheduler(v1Session(promptAsync), {
+      isChildInputWaitCurrent: (taskID) =>
+        current || ['ses_child2', 'ses_new1', 'ses_new2'].includes(taskID),
+    });
+    for (let i = 0; i <= CHILD_INPUT_QUEUE_CAP; i++) {
       scheduler.triggerChildInputWaitWake(
         'parent-1',
         delta(`ses_child${i}`, `que_${i}`),
         `ses_child${i}:que_${i}`,
       );
     }
-    // All retained asks resolve while queued; the overflow count alone
-    // must still produce a wake carrying the marker.
-    current = false;
-    scheduler.triggerChildInputWaitWake('parent-1');
     await flush();
-
     expect(promptAsync).toHaveBeenCalledTimes(1);
-    const call = promptAsync.mock.calls[0]?.[0] as {
-      body: { parts: Array<{ text: string }> };
-    };
-    const text = call.body.parts[0]?.text ?? '';
-    expect(text).toContain(CHILD_INPUT_OVERFLOW_TEXT);
+    for (const id of ['ses_new1', 'ses_new2']) {
+      scheduler.triggerChildInputWaitWake(
+        'parent-1',
+        delta(id, 'que_new'),
+        `${id}:que_new`,
+      );
+    }
+    current = false;
+    await scheduler.event({
+      event: {
+        type: 'question.replied',
+        properties: { sessionID: 'ses_child0', requestID: 'que_0' },
+      },
+    });
+    release?.();
+    await flushMicrotasks();
+    await flush();
+    expect(promptAsync).toHaveBeenCalledTimes(2);
+    const text = promptAsync.mock.calls[1]?.[0]?.body.parts[0]?.text ?? '';
+    expect(text).toContain('ses_child2');
+    expect(text).toContain('ses_new1');
+    expect(text).not.toContain('ses_child0');
   });
 
   test('raw then normalized v2 permission replaces the queued wake delta with action/resources', async () => {
@@ -542,6 +600,8 @@ describe('child input-wait wake', () => {
         idleReconcileDelayMs: 0,
         runtimeStatusReconcileDelayMs: 0,
         onChildInputWait: ({ parentSessionID, taskID, kind, requestID }) => {
+          const wait = getChildInputWait(taskID, requestID);
+          if (!wait) throw new Error('missing notified request');
           scheduler.triggerChildInputWaitWake(
             parentSessionID,
             formatChildInputWaitDelta({
@@ -549,7 +609,7 @@ describe('child input-wait wake', () => {
               taskID,
               kind,
               requestID,
-              detail: formatTestChildInputWaitDetail(taskID, requestID),
+              detail: formatChildInputWaitDetail(wait, 'v2'),
             }),
             `${taskID}:${requestID}`,
           );

@@ -86,9 +86,9 @@ export function createTaskReplyTool(options: {
   isDisposed?: () => boolean;
 }): Record<'task_reply', ToolDefinition> {
   const idParam = idParamFor(options.input);
+  const hostFlavor = (options.input as { hostFlavor?: unknown }).hostFlavor;
   const task_reply = tool({
-    description:
-      'Answer a tracked background child task waiting on a question or permission request. Accepts the task ID or parent-scoped alias plus the request ID from the wake or task_status.',
+    description: `Reply to a tracked child request by task ID/alias and request ID.${hostFlavor === 'v2' ? ' V2 forms cannot be answered here; use host UI, wait, or task_cancel.' : ''}`,
     args: {
       ...taskRefArgs(idParam),
       request_id: z
