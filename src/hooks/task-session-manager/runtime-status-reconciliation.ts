@@ -22,6 +22,7 @@ export function createRuntimeStatusReconciler(options: {
   let disposed = false;
   let activeReconcile: Promise<void> | undefined;
   let rerunRequested = false;
+  let pendingRetryAfter: Promise<void> | undefined;
   let capability: boolean | undefined;
   function supported(): boolean {
     if (capability === undefined) {
@@ -72,8 +73,13 @@ export function createRuntimeStatusReconciler(options: {
     if (snapshot.retryAfter) {
       // A collision is not an observation: rerun the whole pass once the open
       // read settles, instead of one full-map read per task through the gate.
+      if (snapshot.retryAfter === pendingRetryAfter) return;
+      pendingRetryAfter = snapshot.retryAfter;
       void snapshot.retryAfter
-        .then(() => reconcile())
+        .then(() => {
+          pendingRetryAfter = undefined;
+          return reconcile();
+        })
         .catch((err) => {
           log('[runtime-status-reconciliation] rerun failed', String(err));
         });

@@ -168,6 +168,7 @@ test('a pass that collides with an open read reruns once instead of one read per
     });
   const foreign = getRuntimeSessionStatusSnapshot(h.input);
   await h.reconciler.reconcile();
+  await h.reconciler.reconcile();
   expect(h.board.list().some((run) => run.statusUncertain)).toBe(false);
   release();
   await foreign;
