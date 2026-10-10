@@ -12,7 +12,11 @@ import type { BackgroundJobStore } from '../utils/background-job-store';
 import { fetchChildTranscript } from '../utils/child-transcript';
 import { isRecord } from '../utils/guards';
 import { getClient } from '../utils/opencode-client';
-import { OperationTimeoutError, withTimeout } from '../utils/session';
+import {
+  OperationTimeoutError,
+  SESSION_ID_PATTERN,
+  withTimeout,
+} from '../utils/session';
 import { type DelegationWording, delegationWording } from '../v2/delegation';
 import {
   type CanonicalTaskResolver,
@@ -94,7 +98,14 @@ export function createTaskMessageTool(options: {
         ? options.backgroundJobBoard.get(identity)
         : options.backgroundJobBoard.resolve(parentSessionID, requested);
       if (!job || job.parentSessionID !== parentSessionID) {
-        throw new Error(`Unknown task ID or alias: ${identity}`);
+        // The host session may still exist (records are evicted by
+        // retention limits or lost on a host restart), so a bare unknown
+        // here would misdiagnose a settled child as nonexistent.
+        throw new Error(
+          SESSION_ID_PATTERN.test(identity)
+            ? `Unknown task ID or alias: ${identity} (not tracked: records are evicted by retention limits or lost on a host restart, so a settled session can still exist on the host). If it is a settled session you own, continue that same session with task_revive and ${delegation.resumeParam}: "${identity}"; do not launch a duplicate.`
+            : `Unknown task ID or alias: ${identity}`,
+        );
       }
 
       const currentJob = getCurrentTaskMessageJob(

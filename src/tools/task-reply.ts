@@ -11,7 +11,12 @@ import {
 import { pluginDisposedMessage } from '../hooks/task-session-manager/session-recovery';
 import type { BackgroundJobStore } from '../utils/background-job-store';
 import { getClient } from '../utils/opencode-client';
-import { OperationTimeoutError, withTimeout } from '../utils/session';
+import {
+  OperationTimeoutError,
+  SESSION_ID_PATTERN,
+  withTimeout,
+} from '../utils/session';
+import { delegationWording } from '../v2/delegation';
 import {
   type CanonicalTaskResolver,
   idParamFor,
@@ -87,6 +92,9 @@ export function createTaskReplyTool(options: {
 }): Record<'task_reply', ToolDefinition> {
   const idParam = idParamFor(options.input);
   const hostFlavor = (options.input as { hostFlavor?: unknown }).hostFlavor;
+  const delegation = delegationWording(
+    typeof hostFlavor === 'string' ? hostFlavor : undefined,
+  );
   const task_reply = tool({
     description: `Reply to a tracked child request by task ID/alias and request ID.${hostFlavor === 'v2' ? ' V2 forms cannot be answered here; use host UI, wait, or task_cancel.' : ''}`,
     args: {
@@ -125,7 +133,13 @@ export function createTaskReplyTool(options: {
         ? options.backgroundJobBoard.get(identity)
         : options.backgroundJobBoard.resolve(parentSessionID, requested);
       if (!job || job.parentSessionID !== parentSessionID) {
-        throw new Error(`Unknown task ID or alias: ${identity}`);
+        // Same misdiagnosis guard as task_message: a settled child evicted
+        // from the in-memory board is not a nonexistent session.
+        throw new Error(
+          SESSION_ID_PATTERN.test(identity)
+            ? `Unknown task ID or alias: ${identity} (not tracked: records are evicted by retention limits or lost on a host restart, so a settled session can still exist on the host). If it is a settled session you own, continue that same session with task_revive and ${delegation.resumeParam}: "${identity}"; do not launch a duplicate.`
+            : `Unknown task ID or alias: ${identity}`,
+        );
       }
       if (job.state !== 'running') {
         throw new Error(

@@ -605,6 +605,52 @@ describe('task_message', () => {
     expect(prompt).not.toHaveBeenCalled();
   });
 
+  test('a board-missed settled child gets recovery guidance, not bare unknown', async () => {
+    const board = new BackgroundJobBoard();
+    const prompt = makePrompt();
+    client = { session: { prompt } };
+    // No launch registered: the board lost the child (restart or retention
+    // trim) while the host session still exists and is owned.
+    const error = (await createTool(board)
+      .execute({ task_id: 'ses_child1', message: 'go' }, {
+        sessionID: 'parent-1',
+      } as any)
+      .catch((e: Error) => e)) as Error;
+    expect(error.message).toContain('Unknown task ID or alias: ses_child1');
+    expect(error.message).toContain('not tracked');
+    // v1 routing names the host-flavor resume param and the target ID.
+    expect(error.message).toContain('task_revive and task_id: "ses_child1"');
+    expect(error.message).toContain('do not launch a duplicate');
+    expect(prompt).not.toHaveBeenCalled();
+  });
+
+  test('a board-missed settled child on v2 routes with the sessionID param', async () => {
+    const board = new BackgroundJobBoard();
+    const prompt = makePrompt();
+    client = { session: { prompt } };
+    const error = (await createTool(board, 'v2')
+      .execute({ task_id: 'ses_child1', message: 'go' }, {
+        sessionID: 'parent-1',
+      } as any)
+      .catch((e: Error) => e)) as Error;
+    expect(error.message).toContain('task_revive and sessionID: "ses_child1"');
+  });
+
+  test('a board-missed alias keeps the bare unknown error', async () => {
+    const board = new BackgroundJobBoard();
+    const prompt = makePrompt();
+    client = { session: { prompt } };
+    // An alias is board-scoped: without a board record it has no host
+    // existence, so the error stays bare — no settled-session guidance.
+    const error = (await createTool(board)
+      .execute({ task_id: 'exp-9', message: 'go' }, {
+        sessionID: 'parent-1',
+      } as any)
+      .catch((e: Error) => e)) as Error;
+    expect(error.message).toBe('Unknown task ID or alias: exp-9');
+    expect(prompt).not.toHaveBeenCalled();
+  });
+
   test('rejects a relaunch attempt at the transport boundary', async () => {
     const board = new BackgroundJobBoard();
     registerRunningChild(board);

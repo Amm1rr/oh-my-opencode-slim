@@ -621,6 +621,59 @@ describe('task_reply', () => {
     ).rejects.toThrow('Unknown task ID or alias');
   });
 
+  test('a board-missed settled child gets recovery guidance, not bare unknown', async () => {
+    resetChildInputWaitForTests();
+    const board = new BackgroundJobBoard();
+    const { task_reply } = createTaskReplyTool({
+      input: { directory: '/test', client: {} } as never,
+      backgroundJobBoard: board,
+    });
+    // No launch registered: the board lost the child (restart or retention
+    // trim) while the host session still exists and is owned.
+    const error = (await task_reply
+      .execute({ task_id: 'ses_child1', request_id: 'que_1' }, {
+        sessionID: 'parent-1',
+      } as never)
+      .catch((e: Error) => e)) as Error;
+    expect(error.message).toContain('Unknown task ID or alias: ses_child1');
+    expect(error.message).toContain('not tracked');
+    // v1 routing names the host-flavor resume param and the target ID.
+    expect(error.message).toContain('task_revive and task_id: "ses_child1"');
+    expect(error.message).toContain('do not launch a duplicate');
+  });
+
+  test('a board-missed settled child on v2 routes with the sessionID param', async () => {
+    resetChildInputWaitForTests();
+    const board = new BackgroundJobBoard();
+    const { task_reply } = createTaskReplyTool({
+      input: { directory: '/test', client: {}, hostFlavor: 'v2' } as never,
+      backgroundJobBoard: board,
+    });
+    const error = (await task_reply
+      .execute({ task_id: 'ses_child1', request_id: 'que_1' }, {
+        sessionID: 'parent-1',
+      } as never)
+      .catch((e: Error) => e)) as Error;
+    expect(error.message).toContain('task_revive and sessionID: "ses_child1"');
+  });
+
+  test('a board-missed alias keeps the bare unknown error', async () => {
+    resetChildInputWaitForTests();
+    const board = new BackgroundJobBoard();
+    const { task_reply } = createTaskReplyTool({
+      input: { directory: '/test', client: {} } as never,
+      backgroundJobBoard: board,
+    });
+    // An alias is board-scoped: without a board record it has no host
+    // existence, so the error stays bare — no settled-session guidance.
+    const error = (await task_reply
+      .execute({ task_id: 'exp-9', request_id: 'que_1' }, {
+        sessionID: 'parent-1',
+      } as never)
+      .catch((e: Error) => e)) as Error;
+    expect(error.message).toBe('Unknown task ID or alias: exp-9');
+  });
+
   test('answers an open permission request through permission.reply', async () => {
     resetChildInputWaitForTests();
     const board = new BackgroundJobBoard();
